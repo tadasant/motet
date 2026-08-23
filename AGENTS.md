@@ -219,9 +219,10 @@ lockscreen, CarPlay, and speed control with zero iOS code.
 **Storage.** Postgres on Cloud SQL for data *and* the job queue (`SKIP LOCKED`). Audio in
 GCS behind signed URLs. No Redis. No vector store. (See tripwires.)
 
-**Inference.** Claude for dedup/integrate, script generation, and grounding validation;
-Cartesia Sonic for TTS. OpenAI Realtime (voice) and Exa (research) arrive in Phase 2. Every
-one of them sits behind an interface with a fake — invariant 7.
+**Inference.** Claude for dedup/integrate, script generation, and grounding validation,
+reached **through OpenRouter** and defaulting to Claude Sonnet 5; Cartesia Sonic for TTS.
+OpenAI Realtime (voice) and Exa (research) arrive in Phase 2. Every one of them sits behind
+an interface with a fake — invariant 7.
 
 **Two voices on purpose:** Sonic narrates, the realtime model converses. That decouples
 voice identity from the realtime vendor.
@@ -300,6 +301,40 @@ Each stage in `inference/` is a `Protocol` with (a) a deterministic fake and (b)
 adapter. `inference.registry` picks between them from `MOTET_INFERENCE_MODE`, which is
 `fake` everywhere except staging and production. Invariant 7 is why: a test that calls a
 real model is slow, nondeterministic, and expensive, and it stops being a test.
+
+### OpenRouter is the seam to the LLM, and the model is config
+
+`inference/src/motet_inference/llm/` holds one provider-agnostic interface (`LlmClient`),
+one real adapter (OpenRouter), and one deterministic fake. **Stages never name a vendor** —
+they call `build_client()` and `build_request(stage, ...)`, and the model comes back already
+chosen. `MOTET_INFERENCE_MODE=fake` therefore guarantees no test can spend money, exactly as
+it does for the stage registry.
+
+**The default is `anthropic/claude-sonnet-5`, and switching is a variable, not a commit.**
+`MOTET_LLM_MODEL` moves every stage; `MOTET_LLM_MODEL_{DEDUP,SCRIPT,GROUNDING}` moves one.
+Effort works the same way, defaulting per stage: dedup `low` (the volume line), script
+`high`, grounding `max`.
+
+Four things about this are settled, and each exists because of a specific failure:
+
+- **An unknown slug or a missing key is a startup crash**, not a 500 an hour later.
+  `validate_startup()` runs in the API's lifespan and in the worker entry point. Slugs are
+  checked against a committed catalogue; `bin/check-openrouter-models` verifies that
+  catalogue against OpenRouter's live list. That script is deliberately **not** in `bin/ci`,
+  because CI is offline (invariant 7) — run it by hand when adding a model.
+- **Reasoning can be dropped silently.** Anthropic's own API rejects an incompatible
+  thinking config with a 400; OpenRouter drops the field and answers anyway. A response
+  with no evidence of reasoning is logged and, by default, raised on. Never "fix" a
+  `ReasoningNotAppliedError` by switching the check off — it is reporting that a stage ran
+  without thinking.
+- **Prompt caching is the largest LLM cost lever**, because dedup passes the whole news-item
+  window in-prompt once per source item. Put the breakpoint on the last *stable* part and
+  check `usage.cache_read_tokens`. Never assume a hit.
+- **No sampling parameters, ever.** Sonnet 5 rejects `temperature`/`top_p`/`top_k` and
+  `budget_tokens`. The request type has no field for any of them; keep it that way.
+
+Credentials are one enum plus one resolver in `llm/credentials.py`, and that file is the
+whole seam for a future "bring your Claude Max account" quota kind. **Keep it one file.**
 
 ### The golden set is the seam to "is it any good?"
 

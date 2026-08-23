@@ -371,6 +371,12 @@ requires-dist = [{ name = "psycopg", extras = ["binary"], specifier = ">=3.2" }]
 name = "motet-inference"
 version = "0.1.0"
 source = { editable = "inference" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.28" }]
 
 [[package]]
 name = "motet-workers"

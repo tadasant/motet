@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.obs import ERROR_DSN_ENV, OTLP_ENDPOINT_ENV
+from motet_inference.llm import LlmConfigError
 
 client = TestClient(app)
 
@@ -61,3 +62,32 @@ def test_request_validation_still_applies() -> None:
     """The models are real even though the handlers are not."""
     assert client.post("/v1/sources/paste", json={"title": "", "text": ""}).status_code == 422
     assert client.post("/v1/episodes", json={"title": "t", "max_duration_ms": 0}).status_code == 422
+
+
+def test_the_app_starts_when_inference_is_faked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lifespan validation must not need a vendor key in CI or on a laptop."""
+    monkeypatch.delenv("MOTET_INFERENCE_MODE", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with TestClient(app) as started:
+        assert started.get("/healthz").status_code == 200
+
+
+def test_the_app_refuses_to_start_without_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revision that cannot reach a model must fail on boot, not on first request.
+
+    Cloud Run reports a failed revision and holds traffic on the previous one. The same
+    mistake discovered on the first inference call is a 500 an hour after the deploy,
+    with nothing tying it back to the change that caused it.
+    """
+    monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(LlmConfigError, match="OPENROUTER_API_KEY"), TestClient(app):
+        pass  # pragma: no cover - startup raises before the body runs
+
+
+def test_the_app_refuses_to_start_with_an_unknown_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("MOTET_LLM_MODEL", "anthropic/claude-sonnet-99")
+    with pytest.raises(LlmConfigError, match="not in the catalog"), TestClient(app):
+        pass  # pragma: no cover - startup raises before the body runs
