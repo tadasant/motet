@@ -1,0 +1,41 @@
+# Zimmer injects .claude/ into each session clone at prepare time (skills, hooks,
+# .mcp.json, ${SECRET} substitutions). It is runtime state, never source — do not
+# commit it.
+.claude/
+
+# MCP configuration (may contain API keys)
+.mcp.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / web
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Environment — never commit real values. `.env.example` is the documented shape.
+.env
+.env.*
+!.env.example
+
+# Infrastructure state belongs in tadasant-internal, not here — but ignore it anyway
+# so an accidental `terraform` run in this tree cannot leak topology into a PR.
+.terraform/
+*.tfstate*
+*.tfvars
+!*.tfvars.example
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

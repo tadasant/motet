@@ -1,0 +1,122 @@
+name: CI
+
+# Motet's one CI command, run on the shared self-hosted runner pool (label `self-hosted`)
+# that this repo registers against, to stay off the GitHub-hosted Actions minute quota.
+# Postgres comes up as a service container on a *dynamic* host port, and dependencies
+# install into per-runner paths, so concurrent jobs from co-tenant repos never collide.
+#
+# THIS REPO IS PUBLIC, AND A SELF-HOSTED RUNNER ON A PUBLIC REPO IS THE COMBINATION GITHUB
+# WARNS ABOUT: without a guard, any stranger's fork PR would execute arbitrary code on
+# shared infrastructure. Three things close that gap, and all three have to stay:
+#
+#   1. Every job that checks out code carries the fork guard
+#      `github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository`,
+#      so a fork PR skips it and fork code never runs here.
+#   2. `all-checks-pass` below aggregates the result WITHOUT a checkout, so a fork PR —
+#      where everything skipped — still reports green instead of hanging on a required check.
+#   3. `pr-auto-close.yml` closes outside PRs on `ubuntu-latest`, so the untrusted path
+#      never touches this pool even to be rejected.
+#
+# Belt-and-braces on top: the repo's Actions fork-PR approval policy is set to
+# `all_external_contributors`, so a fork workflow needs a maintainer's click regardless.
+#
+# ADDING A JOB? It needs the fork guard AND an entry in `all-checks-pass`. A job without
+# the guard is the whole hole. Adding a *check*, on the other hand, belongs in `bin/ci` —
+# a check that lives only in this file cannot be run on a laptop.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: self-hosted
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: motet_test
+        # Dynamic host port — a fixed 5432 would collide with co-tenant jobs on the box.
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # GitHub-hosted runners export CI=true automatically; this self-hosted runner does
+      # not. Set it explicitly so tooling that keys off it behaves the same way here.
+      CI: true
+      UV_VERSION: "0.12.3"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve dynamic service ports
+        run: |
+          echo "DATABASE_URL=postgresql://postgres:postgres@localhost:${{ job.services.postgres.ports[5432] }}/motet_test" >> "$GITHUB_ENV"
+
+      - name: Install uv and Python (per-runner paths)
+        # uv is installed and cached per runner, and manages its own CPython, so this
+        # never writes to the shared tool cache that co-tenant jobs also use.
+        run: |
+          RUNNER_NUM=$(echo "$RUNNER_NAME" | grep -oE '[0-9]+$' || echo "0")
+          MOTET_HOME="$HOME/.motet/runner-${RUNNER_NUM}"
+          echo "UV_CACHE_DIR=${MOTET_HOME}/uv-cache" >> "$GITHUB_ENV"
+          echo "UV_PYTHON_INSTALL_DIR=${MOTET_HOME}/python" >> "$GITHUB_ENV"
+          echo "npm_config_cache=${MOTET_HOME}/npm-cache" >> "$GITHUB_ENV"
+
+          export UV_INSTALL_DIR="${MOTET_HOME}/bin"
+          mkdir -p "$UV_INSTALL_DIR"
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+          echo "$UV_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run the one CI command
+        run: bin/ci
+
+  # Single aggregate gate. Set THIS job — `all-checks-pass` — as the one required status
+  # check, rather than enumerating every job above.
+  #
+  # Three properties make it a correct gate:
+  #   1. `if: ${{ !cancelled() }}` — it still runs when a dependency FAILS (a plain
+  #      `needs:` job is skipped when a dependency fails, which would leave the required
+  #      check stuck on "skipped" forever). `always()` would be wrong: this workflow sets
+  #      `cancel-in-progress: true`, so every superseded run would execute this job, see
+  #      `cancelled` among the results, and exit 1 — turning a cancelled run into a failed
+  #      one. It deliberately carries no fork guard.
+  #   2. It fails on any dependency that reported `failure` or `cancelled`.
+  #   3. `skipped` dependencies neither fail it nor count as passes. The jobs above carry
+  #      fork guards and report `skipped` on a fork PR, so a fork PR sees everything skip
+  #      and this gate go green — the same tradeoff the guards already make. This job has
+  #      no checkout step, so a fork PR never executes fork code here either.
+  all-checks-pass:
+    if: ${{ !cancelled() }}
+    runs-on: self-hosted
+    needs:
+      - ci
+    steps:
+      - name: Verify no required check failed or was cancelled
+        run: |
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
+            echo "::error::One or more required CI checks failed or were cancelled."
+            echo "Results: ${{ join(needs.*.result, ', ') }}"
+            exit 1
+          fi
+          echo "All required CI checks passed (skipped fork-guarded jobs are allowed)."
+          echo "Results: ${{ join(needs.*.result, ', ') }}"

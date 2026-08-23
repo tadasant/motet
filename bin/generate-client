@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Regenerate the TypeScript client from openapi.yaml. Run bin/generate-openapi first.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec npm --prefix web run generate:client

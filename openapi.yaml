@@ -1,0 +1,363 @@
+# Generated from the FastAPI app — do not edit by hand.
+# Regenerate with `bin/generate-openapi`; `bin/ci` fails if this file is stale.
+components:
+  schemas:
+    ClaimModel:
+      description: A reported assertion beside the span it came from (invariant 3).
+      properties:
+        span:
+          $ref: '#/components/schemas/SourceSpanModel'
+        text:
+          title: Text
+          type: string
+      required:
+      - text
+      - span
+      title: ClaimModel
+      type: object
+    CreateEpisodeRequest:
+      description: 'Phase 1 has manual episodes only: ''all unread'', capped by duration.'
+      properties:
+        max_duration_ms:
+          exclusiveMinimum: 0.0
+          title: Max Duration Ms
+          type: integer
+        title:
+          maxLength: 500
+          minLength: 1
+          title: Title
+          type: string
+      required:
+      - title
+      - max_duration_ms
+      title: CreateEpisodeRequest
+      type: object
+    EpisodeResponse:
+      properties:
+        duration_ms:
+          title: Duration Ms
+          type: integer
+        id:
+          title: Id
+          type: string
+        segments:
+          items:
+            $ref: '#/components/schemas/SegmentResponse'
+          title: Segments
+          type: array
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - duration_ms
+      - segments
+      title: EpisodeResponse
+      type: object
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          title: Detail
+          type: array
+      title: HTTPValidationError
+      type: object
+    HealthResponse:
+      description: Liveness plus enough telemetry wiring to tell 'quiet' from 'unmonitored'.
+      properties:
+        errors_configured:
+          description: Whether error reporting is configured. False means errors go nowhere.
+          title: Errors Configured
+          type: boolean
+        service:
+          description: OTel service name this process reports as
+          title: Service
+          type: string
+        status:
+          description: '''ok'' when the process is serving'
+          title: Status
+          type: string
+        telemetry_configured:
+          description: Whether OTLP export is configured. False means telemetry is a no-op.
+          title: Telemetry Configured
+          type: boolean
+      required:
+      - status
+      - service
+      - telemetry_configured
+      - errors_configured
+      title: HealthResponse
+      type: object
+    NewsItemResponse:
+      description: "A deduped story. Read state lives here, per invariant 5 \u2014 not per episode."
+      properties:
+        id:
+          title: Id
+          type: string
+        read:
+          title: Read
+          type: boolean
+        source_item_ids:
+          items:
+            type: string
+          title: Source Item Ids
+          type: array
+        summary:
+          title: Summary
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - summary
+      - source_item_ids
+      - read
+      title: NewsItemResponse
+      type: object
+    PasteRequest:
+      description: "A blob of text pasted in by hand \u2014 Phase 1's only ingestion route."
+      properties:
+        text:
+          minLength: 1
+          title: Text
+          type: string
+        title:
+          maxLength: 500
+          minLength: 1
+          title: Title
+          type: string
+      required:
+      - title
+      - text
+      title: PasteRequest
+      type: object
+    SegmentResponse:
+      properties:
+        claims:
+          items:
+            $ref: '#/components/schemas/ClaimModel'
+          title: Claims
+          type: array
+        news_item_id:
+          title: News Item Id
+          type: string
+      required:
+      - news_item_id
+      - claims
+      title: SegmentResponse
+      type: object
+    SourceItemResponse:
+      properties:
+        id:
+          title: Id
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      title: SourceItemResponse
+      type: object
+    SourceSpanModel:
+      description: "A half-open character range in a source item \u2014 what makes a claim checkable."
+      properties:
+        end:
+          title: End
+          type: integer
+        source_item_id:
+          title: Source Item Id
+          type: string
+        start:
+          title: Start
+          type: integer
+      required:
+      - source_item_id
+      - start
+      - end
+      title: SourceSpanModel
+      type: object
+    ValidationError:
+      properties:
+        ctx:
+          title: Context
+          type: object
+        input:
+          title: Input
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          title: Location
+          type: array
+        msg:
+          title: Message
+          type: string
+        type:
+          title: Error Type
+          type: string
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+      type: object
+info:
+  description: 'Motet turns a reading backlog into an interactive podcast.
+
+
+    This document is generated from the FastAPI app and committed as `openapi.yaml`; the TypeScript client
+    is generated from it in turn. Do not hand-edit either.'
+  title: Motet API
+  version: 0.1.0
+openapi: 3.1.0
+paths:
+  /feed.xml:
+    get:
+      description: 'The private, authenticated RSS feed Phase 1 ships instead of a player.
+
+
+        RSS buys background audio, offline, lockscreen, CarPlay, and speed control with zero
+
+        iOS code. Audio is served from GCS behind signed URLs, so this document carries links,
+
+        never bytes.'
+      operationId: rss_feed_feed_xml_get
+      responses:
+        '200':
+          content:
+            application/rss+xml: {}
+          description: The RSS feed
+      summary: Rss Feed
+      tags:
+      - feed
+  /healthz:
+    get:
+      description: 'Liveness, plus whether telemetry is actually wired.
+
+
+        The telemetry flags are not decoration. Exporters no-op silently when unconfigured, so
+
+        without this an unmonitored process is indistinguishable from a quiet one.'
+      operationId: healthz_healthz_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+          description: Successful Response
+      summary: Healthz
+      tags:
+      - ops
+  /v1/episodes:
+    post:
+      description: 'Assemble a manual episode from unread news items, capped by duration.
+
+
+        Scripting, grounding validation, and TTS happen on the queue afterwards. Nothing is
+
+        synthesized until grounding passes (invariant 3).'
+      operationId: create_episode_v1_episodes_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEpisodeRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Create Episode
+      tags:
+      - episodes
+  /v1/episodes/{episode_id}:
+    get:
+      description: "An episode with its transcript \u2014 each claim beside the span it came from."
+      operationId: get_episode_v1_episodes__episode_id__get
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Episode
+      tags:
+      - episodes
+  /v1/news-items:
+    get:
+      description: 'The backlog: deduped news items with their read state (invariant 5).'
+      operationId: list_news_items_v1_news_items_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/NewsItemResponse'
+                title: Response List News Items V1 News Items Get
+                type: array
+          description: Successful Response
+      summary: List News Items
+      tags:
+      - backlog
+  /v1/sources/paste:
+    post:
+      description: 'Ingest pasted text as a source item.
+
+
+        Enqueues rather than processes: ingestion is serialized per user (invariant 6), so the
+
+        work belongs to a worker draining the queue, never to the request thread.'
+      operationId: paste_source_v1_sources_paste_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasteRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceItemResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Paste Source
+      tags:
+      - ingestion
