@@ -333,8 +333,23 @@ Four things about this are settled, and each exists because of a specific failur
 - **No sampling parameters, ever.** Sonnet 5 rejects `temperature`/`top_p`/`top_k` and
   `budget_tokens`. The request type has no field for any of them; keep it that way.
 
+Two smaller rules that fall out of the same thinking:
+
+- **`MOTET_INFERENCE_MODE` is parsed in exactly one place** — `motet_inference.mode`. Both
+  the stage registry and the LLM seam ask it. Two readings can disagree, and the
+  disagreement is silent: `MOTET_INFERENCE_MODE=Real` would mean real stages wired to a
+  fake model, which boots clean and emits fabricated text.
+- **The API validates LLM *config* at startup but does not resolve the key.** Workers call
+  `validate_startup()`; the API calls `load_config()`. Phase 1 runs all inference in
+  workers, so mounting the one vendor secret into the internet-facing service buys nothing
+  and widens the blast radius. When the API calls a model, that changes.
+
 Credentials are one enum plus one resolver in `llm/credentials.py`, and that file is the
-whole seam for a future "bring your Claude Max account" quota kind. **Keep it one file.**
+whole seam for a future "bring your Claude Max account" quota kind. **Keep it one file**,
+and keep wire shapes out of it: an API key travels as `Authorization: Bearer` to OpenRouter
+and as `x-api-key` to Anthropic direct, so headers belong to the adapter. A header in the
+credential module forces a *provider* distinction onto the credential-*kind* axis, which is
+what makes the second provider hard.
 
 ### The golden set is the seam to "is it any good?"
 

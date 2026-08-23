@@ -35,19 +35,27 @@ def request_digest(request: LlmRequest) -> str:
 
 
 def cache_prefix_digest(request: LlmRequest) -> str:
-    """A fingerprint of the text up to and including the last cache breakpoint.
+    """A fingerprint of the text up to and including the **last** cache breakpoint.
 
     What a provider would key its prompt cache on. Used by ``simulate_cache`` so that
     breakpoint placement can be exercised offline: move a volatile part ahead of the
     breakpoint and the simulated hit disappears, exactly as a real one would.
+
+    The *last* breakpoint, not the first, and the distinction is not academic — the
+    dedup shape is two breakpoints (a system prompt and the news-item window). Keying on
+    the first would report a full hit whenever the system prompt matched, no matter what
+    happened to the window, which is precisely the case this fake exists to catch.
     """
+    seen: list[str] = []
     prefix: list[str] = []
     for message in request.messages:
         for part in message.parts:
-            prefix.append(part.text)
+            seen.append(part.text)
             if part.cache is not None:
-                return hashlib.sha256("\n".join(prefix).encode()).hexdigest()[:16]
-    return ""
+                prefix = list(seen)
+    if not prefix:
+        return ""
+    return hashlib.sha256("\n".join(prefix).encode()).hexdigest()[:16]
 
 
 class FakeLlmClient:
@@ -75,7 +83,13 @@ class FakeLlmClient:
     def complete(self, request: LlmRequest) -> LlmResponse:
         self.calls.append(request)
         digest = request_digest(request)
-        text = self._responses.get(digest) or self._match_by_substring(request)
+        # Membership, not truthiness: a canned empty response is a legitimate thing to
+        # want to test, and `or` would silently replace it with the fallback.
+        text = (
+            self._responses[digest]
+            if digest in self._responses
+            else self._match_by_substring(request)
+        )
         if text is None:
             text = (
                 json.dumps({"fake": digest}, sort_keys=True)

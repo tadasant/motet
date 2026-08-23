@@ -38,7 +38,12 @@ class LlmError(Exception):
 
 
 class LlmConfigError(LlmError):
-    """Configuration is wrong. Raised at startup, never on the request path."""
+    """We asked for something impossible: bad configuration, or a malformed request.
+
+    Always our mistake rather than the provider's, and it is raised before anything is
+    sent — at startup for configuration, at construction for a request. It never means a
+    call failed; that is :class:`LlmTransportError`.
+    """
 
 
 class LlmTransportError(LlmError):

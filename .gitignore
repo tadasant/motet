@@ -6,10 +6,10 @@
 # MCP configuration (may contain API keys)
 .mcp.json
 
-# Agent session scratch. `NPM_CONFIG_CACHE` points into the clone in a Zimmer session,
-# so any `npm ci` here leaves a cache directory behind; the log is the harness's.
+# Tooling that writes into the checkout rather than outside it: some environments point
+# `NPM_CONFIG_CACHE` here, and some runners drop a stderr log. Never source.
 .npm-cache/
-claude_stderr.log
+*_stderr.log
 
 # Python
 __pycache__/

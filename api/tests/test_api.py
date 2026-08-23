@@ -72,17 +72,18 @@ def test_the_app_starts_when_inference_is_faked(monkeypatch: pytest.MonkeyPatch)
         assert started.get("/healthz").status_code == 200
 
 
-def test_the_app_refuses_to_start_without_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A revision that cannot reach a model must fail on boot, not on first request.
+def test_the_app_does_not_require_the_vendor_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public service validates LLM config but never holds the key.
 
-    Cloud Run reports a failed revision and holds traffic on the previous one. The same
-    mistake discovered on the first inference call is a 500 an hour after the deploy,
-    with nothing tying it back to the change that caused it.
+    Phase 1 runs every model call in a worker, so requiring ``OPENROUTER_API_KEY`` here
+    would mean mounting the one vendor secret in the system into the process most exposed
+    to untrusted input, for no functional gain. The worker entry point resolves it; see
+    ``motet_workers.runner``.
     """
     monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(LlmConfigError, match="OPENROUTER_API_KEY"), TestClient(app):
-        pass  # pragma: no cover - startup raises before the body runs
+    with TestClient(app) as started:
+        assert started.get("/healthz").status_code == 200
 
 
 def test_the_app_refuses_to_start_with_an_unknown_model(monkeypatch: pytest.MonkeyPatch) -> None:

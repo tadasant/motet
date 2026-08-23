@@ -22,14 +22,18 @@ hatch for the hour between a vendor shipping a model and someone updating this f
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, get_args
 
+from ..mode import MODE_ENV_VAR, current_mode
 from .credentials import CredentialKind
 from .types import Effort, LlmConfigError
+
+logger = logging.getLogger("motet.llm.config")
 
 #: The default everywhere. Verified live against OpenRouter's model list on 2026-08-23;
 #: its canonical slug there is ``anthropic/claude-sonnet-5-20260630``.
@@ -39,10 +43,7 @@ PROVIDER_ENV: Final = "MOTET_LLM_PROVIDER"
 MODEL_ENV: Final = "MOTET_LLM_MODEL"
 EFFORT_ENV: Final = "MOTET_LLM_EFFORT"
 TIMEOUT_ENV: Final = "MOTET_LLM_TIMEOUT_SECONDS"
-CREDENTIAL_KIND_ENV: Final = "MOTET_LLM_CREDENTIAL_KIND"
 ALLOW_UNLISTED_ENV: Final = "MOTET_LLM_ALLOW_UNLISTED_MODEL"
-#: Shared with ``motet_inference.registry``: ``fake`` everywhere except staging and prod.
-INFERENCE_MODE_ENV: Final = "MOTET_INFERENCE_MODE"
 
 DEFAULT_TIMEOUT_SECONDS: Final = 120.0
 
@@ -93,40 +94,30 @@ class ModelSpec:
     supports_cache_ttl_1h: bool = False
 
 
-def _spec(
-    slug: str,
-    context_tokens: int,
-    max_output_tokens: int,
-    efforts: tuple[Effort, ...] = (),
-    supports_cache_ttl_1h: bool = False,
-) -> tuple[str, ModelSpec]:
-    return slug, ModelSpec(slug, context_tokens, max_output_tokens, efforts, supports_cache_ttl_1h)
-
-
 _FULL_EFFORTS: Final[tuple[Effort, ...]] = ("low", "medium", "high", "xhigh", "max")
 
 #: Slugs known to work, with the facts that affect how a request is built. Every row was
 #: read off ``GET https://openrouter.ai/api/v1/models`` on 2026-08-23; re-verify with
 #: ``bin/check-openrouter-models`` rather than by hand.
-KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = dict(
-    (
-        _spec(DEFAULT_MODEL, 1_000_000, 128_000, _FULL_EFFORTS, True),
-        _spec("anthropic/claude-opus-5", 1_000_000, 128_000, _FULL_EFFORTS, True),
-        _spec("anthropic/claude-opus-4.8", 1_000_000, 128_000, _FULL_EFFORTS, True),
-        _spec(
-            "anthropic/claude-sonnet-4.6",
-            1_000_000,
-            128_000,
-            ("low", "medium", "high", "max"),
-            True,
-        ),
-        # No selectable effort. Kept in the catalog because it is the obvious candidate
-        # for the dedup volume line — and because pairing it with an effort override is
-        # the misconfiguration this catalog is here to catch.
-        _spec("anthropic/claude-haiku-4.5", 200_000, 64_000, (), True),
-        _spec("openai/gpt-5.1", 400_000, 128_000, ("low", "medium", "high")),
-    )
-)
+KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
+    DEFAULT_MODEL: ModelSpec(DEFAULT_MODEL, 1_000_000, 128_000, _FULL_EFFORTS, True),
+    "anthropic/claude-opus-5": ModelSpec(
+        "anthropic/claude-opus-5", 1_000_000, 128_000, _FULL_EFFORTS, True
+    ),
+    "anthropic/claude-opus-4.8": ModelSpec(
+        "anthropic/claude-opus-4.8", 1_000_000, 128_000, _FULL_EFFORTS, True
+    ),
+    "anthropic/claude-sonnet-4.6": ModelSpec(
+        "anthropic/claude-sonnet-4.6", 1_000_000, 128_000, ("low", "medium", "high", "max"), True
+    ),
+    # No selectable effort. Kept in the catalog because it is the obvious candidate for
+    # the dedup volume line — and because pairing it with an effort override is the
+    # misconfiguration this catalog is here to catch.
+    "anthropic/claude-haiku-4.5": ModelSpec(
+        "anthropic/claude-haiku-4.5", 200_000, 64_000, (), True
+    ),
+    "openai/gpt-5.1": ModelSpec("openai/gpt-5.1", 400_000, 128_000, ("low", "medium", "high")),
+}
 
 #: Per-stage defaults. Grounding gets the deepest thinking because a wrong verdict there
 #: is a fabricated claim reaching audio; dedup gets the shallowest because it is the
@@ -172,8 +163,17 @@ def _default_provider(environ: Mapping[str, str]) -> Provider:
     ``MOTET_INFERENCE_MODE`` already decides whether this process may talk to a vendor.
     Deriving the provider from it means a test or a laptop cannot start spending money by
     forgetting a second variable, and a missing variable fails toward the free side.
+
+    **The mode is parsed by exactly one function, and it must stay that way.** The stage
+    registry normalizes case and whitespace and rejects anything it does not recognize.
+    A second, stricter reading here — an exact ``== "real"``, say — would make
+    ``MOTET_INFERENCE_MODE=Real`` mean *real stage adapters wired to a fake model*: a
+    revision that boots clean, skips the credential check, and feeds
+    ``fake-completion:...`` into grounding validation and then into audio. "Fails toward
+    the free side" is no comfort there; the failure is not free, it is fabricated output
+    that looks fine.
     """
-    return Provider.OPENROUTER if environ.get(INFERENCE_MODE_ENV) == "real" else Provider.FAKE
+    return Provider.OPENROUTER if current_mode(environ) == "real" else Provider.FAKE
 
 
 def _parse_enum[T: StrEnum](raw: str, enum: type[T], var: str) -> T:
@@ -184,21 +184,18 @@ def _parse_enum[T: StrEnum](raw: str, enum: type[T], var: str) -> T:
         raise LlmConfigError(f"{var}={raw!r} is not one of: {allowed}") from None
 
 
-#: Distinguishes "the variable is not set" from "the variable says: no reasoning".
-_UNSET: Final = object()
-
 #: What a caller writes to turn reasoning off for a stage rather than leaving it default.
 #: An empty string cannot mean this: an unset and an empty variable are the same thing in
 #: a Cloud Run service definition, so silence has to keep meaning "use the default".
-OFF_VALUES: Final = ("off", "none")
+OFF_VALUE: Final = "off"
 
 
 def _parse_effort_setting(raw: str, var: str) -> Effort | None:
     value = raw.strip().lower()
-    if value in OFF_VALUES:
+    if value == OFF_VALUE:
         return None
     if value not in _EFFORTS:
-        allowed = ", ".join((*_EFFORTS, *OFF_VALUES))
+        allowed = ", ".join((*_EFFORTS, OFF_VALUE))
         raise LlmConfigError(f"{var}={raw!r} is not one of: {allowed}")
     return value
 
@@ -235,11 +232,16 @@ def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
         if environ.get(PROVIDER_ENV, "").strip()
         else _default_provider(environ)
     )
-    credential_kind = (
-        _parse_enum(environ[CREDENTIAL_KIND_ENV], CredentialKind, CREDENTIAL_KIND_ENV)
-        if environ.get(CREDENTIAL_KIND_ENV, "").strip()
-        else CredentialKind.API_KEY
-    )
+    if provider is Provider.FAKE and current_mode(environ) == "real":
+        # A legitimate escape hatch — run real stages against a fake model to shake out
+        # wiring without spending — but a silent one would be indistinguishable from the
+        # misconfiguration it resembles, so it announces itself.
+        logger.warning(
+            "%s=fake while %s=real: stages are real but every completion will be "
+            "fabricated by the deterministic fake. Nothing will reach a vendor.",
+            PROVIDER_ENV,
+            MODE_ENV_VAR,
+        )
     allow_unlisted = _parse_bool(environ.get(ALLOW_UNLISTED_ENV, ""), ALLOW_UNLISTED_ENV)
     timeout = (
         _parse_timeout(environ[TIMEOUT_ENV])
@@ -248,10 +250,11 @@ def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
     )
 
     global_model = environ.get(MODEL_ENV, "").strip() or DEFAULT_MODEL
-    global_effort: Effort | None | object = (
-        _parse_effort_setting(environ[EFFORT_ENV], EFFORT_ENV)
-        if environ.get(EFFORT_ENV, "").strip()
-        else _UNSET
+    # Presence is checked directly rather than through a sentinel, because "unset" and
+    # "set to off" are genuinely different answers and both are legitimate.
+    global_effort_set = bool(environ.get(EFFORT_ENV, "").strip())
+    global_effort = (
+        _parse_effort_setting(environ[EFFORT_ENV], EFFORT_ENV) if global_effort_set else None
     )
 
     stages: dict[LlmStage, StageConfig] = {}
@@ -263,8 +266,8 @@ def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
         effort: Effort | None
         if environ.get(stage.effort_env, "").strip():
             effort = _parse_effort_setting(environ[stage.effort_env], stage.effort_env)
-        elif global_effort is not _UNSET:
-            effort = global_effort  # type: ignore[assignment]
+        elif global_effort_set:
+            effort = global_effort
         else:
             effort = DEFAULT_EFFORTS[stage]
         _check_model(model, model_source, effort, stage, allow_unlisted)
@@ -272,7 +275,10 @@ def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
 
     return LlmConfig(
         provider=provider,
-        credential_kind=credential_kind,
+        # There is exactly one kind, so nothing reads this from the environment yet.
+        # Adding the variable before the second kind exists would be config nobody can
+        # set to anything useful.
+        credential_kind=CredentialKind.API_KEY,
         stages=stages,
         timeout_seconds=timeout,
         allow_unlisted_model=allow_unlisted,
@@ -322,5 +328,20 @@ def validate_startup(env: Mapping[str, str] | None = None) -> LlmConfig:
 
     config = load_config(env)
     if config.provider is not Provider.FAKE:
-        resolve_credential(config.credential_kind, env)
+        resolve_credential(api_key_env(config.provider), config.credential_kind, env)
     return config
+
+
+def api_key_env(provider: Provider) -> str:
+    """Which environment variable holds ``provider``'s key.
+
+    Which variable, and what header it ends up in, are facts about the provider rather
+    than about the kind of credential — so both live with the adapter, and this is the
+    lookup that connects them. Imported lazily to keep a fake-mode process from pulling
+    in the HTTP client.
+    """
+    if provider is Provider.OPENROUTER:
+        from .openrouter import API_KEY_ENV
+
+        return API_KEY_ENV
+    raise LlmConfigError(f"provider {provider.value!r} has no API key variable")

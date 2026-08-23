@@ -16,7 +16,6 @@ hour later.
 
 from .config import (
     ALLOW_UNLISTED_ENV,
-    CREDENTIAL_KIND_ENV,
     DEFAULT_EFFORTS,
     DEFAULT_MODEL,
     EFFORT_ENV,
@@ -32,7 +31,7 @@ from .config import (
     load_config,
     validate_startup,
 )
-from .credentials import API_KEY_ENV, Credential, CredentialKind, resolve_credential
+from .credentials import Credential, CredentialKind, resolve_credential
 from .fakes import FakeLlmClient, cache_prefix_digest, request_digest
 from .registry import build_client, build_request
 from .types import (
@@ -54,8 +53,6 @@ from .types import (
 
 __all__ = [
     "ALLOW_UNLISTED_ENV",
-    "API_KEY_ENV",
-    "CREDENTIAL_KIND_ENV",
     "DEFAULT_EFFORTS",
     "DEFAULT_MODEL",
     "EFFORT_ENV",

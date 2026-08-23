@@ -55,6 +55,13 @@ logger = logging.getLogger("motet.llm.openrouter")
 
 DEFAULT_BASE_URL: Final = "https://openrouter.ai/api/v1"
 
+#: Where this provider's key is expected. Cloud Run injects it from Secret Manager under
+#: exactly this name; nothing ever reads a key from a file or an image layer. It lives
+#: here rather than in ``credentials`` because which variable holds the key, and how the
+#: key is presented on the wire, are facts about the *provider* — Anthropic direct would
+#: want a different variable and an ``x-api-key`` header for the very same kind of secret.
+API_KEY_ENV: Final = "OPENROUTER_API_KEY"
+
 #: Sent for attribution on OpenRouter's dashboards. Non-secret, and deliberately not a
 #: hostname of ours: this repo is public and carries no topology.
 _APP_TITLE: Final = "Motet"
@@ -168,13 +175,17 @@ class OpenRouterClient:
             headers={"X-Title": _APP_TITLE},
         )
 
+    def _auth_headers(self) -> dict[str, str]:
+        """OpenRouter's wire shape for the credential. Anthropic direct would differ."""
+        return {"Authorization": f"Bearer {self._credential.token()}"}
+
     def complete(self, request: LlmRequest) -> LlmResponse:
         payload = build_payload(request)
         try:
             http_response = self._client.post(
                 f"{self._base_url}/chat/completions",
                 json=payload,
-                headers=self._credential.auth_headers(),
+                headers=self._auth_headers(),
             )
         except httpx.HTTPError as exc:
             raise LlmTransportError(f"OpenRouter request failed: {exc}") from exc
@@ -208,16 +219,37 @@ class OpenRouterClient:
         usage = _usage(data.get("usage"))
         content = message.get("content")
         applied = _reasoning_evidence(message, usage)
+        finish_reason_raw = choice.get("finish_reason")
+        finish_reason = finish_reason_raw if isinstance(finish_reason_raw, str) else None
+
+        # An empty completion is never useful, and it arrives looking like a success.
+        # The most likely cause is reasoning consuming the whole max_tokens budget --
+        # very plausible at effort=max -- which passes the reasoning check above and then
+        # hands "" to a caller that will fail parsing it several frames away, with
+        # nothing pointing back at truncation.
+        if not isinstance(content, str) or not content.strip():
+            raise LlmTransportError(
+                f"OpenRouter returned an empty completion (finish_reason="
+                f"{finish_reason!r}, output_tokens={usage.output_tokens}, "
+                f"reasoning_tokens={usage.reasoning_tokens}). If finish_reason is "
+                "'length', the token budget was spent before any answer was produced -- "
+                "raise max_output_tokens or lower the stage's effort."
+            )
+        if finish_reason == "length":
+            logger.warning(
+                "response truncated at max_output_tokens on model=%s: the answer is "
+                "incomplete, not merely short",
+                data.get("model") or request.model,
+            )
         # OpenRouter echoes the model it actually served, which can be more specific than
         # what was asked for (a dated snapshot). Prefer it, fall back to the request.
         served_model = data.get("model")
-        finish_reason = choice.get("finish_reason")
         response = LlmResponse(
-            text=content if isinstance(content, str) else "",
+            text=content,
             model=served_model if isinstance(served_model, str) else request.model,
             usage=usage,
             reasoning_applied=applied,
-            finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+            finish_reason=finish_reason,
         )
 
         if request.reasoning is not None and not applied:
@@ -241,4 +273,11 @@ class OpenRouterClient:
         return response
 
     def close(self) -> None:
+        """Release the connection pool. Also reachable as a context manager."""
         self._client.close()
+
+    def __enter__(self) -> OpenRouterClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
