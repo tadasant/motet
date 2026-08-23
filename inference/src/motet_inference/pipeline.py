@@ -44,13 +44,27 @@ def build_briefing(source_items: Iterable[SourceItem], stages: Stages) -> Briefi
     for item in source_items:
         sources[item.id] = item
         result = stages.integrator.integrate(item, window)
-        for index, existing in enumerate(window):
-            if existing.id == result.news_item.id:
-                window[index] = result.news_item
-                break
+        if result.merged:
+            window[_index_of(window, result.news_item.id, item.id)] = result.news_item
         else:
             window.append(result.news_item)
 
     script = stages.script_generator.generate(window, sources)
     grounding = stages.grounding_validator.validate(script, sources)
     return Briefing(news_items=tuple(window), script=script, grounding=grounding)
+
+
+def _index_of(window: list[NewsItem], news_item_id: str, source_item_id: str) -> int:
+    """Locate the news item an integrator says it merged into.
+
+    Trusting ``merged`` rather than re-deriving it by id is deliberate: the integrator is
+    the thing that decided, so a disagreement between its answer and the window is a bug in
+    the integrator. Raising here makes that loud instead of silently appending a second
+    news item with a duplicate id — which would surface much later as a story spoken twice.
+    """
+    for index, existing in enumerate(window):
+        if existing.id == news_item_id:
+            return index
+    raise ValueError(
+        f"integrator merged source {source_item_id!r} into unknown news item {news_item_id!r}"
+    )

@@ -7,6 +7,9 @@ any particular briefing's wording.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
+
 import pytest
 from motet_inference import (
     MODE_ENV_VAR,
@@ -19,7 +22,8 @@ from motet_inference import (
     fake_stages,
     get_stages,
 )
-from motet_inference.types import Claim, Script, ScriptSegment, SourceSpan
+from motet_inference.interfaces import IntegrationResult
+from motet_inference.types import Claim, NewsItem, Script, ScriptSegment, SourceSpan
 
 ITEM_A = SourceItem(id="si_a", title="Acme raises $20M", text="Acme raised $20M. More text.")
 ITEM_A_DUP = SourceItem(id="si_b", title="$20M — ACME Raises!", text="Acme's round closed.")
@@ -113,3 +117,22 @@ def test_synthesizer_returns_wav_bytes_with_a_duration() -> None:
     assert audio.media_type == "audio/wav"
     assert audio.data.startswith(b"RIFF")
     assert audio.duration_ms > 0
+
+
+def test_a_lying_integrator_fails_loudly_rather_than_duplicating() -> None:
+    """An integrator that claims a merge into an item not in the window is a bug.
+
+    Appending instead would put two news items with the same id in the window, and the
+    story would be spoken twice — a failure that surfaces far from its cause.
+    """
+
+    class LyingIntegrator:
+        def integrate(self, item: SourceItem, window: Sequence[NewsItem]) -> IntegrationResult:
+            return IntegrationResult(
+                news_item=NewsItem(id="ni_never_added", title="t", summary="s", source_item_ids=()),
+                merged=True,
+            )
+
+    stages = replace(fake_stages(), integrator=LyingIntegrator())
+    with pytest.raises(ValueError, match="unknown news item"):
+        build_briefing([ITEM_A], stages)
