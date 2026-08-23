@@ -1,0 +1,64 @@
+name: Close outside pull requests
+
+# Motet does not accept pull requests. This workflow politely closes PRs opened by outside
+# contributors (forks and non-members), pointing them at the issue tracker instead. It
+# deliberately does NOT close PRs from the repo owner, org members, or collaborators, so
+# the maintainer's own PR-based workflow keeps working.
+#
+# Runs on `pull_request_target`, which executes in the BASE repo's context with a token
+# that can comment and close — a plain `pull_request` from a fork gets a read-only token
+# and could not. This is safe because the job never checks out or runs any code from the
+# PR branch; it only calls the issues/PR API via github-script.
+#
+# It runs on GitHub-hosted `ubuntu-latest`, NEVER the self-hosted runners. That is the
+# point: this is the one workflow an untrusted fork PR reliably triggers, so it must not
+# touch the shared pool even to reject the PR. See ci.yml for the other two legs of the
+# guard.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: pr-auto-close-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    # Skip PRs from the owner / org members / collaborators — only outside PRs are closed.
+    if: >-
+      github.event.pull_request.author_association != 'OWNER' &&
+      github.event.pull_request.author_association != 'MEMBER' &&
+      github.event.pull_request.author_association != 'COLLABORATOR'
+    steps:
+      - name: Comment and close
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+            const author = context.payload.pull_request.user.login;
+            const body = [
+              `Hi @${author}, and thank you for wanting to contribute to Motet! 🙏`,
+              ``,
+              `Motet **doesn't accept pull requests** — and that's a process decision, not a snub.`,
+              `Feature work here is done by running agent sessions against this repo, on a pipeline`,
+              `built to produce reviewed, CI-green changes. A patch that arrives out of band skips`,
+              `that pipeline, so it's easier and safer to feed it than to bypass it. Forking is very`,
+              `welcome, though — build on it under the MIT license.`,
+              ``,
+              `**What helps most:** open a detailed issue. A precise bug report (exact reproduction`,
+              `steps, real output, impact) or a concrete feature request gets triaged quickly, and`,
+              `the change you had in mind may well get built.`,
+              ``,
+              `- 🐞 [Report a bug](https://github.com/${owner}/${repo}/issues/new)`,
+              `- 💡 [Request a feature](https://github.com/${owner}/${repo}/issues/new)`,
+              ``,
+              `Closing this PR per that policy — no action needed from you. Thanks again!`,
+            ].join('\n');
+            await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+            await github.rest.pulls.update({ owner, repo, pull_number: number, state: 'closed' });

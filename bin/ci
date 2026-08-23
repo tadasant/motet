@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# The one CI command: migrations, tests, typecheck — both halves of the repo.
+#
+# The GitHub Actions workflow calls this and nothing else, so anything CI checks can be
+# reproduced locally with one command. If you add a check, add it HERE, not to the
+# workflow: a check that only exists in YAML cannot be run on a laptop and will rot.
+#
+# Needs a Postgres. See CONTRIBUTING.md; DATABASE_URL below is the local default.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+export DATABASE_URL="${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/motet_test}"
+# Never let CI reach a vendor — invariant 7.
+export MOTET_INFERENCE_MODE=fake
+
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+step "Install Python dependencies"
+uv sync --all-packages
+
+step "Install web dependencies"
+npm --prefix web ci
+
+step "Apply migrations"
+uv run python -m motet_db.migrate
+
+step "Lint (ruff)"
+uv run ruff check .
+uv run ruff format --check .
+
+step "Typecheck (mypy)"
+uv run mypy
+
+step "Test (pytest — api, db, inference, workers, golden set)"
+uv run pytest
+
+# The contract chain: FastAPI app -> openapi.yaml -> web/src/api/schema.gen.ts.
+# Regenerate both and fail on any diff, so the three can never drift apart.
+step "Contract: openapi.yaml is in sync with the app"
+uv run python -m motet_api.openapi
+git diff --exit-code -- openapi.yaml
+
+step "Contract: the TypeScript client is in sync with openapi.yaml"
+npm --prefix web run generate:client
+git diff --exit-code -- web/src/api/schema.gen.ts
+
+step "Typecheck (tsc)"
+npm --prefix web run typecheck
+
+step "Test (vitest)"
+npm --prefix web test
+
+step "Build the SPA"
+npm --prefix web run build
+
+printf '\n\033[1;32mAll checks passed.\033[0m\n'

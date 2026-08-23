@@ -1,0 +1,53 @@
+# uv workspace root. Each deployable/library is a member; this file holds only the
+# shared dev toolchain and the lint/type/test configuration for the whole tree.
+[project]
+name = "motet"
+version = "0.1.0"
+description = "Motet — an interactive podcast built from your own reading backlog"
+requires-python = ">=3.13"
+dependencies = [
+    "motet-api",
+    "motet-db",
+    "motet-inference",
+    "motet-workers",
+]
+
+[tool.uv]
+# The root is a virtual workspace: it pins the toolchain and configuration for the whole
+# tree but is not itself an installable package.
+package = false
+
+[tool.uv.workspace]
+members = ["api", "db", "inference", "workers"]
+
+[tool.uv.sources]
+motet-api = { workspace = true }
+motet-db = { workspace = true }
+motet-inference = { workspace = true }
+motet-workers = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "ruff>=0.9",
+    "types-pyyaml>=6.0.12.20260815",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logger (AGENTS.md)
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["api/src", "db/src", "inference/src", "workers/src", "goldens"]
+
+[tool.pytest.ini_options]
+testpaths = ["api/tests", "db/tests", "inference/tests", "workers/tests", "goldens"]
+addopts = "-q"

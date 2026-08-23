@@ -1,0 +1,7 @@
+{
+  "why": "Unrelated stories must stay separate. The negative case for dedup — over-merging is as wrong as under-merging.",
+  "news_items": [
+    { "title": "Beta ships v2", "source_count": 1 },
+    { "title": "Regulator opens inquiry", "source_count": 1 }
+  ]
+}
