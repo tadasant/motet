@@ -12,24 +12,40 @@
 #
 #     bin/build-images              # build and smoke-test all three
 #     bin/build-images api web      # a subset
-#     TAG=v1 bin/build-images       # tag something other than `local`
+#     TAG=v1 bin/build-images       # pin the tag instead of the per-run default
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-TAG="${TAG:-local}"
+# Tagged per run, not `local`. The self-hosted pool is shared and `ci.yml` groups
+# concurrency by ref, so a PR run and a push-to-main run overlap freely on one box —
+# a fixed tag means one run retags the image another is about to smoke-test.
+TAG="${TAG:-local-$$}"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
 # Every smoke container is named and torn down on exit, including the failure path —
 # a leaked container holds its port and makes the next run fail for the wrong reason.
 CONTAINERS=()
+IMAGES=()
 cleanup() {
   for name in "${CONTAINERS[@]:-}"; do
     [ -n "$name" ] && docker rm -f "$name" >/dev/null 2>&1 || true
   done
+  # Only the tags this run created. A blanket `docker image prune` here would delete a
+  # co-tenant job's dangling layers off the shared runner mid-build.
+  for image in "${IMAGES[@]:-}"; do
+    [ -n "$image" ] && docker rmi -f "$image" >/dev/null 2>&1 || true
+  done
 }
 trap cleanup EXIT
+
+# The host port Docker chose for a container's 8080. Ports are assigned by the daemon
+# (`-P`) rather than hardcoded: two concurrent jobs on this shared runner would otherwise
+# collide on a fixed port and fail for a reason unrelated to the change under test.
+host_port() {
+  docker port "$1" 8080 | head -1 | sed 's/.*://'
+}
 
 # Wait for a container's HTTP endpoint, then hand back the body. Polls rather than
 # sleeping a fixed interval: a cold Python start is a second on a laptop and rather
@@ -54,16 +70,18 @@ wait_for_http() {
 
 # --- api -------------------------------------------------------------------
 build_api() {
+  IMAGES+=("motet-api:${TAG}")
   docker build --target api -t "motet-api:${TAG}" -f Dockerfile .
 }
 
 smoke_api() {
-  local name="motet-smoke-api-$$" port=18080
+  local name="motet-smoke-api-$$" port
   CONTAINERS+=("$name")
   # No DATABASE_URL and no vendor key on purpose. /healthz must answer without either —
   # it is what Cloud Run's startup probe hits, and a health check that needed the
   # database would report the database's health rather than the revision's.
-  docker run -d --name "$name" -p "${port}:8080" "motet-api:${TAG}" >/dev/null
+  docker run -d --name "$name" -P "motet-api:${TAG}" >/dev/null
+  port="$(host_port "$name")"
 
   local body
   body="$(wait_for_http "http://127.0.0.1:${port}/healthz" "$name")"
@@ -80,6 +98,7 @@ smoke_api() {
 
 # --- worker ----------------------------------------------------------------
 build_worker() {
+  IMAGES+=("motet-worker:${TAG}")
   docker build --target worker -t "motet-worker:${TAG}" -f Dockerfile .
 }
 
@@ -98,14 +117,16 @@ smoke_worker() {
 
 # --- web -------------------------------------------------------------------
 build_web() {
+  IMAGES+=("motet-web:${TAG}")
   docker build -t "motet-web:${TAG}" -f web/Dockerfile .
 }
 
 smoke_web() {
-  local name="motet-smoke-web-$$" port=18081 base="https://api.example.test"
+  local name="motet-smoke-web-$$" port base="https://api.example.test"
   CONTAINERS+=("$name")
-  docker run -d --name "$name" -p "${port}:8080" -e "MOTET_API_BASE_URL=${base}" \
+  docker run -d --name "$name" -P -e "MOTET_API_BASE_URL=${base}" \
     "motet-web:${TAG}" >/dev/null
+  port="$(host_port "$name")"
 
   local index
   index="$(wait_for_http "http://127.0.0.1:${port}/" "$name")"

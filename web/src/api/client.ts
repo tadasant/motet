@@ -74,8 +74,15 @@ declare global {
  */
 export function apiBaseUrl(): string {
   const runtime = globalThis.window?.__MOTET_CONFIG__?.apiBaseUrl
-  if (typeof runtime === 'string' && runtime.trim()) return runtime.trim().replace(/\/+$/, '')
-  return import.meta.env.VITE_API_BASE_URL ?? ''
+  // Both branches go through `normalise`, so `VITE_API_BASE_URL=http://127.0.0.1:8000/`
+  // cannot produce `http://127.0.0.1:8000//v1/...` while the runtime path handles it.
+  return normalise(runtime) || normalise(import.meta.env.VITE_API_BASE_URL)
+}
+
+/** Trim, drop trailing slashes, and treat anything blank or non-string as unset. */
+function normalise(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value.trim().replace(/\/+$/, '')
 }
 
 const TOKEN_STORAGE_KEY = 'motet.apiToken'

@@ -112,27 +112,43 @@ app = FastAPI(
     ),
 )
 
-# CORS, because the SPA is on `app.` and this API is on `api.` — two origins, so every
-# call the web app makes is cross-origin and a browser blocks it by default. Without this
-# the SPA loads, renders, and fails every request with an opaque network error that says
-# nothing about the cause.
-#
+
+def configure_cors(target: FastAPI, config: Settings) -> None:
+    """Allow the SPA's origin to call ``/v1`` from a browser, and nothing else.
+
+    The SPA is on ``app.`` and this API is on ``api.`` — two origins, so every call the
+    web app makes is cross-origin and a browser blocks it by default. Without this the
+    SPA loads, renders, and fails every request with an opaque network error that says
+    nothing about the cause.
+
+    A function rather than inline setup so that the tests can apply *this* policy to a
+    throwaway app. Retyping the same arguments in a test would mean the test still passed
+    after someone changed the real ones, which is the failure mode a CORS test exists to
+    prevent.
+    """
+    origins = config.cors_origins
+    if not origins:
+        return
+    target.add_middleware(
+        CORSMiddleware,
+        # Exact origins, never `*`. See Settings.cors_origins.
+        allow_origins=origins,
+        # `Authorization` is a non-simple header, so every request the SPA makes is
+        # preflighted and this list is what makes the preflight pass.
+        allow_headers=["Authorization", "Content-Type"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        # Deliberately NOT `allow_credentials=True`. The client never sets
+        # `credentials: 'include'` — it carries its token in `Authorization`, which is not
+        # a credential in the CORS sense — so allowing them buys nothing, and it would
+        # opt this API into honouring cookie-bearing cross-origin requests if anything
+        # ever set a cookie.
+    )
+
+
 # Read once at import rather than per request: an origin policy that could change under a
 # running process would be a policy nobody could reason about, and Cloud Run gives a new
 # revision for an environment change anyway.
-_cors_origins = Settings.from_env().cors_origins
-if _cors_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        # Exact origins, never `*`. See Settings.cors_origins.
-        allow_origins=_cors_origins,
-        # The SPA sends `Authorization`, which makes every request preflighted and
-        # credentialed. Both halves have to be allowed or the browser drops the header
-        # and the API answers 401 to a request that looked correct in the network tab.
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
-    )
+configure_cors(app, Settings.from_env())
 
 
 @app.get("/healthz", response_model=HealthResponse, tags=["ops"])

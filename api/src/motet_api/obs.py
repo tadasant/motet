@@ -109,15 +109,25 @@ def status(env: Mapping[str, str] | None = None) -> ObsStatus:
 def configure() -> ObsStatus:
     """Set up logging and report what telemetry is wired.
 
-    Called from the API's lifespan and from the worker entry point — a configure()
-    nobody calls is exactly the silent no-op this module warns about, and it was one.
+    Called from the API's lifespan — a ``configure()`` nobody calls is exactly the silent
+    no-op this module warns about, and until this was wired it was one.
+
+    **The worker does not call this, and that is a known gap rather than a decision.**
+    ``motet_api`` depends on ``motet_workers``, so the worker cannot import back without
+    a cycle; giving it telemetry means moving this module somewhere both can reach. The
+    gap matters because the worker is the process that makes every vendor call and has no
+    ``/healthz`` to ask, so "ask the app instead" currently has no answer for it. Tracked
+    rather than half-fixed here.
 
     Scaffold: the OTLP and GlitchTip exporters themselves are not installed yet, so this
     configures stdlib logging and records the intent. Wiring the exporters means filling
     this function in — not calling a vendor SDK from somewhere else.
     """
     current = status()
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    # `.upper()` because `logging.basicConfig(level="debug")` raises `ValueError: Unknown
+    # level`. This is the first statement in the API's lifespan, so a lowercase LOG_LEVEL
+    # would be a failed revision whose traceback never mentions LOG_LEVEL.
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO")
     logger.info(
         "obs: service=%s otlp=%s errors=%s",
         current.service_name,

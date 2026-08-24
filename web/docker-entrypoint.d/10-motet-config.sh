@@ -29,12 +29,33 @@ fi
 # and `https://host//v1/...` is a different path to some routers.
 BASE_URL="$(printf '%s' "$BASE_URL" | sed 's:/*$::')"
 
-# Single-quoted JS string, so the value cannot terminate the statement. A hostname has
-# no business containing a quote or a backslash, and one that does is a misconfiguration
-# rather than input to escape cleverly — refuse it instead of writing a broken bundle.
+# The value goes into a single-quoted JS string, so refuse anything that could leave that
+# string — or the file — malformed. A hostname has no business containing any of this, so
+# a value that does is a misconfiguration rather than input to escape cleverly.
+#
+# The printable-ASCII check is the one that matters most, and it is not about injection: a
+# value containing a newline would sail past a quote-and-backslash check, `sed` is
+# line-oriented so only its last line would be stripped, and the result is an unterminated
+# string literal. `config.js` then fails to parse, `__MOTET_CONFIG__` is never defined, and
+# the SPA silently falls back to same-origin — asking nginx for /v1, getting index.html,
+# and reporting a JSON parse error. Exactly the failure this script exists to prevent.
 case "$BASE_URL" in
+  *[!\ -~]*)
+    echo "motet-web: refusing MOTET_API_BASE_URL with a newline or non-printable character." >&2
+    exit 1
+    ;;
   *\'*|*\\*|*'<'*)
-    echo "motet-web: refusing to write MOTET_API_BASE_URL containing a quote, backslash or '<'." >&2
+    echo "motet-web: refusing MOTET_API_BASE_URL containing a quote, backslash or '<'." >&2
+    exit 1
+    ;;
+esac
+
+# Shape check. Anything that is not an absolute http(s) URL would be joined onto paths
+# that already begin with a slash and produce nonsense requests.
+case "$BASE_URL" in
+  ''|http://*|https://*) ;;
+  *)
+    echo "motet-web: MOTET_API_BASE_URL must be an absolute http:// or https:// URL." >&2
     exit 1
     ;;
 esac

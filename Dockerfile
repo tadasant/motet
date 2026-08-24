@@ -94,7 +94,16 @@ EXPOSE 8080
 # instance holds its own Postgres connections — a second in-container worker would
 # double the connection count against a db-f1-micro for no extra concurrency that
 # `max_instance_request_concurrency` does not already provide.
-CMD exec uvicorn motet_api.main:app --host 0.0.0.0 --port "$PORT"
+#
+# `--forwarded-allow-ips='*'` is load-bearing rather than lax. uvicorn honours
+# `X-Forwarded-Proto` only from `forwarded_allow_ips`, which defaults to `127.0.0.1`; on
+# Cloud Run the peer is the front end, never loopback, so the header is discarded and
+# `request.base_url` comes back `http://`. The feed builds enclosure URLs from that
+# whenever `MOTET_PUBLIC_BASE_URL` is unset, which would put `http://` links inside an RSS
+# document a podcast client caches for hours. Trusting the header is safe here precisely
+# because Cloud Run is the only route to the container — nothing else can reach it to
+# forge one.
+CMD exec uvicorn motet_api.main:app --host 0.0.0.0 --port "$PORT" --forwarded-allow-ips='*'
 
 # ---------------------------------------------------------------------------
 # worker — one Cloud Run job invocation drains one queue and exits.

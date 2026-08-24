@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
-from motet_api.config import APP_BASE_URL_ENV, Settings
+from motet_api.config import APP_BASE_URL_ENV, ConfigError, Settings
+from motet_api.main import configure_cors
 from motet_api.obs import (
     ERROR_DSN_ENV,
     GLITCHTIP_DSN_ENV,
@@ -26,6 +26,20 @@ from motet_api.obs import (
 )
 
 APP_ORIGIN = "https://app.example.invalid"
+
+
+def _settings(app_base_url: str | None) -> Settings:
+    """Settings carrying just the one field the CORS policy is built from."""
+    return Settings(
+        database_url=None,
+        inference_mode="fake",
+        api_token=None,
+        public_base_url=None,
+        app_base_url=app_base_url,
+        feed_title="Motet",
+        feed_description="",
+        feed_author="Motet",
+    )
 
 
 class TestCorsOrigins:
@@ -67,31 +81,69 @@ class TestCorsOrigins:
         assert Settings.from_env().cors_origins == ["http://localhost:5173"]
 
     def test_it_is_never_a_wildcard(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A wildcard cannot carry credentials, and the SPA sends `Authorization`."""
+        """One named origin, so a stranger's page cannot drive this API."""
         monkeypatch.setenv(APP_BASE_URL_ENV, APP_ORIGIN)
         assert "*" not in Settings.from_env().cors_origins
+
+    def test_the_host_is_lowercased(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A browser always sends a lowercase host; the comparison is exact.
+
+        `urlsplit` lowercases the scheme but not the netloc, so building from `netloc`
+        would yield an origin no `Origin` header could ever equal.
+        """
+        monkeypatch.setenv(APP_BASE_URL_ENV, "HTTPS://App.Example.INVALID")
+        assert Settings.from_env().cors_origins == ["https://app.example.invalid"]
+
+    def test_userinfo_is_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """It never appears in an `Origin` header, and it would reach the startup log."""
+        monkeypatch.setenv(APP_BASE_URL_ENV, "https://user:pw@app.example.invalid")
+        assert Settings.from_env().cors_origins == ["https://app.example.invalid"]
+
+    def test_an_ipv6_literal_keeps_its_brackets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(APP_BASE_URL_ENV, "http://[::1]:8080")
+        assert Settings.from_env().cors_origins == ["http://[::1]:8080"]
+
+    def test_a_bare_hostname_is_assumed_https(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(APP_BASE_URL_ENV, "app.example.invalid")
+        assert Settings.from_env().cors_origins == ["https://app.example.invalid"]
+
+    @pytest.mark.parametrize(
+        "configured",
+        [
+            # The motivating case: one missing slash. The lenient reading of this is the
+            # netloc `https:`, giving `https://https:` — a policy that installs cleanly
+            # and refuses every request, while the "no origin configured" warning stays
+            # silent because an origin *was* configured.
+            "https:/app.example.invalid",
+            "ftp://app.example.invalid",
+            "https://",
+            "https://app.example.invalid:notaport",
+        ],
+    )
+    def test_an_unusable_value_raises_rather_than_never_matching(
+        self, monkeypatch: pytest.MonkeyPatch, configured: str
+    ) -> None:
+        """Fail at startup, like an unknown model slug — not invisibly at request time."""
+        monkeypatch.setenv(APP_BASE_URL_ENV, configured)
+        with pytest.raises(ConfigError):
+            _ = Settings.from_env().cors_origins
 
 
 class TestCorsMiddleware:
     """The policy as a browser meets it: a preflight and an actual request.
 
-    Built here against a throwaway app rather than the real one, because the real app
-    reads its origin at import and a test that needed a different one would have to
-    reimport the module. What is under test is the middleware configuration, and this is
-    the same configuration main.py applies.
+    Applied to a throwaway app rather than the real one, because the real app configures
+    itself at import and a test needing a different origin would have to reimport the
+    module. What matters is that it goes through **``main.configure_cors``** — the same
+    function ``main`` calls. Retyping the middleware arguments here would leave these
+    tests passing after somebody changed the real policy, which is the one failure a CORS
+    test exists to catch.
     """
 
     @staticmethod
-    def _client(origins: list[str]) -> TestClient:
+    def _client(app_base_url: str | None) -> TestClient:
         app = FastAPI()
-        if origins:
-            app.add_middleware(
-                CORSMiddleware,
-                allow_origins=origins,
-                allow_credentials=True,
-                allow_methods=["GET", "POST", "OPTIONS"],
-                allow_headers=["Authorization", "Content-Type"],
-            )
+        configure_cors(app, _settings(app_base_url))
 
         @app.get("/v1/news-items")
         def _news_items() -> list[str]:
@@ -101,7 +153,7 @@ class TestCorsMiddleware:
 
     def test_a_preflight_from_the_app_origin_is_allowed(self) -> None:
         """Without this the SPA fails every call before it is ever sent."""
-        response = self._client([APP_ORIGIN]).options(
+        response = self._client(APP_ORIGIN).options(
             "/v1/news-items",
             headers={
                 "Origin": APP_ORIGIN,
@@ -114,19 +166,19 @@ class TestCorsMiddleware:
         assert "authorization" in response.headers["access-control-allow-headers"].lower()
 
     def test_the_actual_request_carries_the_allow_origin_header(self) -> None:
-        response = self._client([APP_ORIGIN]).get("/v1/news-items", headers={"Origin": APP_ORIGIN})
+        response = self._client(APP_ORIGIN).get("/v1/news-items", headers={"Origin": APP_ORIGIN})
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == APP_ORIGIN
 
     def test_another_origin_is_not_granted_access(self) -> None:
         """The point of naming one origin rather than allowing every one."""
-        response = self._client([APP_ORIGIN]).get(
+        response = self._client(APP_ORIGIN).get(
             "/v1/news-items", headers={"Origin": "https://evil.example.invalid"}
         )
         assert "access-control-allow-origin" not in response.headers
 
     def test_no_configured_origin_means_no_cors_headers(self) -> None:
-        response = self._client([]).get("/v1/news-items", headers={"Origin": APP_ORIGIN})
+        response = self._client(None).get("/v1/news-items", headers={"Origin": APP_ORIGIN})
         assert "access-control-allow-origin" not in response.headers
 
 
