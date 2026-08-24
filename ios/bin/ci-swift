@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# Build and test MotetKit — the half of the iOS client that is not AVFoundation, and so the
+# half that can be tested anywhere. Called by `bin/ci`.
+#
+# Finding a toolchain, in order:
+#   1. `swift` on PATH            — a Mac with Xcode, or a machine that already has one.
+#   2. a per-runner install       — what `ci.yml` sets up with install-swift-toolchain.
+#   3. nothing                    — SKIP, loudly, with the command to fix it.
+#
+# The skip is a deliberate compromise and the loudness is the point: a contributor with
+# neither Xcode nor a Swift toolchain should not be blocked from running `bin/ci` for the
+# Python and TypeScript halves, and CI installs a toolchain so CI never takes this path.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+find_swift() {
+  if command -v swift >/dev/null 2>&1; then
+    command -v swift
+    return 0
+  fi
+  local runner_num shim
+  runner_num=$(echo "${RUNNER_NAME:-}" | grep -oE '[0-9]+$' || echo "0")
+  for shim in "${MOTET_SWIFT_SHIM:-}" \
+              "$HOME/.motet/runner-${runner_num}/swift/shim/swift" \
+              "$HOME/.motet/swift/shim/swift"; do
+    if [ -n "$shim" ] && [ -x "$shim" ]; then
+      printf '%s\n' "$shim"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! SWIFT=$(find_swift); then
+  printf '\n\033[1;33m==> SKIPPED: MotetKit tests (no Swift toolchain)\033[0m\n'
+  printf '    Install one with: ios/bin/install-swift-toolchain\n'
+  printf '    On a Mac, Xcode provides it. CI always installs it, so CI always runs them.\n\n'
+  exit 0
+fi
+
+printf '    using %s (%s)\n' "$SWIFT" "$("$SWIFT" --version | head -1)"
+"$SWIFT" build
+"$SWIFT" test

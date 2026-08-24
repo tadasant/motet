@@ -87,6 +87,18 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install the Swift toolchain (per-runner paths)
+        # MotetKit — the iOS client's logic — is tested by `bin/ci`, and these runners have
+        # no Swift. The toolchain is ~1 GB, so it installs ONCE per runner into the same
+        # per-runner directory uv and npm use above, and every later run reuses it. Without
+        # this step `bin/ci` skips the iOS tests rather than failing, which is why this is a
+        # real step and not `continue-on-error`.
+        run: |
+          RUNNER_NUM=$(echo "$RUNNER_NAME" | grep -oE '[0-9]+$' || echo "0")
+          MOTET_HOME="$HOME/.motet/runner-${RUNNER_NUM}"
+          SHIM_DIR=$(ios/bin/install-swift-toolchain "${MOTET_HOME}/swift")
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+
       - name: Run the one CI command
         run: bin/ci
 

@@ -51,6 +51,19 @@ step "Contract: the TypeScript client is in sync with openapi.yaml"
 npm --prefix web run generate:client
 git diff --exit-code -- web/src/api/schema.gen.ts
 
+# The iOS client is generated from openapi.yaml too, by a stdlib-Python generator rather
+# than by a Swift or JVM tool, so this check works offline and needs no toolchain.
+step "Contract: the Swift client is in sync with openapi.yaml"
+uv run python ios/tools/generate_swift_client.py
+git diff --exit-code -- ios/Sources/MotetKit/Generated/Schema.swift
+
+# MotetKit is the iOS app's logic — API client, playback state machine, offline library,
+# outbox — and it is Foundation-only precisely so that it can be tested here. The
+# AVFoundation/SwiftUI/CarPlay half needs Xcode; see ios/README.md for what that leaves
+# unverified.
+step "Test (swift — MotetKit)"
+ios/bin/ci-swift
+
 step "Typecheck (tsc)"
 npm --prefix web run typecheck
 
