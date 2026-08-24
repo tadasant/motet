@@ -27,14 +27,17 @@ hand-rolled escaping is exactly the kind of thing that works until the first amp
 
 from __future__ import annotations
 
+import secrets
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from urllib.parse import quote, urlencode
 
 from motet_db import StoredEpisode
+
+from .shownotes import chapters, show_notes_html, show_notes_text
 
 #: Apple's namespace URI, and the trailing ``.dtd`` is load-bearing. A feed that declares
 #: ``.../podcast-1.0/`` instead is still well-formed XML and still parses — the itunes
@@ -44,11 +47,42 @@ from motet_db import StoredEpisode
 ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 ATOM_NS = "http://www.w3.org/2005/Atom"
 
+#: Podcasting 2.0. Where `<podcast:transcript>` and `<podcast:chapters>` live, and the
+#: namespace Fountain, Podverse, and Podcast Addict look for them in.
+PODCAST_NS = "https://podcastindex.org/namespace/1.0"
+
+#: Podlove Simple Chapters — inline chapter markers, read by Overcast and Podcast Addict.
+#: Emitted alongside the 2.0 tag rather than instead of it: the two are read by different
+#: clients, and the inline form also works for a client that will not make a second
+#: authenticated request just to find out an episode has chapters.
+PSC_NS = "http://podlove.org/simple-chapters"
+
+#: RSS 1.0's content module, for show notes as markup. Apple reads `<description>`; most
+#: third-party clients prefer `<content:encoded>` where it exists.
+CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
+
 #: Registering the prefixes globally is what makes ``ElementTree`` emit `itunes:duration`
 #: rather than `ns0:duration`. Clients parse both, but a feed a human cannot read in a
 #: browser is a feed nobody can debug.
 ET.register_namespace("itunes", ITUNES_NS)
 ET.register_namespace("atom", ATOM_NS)
+ET.register_namespace("podcast", PODCAST_NS)
+ET.register_namespace("psc", PSC_NS)
+ET.register_namespace("content", CONTENT_NS)
+
+
+#: Placeholder for markup that must survive as markup.
+#:
+#: ``ElementTree`` has no CDATA support and escapes every character it writes, which is
+#: exactly wrong for ``content:encoded`` — the point of that element is that its HTML
+#: reaches the client as HTML. So the element gets an opaque token as its text, and the
+#: token is swapped for a real CDATA section after serialization.
+#:
+#: The token contains no ``<``, ``>`` or ``&``, so the writer passes it through unchanged
+#: and the substitution can be an exact match. It carries a random suffix per document, so
+#: a newsletter title that happened to contain the literal prefix cannot be mistaken for
+#: one.
+_CDATA_TOKEN_PREFIX = "motet-cdata-placeholder"
 
 
 @dataclass(frozen=True)
@@ -64,6 +98,17 @@ class FeedMetadata:
 
 def feed_url(base_url: str, token: str) -> str:
     return f"{base_url.rstrip('/')}/feed.xml?{urlencode({'token': token})}"
+
+
+def episode_asset_url(base_url: str, episode_id: str, asset: str, token: str) -> str:
+    """Where a client fetches one of an episode's side documents.
+
+    Same shape and same token as the audio URL: transcripts and chapter files are fetched
+    by the podcast client, not by the app, so they need a credential a client will actually
+    send — which for a podcast client means one in the query string.
+    """
+    query = urlencode({"token": token})
+    return f"{base_url.rstrip('/')}/v1/episodes/{quote(episode_id)}/{asset}?{query}"
 
 
 def episode_audio_url(base_url: str, episode_id: str, token: str) -> str:
@@ -86,22 +131,21 @@ def itunes_duration(duration_ms: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}"
 
 
-def episode_description(episode: StoredEpisode) -> str:
-    """Show notes: the stories in this episode, in the order they are spoken.
+def render_feed(
+    metadata: FeedMetadata,
+    episodes: Sequence[StoredEpisode],
+    titles: Mapping[str, str] | None = None,
+) -> bytes:
+    """Build the whole document. Returns UTF-8 bytes, declaration included.
 
-    Plain text rather than HTML — this is what a listener sees on a lockscreen, where
-    markup is either stripped or shown raw depending on the client.
+    ``titles`` maps a news item id to its title, for show notes and chapter markers. Passed
+    in rather than looked up here because this module does no database work — which is what
+    lets the feed be rendered from fixtures in a test.
     """
-    if not episode.segments:
-        return "No stories in this episode."
-    return "\n".join(
-        f"{index + 1}. {segment.text.strip()[:180]}"
-        for index, segment in enumerate(episode.segments)
-    )
-
-
-def render_feed(metadata: FeedMetadata, episodes: Sequence[StoredEpisode]) -> bytes:
-    """Build the whole document. Returns UTF-8 bytes, declaration included."""
+    story_titles = dict(titles or {})
+    # Token -> markup, filled by `_cdata` and substituted after serialization.
+    pending: dict[str, str] = {}
+    nonce = secrets.token_hex(8)
     # The `xmlns:` declarations are NOT set as attributes here. `ElementTree` emits one
     # for every namespace it actually uses, and setting them by hand as well produces a
     # root element carrying `xmlns:itunes` twice — a duplicate attribute, which is not
@@ -135,16 +179,42 @@ def render_feed(metadata: FeedMetadata, episodes: Sequence[StoredEpisode]) -> by
     _text(owner, f"{{{ITUNES_NS}}}name", metadata.author)
 
     for episode in episodes:
-        _episode_item(channel, metadata, episode)
+        _episode_item(channel, metadata, episode, story_titles, pending, nonce)
 
     document: bytes = ET.tostring(rss, encoding="utf-8", xml_declaration=True)
+    # Swap each placeholder for a real CDATA section. Done on the serialized bytes because
+    # `ElementTree` offers no other way; the tokens survive serialization untouched because
+    # they contain no character the writer would escape.
+    for token, markup in pending.items():
+        document = document.replace(token.encode(), b"<![CDATA[" + markup.encode() + b"]]>")
     return document
 
 
-def _episode_item(channel: ET.Element, metadata: FeedMetadata, episode: StoredEpisode) -> None:
+def _episode_item(
+    channel: ET.Element,
+    metadata: FeedMetadata,
+    episode: StoredEpisode,
+    titles: dict[str, str],
+    pending: dict[str, str],
+    nonce: str,
+) -> None:
     item = ET.SubElement(channel, "item")
     _text(item, "title", episode.title)
-    _text(item, "description", episode_description(episode))
+
+    notes = show_notes_text(episode, titles)
+    _text(item, "description", notes)
+    # Apple reads `itunes:summary` where it exists and `description` otherwise; several
+    # clients do the reverse. Both, with the same text, is the only combination that shows
+    # the same thing everywhere.
+    _text(item, f"{{{ITUNES_NS}}}summary", notes)
+    _cdata(
+        item,
+        f"{{{CONTENT_NS}}}encoded",
+        show_notes_html(episode, titles),
+        pending,
+        nonce,
+    )
+
     url = episode_audio_url(metadata.base_url, episode.id, metadata.token)
     _text(item, "link", url)
     guid = _text(item, "guid", episode.id)
@@ -164,6 +234,88 @@ def _episode_item(channel: ET.Element, metadata: FeedMetadata, episode: StoredEp
     _text(item, f"{{{ITUNES_NS}}}duration", itunes_duration(episode.duration_ms))
     _text(item, f"{{{ITUNES_NS}}}explicit", "no")
     _text(item, f"{{{ITUNES_NS}}}episodeType", "full")
+
+    _transcript_and_chapters(item, metadata, episode, titles)
+
+
+def _transcript_and_chapters(
+    item: ET.Element,
+    metadata: FeedMetadata,
+    episode: StoredEpisode,
+    titles: dict[str, str],
+) -> None:
+    """Point at the subtitles and the chapters, and inline the chapters as well.
+
+    Only for an episode that has actually been rendered: before TTS runs, every claim's
+    timing is zero, so a transcript would be a pile of cues at 00:00 and the chapters would
+    all point at the start. An absent transcript reads as "not available"; a wrong one
+    reads as broken.
+    """
+    markers = chapters(episode, titles)
+    if not markers:
+        return
+
+    ET.SubElement(
+        item,
+        f"{{{PODCAST_NS}}}transcript",
+        {
+            "url": episode_asset_url(
+                metadata.base_url, episode.id, "transcript.vtt", metadata.token
+            ),
+            "type": "text/vtt",
+            # `captions` rather than the default: these cues are timed to the audio, which
+            # is what the attribute is for. A client that wants a readable transcript
+            # renders captions fine; one that wants captions cannot use an untimed document.
+            "rel": "captions",
+            "language": "en",
+        },
+    )
+    ET.SubElement(
+        item,
+        f"{{{PODCAST_NS}}}chapters",
+        {
+            "url": episode_asset_url(
+                metadata.base_url, episode.id, "chapters.json", metadata.token
+            ),
+            "type": "application/json+chapters",
+        },
+    )
+
+    # Inline Podlove chapters as well. `start` is `HH:MM:SS.mmm`, and the element is
+    # self-closing with the title in an attribute — not as text, which is the mistake that
+    # makes a chapter list render as a column of blanks.
+    inline = ET.SubElement(item, f"{{{PSC_NS}}}chapters", {"version": "1.2"})
+    for marker in markers:
+        ET.SubElement(
+            inline,
+            f"{{{PSC_NS}}}chapter",
+            {"start": _psc_timestamp(marker.start_ms), "title": marker.title},
+        )
+
+
+def _psc_timestamp(milliseconds: int) -> str:
+    total = max(0, milliseconds) // 1000
+    millis = max(0, milliseconds) % 1000
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def _cdata(
+    parent: ET.Element, tag: str, markup: str, pending: dict[str, str], nonce: str
+) -> ET.Element:
+    """Write markup that must survive as markup.
+
+    The element gets an opaque token; :func:`render_feed` swaps it for a real CDATA section
+    after serialization. :func:`~motet_api.shownotes.show_notes_html` has already
+    neutralized any ``]]>`` in the content, which is the one sequence that could close the
+    section early and produce a document that is not well-formed.
+    """
+    token = f"{_CDATA_TOKEN_PREFIX}-{nonce}-{len(pending)}"
+    pending[token] = markup
+    element = ET.SubElement(parent, tag)
+    element.text = token
+    return element
 
 
 def _text(parent: ET.Element, tag: str, value: str) -> ET.Element:

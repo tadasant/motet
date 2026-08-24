@@ -1,0 +1,65 @@
+From: Acme Newsletter <news@acme.example.com>
+To: reader@example.com
+Subject: =?UTF-8?B?QWNtZSByYWlzZXMgJDIwTSBTZXJpZXMgQSDigJQgdGhlIGRldGFpbHM=?=
+Date: Tue, 18 Aug 2026 07:02:11 +0000
+Message-ID: <acme-series-a-001@acme.example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Acme raises $20M Series A to build developer tools
+
+View this email in your browser
+
+Acme announced a $20M Series A led by Northwind Ventures, the company said =
+on
+Tuesday. The round values Acme at $180M post-money and brings total funding=
+ to
+$26M.
+
+Chief executive Dana Reyes said the money will go toward hiring =E2=80=94 t=
+he company
+plans to double its engineering team to 40 people by the end of the year =
+=E2=80=94 and
+toward shipping a hosted version of its open-source build tool.
+
+Northwind partner Sam Oyelaran will join the board. Existing investors Foun=
+dry
+Lane and Cedar Capital also participated.
+
+https://acme.example.com/blog/series-a?utm_source=3Dnewsletter&utm_medium=
+=3Demail
+
+--
+You're receiving this email because you subscribed at acme.example.com.
+Unsubscribe
+Our mailing address is:
+Acme Inc, 100 Example Street, Springfield
+Copyright (C) 2026 Acme Inc. All rights reserved.
+
+--b1
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><style>.hidden{display:none}</style></head>
+<body>
+<div style=3D"display:none;font-size:0;max-height:0">Acme's Series A, the h=
+iring plan, and who joins the board</div>
+<table><tr><td><a href=3D"https://click.example.com/r/abc123">View this ema=
+il in your browser</a></td></tr></table>
+<table width=3D"600"><tr><td>
+<h1>Acme raises $20M Series A to build developer tools</h1>
+<p>Acme announced a <strong>$20M Series A</strong> led by Northwind Venture=
+s, the company said on Tuesday.</p>
+<p>The round values Acme at $180M post-money and brings total funding to $2=
+6M.</p>
+</td></tr></table>
+<img src=3D"https://track.example.com/o.gif?id=3D9" width=3D"1" height=3D"1=
+" alt=3D"">
+<table><tr><td><a href=3D"https://click.example.com/u/xyz">Unsubscribe</a><=
+/td></tr></table>
+</body></html>
+--b1--

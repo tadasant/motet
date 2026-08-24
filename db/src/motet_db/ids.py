@@ -44,6 +44,14 @@ def claim_id() -> str:
     return new_id("cl")
 
 
+def source_id() -> str:
+    return new_id("src")
+
+
+def highlight_id() -> str:
+    return new_id("hl")
+
+
 def feed_token() -> str:
     """A bearer secret that travels in a URL, so it needs real entropy.
 

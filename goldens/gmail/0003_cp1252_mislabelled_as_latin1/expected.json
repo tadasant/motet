@@ -1,0 +1,10 @@
+{
+  "why": "A sender that declares iso-8859-1 and emits windows-1252 — which is nearly all of them. Decoding as declared puts C1 control characters where an apostrophe and an em dash belong, and those characters travel into a news item title, an RSS document and a TTS request.",
+  "title": "Acme’s round — what it means",
+  "text_contains": [
+    "Acme’s $20M Series A closed on Tuesday — a round led by Northwind Ventures.",
+    "double its engineering team to 40 people"
+  ],
+  "text_excludes": [],
+  "no_c1_controls": true
+}

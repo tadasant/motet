@@ -9,34 +9,51 @@ slightly differently, and a slight difference in the definition of "unread" is h
 invariant 5 stops being true.
 """
 
-from . import repo
+from . import phase2, repo
 from .migrate import MIGRATIONS_DIR, Migration, MigrationError, discover, migrate
 from .models import (
+    CredentialPurpose,
+    EpisodeKind,
     EpisodeState,
+    Highlight,
     SourceItemState,
+    SourceKind,
     StoredClaim,
     StoredEpisode,
     StoredNewsItem,
     StoredSegment,
+    StoredSource,
     StoredSourceItem,
 )
 from .repo import OWNER_USER_ID, PASTE_SOURCE_ID, connect
+from .rules import DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, Ranking, RuleError, SmartRule
 
 __all__ = [
+    "DEFAULT_WINDOW_DAYS",
+    "MAX_WINDOW_DAYS",
     "MIGRATIONS_DIR",
     "OWNER_USER_ID",
     "PASTE_SOURCE_ID",
+    "CredentialPurpose",
+    "EpisodeKind",
     "EpisodeState",
+    "Highlight",
     "Migration",
     "MigrationError",
+    "Ranking",
+    "RuleError",
+    "SmartRule",
     "SourceItemState",
+    "SourceKind",
     "StoredClaim",
     "StoredEpisode",
     "StoredNewsItem",
     "StoredSegment",
+    "StoredSource",
     "StoredSourceItem",
     "connect",
     "discover",
     "migrate",
+    "phase2",
     "repo",
 ]

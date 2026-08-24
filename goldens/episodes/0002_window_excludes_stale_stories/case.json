@@ -1,0 +1,36 @@
+{
+  "why": "A morning briefing should not open with something from last week. The window is what makes a smart episode current, and it is bounded because everything selected is eventually passed in-prompt.",
+  "stories": [
+    {
+      "title": "Nine days old",
+      "age_days": 9,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Three days old",
+      "age_days": 3,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Yesterday",
+      "age_days": 1,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Today",
+      "age_days": 0,
+      "sources": 1,
+      "read": false
+    }
+  ],
+  "rule": {
+    "window_days": 2
+  },
+  "expected": [
+    "Yesterday",
+    "Today"
+  ]
+}

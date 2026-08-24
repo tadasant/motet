@@ -1,0 +1,39 @@
+{
+  "why": "The one ranking that is not a date. A story three newsletters all ran is empirically the story of the day, and the source count is the only signal for that which needs no model — so `coverage` is a count(*), not an LLM call in the assemble stage.",
+  "stories": [
+    {
+      "title": "One source, oldest",
+      "age_days": 5,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Two sources",
+      "age_days": 3,
+      "sources": 2,
+      "read": false
+    },
+    {
+      "title": "Four sources",
+      "age_days": 1,
+      "sources": 4,
+      "read": false
+    },
+    {
+      "title": "Two sources, older",
+      "age_days": 4,
+      "sources": 2,
+      "read": false
+    }
+  ],
+  "rule": {
+    "ranking": "coverage",
+    "window_days": 0
+  },
+  "expected": [
+    "Four sources",
+    "Two sources, older",
+    "Two sources",
+    "One source, oldest"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "why": "An HTML-only newsletter in base64 with a table-based layout — the shape where html_to_text is the only path to prose. Table cells must become separate lines, entities must decode, and anchor text must survive without its tracking href.",
+  "title": "Cedar closes its fourth fund",
+  "text_contains": [
+    "Cedar Capital closed a $400 million growth fund on Thursday",
+    "$15 million to $40 million into software companies",
+    "Managing partner Ines Duarte"
+  ],
+  "text_excludes": [
+    "Preheader nobody reads aloud",
+    "track.example",
+    "Web version",
+    "Unsubscribe",
+    "Manage your preferences"
+  ]
+}

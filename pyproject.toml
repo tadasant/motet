@@ -9,7 +9,9 @@ dependencies = [
     "motet-api",
     "motet-db",
     "motet-inference",
+    "motet-sources",
     "motet-storage",
+    "motet-vault",
     "motet-workers",
 ]
 
@@ -19,13 +21,15 @@ dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["api", "db", "inference", "storage", "workers"]
+members = ["api", "db", "inference", "sources", "storage", "vault", "workers"]
 
 [tool.uv.sources]
 motet-api = { workspace = true }
 motet-db = { workspace = true }
 motet-inference = { workspace = true }
+motet-sources = { workspace = true }
 motet-storage = { workspace = true }
+motet-vault = { workspace = true }
 motet-workers = { workspace = true }
 
 [dependency-groups]
@@ -59,7 +63,16 @@ select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logge
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["api/src", "db/src", "inference/src", "storage/src", "workers/src", "goldens"]
+files = [
+    "api/src",
+    "db/src",
+    "inference/src",
+    "sources/src",
+    "storage/src",
+    "vault/src",
+    "workers/src",
+    "goldens",
+]
 
 # The Google Cloud SDK ships no py.typed marker, so every symbol from it is untyped as
 # far as strict mode is concerned. Scoped to the one package rather than relaxed globally:
@@ -69,5 +82,14 @@ module = ["google.cloud.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["api/tests", "db/tests", "inference/tests", "storage/tests", "workers/tests", "goldens"]
+testpaths = [
+    "api/tests",
+    "db/tests",
+    "inference/tests",
+    "sources/tests",
+    "storage/tests",
+    "vault/tests",
+    "workers/tests",
+    "goldens",
+]
 addopts = "-q"

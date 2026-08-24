@@ -27,6 +27,57 @@ components:
       - source_title
       title: ClaimModel
       type: object
+    ConnectSourceRequest:
+      description: Begin connecting a mailbox. Returns a URL for the user to visit.
+      properties:
+        name:
+          default: Gmail
+          maxLength: 200
+          minLength: 1
+          title: Name
+          type: string
+        provider:
+          default: gmail
+          description: Only 'gmail' in Phase 2. X bookmarks are not built.
+          title: Provider
+          type: string
+        query:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The provider's own search syntax, deciding which messages are newsletters. Defaults
+            to Gmail's updates and promotions categories, which need no setup.
+          title: Query
+        redirect_uri:
+          description: Where the provider sends the user back to. Supplied by the client rather than configured,
+            because the SPA, a local dev server, and a future iOS app each have a different one.
+          minLength: 1
+          title: Redirect Uri
+          type: string
+      required:
+      - redirect_uri
+      title: ConnectSourceRequest
+      type: object
+    ConnectSourceResponse:
+      description: Where to send the user, and the source the grant will attach to.
+      properties:
+        authorization_url:
+          title: Authorization Url
+          type: string
+        source_id:
+          title: Source Id
+          type: string
+        state:
+          description: The CSRF token for this authorization. Returned so a client can verify the callback
+            it receives is the one it started.
+          title: State
+          type: string
+      required:
+      - source_id
+      - authorization_url
+      - state
+      title: ConnectSourceResponse
+      type: object
     CreateEpisodeRequest:
       description: 'Phase 1 has manual episodes only: ''all unread'', capped by duration.'
       properties:
@@ -43,6 +94,25 @@ components:
       - title
       - max_duration_ms
       title: CreateEpisodeRequest
+      type: object
+    CreateSmartEpisodeRequest:
+      description: An episode whose stories are selected by a rule rather than by 'all unread'.
+      properties:
+        max_duration_ms:
+          exclusiveMinimum: 0.0
+          title: Max Duration Ms
+          type: integer
+        rule:
+          $ref: '#/components/schemas/SmartRuleModel'
+        title:
+          maxLength: 500
+          minLength: 1
+          title: Title
+          type: string
+      required:
+      - title
+      - max_duration_ms
+      title: CreateSmartEpisodeRequest
       type: object
     EpisodeResponse:
       properties:
@@ -169,6 +239,100 @@ components:
       - inference_mode
       title: HealthResponse
       type: object
+    HighlightResponse:
+      description: "A saved passage, anchored to the span of source text it quotes.\n\nThe anchor is the\
+        \ source span and nothing else \u2014 claims are rewritten on every script\nretry and audio offsets\
+        \ move on every re-render, while a source item's text never\nchanges. ``episode_id`` and ``anchor_ms``\
+        \ say where the listener was when they saved\nit: provenance, not the anchor."
+      properties:
+        anchor_ms:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Anchor Ms
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        episode_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Episode Id
+        id:
+          title: Id
+          type: string
+        news_item_id:
+          title: News Item Id
+          type: string
+        note:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Note
+        quote:
+          description: "What the source actually says at that span, read from the source item rather than\
+            \ taken from the caller \u2014 so a model calling save_highlight cannot write its paraphrase\
+            \ in and have it look verbatim."
+          title: Quote
+          type: string
+        source_item_id:
+          title: Source Item Id
+          type: string
+        span:
+          $ref: '#/components/schemas/SourceSpanModel'
+      required:
+      - id
+      - news_item_id
+      - source_item_id
+      - span
+      - quote
+      - note
+      - episode_id
+      - anchor_ms
+      - created_at
+      title: HighlightResponse
+      type: object
+    ListenProgressRequest:
+      description: 'How far into an episode the listener has got.
+
+
+        Invariant 4: we own playback position, so this is a *report* from a client that we
+
+        record, never a value read back out of a vendor SDK. Invariant 5 is what it does: a
+
+        story whose segment has been passed is marked read, which is the same fact the backlog
+
+        screen''s toggle writes.'
+      properties:
+        listened_through_ms:
+          description: 'Monotonic on the server: seeking backwards is reviewing, not un-listening, so
+            a smaller value never lowers the recorded position or un-marks a story.'
+          minimum: 0.0
+          title: Listened Through Ms
+          type: integer
+      required:
+      - listened_through_ms
+      title: ListenProgressRequest
+      type: object
+    ListenProgressResponse:
+      properties:
+        episode_id:
+          title: Episode Id
+          type: string
+        listened_through_ms:
+          description: The position after applying monotonicity.
+          title: Listened Through Ms
+          type: integer
+        news_items_marked_read:
+          title: News Items Marked Read
+          type: integer
+      required:
+      - episode_id
+      - listened_through_ms
+      - news_items_marked_read
+      title: ListenProgressResponse
+      type: object
     MarkListenedResponse:
       description: "The result of \"I listened to this\" \u2014 read state, synced (invariant 5)."
       properties:
@@ -216,6 +380,22 @@ components:
       - created_at
       title: NewsItemResponse
       type: object
+    OAuthCallbackRequest:
+      description: What the provider redirected back with.
+      properties:
+        code:
+          minLength: 1
+          title: Code
+          type: string
+        state:
+          minLength: 1
+          title: State
+          type: string
+      required:
+      - state
+      - code
+      title: OAuthCallbackRequest
+      type: object
     PasteRequest:
       description: "A blob of text pasted in by hand \u2014 Phase 1's only ingestion route."
       properties:
@@ -250,6 +430,50 @@ components:
       - read
       title: ReadStateRequest
       type: object
+    SaveHighlightRequest:
+      description: Save a passage. The platform tool `save_highlight` posts exactly this.
+      properties:
+        anchor_ms:
+          anyOf:
+          - minimum: 0.0
+            type: integer
+          - type: 'null'
+          title: Anchor Ms
+        episode_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Where the user was listening. Provenance, not the anchor.
+          title: Episode Id
+        news_item_id:
+          minLength: 1
+          title: News Item Id
+          type: string
+        note:
+          anyOf:
+          - maxLength: 2000
+            type: string
+          - type: 'null'
+          title: Note
+        source_item_id:
+          minLength: 1
+          title: Source Item Id
+          type: string
+        span_end:
+          exclusiveMinimum: 0.0
+          title: Span End
+          type: integer
+        span_start:
+          minimum: 0.0
+          title: Span Start
+          type: integer
+      required:
+      - news_item_id
+      - source_item_id
+      - span_start
+      - span_end
+      title: SaveHighlightRequest
+      type: object
     SegmentResponse:
       properties:
         claims:
@@ -283,6 +507,44 @@ components:
       - claims
       title: SegmentResponse
       type: object
+    SmartRuleModel:
+      description: "Filter, window, duration, ranking \u2014 how a smart episode chooses its stories.\n\
+        \nDuration is deliberately absent: it is ``max_duration_ms`` on the episode itself. Two\ncopies\
+        \ of a cap is one too many, and the stale one is the one somebody would trust."
+      properties:
+        max_items:
+          default: 100
+          maximum: 100.0
+          minimum: 1.0
+          title: Max Items
+          type: integer
+        ranking:
+          default: oldest_first
+          description: "oldest_first (drains a backlog), newest_first (a morning briefing), or coverage\
+            \ (most independently reported first). All three are computed from the rows \u2014 ranking\
+            \ with a model is Phase 3."
+          title: Ranking
+          type: string
+        source_ids:
+          description: Only stories backed by these sources. Empty means every source.
+          items:
+            type: string
+          title: Source Ids
+          type: array
+        unread_only:
+          default: true
+          description: Skip stories already read. Off for a 'catch me up' rule.
+          title: Unread Only
+          type: boolean
+        window_days:
+          default: 2
+          description: How far back to reach. 0 means no window, which is what manual does.
+          maximum: 30.0
+          minimum: 0.0
+          title: Window Days
+          type: integer
+      title: SmartRuleModel
+      type: object
     SourceItemResponse:
       properties:
         id:
@@ -300,6 +562,61 @@ components:
       - title
       - state
       title: SourceItemResponse
+      type: object
+    SourceResponse:
+      description: "A place source items come from \u2014 pasted text, or a connected mailbox."
+      properties:
+        active:
+          description: 'False means connected but paused: it is not polled, and nothing is lost.'
+          title: Active
+          type: boolean
+        connected:
+          description: "Whether a credential is stored for this source. Answered without decrypting anything\
+            \ \u2014 only workers can do that (invariant 8)."
+          title: Connected
+          type: boolean
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        id:
+          title: Id
+          type: string
+        kind:
+          description: '''paste'' or ''gmail''.'
+          title: Kind
+          type: string
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        last_polled_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Last Polled At
+        name:
+          title: Name
+          type: string
+        scopes:
+          description: OAuth scopes actually granted, which may be more than were asked for.
+          items:
+            type: string
+          title: Scopes
+          type: array
+      required:
+      - id
+      - kind
+      - name
+      - active
+      - connected
+      - scopes
+      - last_polled_at
+      - last_error
+      - created_at
+      title: SourceResponse
       type: object
     SourceSpanModel:
       description: "A half-open character range in a source item \u2014 what makes a claim checkable."
@@ -476,6 +793,48 @@ paths:
       summary: Create Episode
       tags:
       - episodes
+  /v1/episodes/smart:
+    post:
+      description: 'Assemble an episode by rule rather than by "everything unread".
+
+
+        The rule is validated **here**, at creation, and stored as a snapshot on the episode.
+
+        Validating at assembly time instead would surface a typo as a failed episode minutes
+
+        later on a queue, with the mistake and the error in different places.'
+      operationId: create_smart_episode_v1_episodes_smart_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSmartEpisodeRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Create Smart Episode
+      tags:
+      - episodes
   /v1/episodes/{episode_id}:
     get:
       description: "An episode with its transcript \u2014 each claim beside the span it came from."
@@ -551,6 +910,47 @@ paths:
       summary: Episode Audio
       tags:
       - feed
+  /v1/episodes/{episode_id}/chapters.json:
+    get:
+      description: 'The Podcasting 2.0 chapters document, one chapter per story.
+
+
+        Served with `application/json+chapters`, the media type the namespace specifies and the
+
+        one the `<podcast:chapters>` tag declares. A client that fetched `application/json`
+
+        here and got a mismatch would be within its rights to ignore the document.'
+      operationId: episode_chapters_v1_episodes__episode_id__chapters_json_get
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - description: The feed's secret, from GET /v1/feed.
+        in: query
+        name: token
+        required: false
+        schema:
+          default: ''
+          description: The feed's secret, from GET /v1/feed.
+          title: Token
+          type: string
+      responses:
+        '200':
+          content:
+            application/json+chapters: {}
+          description: Podcasting 2.0 chapters
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Episode Chapters
+      tags:
+      - feed
   /v1/episodes/{episode_id}/listened:
     post:
       description: "Mark every news item in this episode read.\n\nPhase 1's stand-in for playback tracking:\
@@ -590,6 +990,90 @@ paths:
       summary: Mark Episode Listened
       tags:
       - episodes
+  /v1/episodes/{episode_id}/progress:
+    post:
+      description: "Record how far the listener has got, and mark what they have passed as read.\n\n**This\
+        \ is how the audio surface participates in invariant 5.** Phase 1 only had the\nvisual side plus\
+        \ an all-or-nothing \"mark listened\"; this makes partial listening count.\nA story is read once\
+        \ its segment has been *passed* \u2014 the comparison is against the end\nof the segment, because\
+        \ marking at the start would tick a story off on its first word.\n\nPosition is monotonic on the\
+        \ server (invariant 4: we own it). A client that seeks\nbackwards is reviewing, not un-listening,\
+        \ so a lower report never lowers the recorded\nposition and never un-marks a story."
+      operationId: report_listen_progress_v1_episodes__episode_id__progress_post
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListenProgressRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListenProgressResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Report Listen Progress
+      tags:
+      - episodes
+  /v1/episodes/{episode_id}/transcript.vtt:
+    get:
+      description: "WebVTT captions, one cue per spoken claim.\n\nAuthenticated by the **feed** token\
+        \ rather than the API token, because the client that\nfetches this is the podcast app \u2014 it\
+        \ found the URL in a `<podcast:transcript>` tag and\nwill send exactly the credential that was\
+        \ in it."
+      operationId: episode_transcript_v1_episodes__episode_id__transcript_vtt_get
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - description: The feed's secret, from GET /v1/feed.
+        in: query
+        name: token
+        required: false
+        schema:
+          default: ''
+          description: The feed's secret, from GET /v1/feed.
+          title: Token
+          type: string
+      responses:
+        '200':
+          content:
+            text/vtt: {}
+          description: WebVTT captions
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Episode Transcript
+      tags:
+      - feed
   /v1/feed:
     get:
       description: The private feed URL, minting a token on first ask.
@@ -650,6 +1134,108 @@ paths:
       summary: Rotate Feed
       tags:
       - feed
+  /v1/highlights:
+    get:
+      description: Every saved passage, newest first.
+      operationId: list_highlights_v1_highlights_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/HighlightResponse'
+                title: Response List Highlights V1 Highlights Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Highlights
+      tags:
+      - highlights
+    post:
+      description: "Save a passage \u2014 what the `save_highlight` platform tool calls.\n\n**The quote\
+        \ is read out of the source item, not taken from the caller.** That is the\nwhole trust property:\
+        \ in the voice case the caller is a model, and a model that quoted\nloosely would otherwise write\
+        \ its own paraphrase into the user's highlights where it\nwould look verbatim.\n\nAnchored to\
+        \ the source span and nothing else. Claims are rewritten on every script\nretry and audio offsets\
+        \ move on every re-render; `source_items.text` never changes.\n`episode_id` and `anchor_ms` record\
+        \ where the listener was \u2014 provenance, not anchor."
+      operationId: save_highlight_v1_highlights_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveHighlightRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HighlightResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Save Highlight
+      tags:
+      - highlights
+  /v1/highlights/{highlight_id}:
+    delete:
+      operationId: delete_highlight_v1_highlights__highlight_id__delete
+      parameters:
+      - in: path
+        name: highlight_id
+        required: true
+        schema:
+          title: Highlight Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Delete Highlight
+      tags:
+      - highlights
   /v1/news-items:
     get:
       description: 'The backlog: deduped news items with their read state (invariant 5).'
@@ -728,6 +1314,135 @@ paths:
       summary: Set News Item Read
       tags:
       - backlog
+  /v1/sources:
+    get:
+      description: 'Every source, connected or paused, with whether a credential exists.
+
+
+        "Connected" is answered *without* decrypting anything: the credential row''s existence
+
+        is the answer, and reading it needs no key. Invariant 8 means only workers can open
+
+        one, so a screen that had to decrypt to render would have to break the invariant.'
+      operationId: list_sources_v1_sources_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/SourceResponse'
+                title: Response List Sources V1 Sources Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Sources
+      tags:
+      - sources
+  /v1/sources/callback:
+    post:
+      description: "Complete consent: exchange the code, seal the tokens, and start polling.\n\n**This\
+        \ is the one place in the API that touches a third-party credential**, and it can\nonly seal \u2014\
+        \ `wrapper` is the encrypt-only half of the vault, and the deployed service\naccount has no KMS\
+        \ decrypt permission (invariant 8). The plaintext token exists only\nas a local variable inside\
+        \ this function; it is never logged and never returned.\n\nThe state is consumed exactly once\
+        \ by a `DELETE ... RETURNING`, so a replayed callback\nfinds nothing rather than racing a concurrent\
+        \ one into two token exchanges."
+      operationId: oauth_callback_v1_sources_callback_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthCallbackRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Oauth Callback
+      tags:
+      - sources
+  /v1/sources/connect:
+    post:
+      description: 'Start connecting a mailbox: create the source and return a consent URL.
+
+
+        **The source row is created before consent completes**, and stays inactive until a
+
+        credential lands. That ordering is what lets the callback identify what it is
+
+        connecting *to* without trusting anything in the redirect: the source id is bound to
+
+        the stored `oauth_states` row, not carried in a parameter an attacker could change.
+
+
+        PKCE and a stored `state` are both required. `state` alone is a CSRF token; the PKCE
+
+        verifier is what makes an intercepted authorization code unusable.'
+      operationId: connect_source_v1_sources_connect_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectSourceRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectSourceResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Connect Source
+      tags:
+      - sources
   /v1/sources/paste:
     post:
       description: "Ingest pasted text as a source item.\n\nEnqueues rather than processes: ingestion\
@@ -767,3 +1482,81 @@ paths:
       summary: Paste Source
       tags:
       - ingestion
+  /v1/sources/{source_id}/credentials:
+    delete:
+      description: 'Forget a mailbox''s credentials and stop polling it.
+
+
+        The source row and everything it ingested survive: deleting the source would cascade
+
+        to its source items and take the claims that cite them with it, which would silently
+
+        break the transcript of an episode the user has already heard.'
+      operationId: disconnect_source_v1_sources__source_id__credentials_delete
+      parameters:
+      - in: path
+        name: source_id
+        required: true
+        schema:
+          title: Source Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Disconnect Source
+      tags:
+      - sources
+  /v1/sources/{source_id}/poll:
+    post:
+      description: 'Queue a poll now, rather than waiting for the scheduler.
+
+
+        Enqueues; it does not fetch. Polling is serialized per source, so asking twice in a row
+
+        produces one run and one deferral rather than two overlapping fetches.'
+      operationId: poll_source_v1_sources__source_id__poll_post
+      parameters:
+      - in: path
+        name: source_id
+        required: true
+        schema:
+          title: Source Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Poll Source
+      tags:
+      - sources

@@ -1,0 +1,32 @@
+{
+  "why": "`unread_only` is a knob rather than an assumption: a 'catch me up on the week' rule wants what you already heard about too. Everything else about the rule is unchanged, which is the point of having one selector.",
+  "stories": [
+    {
+      "title": "Read on Monday",
+      "age_days": 5,
+      "sources": 1,
+      "read": true
+    },
+    {
+      "title": "Unread since Tuesday",
+      "age_days": 4,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Read yesterday",
+      "age_days": 1,
+      "sources": 1,
+      "read": true
+    }
+  ],
+  "rule": {
+    "unread_only": false,
+    "window_days": 0
+  },
+  "expected": [
+    "Read on Monday",
+    "Unread since Tuesday",
+    "Read yesterday"
+  ]
+}

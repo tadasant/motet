@@ -3,7 +3,21 @@ name = "motet-workers"
 version = "0.1.0"
 description = "Ingestion and pipeline workers (Cloud Run jobs)"
 requires-python = ">=3.13"
-dependencies = ["motet-db", "motet-inference", "motet-storage", "psycopg[binary]>=3.2"]
+dependencies = [
+    "motet-db",
+    "motet-inference",
+    "motet-sources",
+    "motet-storage",
+    "motet-vault",
+    "psycopg[binary]>=3.2",
+]
+
+[tool.uv.sources]
+motet-db = { workspace = true }
+motet-inference = { workspace = true }
+motet-sources = { workspace = true }
+motet-storage = { workspace = true }
+motet-vault = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

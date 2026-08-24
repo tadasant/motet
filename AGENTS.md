@@ -208,6 +208,75 @@ lockscreen, CarPlay, and speed control with zero iOS code.
 
 ---
 
+## Phase 2 — the credential-independent backend
+
+**Status: built, and dormant where a credential is missing.** Gmail ingestion, the
+credential vault, smart episodes, highlights, show notes and subtitles, and read state from
+the audio side. Two paths are written, typed, and covered against fakes but have never
+executed against a vendor, because the vendor does not exist yet:
+
+| Dormant path | Waiting on | Turning it on |
+|---|---|---|
+| Gmail ingestion | a Google OAuth client (a **one-time human-owned** step, invariant 9) | `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET`, and `MOTET_INFERENCE_MODE=real` |
+| KMS-backed credentials | a Cloud KMS keyring | `MOTET_VAULT_BACKEND=kms` + `MOTET_VAULT_KMS_KEY` |
+
+Both are **configuration changes, not refactors** — that is the property the seams exist to
+buy, and the thing to preserve.
+
+**`MOTET_INFERENCE_MODE` governs Gmail too.** Gmail is a vendor, and "may this process talk
+to a vendor" is one question with one answer. A second variable would reintroduce the
+exact silent-disagreement failure the mode module already documents, in a worse form: a
+process could poll a real mailbox and dedup it with a fake model.
+
+**The vault is two Protocols, not one.** `DekWrapper` wraps; `KeyManager` also unwraps.
+Invariant 8 says only workers may decrypt, and Cloud KMS distinguishes `useToEncrypt` from
+`useToDecrypt` — so the API holds the wrapper and cannot ask for plaintext, because the
+method does not exist on what it holds. **The IAM grant is the actual control**; the split
+is what stops a well-meaning refactor from quietly needing it widened.
+
+**Highlights anchor to the source span, and nothing else.** A claim id is not stable — the
+script stage deletes and rewrites every claim on retry — and an audio offset moves on every
+re-render and means nothing on the visual surface. `source_items.text` is the one immutable
+thing in the pipeline and is already what every claim cites, so a highlight anchored there
+survives re-scripting, re-rendering, and dedup merges, and means the same thing whether it
+was saved by voice or by tapping the transcript. `episode_id` and `anchor_ms` are recorded
+as **provenance, not the anchor**.
+
+**A highlight's quote is read out of the source item, never taken from the caller.** In the
+voice case the caller is a model; one that quoted loosely would otherwise write its own
+paraphrase into the user's highlights, where it would look verbatim.
+
+**Smart and manual episodes go through one selector.** Manual *is* the rule with every
+default left alone (unread, no window, oldest first). Two selection paths would eventually
+disagree about what "unread" means, and invariant 5 is precisely the rule that one fact
+must not have two definitions. Rankings are deterministic and model-free — age, or how many
+independent sources covered a story. Ranking with a model is Phase 3 and would put an LLM
+call into a stage that currently cannot fail.
+
+**A rule is stored as a snapshot on the episode**, not referenced from a rule table. An
+episode is a historical artifact, and "why does this contain these stories" has to stay
+answerable after the rule is edited.
+
+**Read state from the audio side is `episodes.listened_through_ms`.** It is monotonic in the
+repository layer — a client that seeks backwards is reviewing, not un-listening — and its
+only job is deciding which news items are read, so listening past a story on a walk and
+ticking it off on the backlog screen stay one fact. Deliberately **not** named
+`spoken_through_ms`: that belongs to the voice session contract, which is a different
+session's work, and the voice service should call this same repository function rather than
+growing a second column.
+
+**Claim timings are apportioned, not measured.** Narration is synthesized per *segment*, so
+segment boundaries are exact and claims within a segment are proportioned by length. Going
+per-claim would give exact timings at the cost of three to four times the request count and
+a hard prosody break at every sentence, for an error well inside what a caption cue needs.
+If word-level timing is ever needed, the upgrade is Cartesia's own timestamp output rather
+than more calls.
+
+**Out, and still out:** X bookmarks (verify the API tier first — Tadas's spend decision),
+the voice/interaction path, and the iOS app.
+
+---
+
 ## Architecture
 
 | Component | Runtime | Directory |
@@ -215,6 +284,8 @@ lockscreen, CarPlay, and speed control with zero iOS code.
 | API | FastAPI, Cloud Run | `api/` |
 | Ingestion workers | Cloud Run jobs | `workers/` |
 | Inference adapters | library | `inference/` |
+| Ingestion sources | library | `sources/` |
+| Credential vault | library | `vault/` |
 | Schema + migrations | library | `db/` |
 | Object storage | library | `storage/` |
 | Web SPA | Vite + React, static behind Cloudflare | `web/` |
@@ -391,13 +462,88 @@ better than HTTP auth — and it is stored in the clear because the owner has to
 read it back onto a new device. Hashing it would make every device change a rotation, and a
 rotation unsubscribes every client already using the URL.
 
+### Gmail is the seam to the mailbox, and the extractor is where it earns its keep
+
+`sources/` holds one `MailClient` Protocol, one `OAuthClient` Protocol, a real Gmail
+adapter, and deterministic fakes — the same shape as the inference seam, reading the same
+`MOTET_INFERENCE_MODE`.
+
+**The interface is deliberately smaller than Gmail's API**: list what arrived since a
+cursor, and fetch one message's raw RFC 822 bytes. A narrow interface is what makes the fake
+honest; a fake that had to model Gmail's history API would be a worse Gmail rather than a
+better test.
+
+**Fetching returns raw bytes, not a parsed message.** Parsing is
+`motet_sources.extract`, and it runs identically on real and fake input — which is what
+makes the newsletter-sludge handling testable before a credential exists. That module is
+the part of this path that can actually be *wrong*, and it fails quietly: a hidden
+preheader read aloud as the opening sentence, an unsubscribe footer becoming a claim, a
+control character where an em dash belongs travelling into TTS.
+
+Two things learned there that are worth not rediscovering:
+
+- **A footer is a block, so cut at the FIRST marker in the tail, not the last.** Cutting at
+  the last one keeps most of the footer. The cut is bounded to the tail because some
+  templates put a compact "unsubscribe" in the masthead, and cutting there reduces a
+  newsletter to its header — which looks ingested-and-empty rather than failed.
+- **A sender that declares `iso-8859-1` has emitted windows-1252.** The em dash and curly
+  quotes a writer typed live in 0x80–0x9F, which is a *control* block in latin-1. Decoding
+  as declared puts a control character in a news item title, an RSS document, and a
+  text-to-speech request. Browsers have mandated this same substitution since HTML5.
+
+### The vault is the seam to a credential that is not ours
+
+`vault/` holds the envelope-encryption path: a per-record DEK, a KEK in Cloud KMS, and an
+AAD bound to `user_id:source_id:provider`. **The AAD is the design, not decoration** — it is
+what makes a ciphertext copied between rows fail to authenticate instead of handing one
+account another's mailbox.
+
+`MOTET_VAULT_BACKEND=local` is a fake in exactly the sense the inference fakes are fakes: it
+implements the contract honestly with a local KEK, so the whole path runs in CI. It is
+**refused when `MOTET_INFERENCE_MODE=real`**, because it is also the *default* — a deployed
+environment quietly encrypting real tokens under a key in its own memory would satisfy
+every test and none of invariant 8.
+
+### Podcast clients read show notes, chapters and transcripts in more places than one
+
+`api/src/motet_api/shownotes.py` renders all three from the transcript already stored —
+each claim beside its source span, plus the timing the TTS stage apportions. Nothing new is
+kept; the structure invariant 3 forced already *is* a citation-bearing transcript.
+
+Where clients actually look, which is not always where the spec says:
+
+- Show notes go in **both** `<description>` and `<content:encoded>`. Apple reads the first;
+  most third-party clients prefer the second. A client that finds only one shows either
+  plain text or raw tags.
+- Chapters are emitted **twice** — inline as Podlove Simple Chapters and by reference as
+  Podcasting 2.0. Different clients read different ones, and the inline form also works for
+  a client that will not make a second authenticated request.
+- `<podcast:transcript>` points at WebVTT with `rel="captions"`, because the cues are timed.
+
+`ElementTree` has no CDATA support and escapes everything, which is wrong for
+`content:encoded` — so that element gets an opaque token that is swapped for a real CDATA
+section after serialization. The token carries a per-document nonce and contains no
+character the writer would escape.
+
+**A rendered episode only.** Before TTS every claim's timing is zero, so an advertised
+transcript would be a stack of cues at 00:00 and chapters would all point at the start. An
+absent document reads as "not available"; a wrong one reads as broken, and a client caches
+it.
+
 ### The golden set is the seam to "is it any good?"
 
-`goldens/` holds newsletters with their expected news items and a script considered good.
-It will grow to ~20 cases. It runs in `bin/ci` against the fakes, where it asserts the
-*structural* contract — every claim in the script resolves to a real source span, dedup is
-stable, output is deterministic. Scoring real model output against the corpus is a separate,
-later, non-blocking job.
+`goldens/` holds three corpora, one per stage that has no single right answer and fails
+*quietly*: dedup and script (`fixtures/`), Gmail extraction (`gmail/`), and smart-episode
+selection (`episodes/`). All of it runs in `bin/ci` against the fakes, where it asserts the
+*structural* contract — every claim resolves to a real source span, dedup is stable, a
+newsletter's prose survives and its machinery does not, a rule selects the same stories in
+the same order twice. Scoring real model output against the corpus is a separate, later,
+non-blocking job.
+
+The selection corpus runs against **the real repository query and a real Postgres** rather
+than a reimplementation of the ordering: the selection *is* an `ORDER BY` with a window
+predicate and a source-count subquery, so a corpus that recomputed it in the harness would
+pass while the SQL was wrong.
 
 ---
 

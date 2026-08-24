@@ -7,12 +7,25 @@ dependencies = [
     "fastapi>=0.115",
     "motet-db",
     "motet-inference",
+    # The OAuth callback lands on an HTTP route, so the API is where a third-party token
+    # first arrives — and therefore where it must be sealed. It takes the encrypt-only
+    # half of the vault (`build_dek_wrapper`) and never the decrypt half: invariant 8.
+    "motet-sources",
     "motet-storage",
+    "motet-vault",
     "motet-workers",
     "pydantic>=2.10",
     "pyyaml>=6.0",
     "uvicorn>=0.34",
 ]
+
+[tool.uv.sources]
+motet-db = { workspace = true }
+motet-inference = { workspace = true }
+motet-sources = { workspace = true }
+motet-storage = { workspace = true }
+motet-vault = { workspace = true }
+motet-workers = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

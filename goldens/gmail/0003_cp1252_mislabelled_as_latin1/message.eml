@@ -1,0 +1,15 @@
+From: Acme News <news@acme.example>
+To: reader@example.com
+Subject: =?iso-8859-1?B?QWNtZZJzIHJvdW5kIJcgd2hhdCBpdCBtZWFucw==?=
+Date: Tue, 18 Aug 2026 07:02:11 +0000
+Message-ID: <acme-1@acme.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="iso-8859-1"
+
+Acme’s round — what it means
+
+Acme’s $20M Series A closed on Tuesday — a round led by Northwind Ventures.
+
+The company said it will double its engineering team to 40 people by year end, and ship a hosted version of its build tool.
+
+Existing investors Foundry Lane and Cedar Capital also participated in the round.

@@ -1,0 +1,12 @@
+{
+  "why": "A forwarded newsletter with a text/calendar attachment. The attachment must not be spliced into the body — a text/* attachment is a file the sender attached, not the message — and the signature separator must not survive as prose.",
+  "title": "Fwd: The regulator opens an inquiry",
+  "text_contains": [
+    "opened a formal inquiry into data",
+    "An initial report is expected within six months."
+  ],
+  "text_excludes": [
+    "BEGIN:VCALENDAR",
+    "Not a newsletter"
+  ]
+}

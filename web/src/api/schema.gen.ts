@@ -82,6 +82,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/episodes/smart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Smart Episode
+         * @description Assemble an episode by rule rather than by "everything unread".
+         *
+         *     The rule is validated **here**, at creation, and stored as a snapshot on the episode.
+         *     Validating at assembly time instead would surface a typo as a failed episode minutes
+         *     later on a queue, with the mistake and the error in different places.
+         */
+        post: operations["create_smart_episode_v1_episodes_smart_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes/{episode_id}": {
         parameters: {
             query?: never;
@@ -128,6 +152,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/episodes/{episode_id}/chapters.json": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Episode Chapters
+         * @description The Podcasting 2.0 chapters document, one chapter per story.
+         *
+         *     Served with `application/json+chapters`, the media type the namespace specifies and the
+         *     one the `<podcast:chapters>` tag declares. A client that fetched `application/json`
+         *     here and got a mismatch would be within its rights to ignore the document.
+         */
+        get: operations["episode_chapters_v1_episodes__episode_id__chapters_json_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes/{episode_id}/listened": {
         parameters: {
             query?: never;
@@ -148,6 +196,59 @@ export interface paths {
          *     changes nothing about read state.
          */
         post: operations["mark_episode_listened_v1_episodes__episode_id__listened_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/episodes/{episode_id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report Listen Progress
+         * @description Record how far the listener has got, and mark what they have passed as read.
+         *
+         *     **This is how the audio surface participates in invariant 5.** Phase 1 only had the
+         *     visual side plus an all-or-nothing "mark listened"; this makes partial listening count.
+         *     A story is read once its segment has been *passed* — the comparison is against the end
+         *     of the segment, because marking at the start would tick a story off on its first word.
+         *
+         *     Position is monotonic on the server (invariant 4: we own it). A client that seeks
+         *     backwards is reviewing, not un-listening, so a lower report never lowers the recorded
+         *     position and never un-marks a story.
+         */
+        post: operations["report_listen_progress_v1_episodes__episode_id__progress_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/episodes/{episode_id}/transcript.vtt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Episode Transcript
+         * @description WebVTT captions, one cue per spoken claim.
+         *
+         *     Authenticated by the **feed** token rather than the API token, because the client that
+         *     fetches this is the podcast app — it found the URL in a `<podcast:transcript>` tag and
+         *     will send exactly the credential that was in it.
+         */
+        get: operations["episode_transcript_v1_episodes__episode_id__transcript_vtt_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -197,6 +298,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/highlights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Highlights
+         * @description Every saved passage, newest first.
+         */
+        get: operations["list_highlights_v1_highlights_get"];
+        put?: never;
+        /**
+         * Save Highlight
+         * @description Save a passage — what the `save_highlight` platform tool calls.
+         *
+         *     **The quote is read out of the source item, not taken from the caller.** That is the
+         *     whole trust property: in the voice case the caller is a model, and a model that quoted
+         *     loosely would otherwise write its own paraphrase into the user's highlights where it
+         *     would look verbatim.
+         *
+         *     Anchored to the source span and nothing else. Claims are rewritten on every script
+         *     retry and audio offsets move on every re-render; `source_items.text` never changes.
+         *     `episode_id` and `anchor_ms` record where the listener was — provenance, not anchor.
+         */
+        post: operations["save_highlight_v1_highlights_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/highlights/{highlight_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Highlight */
+        delete: operations["delete_highlight_v1_highlights__highlight_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/news-items": {
         parameters: {
             query?: never;
@@ -240,6 +391,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sources
+         * @description Every source, connected or paused, with whether a credential exists.
+         *
+         *     "Connected" is answered *without* decrypting anything: the credential row's existence
+         *     is the answer, and reading it needs no key. Invariant 8 means only workers can open
+         *     one, so a screen that had to decrypt to render would have to break the invariant.
+         */
+        get: operations["list_sources_v1_sources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sources/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Oauth Callback
+         * @description Complete consent: exchange the code, seal the tokens, and start polling.
+         *
+         *     **This is the one place in the API that touches a third-party credential**, and it can
+         *     only seal — `wrapper` is the encrypt-only half of the vault, and the deployed service
+         *     account has no KMS decrypt permission (invariant 8). The plaintext token exists only
+         *     as a local variable inside this function; it is never logged and never returned.
+         *
+         *     The state is consumed exactly once by a `DELETE ... RETURNING`, so a replayed callback
+         *     finds nothing rather than racing a concurrent one into two token exchanges.
+         */
+        post: operations["oauth_callback_v1_sources_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sources/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Connect Source
+         * @description Start connecting a mailbox: create the source and return a consent URL.
+         *
+         *     **The source row is created before consent completes**, and stays inactive until a
+         *     credential lands. That ordering is what lets the callback identify what it is
+         *     connecting *to* without trusting anything in the redirect: the source id is bound to
+         *     the stored `oauth_states` row, not carried in a parameter an attacker could change.
+         *
+         *     PKCE and a stored `state` are both required. `state` alone is a CSRF token; the PKCE
+         *     verifier is what makes an intercepted authorization code unusable.
+         */
+        post: operations["connect_source_v1_sources_connect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources/paste": {
         parameters: {
             query?: never;
@@ -259,6 +490,53 @@ export interface paths {
          *     window where the source item exists and nothing will ever pick it up.
          */
         post: operations["paste_source_v1_sources_paste_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sources/{source_id}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disconnect Source
+         * @description Forget a mailbox's credentials and stop polling it.
+         *
+         *     The source row and everything it ingested survive: deleting the source would cascade
+         *     to its source items and take the claims that cite them with it, which would silently
+         *     break the transcript of an episode the user has already heard.
+         */
+        delete: operations["disconnect_source_v1_sources__source_id__credentials_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sources/{source_id}/poll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll Source
+         * @description Queue a poll now, rather than waiting for the scheduler.
+         *
+         *     Enqueues; it does not fetch. Polling is serialized per source, so asking twice in a row
+         *     produces one run and one deferral rather than two overlapping fetches.
+         */
+        post: operations["poll_source_v1_sources__source_id__poll_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -288,12 +566,65 @@ export interface components {
             text: string;
         };
         /**
+         * ConnectSourceRequest
+         * @description Begin connecting a mailbox. Returns a URL for the user to visit.
+         */
+        ConnectSourceRequest: {
+            /**
+             * Name
+             * @default Gmail
+             */
+            name: string;
+            /**
+             * Provider
+             * @description Only 'gmail' in Phase 2. X bookmarks are not built.
+             * @default gmail
+             */
+            provider: string;
+            /**
+             * Query
+             * @description The provider's own search syntax, deciding which messages are newsletters. Defaults to Gmail's updates and promotions categories, which need no setup.
+             */
+            query?: string | null;
+            /**
+             * Redirect Uri
+             * @description Where the provider sends the user back to. Supplied by the client rather than configured, because the SPA, a local dev server, and a future iOS app each have a different one.
+             */
+            redirect_uri: string;
+        };
+        /**
+         * ConnectSourceResponse
+         * @description Where to send the user, and the source the grant will attach to.
+         */
+        ConnectSourceResponse: {
+            /** Authorization Url */
+            authorization_url: string;
+            /** Source Id */
+            source_id: string;
+            /**
+             * State
+             * @description The CSRF token for this authorization. Returned so a client can verify the callback it receives is the one it started.
+             */
+            state: string;
+        };
+        /**
          * CreateEpisodeRequest
          * @description Phase 1 has manual episodes only: 'all unread', capped by duration.
          */
         CreateEpisodeRequest: {
             /** Max Duration Ms */
             max_duration_ms: number;
+            /** Title */
+            title: string;
+        };
+        /**
+         * CreateSmartEpisodeRequest
+         * @description An episode whose stories are selected by a rule rather than by 'all unread'.
+         */
+        CreateSmartEpisodeRequest: {
+            /** Max Duration Ms */
+            max_duration_ms: number;
+            rule?: components["schemas"]["SmartRuleModel"];
             /** Title */
             title: string;
         };
@@ -384,6 +715,68 @@ export interface components {
             telemetry_configured: boolean;
         };
         /**
+         * HighlightResponse
+         * @description A saved passage, anchored to the span of source text it quotes.
+         *
+         *     The anchor is the source span and nothing else — claims are rewritten on every script
+         *     retry and audio offsets move on every re-render, while a source item's text never
+         *     changes. ``episode_id`` and ``anchor_ms`` say where the listener was when they saved
+         *     it: provenance, not the anchor.
+         */
+        HighlightResponse: {
+            /** Anchor Ms */
+            anchor_ms: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Episode Id */
+            episode_id: string | null;
+            /** Id */
+            id: string;
+            /** News Item Id */
+            news_item_id: string;
+            /** Note */
+            note: string | null;
+            /**
+             * Quote
+             * @description What the source actually says at that span, read from the source item rather than taken from the caller — so a model calling save_highlight cannot write its paraphrase in and have it look verbatim.
+             */
+            quote: string;
+            /** Source Item Id */
+            source_item_id: string;
+            span: components["schemas"]["SourceSpanModel"];
+        };
+        /**
+         * ListenProgressRequest
+         * @description How far into an episode the listener has got.
+         *
+         *     Invariant 4: we own playback position, so this is a *report* from a client that we
+         *     record, never a value read back out of a vendor SDK. Invariant 5 is what it does: a
+         *     story whose segment has been passed is marked read, which is the same fact the backlog
+         *     screen's toggle writes.
+         */
+        ListenProgressRequest: {
+            /**
+             * Listened Through Ms
+             * @description Monotonic on the server: seeking backwards is reviewing, not un-listening, so a smaller value never lowers the recorded position or un-marks a story.
+             */
+            listened_through_ms: number;
+        };
+        /** ListenProgressResponse */
+        ListenProgressResponse: {
+            /** Episode Id */
+            episode_id: string;
+            /**
+             * Listened Through Ms
+             * @description The position after applying monotonicity.
+             */
+            listened_through_ms: number;
+            /** News Items Marked Read */
+            news_items_marked_read: number;
+        };
+        /**
          * MarkListenedResponse
          * @description The result of "I listened to this" — read state, synced (invariant 5).
          */
@@ -415,6 +808,16 @@ export interface components {
             title: string;
         };
         /**
+         * OAuthCallbackRequest
+         * @description What the provider redirected back with.
+         */
+        OAuthCallbackRequest: {
+            /** Code */
+            code: string;
+            /** State */
+            state: string;
+        };
+        /**
          * PasteRequest
          * @description A blob of text pasted in by hand — Phase 1's only ingestion route.
          */
@@ -436,6 +839,29 @@ export interface components {
             /** Read */
             read: boolean;
         };
+        /**
+         * SaveHighlightRequest
+         * @description Save a passage. The platform tool `save_highlight` posts exactly this.
+         */
+        SaveHighlightRequest: {
+            /** Anchor Ms */
+            anchor_ms?: number | null;
+            /**
+             * Episode Id
+             * @description Where the user was listening. Provenance, not the anchor.
+             */
+            episode_id?: string | null;
+            /** News Item Id */
+            news_item_id: string;
+            /** Note */
+            note?: string | null;
+            /** Source Item Id */
+            source_item_id: string;
+            /** Span End */
+            span_end: number;
+            /** Span Start */
+            span_start: number;
+        };
         /** SegmentResponse */
         SegmentResponse: {
             /** Claims */
@@ -454,6 +880,43 @@ export interface components {
             /** Text */
             text: string;
         };
+        /**
+         * SmartRuleModel
+         * @description Filter, window, duration, ranking — how a smart episode chooses its stories.
+         *
+         *     Duration is deliberately absent: it is ``max_duration_ms`` on the episode itself. Two
+         *     copies of a cap is one too many, and the stale one is the one somebody would trust.
+         */
+        SmartRuleModel: {
+            /**
+             * Max Items
+             * @default 100
+             */
+            max_items: number;
+            /**
+             * Ranking
+             * @description oldest_first (drains a backlog), newest_first (a morning briefing), or coverage (most independently reported first). All three are computed from the rows — ranking with a model is Phase 3.
+             * @default oldest_first
+             */
+            ranking: string;
+            /**
+             * Source Ids
+             * @description Only stories backed by these sources. Empty means every source.
+             */
+            source_ids?: string[];
+            /**
+             * Unread Only
+             * @description Skip stories already read. Off for a 'catch me up' rule.
+             * @default true
+             */
+            unread_only: boolean;
+            /**
+             * Window Days
+             * @description How far back to reach. 0 means no window, which is what manual does.
+             * @default 2
+             */
+            window_days: number;
+        };
         /** SourceItemResponse */
         SourceItemResponse: {
             /** Id */
@@ -465,6 +928,45 @@ export interface components {
             state: string;
             /** Title */
             title: string;
+        };
+        /**
+         * SourceResponse
+         * @description A place source items come from — pasted text, or a connected mailbox.
+         */
+        SourceResponse: {
+            /**
+             * Active
+             * @description False means connected but paused: it is not polled, and nothing is lost.
+             */
+            active: boolean;
+            /**
+             * Connected
+             * @description Whether a credential is stored for this source. Answered without decrypting anything — only workers can do that (invariant 8).
+             */
+            connected: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @description 'paste' or 'gmail'.
+             */
+            kind: string;
+            /** Last Error */
+            last_error: string | null;
+            /** Last Polled At */
+            last_polled_at: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Scopes
+             * @description OAuth scopes actually granted, which may be more than were asked for.
+             */
+            scopes: string[];
         };
         /**
          * SourceSpanModel
@@ -618,6 +1120,41 @@ export interface operations {
             };
         };
     };
+    create_smart_episode_v1_episodes_smart_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSmartEpisodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpisodeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_episode_v1_episodes__episode_id__get: {
         parameters: {
             query?: never;
@@ -692,6 +1229,40 @@ export interface operations {
             };
         };
     };
+    episode_chapters_v1_episodes__episode_id__chapters_json_get: {
+        parameters: {
+            query?: {
+                /** @description The feed's secret, from GET /v1/feed. */
+                token?: string;
+            };
+            header?: never;
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Podcasting 2.0 chapters */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json+chapters": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     mark_episode_listened_v1_episodes__episode_id__listened_post: {
         parameters: {
             query?: never;
@@ -712,6 +1283,77 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarkListenedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_listen_progress_v1_episodes__episode_id__progress_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ListenProgressRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListenProgressResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    episode_transcript_v1_episodes__episode_id__transcript_vtt_get: {
+        parameters: {
+            query?: {
+                /** @description The feed's secret, from GET /v1/feed. */
+                token?: string;
+            };
+            header?: never;
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebVTT captions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/vtt": unknown;
                 };
             };
             /** @description Validation Error */
@@ -775,6 +1417,103 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FeedInfoResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_highlights_v1_highlights_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighlightResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_highlight_v1_highlights_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveHighlightRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighlightResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_highlight_v1_highlights__highlight_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                highlight_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -855,6 +1594,107 @@ export interface operations {
             };
         };
     };
+    list_sources_v1_sources_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    oauth_callback_v1_sources_callback_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OAuthCallbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    connect_source_v1_sources_connect_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectSourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     paste_source_v1_sources_paste_post: {
         parameters: {
             query?: never;
@@ -877,6 +1717,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceItemResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disconnect_source_v1_sources__source_id__credentials_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    poll_source_v1_sources__source_id__poll_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceResponse"];
                 };
             };
             /** @description Validation Error */

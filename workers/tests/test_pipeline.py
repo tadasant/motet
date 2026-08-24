@@ -285,7 +285,9 @@ class TestFullPipeline:
         assert episode is not None
         assert episode.state is EpisodeState.FAILED
         assert episode.last_error is not None
-        assert "no unread news items" in episode.last_error
+        # Phase 2 assembles both episode kinds through one rule-driven selector, so the
+        # message names the rule that selected nothing rather than saying "unread".
+        assert "no news items match this episode's rule" in episode.last_error
         # And it did not burn five attempts discovering that.
         row = db.execute("SELECT attempts FROM jobs WHERE queue = 'assemble'").fetchone()
         assert row is not None

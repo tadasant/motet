@@ -16,13 +16,13 @@ dedup call must never re-synthesize twenty minutes of audio that was already pai
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from motet_db import EpisodeState, SourceItemState, repo
-from motet_db.models import StoredNewsItem, StoredSourceItem
+from motet_db import EpisodeKind, EpisodeState, RuleError, SmartRule, SourceItemState, phase2, repo
+from motet_db.models import StoredNewsItem, StoredSegment, StoredSourceItem
 from motet_inference import (
     MPEG_MEDIA_TYPE,
     WAV_MEDIA_TYPE,
@@ -38,6 +38,7 @@ from motet_inference import (
 )
 from motet_storage import ObjectStore, episode_audio_key
 
+from .ingest import handle_extract, handle_poll
 from .jobs import enqueue
 from .queues import Queue
 
@@ -59,19 +60,6 @@ _EXTENSIONS = {MPEG_MEDIA_TYPE: "mp3", WAV_MEDIA_TYPE: "wav"}
 #: A blunt multiplier rather than anything cleverer: the honest answer is that nobody
 #: knows the length until the script exists, and this only has to be close enough that
 #: the trim downstream is a backstop rather than the normal path.
-SCRIPT_EXPANSION = 3
-
-#: How much longer the spoken script is than the summary it is written from.
-#:
-#: Assembly has to apply the duration cap before any script exists, so it estimates from
-#: each story's summary — one or two sentences. The script stage then writes two to four
-#: narrated claims for that story, which is several times more words. Estimating 1:1 makes
-#: assembly systematically over-fill the episode, and the script-stage trim would then have
-#: to throw stories away on nearly every run.
-#:
-#: A crude constant rather than a model of the script, deliberately: the script stage
-#: re-applies the cap against the real copy, so this only has to be close enough to keep
-#: that backstop from firing routinely.
 SCRIPT_EXPANSION = 3
 
 
@@ -155,18 +143,20 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
 
 
 def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
-    """Choose which unread stories fit inside the episode's duration cap.
+    """Choose which stories fit inside the episode's duration cap.
 
-    Manual episodes only in Phase 1: "all unread", oldest first, until the cap is reached.
-    No ranking and no scoring — that is Phase 2, and pretending otherwise here would be
-    building a product instead of a factory.
+    **One selector for both episode kinds.** A manual episode is
+    :meth:`SmartRule.manual` — unread, no window, oldest first — and a smart episode is
+    the same query with the four knobs turned. Two selection paths would eventually
+    disagree about what "unread" means, and invariant 5 is precisely the rule that one
+    fact must not have two definitions.
 
     The cap is applied against an *estimate*, because no audio exists yet and the
-    alternative is synthesizing everything and discarding some of it — which is the largest
-    cost line in the system. The estimate is scaled by :data:`SCRIPT_EXPANSION`, because
-    what gets spoken is the script rather than the summary this is measuring. The script
-    stage applies the cap again against the real copy; this pass is what keeps that one
-    from having to discard stories on every run.
+    alternative is synthesizing everything and discarding some of it — the largest cost
+    line in the system. The estimate is scaled by :data:`SCRIPT_EXPANSION`, because what
+    gets spoken is the script rather than the summary this is measuring. The script stage
+    applies the cap again against the real copy; this pass is what keeps that one from
+    having to discard stories on every run.
     """
     episode_id = _require(payload, "episode_id")
     episode = repo.get_episode(context.conn, episode_id)
@@ -176,19 +166,25 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
         logger.info("episode %s is already past assembly (%s)", episode_id, episode.state.value)
         return
 
-    unread = repo.unread_news_items(context.conn, episode.user_id)
-    if not unread:
-        raise PermanentFailure("there are no unread news items to build an episode from")
+    rule = _rule_for(context.conn, episode_id, episode.kind, episode.rule)
+    candidates = phase2.select_for_rule(context.conn, episode.user_id, rule)
+    if not candidates:
+        raise PermanentFailure(
+            f"no news items match this episode's rule ({rule.ranking.value}, "
+            f"window {rule.window_days}d, unread_only={rule.unread_only})"
+        )
 
     chosen: list[repo.SegmentSpec] = []
     budget_ms = episode.max_duration_ms
-    for item in unread:
-        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION * SCRIPT_EXPANSION
+    for item in candidates:
+        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION
         if chosen and estimate > budget_ms:
+            # `break` rather than `continue`: the candidates arrive in the rule's ranking
+            # order, and skipping past a long story to fit a shorter one behind it would
+            # silently override the ranking the user asked for.
             break
         # The first item always goes in, even if it alone exceeds the cap: an episode with
-        # no segments is worse than an episode that runs slightly long, and the caller
-        # asked for "all unread" rather than "as much as fits exactly".
+        # no segments is worse than an episode that runs slightly long.
         chosen.append(
             repo.SegmentSpec(news_item_id=item.id, text="", duration_ms=estimate, claims=())
         )
@@ -198,11 +194,34 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
     repo.set_episode_state(context.conn, episode_id, EpisodeState.SCRIPTING)
     enqueue(context.conn, Queue.SCRIPT, {"episode_id": episode_id})
     logger.info(
-        "episode %s assembled from %d of %d unread news items",
+        "episode %s (%s, %s) assembled from %d of %d candidate news items",
         episode_id,
+        episode.kind.value,
+        rule.ranking.value,
         len(chosen),
-        len(unread),
+        len(candidates),
     )
+
+
+def _rule_for(
+    conn: psycopg.Connection[Any],
+    episode_id: str,
+    kind: EpisodeKind,
+    stored_rule: Mapping[str, Any] | None,
+) -> SmartRule:
+    """The rule this episode selects by.
+
+    A smart episode carries a snapshot; a manual one uses the defaults. An unparsable
+    snapshot is *permanent*: the rule was validated when the episode was created, so a
+    rule that no longer parses means the schema changed underneath it, and retrying five
+    times will not make it parse.
+    """
+    if kind is not EpisodeKind.SMART:
+        return SmartRule.manual()
+    try:
+        return SmartRule.from_json(dict(stored_rule or {}))
+    except RuleError as exc:
+        raise PermanentFailure(f"episode {episode_id} has an unusable rule: {exc}") from exc
 
 
 # --- script + grounding --------------------------------------------------------------
@@ -394,6 +413,16 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
     total_ms = repo.set_segment_durations(
         context.conn, episode_id, [part.duration_ms for part in rendered]
     )
+    # Subtitles and chapters need per-claim timing, and the transcript already pairs every
+    # spoken sentence with its source span — so this is the last piece that turns the
+    # existing structure into captions. Re-read rather than reused: `set_segment_durations`
+    # has just rewritten every segment's offsets, and apportioning against the pre-TTS
+    # estimates would drift a little further out of sync with every segment.
+    rendered_episode = repo.get_episode(context.conn, episode_id)
+    assert rendered_episode is not None
+    phase2.set_claim_timings(
+        context.conn, episode_id, apportion_claim_timings(rendered_episode.segments)
+    )
     repo.publish_episode(
         context.conn,
         episode_id,
@@ -412,12 +441,82 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
     )
 
 
+def apportion_claim_timings(
+    segments: Sequence[StoredSegment],
+) -> list[tuple[str, int, int]]:
+    """Spread each segment's measured duration across its claims, by character count.
+
+    **An apportionment rather than a measurement, deliberately.** Narration is synthesized
+    one *segment* at a time, so the only real numbers are the segment boundaries — which
+    this is exact at. Within a segment, claims are proportioned by length.
+
+    The alternative is synthesizing per claim, which would give exact per-claim timings.
+    It was not chosen: it multiplies the request count by three or four for the same
+    billed characters, it inserts a hard prosody break at every sentence, and the error it
+    removes is small. Narration is a single voice at a near-constant pace, so
+    proportion-by-length is accurate to a fraction of a second — well inside what a
+    caption cue needs, since a client shows cues as blocks rather than word-by-word.
+
+    If word-level timing is ever needed — karaoke highlighting, or seeking to a word — the
+    upgrade is Cartesia's own timestamp output rather than more calls, and it would replace
+    this function without touching anything that reads its result.
+    """
+    timings: list[tuple[str, int, int]] = []
+    for segment in segments:
+        if not segment.claims:
+            continue
+        weights = [max(1, len(claim.text)) for claim in segment.claims]
+        total_weight = sum(weights)
+        offset = 0
+        for index, (claim, weight) in enumerate(zip(segment.claims, weights, strict=True)):
+            if index == len(segment.claims) - 1:
+                # The last claim absorbs the rounding, so the claims of a segment always
+                # sum to exactly the segment's duration. Without this the drift is
+                # invisible per segment and cumulative across an episode.
+                duration = max(0, segment.duration_ms - offset)
+            else:
+                duration = round(segment.duration_ms * weight / total_weight)
+            timings.append((claim.id, segment.start_ms + offset, duration))
+            offset += duration
+    return timings
+
+
+def enqueue_smart_episode(
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str,
+    title: str,
+    max_duration_ms: int,
+    rule: SmartRule,
+) -> str:
+    """Create a rule-selected episode and queue its assembly.
+
+    The rule is validated by the caller and stored as a snapshot here, so assembly reads
+    a rule that was already known-good at creation time rather than discovering a bad one
+    an hour later on a queue.
+    """
+    episode_id = repo.create_episode(
+        conn,
+        user_id=user_id,
+        title=title,
+        max_duration_ms=max_duration_ms,
+        kind=EpisodeKind.SMART,
+        rule=rule.to_json(),
+    )
+    enqueue(conn, Queue.ASSEMBLE, {"episode_id": episode_id})
+    return episode_id
+
+
 # --- shared --------------------------------------------------------------------------
 
-#: The queues Phase 1 drains. ``poll`` and ``extract`` exist in :class:`Queue` because the
-#: pipeline shape is settled, but they belong to Gmail and X ingestion in Phase 2 — a
-#: worker asked to drain one says so rather than silently succeeding on an empty queue.
+#: Every queue the pipeline drains, one Cloud Run job each.
+#:
+#: ``poll`` and ``extract`` were named in :class:`Queue` from the start and had no handlers
+#: in Phase 1; Gmail ingestion fills them in. X bookmarks would be a third source behind
+#: the same two stages rather than a fourth queue.
 HANDLERS = {
+    Queue.POLL: handle_poll,
+    Queue.EXTRACT: handle_extract,
     Queue.INTEGRATE: handle_integrate,
     Queue.ASSEMBLE: handle_assemble,
     Queue.SCRIPT: handle_script,
@@ -500,6 +599,9 @@ def source_item_failed(
 def failure_recorders() -> Mapping[Queue, Any]:
     """Which "this stage gave up" note to write, per queue."""
     return {
+        # `poll` and `extract` have no domain object to mark failed: a mailbox that could
+        # not be reached has its error recorded on the source by the handler itself, and a
+        # message that could not be fetched simply has no row yet.
         Queue.INTEGRATE: source_item_failed,
         Queue.ASSEMBLE: episode_failed,
         Queue.SCRIPT: episode_failed,

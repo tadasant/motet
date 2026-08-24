@@ -27,6 +27,7 @@ import psycopg
 from fastapi import Depends, Header, HTTPException, Query, status
 from motet_db import repo
 from motet_storage import ObjectStore, build_store
+from motet_vault import DekWrapper, build_dek_wrapper
 
 from .config import Settings
 
@@ -51,6 +52,25 @@ def reset_store() -> None:
     """Drop the cached store. For tests that switch backends between cases."""
     global _store
     _store = None
+
+
+def dek_wrapper() -> DekWrapper:
+    """The encrypt-only half of the credential vault.
+
+    **The API can seal a token and cannot open one** (invariant 8). The OAuth callback is
+    an HTTP redirect, so this is where a third-party token first arrives and therefore
+    where it must be sealed — but sealing is all this process may ever do.
+
+    Two things enforce that, and only one of them is code. The type has no ``unwrap``, so
+    a route that wanted plaintext would have to change a signature and be seen in review.
+    The real control is IAM: the deployed API's service account holds
+    ``cloudkms...useToEncrypt`` and not ``useToDecrypt``, so the same call from here fails
+    inside Cloud KMS regardless of what this process believes it may do.
+
+    Built per request rather than cached: it holds no connection, and the KMS client
+    underneath it is created lazily on first use.
+    """
+    return build_dek_wrapper()
 
 
 def connection(
