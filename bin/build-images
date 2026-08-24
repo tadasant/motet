@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+#
+# Build the three container images Cloud Run runs — motet-api, motet-worker, motet-web —
+# and prove each one actually serves, rather than merely that it built.
+#
+# Separate from bin/ci because it needs a Docker daemon, and bin/ci deliberately needs
+# only Postgres: a laptop without Docker must still be able to run the full check suite.
+# CI runs this as its own job, so the images cannot silently stop building.
+#
+# It does NOT push. This repo is public and holds no cloud credential of any kind (see
+# AGENTS.md); publishing is the private infrastructure repo's job.
+#
+#     bin/build-images              # build and smoke-test all three
+#     bin/build-images api web      # a subset
+#     TAG=v1 bin/build-images       # pin the tag instead of the per-run default
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Tagged per run, not `local`. The self-hosted pool is shared and `ci.yml` groups
+# concurrency by ref, so a PR run and a push-to-main run overlap freely on one box —
+# a fixed tag means one run retags the image another is about to smoke-test.
+TAG="${TAG:-local-$$}"
+
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+# Every smoke container is named and torn down on exit, including the failure path —
+# a leaked container holds its port and makes the next run fail for the wrong reason.
+CONTAINERS=()
+IMAGES=()
+cleanup() {
+  for name in "${CONTAINERS[@]:-}"; do
+    [ -n "$name" ] && docker rm -f "$name" >/dev/null 2>&1 || true
+  done
+  # Only the tags this run created. A blanket `docker image prune` here would delete a
+  # co-tenant job's dangling layers off the shared runner mid-build.
+  for image in "${IMAGES[@]:-}"; do
+    [ -n "$image" ] && docker rmi -f "$image" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT
+
+# The host port Docker chose for a container's 8080. Ports are assigned by the daemon
+# (`-P`) rather than hardcoded: two concurrent jobs on this shared runner would otherwise
+# collide on a fixed port and fail for a reason unrelated to the change under test.
+host_port() {
+  docker port "$1" 8080 | head -1 | sed 's/.*://'
+}
+
+# Wait for a container's HTTP endpoint, then hand back the body. Polls rather than
+# sleeping a fixed interval: a cold Python start is a second on a laptop and rather
+# longer on a loaded shared runner.
+wait_for_http() {
+  local url="$1" name="$2" attempts=60
+  for _ in $(seq "$attempts"); do
+    if curl -fsS --max-time 2 "$url" 2>/dev/null; then
+      return 0
+    fi
+    if [ -z "$(docker ps -q -f "name=^${name}$")" ]; then
+      echo "smoke: container ${name} exited before serving ${url}" >&2
+      docker logs "$name" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+  echo "smoke: ${url} did not answer within ${attempts}s" >&2
+  docker logs "$name" >&2 || true
+  return 1
+}
+
+# --- api -------------------------------------------------------------------
+build_api() {
+  IMAGES+=("motet-api:${TAG}")
+  docker build --target api -t "motet-api:${TAG}" -f Dockerfile .
+}
+
+smoke_api() {
+  local name="motet-smoke-api-$$" port
+  CONTAINERS+=("$name")
+  # No DATABASE_URL and no vendor key on purpose. /healthz must answer without either —
+  # it is what Cloud Run's startup probe hits, and a health check that needed the
+  # database would report the database's health rather than the revision's.
+  docker run -d --name "$name" -P "motet-api:${TAG}" >/dev/null
+  port="$(host_port "$name")"
+
+  local body
+  body="$(wait_for_http "http://127.0.0.1:${port}/healthz" "$name")"
+  echo "    /healthz -> ${body}"
+  case "$body" in
+    *'"status":"ok"'*) ;;
+    *) echo "smoke: /healthz did not report ok" >&2; return 1 ;;
+  esac
+  # The generated contract has to be reachable too: it is what proves the app booted as
+  # the real FastAPI application rather than as something that merely answers /healthz.
+  curl -fsS --max-time 5 "http://127.0.0.1:${port}/openapi.json" >/dev/null
+  echo "    /openapi.json -> ok"
+}
+
+# --- worker ----------------------------------------------------------------
+build_worker() {
+  IMAGES+=("motet-worker:${TAG}")
+  docker build --target worker -t "motet-worker:${TAG}" -f Dockerfile .
+}
+
+smoke_worker() {
+  # The runner refuses an unknown queue name and exits non-zero, which makes `--help` the
+  # only invocation that proves the entrypoint is wired without needing a database. It
+  # also proves the queue choices, so a renamed queue shows up here.
+  local usage
+  usage="$(docker run --rm "motet-worker:${TAG}" --help)"
+  echo "$usage" | head -3 | sed 's/^/    /'
+  case "$usage" in
+    *integrate*assemble*script*tts*) ;;
+    *) echo "smoke: worker --help did not list the Phase 1 queues" >&2; return 1 ;;
+  esac
+}
+
+# --- web -------------------------------------------------------------------
+build_web() {
+  IMAGES+=("motet-web:${TAG}")
+  docker build -t "motet-web:${TAG}" -f web/Dockerfile .
+}
+
+smoke_web() {
+  local name="motet-smoke-web-$$" port base="https://api.example.test"
+  CONTAINERS+=("$name")
+  docker run -d --name "$name" -P -e "MOTET_API_BASE_URL=${base}" \
+    "motet-web:${TAG}" >/dev/null
+  port="$(host_port "$name")"
+
+  local index
+  index="$(wait_for_http "http://127.0.0.1:${port}/" "$name")"
+  case "$index" in
+    *'/config.js'*) ;;
+    *) echo "smoke: index.html does not load /config.js" >&2; return 1 ;;
+  esac
+  echo "    / -> index.html loading /config.js"
+
+  # The whole point of the image: the API origin is injected at RUN time, so this must
+  # come back carrying the value the container was started with rather than the empty
+  # placeholder that was built into it.
+  local config
+  config="$(curl -fsS --max-time 5 "http://127.0.0.1:${port}/config.js")"
+  echo "    /config.js -> ${config}"
+  case "$config" in
+    *"apiBaseUrl: '${base}'"*) ;;
+    *) echo "smoke: /config.js did not carry MOTET_API_BASE_URL" >&2; return 1 ;;
+  esac
+
+  # History fallback: a deep link must return the app, not a 404.
+  curl -fsS --max-time 5 "http://127.0.0.1:${port}/episodes/ep_smoke" >/dev/null
+  echo "    /episodes/ep_smoke -> index.html (history fallback)"
+}
+
+targets=("$@")
+if [ ${#targets[@]} -eq 0 ]; then
+  targets=(api worker web)
+fi
+
+for target in "${targets[@]}"; do
+  case "$target" in
+    api)    step "Build motet-api:${TAG}";    build_api
+            step "Smoke motet-api";           smoke_api ;;
+    worker) step "Build motet-worker:${TAG}"; build_worker
+            step "Smoke motet-worker";        smoke_worker ;;
+    web)    step "Build motet-web:${TAG}";    build_web
+            step "Smoke motet-web";           smoke_web ;;
+    *) echo "unknown image '$target' (expected: api, worker, web)" >&2; exit 2 ;;
+  esac
+done
+
+printf '\n\033[1;32mBuilt and smoke-tested: %s\033[0m\n' "${targets[*]}"

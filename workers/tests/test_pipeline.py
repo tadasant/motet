@@ -476,6 +476,44 @@ class TestDurationCap:
         assert episode is not None
         assert 0 < len(episode.segments) <= 2
 
+    def test_the_expansion_factor_is_applied_exactly_once(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """Pins the estimate to `summary x SCRIPT_EXPANSION`, and to nothing else.
+
+        The test above bounds the segment count loosely enough that applying the factor
+        twice still passed it — which is how a duplicated constant and a squared estimate
+        (~9x rather than 3x) survived. An episode capped at twenty minutes then assembled
+        as though every story were three times its real length, so it silently held a
+        third of the stories it should have. Asserting the stored estimate exactly is
+        what makes that visible.
+        """
+        from motet_inference import estimate_duration_ms
+        from motet_workers.handlers import SCRIPT_EXPANSION
+
+        enqueue_paste(
+            db,
+            user_id=USER,
+            title="Only story",
+            text="Only story. " + " ".join(["word"] * 60),
+        )
+        db.commit()
+        drain(Queue.INTEGRATE, _migrated)
+
+        # Large enough that the cap cannot trim anything: this is about the estimate, not
+        # about which stories fit.
+        episode_id = enqueue_episode(db, user_id=USER, title="E", max_duration_ms=60 * 60_000)
+        db.commit()
+        drain(Queue.ASSEMBLE, _migrated)
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert len(episode.segments) == 1
+
+        items = repo.load_news_items(db, [episode.segments[0].news_item_id])
+        summary = next(iter(items.values())).summary
+        assert episode.segments[0].duration_ms == estimate_duration_ms(summary) * SCRIPT_EXPANSION
+
 
 class TestDedupWindow:
     def test_the_cap_keeps_the_most_recent_stories(

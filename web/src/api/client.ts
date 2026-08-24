@@ -44,12 +44,46 @@ export class ApiError extends Error {
 }
 
 /**
- * The API base URL, injected at build time.
+ * Runtime configuration, served by the container rather than compiled into the bundle.
  *
- * Empty by default so the dev server and the deployed SPA both use same-origin relative
- * paths. Real hostnames live in the private infrastructure repo, never in this tree.
+ * `config.js` is written by the web image's entrypoint from the environment Cloud Run
+ * gives it, and loaded by index.html before the bundle. In dev it is the checked-in
+ * placeholder under `web/public/`, which sets nothing.
  */
-export const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? ''
+declare global {
+  interface Window {
+    __MOTET_CONFIG__?: { apiBaseUrl?: string }
+  }
+}
+
+/**
+ * Where the API lives. Runtime first, build time second, same-origin last.
+ *
+ * **Runtime first is the load-bearing part.** The SPA and the API are served from two
+ * different hostnames in every deployed environment — `app.` and `api.` — so the bundle
+ * cannot use same-origin paths, and it cannot bake the hostname in either: Vite inlines
+ * `import.meta.env` at build time, so a compiled-in value would make one image per
+ * environment and would silently ignore the `MOTET_API_BASE_URL` the service definition
+ * already sets. One image, configured where it runs.
+ *
+ * `import.meta.env.VITE_API_BASE_URL` is kept as the second choice for `npm run dev`
+ * against a non-default API. The empty fallback is what the dev server wants, because
+ * vite.config.ts proxies `/v1` to the local API and same-origin is then correct.
+ *
+ * Real hostnames live in the private infrastructure repo, never in this tree.
+ */
+export function apiBaseUrl(): string {
+  const runtime = globalThis.window?.__MOTET_CONFIG__?.apiBaseUrl
+  // Both branches go through `normalise`, so `VITE_API_BASE_URL=http://127.0.0.1:8000/`
+  // cannot produce `http://127.0.0.1:8000//v1/...` while the runtime path handles it.
+  return normalise(runtime) || normalise(import.meta.env.VITE_API_BASE_URL)
+}
+
+/** Trim, drop trailing slashes, and treat anything blank or non-string as unset. */
+function normalise(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value.trim().replace(/\/+$/, '')
+}
 
 const TOKEN_STORAGE_KEY = 'motet.apiToken'
 
@@ -108,7 +142,7 @@ async function parse<T>(response: Response, method: string, path: string): Promi
 }
 
 export async function apiGet<P extends keyof paths>(path: P): Promise<GetResponse<P>> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { headers: headers() })
+  const response = await fetch(`${apiBaseUrl()}${path}`, { headers: headers() })
   return parse<GetResponse<P>>(response, 'GET', path)
 }
 
@@ -116,7 +150,7 @@ export async function apiPost<P extends keyof paths>(
   path: P,
   body?: unknown,
 ): Promise<PostResponse<P>> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
@@ -136,7 +170,7 @@ export async function apiGetPath<P extends keyof paths>(
   _template: P,
   url: string,
 ): Promise<GetResponse<P>> {
-  const response = await fetch(`${API_BASE_URL}${url}`, { headers: headers() })
+  const response = await fetch(`${apiBaseUrl()}${url}`, { headers: headers() })
   return parse<GetResponse<P>>(response, 'GET', url)
 }
 
@@ -145,7 +179,7 @@ export async function apiPostPath<P extends keyof paths>(
   url: string,
   body?: unknown,
 ): Promise<PostResponse<P>> {
-  const response = await fetch(`${API_BASE_URL}${url}`, {
+  const response = await fetch(`${apiBaseUrl()}${url}`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
