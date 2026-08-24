@@ -257,6 +257,11 @@ executed against a vendor, because the vendor does not exist yet:
 Both are **configuration changes, not refactors** — that is the property the seams exist to
 buy, and the thing to preserve.
 
+Consent itself is started from the SPA's **Sources** screen, which is the only thing in the
+system that calls `/v1/sources/connect`. Granting a mailbox is invariant 9's human-owned
+half — a person has to look at Google's consent page and say yes — so the screen exists to
+put that click somewhere a human can reach, and everything after it is automatic.
+
 **`MOTET_INFERENCE_MODE` governs Gmail too.** Gmail is a vendor, and "may this process talk
 to a vendor" is one question with one answer. A second variable would reintroduce the
 exact silent-disagreement failure the mode module already documents, in a worse form: a
@@ -558,6 +563,25 @@ Two things learned there that are worth not rediscovering:
   quotes a writer typed live in 0x80–0x9F, which is a *control* block in latin-1. Decoding
   as declared puts a control character in a news item title, an RSS document, and a
   text-to-speech request. Browsers have mandated this same substitution since HTML5.
+
+**`/oauth/callback` is the SPA's one and only path, and it is not a router.** Google hands
+consent back by navigating to a URL, so the browser arrives with a fresh page load and no
+memory of the app it left. `web/src/oauth.ts` reads `window.location` once at boot and
+`App.tsx` renders the callback instead of the tab strip — a few lines, against a routing
+dependency that would then be available for every future "shouldn't this be a route?".
+Three registered redirect URIs, one per environment, are each that environment's own
+origin plus that path; **the path is the part that must not drift**, because the
+registrations live in the private repo and nothing in this one can tell you it broke.
+Google matches the string exactly, so in dev the app has to be reached at `localhost` and
+not `127.0.0.1`.
+
+Two things there are load-bearing rather than defensive. The **authorization code is
+exchanged exactly once** — StrictMode double-invokes effects, the API consumes the state
+row with a `DELETE ... RETURNING`, and a second exchange would overwrite a success with
+"already used"; the URL is cleared for the same reason, so that a reload cannot replay a
+spent code. And **`error=access_denied` is an answer, not a failure** — someone pressed
+Cancel, which is a supported response to being asked for a mailbox, and it must not read
+like a crash.
 
 ### The vault is the seam to a credential that is not ours
 
