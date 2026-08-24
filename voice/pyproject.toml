@@ -1,0 +1,32 @@
+[project]
+name = "motet-voice"
+version = "0.1.0"
+description = "Voice service: the session contract, the provider arms, and the barge-in harness"
+requires-python = ">=3.13"
+# NOTE THE ABSENCE: `motet-db` is not here and must never be. Invariant 2 — the voice
+# service takes a session config and calls tools; it has no database credential and no
+# schema knowledge. `tests/test_no_database_access.py` asserts this list, so adding the
+# dependency fails CI rather than quietly crossing the boundary.
+#
+# `motet-inference` is a pure library (interfaces, fakes, the LLM seam, the Cartesia
+# adapter). It reaches vendors, never Postgres, so depending on it does not weaken the
+# boundary — and it is what keeps `MOTET_INFERENCE_MODE` parsed in exactly one place.
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "motet-inference",
+    "motet-storage",
+    "pydantic>=2.10",
+    "uvicorn>=0.34",
+    "websockets>=14",
+]
+
+[project.scripts]
+motet-voice = "motet_voice.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/motet_voice"]
