@@ -36,11 +36,25 @@ WORKDIR /app
 # Dependency metadata first, workspace source second. The dependency graph changes far
 # less often than the code does, so this ordering keeps the expensive resolve-and-install
 # layer cached across ordinary source edits.
+#
+# EVERY WORKSPACE MEMBER IS COPIED, INCLUDING ONES THESE IMAGES DO NOT IMPORT. `uv sync`
+# resolves the whole workspace: uv.lock records each member as a path source, so a member
+# missing from the build context fails the sync outright —
+# `Distribution not found at: file:///app/voice` — rather than being quietly skipped.
+# `voice` is the case in point. Neither motet-api nor motet-worker imports motet_voice,
+# and the voice service is a separate deployable by design, but it is a member of this
+# workspace and so it has to be here for the sync to plan at all.
+#
+# Keep this list in step with `[tool.uv.workspace] members` in the root pyproject.toml.
+# It went out of step once already, and in a way no CI run could see: this Dockerfile was
+# written on a branch whose workspace had five members while `voice` was being added on
+# main in parallel. Both branches were green; the merge of the two was not.
 COPY pyproject.toml uv.lock ./
 COPY api/pyproject.toml api/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
 COPY inference/pyproject.toml inference/pyproject.toml
 COPY storage/pyproject.toml storage/pyproject.toml
+COPY voice/pyproject.toml voice/pyproject.toml
 COPY workers/pyproject.toml workers/pyproject.toml
 
 # `--frozen` is the point of this line: it fails rather than silently re-resolving when
@@ -52,6 +66,7 @@ COPY api api
 COPY db db
 COPY inference inference
 COPY storage storage
+COPY voice voice
 COPY workers workers
 
 RUN uv sync --frozen --no-dev
