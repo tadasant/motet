@@ -32,6 +32,8 @@ export type EpisodeSegment = Episode['segments'][number]
 export type Claim = EpisodeSegment['claims'][number]
 export type FeedInfo = GetResponse<'/v1/feed'>
 export type SourceItem = PostResponse<'/v1/sources/paste'>
+export type Source = GetResponse<'/v1/sources'>[number]
+export type Connection = PostResponse<'/v1/sources/connect'>
 
 export class ApiError extends Error {
   constructor(
@@ -193,6 +195,22 @@ export const api = {
   episodes: () => apiGet('/v1/episodes'),
   feed: () => apiGet('/v1/feed'),
   paste: (title: string, text: string) => apiPost('/v1/sources/paste', { title, text }),
+  sources: () => apiGet('/v1/sources'),
+  // `provider` is sent explicitly even though the API defaults it, so that the one place
+  // the SPA names a provider is here rather than buried in a default two repos away.
+  // Anything but 'gmail' is a 400: X bookmarks are not built, and there is deliberately
+  // no affordance for them.
+  connectSource: (name: string, query: string, redirectUri: string) =>
+    apiPost('/v1/sources/connect', {
+      provider: 'gmail',
+      name,
+      // The API reads null as "use Gmail's own default", which is not the same request as
+      // an empty string.
+      query: query || null,
+      redirect_uri: redirectUri,
+    }),
+  completeOAuth: (state: string, code: string) =>
+    apiPost('/v1/sources/callback', { state, code }),
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),
