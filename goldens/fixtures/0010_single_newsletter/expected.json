@@ -1,0 +1,9 @@
+{
+  "why": "One newsletter, one story. The degenerate case: dedup with an empty window must create rather than crash or merge into nothing.",
+  "news_items": [
+    {
+      "title": "Pallas ships offline sync",
+      "source_count": 1
+    }
+  ]
+}

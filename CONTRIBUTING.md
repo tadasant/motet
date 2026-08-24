@@ -19,7 +19,7 @@ You need **Python 3.13**, **Node 22**, **[uv](https://docs.astral.sh/uv/)**, and
 **Postgres 16**.
 
 ```bash
-uv sync --all-packages     # Python workspace: api, db, inference, workers
+uv sync --all-packages     # Python workspace: api, db, inference, storage, workers
 npm --prefix web ci        # the SPA
 ```
 
@@ -91,6 +91,27 @@ or when a slug looks stale, and update `KNOWN_MODELS` from what it reports.
 **No test here calls a vendor**, not even behind an opt-in flag — invariant 7 is
 absolute. The adapter is covered end to end against a stub transport instead. To confirm
 a slug or a reasoning config against the live API, do it by hand outside the suite.
+
+## Running the pipeline locally
+
+Nothing happens on the request thread: the API writes a row and enqueues a job, and a
+worker does the work. So a local run needs both.
+
+```bash
+uv run uvicorn motet_api:app --reload          # the API
+uv run python -m motet_workers.runner integrate  # ...and one drain per stage
+uv run python -m motet_workers.runner assemble
+uv run python -m motet_workers.runner script
+uv run python -m motet_workers.runner tts
+npm --prefix web run dev                       # the SPA
+```
+
+Each drain exits when its queue is empty, which is what a Cloud Run job wants. Pass
+`--poll-seconds 2` to keep one running while you work.
+
+With `MOTET_INFERENCE_MODE=fake` (the default) none of this touches a vendor: the fakes
+produce deterministic news items, a script whose claims quote their sources verbatim, and
+silent WAV audio whose length tracks the text. That is enough to exercise every seam.
 
 ## Migrations
 

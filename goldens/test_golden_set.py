@@ -6,11 +6,11 @@ thing has to come out the same way twice. Those are properties of the *contract*
 hold whether the stages are fakes or real models — which is why the harness can gate CI
 today, before a single vendor is wired up.
 
-**What it is not, yet.** Two placeholder cases stand in for the ~20 real newsletters the
-plan calls for, and it runs against the fakes, so it cannot say whether a briefing is any
-*good*. Judging quality means running the same cases through the real adapters and scoring
-the output, which is a separate, slower, non-blocking job — not this one. Growing the
-corpus is adding directories under ``fixtures/``; the harness needs no changes.
+**What it is not.** It runs against the fakes, so it cannot say whether a briefing is any
+*good* in the sense a listener would mean. Judging that means running the same cases
+through the real adapters and scoring the output, which is a separate, slower,
+non-blocking job — not this one. Growing the corpus is adding directories under
+``fixtures/``; the harness needs no changes.
 """
 
 from __future__ import annotations
@@ -61,6 +61,26 @@ def test_the_pipeline_is_deterministic(case: GoldenCase) -> None:
     assert build_briefing(case.sources, fake_stages()) == build_briefing(
         case.sources, fake_stages()
     )
+
+
+@pytest.mark.parametrize("case", [c for c in CASES if c.script is not None], ids=str)
+def test_the_script_matches_the_one_this_case_considers_good(case: GoldenCase) -> None:
+    """The other half of the golden set: not just *which* stories, but what gets said.
+
+    Only the cases that declare a script are checked, because pinning spoken copy is
+    worth its maintenance cost where the wording is the thing under test and not
+    everywhere. Where it is declared, this is what catches a script stage that quietly
+    drops a claim or reorders the briefing.
+    """
+    assert case.script is not None
+    briefing = build_briefing(case.sources, fake_stages())
+    titles = {item.id: item.title for item in briefing.news_items}
+
+    actual = [
+        (titles[segment.news_item_id], [claim.text for claim in segment.claims])
+        for segment in briefing.script.segments
+    ]
+    assert actual == [(s.news_item_title, list(s.claims)) for s in case.script], case.why
 
 
 @pytest.mark.parametrize("case", CASES, ids=str)

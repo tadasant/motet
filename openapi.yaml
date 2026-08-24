@@ -3,8 +3,18 @@
 components:
   schemas:
     ClaimModel:
-      description: A reported assertion beside the span it came from (invariant 3).
+      description: "A reported assertion beside the span it came from (invariant 3).\n\n``text`` is what\
+        \ gets spoken and may paraphrase; ``source_excerpt`` is the source text\nthe span actually covers,\
+        \ resolved server-side. Both are sent because the episode\nscreen shows them side by side \u2014\
+        \ that display *is* the trust surface, and a client\nthat had to fetch the source separately to\
+        \ render it would sometimes not bother."
       properties:
+        source_excerpt:
+          title: Source Excerpt
+          type: string
+        source_title:
+          title: Source Title
+          type: string
         span:
           $ref: '#/components/schemas/SourceSpanModel'
         text:
@@ -13,6 +23,8 @@ components:
       required:
       - text
       - span
+      - source_excerpt
+      - source_title
       title: ClaimModel
       type: object
     CreateEpisodeRequest:
@@ -34,26 +46,82 @@ components:
       type: object
     EpisodeResponse:
       properties:
+        audio_bytes:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Audio Bytes
+        audio_media_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Audio Media Type
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
         duration_ms:
           title: Duration Ms
           type: integer
         id:
           title: Id
           type: string
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        max_duration_ms:
+          title: Max Duration Ms
+          type: integer
+        published_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Published At
         segments:
           items:
             $ref: '#/components/schemas/SegmentResponse'
           title: Segments
           type: array
+        state:
+          description: pending -> scripting -> rendering -> ready, or failed.
+          title: State
+          type: string
         title:
           title: Title
           type: string
       required:
       - id
       - title
+      - state
       - duration_ms
+      - max_duration_ms
+      - audio_bytes
+      - audio_media_type
+      - last_error
+      - created_at
+      - published_at
       - segments
       title: EpisodeResponse
+      type: object
+    FeedInfoResponse:
+      description: "The private feed URL, ready to paste into a podcast client.\n\nThe token is returned\
+        \ in full rather than masked. It has to be: a feed URL is copied\nto a new device months after\
+        \ it was minted, and a secret the owner cannot read back is\none that forces a rotation \u2014\
+        \ which unsubscribes every client already using it."
+      properties:
+        token:
+          title: Token
+          type: string
+        url:
+          title: Url
+          type: string
+      required:
+      - url
+      - token
+      title: FeedInfoResponse
       type: object
     HTTPValidationError:
       properties:
@@ -65,12 +133,21 @@ components:
       title: HTTPValidationError
       type: object
     HealthResponse:
-      description: Liveness plus enough telemetry wiring to tell 'quiet' from 'unmonitored'.
+      description: Liveness plus enough wiring detail to tell 'quiet' from 'unmonitored'.
       properties:
+        authenticated:
+          description: "Whether /v1 requires a bearer token. False means this deployment is open to anyone\
+            \ who can reach it \u2014 legitimate on a laptop, a mistake anywhere else."
+          title: Authenticated
+          type: boolean
         errors_configured:
           description: Whether error reporting is configured. False means errors go nowhere.
           title: Errors Configured
           type: boolean
+        inference_mode:
+          description: '''fake'' or ''real''. ''fake'' means no vendor is ever called.'
+          title: Inference Mode
+          type: string
         service:
           description: OTel service name this process reports as
           title: Service
@@ -88,11 +165,31 @@ components:
       - service
       - telemetry_configured
       - errors_configured
+      - authenticated
+      - inference_mode
       title: HealthResponse
+      type: object
+    MarkListenedResponse:
+      description: "The result of \"I listened to this\" \u2014 read state, synced (invariant 5)."
+      properties:
+        episode_id:
+          title: Episode Id
+          type: string
+        news_items_marked_read:
+          title: News Items Marked Read
+          type: integer
+      required:
+      - episode_id
+      - news_items_marked_read
+      title: MarkListenedResponse
       type: object
     NewsItemResponse:
       description: "A deduped story. Read state lives here, per invariant 5 \u2014 not per episode."
       properties:
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
         id:
           title: Id
           type: string
@@ -116,6 +213,7 @@ components:
       - summary
       - source_item_ids
       - read
+      - created_at
       title: NewsItemResponse
       type: object
     PasteRequest:
@@ -135,6 +233,23 @@ components:
       - text
       title: PasteRequest
       type: object
+    ReadStateRequest:
+      description: 'Mark one news item read or unread.
+
+
+        A body rather than two endpoints, because "unread" is a real thing a user wants: the
+
+        backlog is the product''s memory, and being unable to put something back is worse than
+
+        never having marked it.'
+      properties:
+        read:
+          title: Read
+          type: boolean
+      required:
+      - read
+      title: ReadStateRequest
+      type: object
     SegmentResponse:
       properties:
         claims:
@@ -142,11 +257,29 @@ components:
             $ref: '#/components/schemas/ClaimModel'
           title: Claims
           type: array
+        duration_ms:
+          title: Duration Ms
+          type: integer
         news_item_id:
           title: News Item Id
           type: string
+        news_item_title:
+          title: News Item Title
+          type: string
+        start_ms:
+          description: Where this segment starts in the episode audio. We own playback position (invariant
+            4); this never comes from a player.
+          title: Start Ms
+          type: integer
+        text:
+          title: Text
+          type: string
       required:
       - news_item_id
+      - news_item_title
+      - text
+      - start_ms
+      - duration_ms
       - claims
       title: SegmentResponse
       type: object
@@ -155,12 +288,17 @@ components:
         id:
           title: Id
           type: string
+        state:
+          description: '''pending'' until a worker integrates it, then ''integrated'' or ''failed''.'
+          title: State
+          type: string
         title:
           title: Title
           type: string
       required:
       - id
       - title
+      - state
       title: SourceItemResponse
       type: object
     SourceSpanModel:
@@ -224,26 +362,40 @@ paths:
 
         RSS buys background audio, offline, lockscreen, CarPlay, and speed control with zero
 
-        iOS code. Audio is served from GCS behind signed URLs, so this document carries links,
+        iOS code. Audio is served from object storage behind signed URLs, so this document
 
-        never bytes.'
+        carries links, never bytes.'
       operationId: rss_feed_feed_xml_get
+      parameters:
+      - description: The feed's secret, from GET /v1/feed.
+        in: query
+        name: token
+        required: false
+        schema:
+          default: ''
+          description: The feed's secret, from GET /v1/feed.
+          title: Token
+          type: string
       responses:
         '200':
           content:
             application/rss+xml: {}
           description: The RSS feed
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
       summary: Rss Feed
       tags:
       - feed
   /healthz:
     get:
-      description: 'Liveness, plus whether telemetry is actually wired.
-
-
-        The telemetry flags are not decoration. Exporters no-op silently when unconfigured, so
-
-        without this an unmonitored process is indistinguishable from a quiet one.'
+      description: "Liveness, plus whether telemetry and authentication are actually wired.\n\nThe flags\
+        \ are not decoration. Exporters no-op silently when unconfigured, so without\nthis an unmonitored\
+        \ process is indistinguishable from a quiet one \u2014 and an\nunauthenticated deployment is indistinguishable\
+        \ from a working one until the bill\narrives."
       operationId: healthz_healthz_get
       responses:
         '200':
@@ -256,14 +408,52 @@ paths:
       tags:
       - ops
   /v1/episodes:
+    get:
+      description: Every episode, newest first, whatever state it is in.
+      operationId: list_episodes_v1_episodes_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/EpisodeResponse'
+                title: Response List Episodes V1 Episodes Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Episodes
+      tags:
+      - episodes
     post:
-      description: 'Assemble a manual episode from unread news items, capped by duration.
-
-
-        Scripting, grounding validation, and TTS happen on the queue afterwards. Nothing is
-
-        synthesized until grounding passes (invariant 3).'
+      description: "Assemble a manual episode from unread news items, capped by duration.\n\nReturns immediately,\
+        \ in ``pending``. Assembly, scripting, grounding validation, and TTS\nhappen on the queue afterwards,\
+        \ and nothing is synthesized until grounding passes\n(invariant 3) \u2014 so the episode a client\
+        \ polls for moves through states rather than\nappearing finished."
       operationId: create_episode_v1_episodes_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
       requestBody:
         content:
           application/json:
@@ -297,6 +487,14 @@ paths:
         schema:
           title: Episode Id
           type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
       responses:
         '200':
           content:
@@ -313,10 +511,158 @@ paths:
       summary: Get Episode
       tags:
       - episodes
+  /v1/episodes/{episode_id}/audio:
+    get:
+      description: "Serve an episode's audio, or redirect to a signed URL for it.\n\nWhich of the two\
+        \ depends on the storage backend, and the *store* decides rather than\nthis route: a backend that\
+        \ can mint a signed URL returns one, and one that cannot\nreturns ``None``. A podcast client cannot\
+        \ tell the difference \u2014 it follows the\nredirect \u2014 so the enclosure URL in the feed\
+        \ is stable across both, and a signed URL's\nexpiry never ends up cached inside a feed document."
+      operationId: episode_audio_v1_episodes__episode_id__audio_get
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - description: The feed's secret, from GET /v1/feed.
+        in: query
+        name: token
+        required: false
+        schema:
+          default: ''
+          description: The feed's secret, from GET /v1/feed.
+          title: Token
+          type: string
+      responses:
+        '200':
+          content:
+            audio/mpeg: {}
+          description: The episode audio
+        '307':
+          description: Redirect to a time-limited signed URL
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Episode Audio
+      tags:
+      - feed
+  /v1/episodes/{episode_id}/listened:
+    post:
+      description: "Mark every news item in this episode read.\n\nPhase 1's stand-in for playback tracking:\
+        \ RSS gives background audio and CarPlay for\nfree, and takes away any way for a client to report\
+        \ where the listener got to. Phase\n2's iOS app reports ``spoken_through_ms`` and this becomes\
+        \ automatic \u2014 but the fact it\nwrites is the same one, on the same column, which is why swapping\
+        \ the trigger later\nchanges nothing about read state."
+      operationId: mark_episode_listened_v1_episodes__episode_id__listened_post
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkListenedResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Mark Episode Listened
+      tags:
+      - episodes
+  /v1/feed:
+    get:
+      description: The private feed URL, minting a token on first ask.
+      operationId: get_feed_info_v1_feed_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedInfoResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Feed Info
+      tags:
+      - feed
+  /v1/feed/rotate:
+    post:
+      description: "Revoke the current feed URL and mint a new one.\n\nThis unsubscribes every client\
+        \ using the old URL, which is the point \u2014 it is the\nanswer to a leaked feed link, and there\
+        \ is no other way to take one back."
+      operationId: rotate_feed_v1_feed_rotate_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedInfoResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Rotate Feed
+      tags:
+      - feed
   /v1/news-items:
     get:
       description: 'The backlog: deduped news items with their read state (invariant 5).'
       operationId: list_news_items_v1_news_items_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
       responses:
         '200':
           content:
@@ -327,18 +673,78 @@ paths:
                 title: Response List News Items V1 News Items Get
                 type: array
           description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
       summary: List News Items
+      tags:
+      - backlog
+  /v1/news-items/{news_item_id}/read:
+    post:
+      description: 'Mark a news item read or unread.
+
+
+        The same write that "I listened to this episode" performs, which is what invariant 5
+
+        means in practice: one fact, one column, two ways of reaching it.'
+      operationId: set_news_item_read_v1_news_items__news_item_id__read_post
+      parameters:
+      - in: path
+        name: news_item_id
+        required: true
+        schema:
+          title: News Item Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReadStateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewsItemResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Set News Item Read
       tags:
       - backlog
   /v1/sources/paste:
     post:
-      description: 'Ingest pasted text as a source item.
-
-
-        Enqueues rather than processes: ingestion is serialized per user (invariant 6), so the
-
-        work belongs to a worker draining the queue, never to the request thread.'
+      description: "Ingest pasted text as a source item.\n\nEnqueues rather than processes: ingestion\
+        \ is serialized per user (invariant 6), so the\nwork belongs to a worker draining the queue, never\
+        \ to the request thread. The row and\nthe job are written in the same transaction \u2014 with\
+        \ two systems there would always be a\nwindow where the source item exists and nothing will ever\
+        \ pick it up."
       operationId: paste_source_v1_sources_paste_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
       requestBody:
         content:
           application/json:

@@ -1,0 +1,9 @@
+{
+  "why": "Headlines that differ only in punctuation are the same story. A dedup key that treated an em dash or an exclamation mark as signal would split one story in two.",
+  "news_items": [
+    {
+      "title": "Ferrite ships its compiler rewrite",
+      "source_count": 2
+    }
+  ]
+}

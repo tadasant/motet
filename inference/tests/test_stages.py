@@ -51,11 +51,19 @@ def test_registry_rejects_an_unknown_mode(monkeypatch: pytest.MonkeyPatch) -> No
         get_stages()
 
 
-def test_real_adapters_are_not_implemented_yet() -> None:
-    """The seam exists; the vendors do not. Keeps the scaffold honest."""
-    stages = get_stages(mode="real")
-    with pytest.raises(NotImplementedError):
-        stages.speech_synthesizer.synthesize("anything")
+def test_real_stages_refuse_to_build_without_vendor_configuration() -> None:
+    """The real stages exist now, and they fail *before* doing any work without a key.
+
+    This is the safe direction for the mode switch to fail in: asking for real adapters in
+    an environment that cannot pay for them stops at construction, not partway through an
+    episode. The fake path below needs no configuration at all, which is what lets CI run
+    the whole pipeline (invariant 7).
+    """
+    with pytest.raises(Exception, match="CARTESIA_API_KEY|OPENROUTER_API_KEY"):
+        get_stages(mode="real")
+
+    # And the fake path builds with nothing set.
+    assert get_stages(mode="fake").speech_synthesizer.synthesize("hello there").duration_ms > 0
 
 
 def test_integrate_dedups_titles_differing_only_in_case_order_and_punctuation() -> None:

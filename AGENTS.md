@@ -194,6 +194,11 @@ script + grounding validation, TTS, GCS, private authenticated RSS, a 3-screen S
 **Out — do not build these yet:** Gmail, X, OAuth, the secret store, smart episodes,
 ranking, iOS, voice interactivity, signup, brand.
 
+**Status: the Phase 1 path is built** — paste-in, dedup/integrate, assemble, script +
+grounding validation, TTS, object storage, the private feed, and the three SPA screens. The
+stages run as Cloud Run jobs draining Postgres queues (`workers/`), and every one of them
+is retried independently.
+
 **Phase 1's real deliverable is the factory, not the feature.** The question it answers is
 *"does the factory work?"* — not *"is the briefing good?"*. That is what the scaffolding in
 this repo is: the one CI command, the OpenAPI contract, the fake adapters, the golden set.
@@ -211,6 +216,7 @@ lockscreen, CarPlay, and speed control with zero iOS code.
 | Ingestion workers | Cloud Run jobs | `workers/` |
 | Inference adapters | library | `inference/` |
 | Schema + migrations | library | `db/` |
+| Object storage | library | `storage/` |
 | Web SPA | Vite + React, static behind Cloudflare | `web/` |
 | Voice service | Pipecat, Cloud Run — **Phase 2** | `voice/` |
 | iOS app | Swift — **Phase 2** | `ios/` |
@@ -350,6 +356,40 @@ and keep wire shapes out of it: an API key travels as `Authorization: Bearer` to
 and as `x-api-key` to Anthropic direct, so headers belong to the adapter. A header in the
 credential module forces a *provider* distinction onto the credential-*kind* axis, which is
 what makes the second provider hard.
+
+### Object storage is the seam to where audio lives
+
+`storage/` holds one `ObjectStore` interface, a GCS backend with V4 signed URLs, and a
+local filesystem backend that dev and CI run against — the same fake-by-default shape as
+the inference seam, and `MOTET_STORAGE_BACKEND` defaults to `local` for the same reason
+`MOTET_INFERENCE_MODE` defaults to `fake`.
+
+**`signed_url()` returning `None` is part of the contract, not a failure.** It means "this
+backend cannot hand out a direct link, serve the bytes yourself", and the API's audio route
+branches on that rather than on a backend name. That is what keeps an RSS enclosure URL
+identical across both backends — a podcast client cannot tell them apart — and what keeps a
+third backend from ever touching the route.
+
+**Enclosure URLs point at us, never at the bucket.** A signed URL's expiry inside a feed
+document a client cached for six hours is a download that fails later for no visible
+reason.
+
+### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
+
+`api/src/motet_api/feed.py`. RSS is Phase 1's listening surface *instead of* an in-app
+player, because a browser has no background audio and no offline and a dog walk needs both.
+
+**Validate the feed by parsing it with a real client's parser, not by asserting on XML you
+wrote.** `podcastparser` is the parser inside gPodder; `feedparser` is what most other
+tooling uses. Both run in `bin/ci`. This is not belt-and-braces — it caught the feed
+declaring the iTunes namespace as `.../podcast-1.0/` rather than `.../podcast-1.0.dtd`,
+where the document parsed perfectly and every `itunes:` element was silently ignored. No
+error anywhere; the episode simply had no duration on a lockscreen.
+
+The feed token is a **bearer secret in a URL, deliberately** — clients handle that far
+better than HTTP auth — and it is stored in the clear because the owner has to be able to
+read it back onto a new device. Hashing it would make every device change a rotation, and a
+rotation unsubscribes every client already using the URL.
 
 ### The golden set is the seam to "is it any good?"
 

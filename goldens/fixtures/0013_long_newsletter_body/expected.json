@@ -1,0 +1,9 @@
+{
+  "why": "A realistic newsletter is many paragraphs long. The summary the fake derives, the span it cites, and the duration estimate all have to behave when the body is far longer than the headline.",
+  "news_items": [
+    {
+      "title": "Thorn releases its annual transparency report",
+      "source_count": 1
+    }
+  ]
+}

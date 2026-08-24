@@ -1,0 +1,9 @@
+{
+  "why": "Newsletters are hard-wrapped. A span that runs across a line break must still resolve to real source text, because most sentences worth quoting do.",
+  "news_items": [
+    {
+      "title": "Juniper standardises on the new protocol",
+      "source_count": 1
+    }
+  ]
+}

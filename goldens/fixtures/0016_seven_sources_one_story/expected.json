@@ -1,0 +1,9 @@
+{
+  "why": "A story every newsletter covered. Seven sources on one news item is the shape a big announcement actually takes, and it is where a merge that rewrote rather than appended sources would lose citations.",
+  "news_items": [
+    {
+      "title": "Ridge announces the acquisition",
+      "source_count": 7
+    }
+  ]
+}

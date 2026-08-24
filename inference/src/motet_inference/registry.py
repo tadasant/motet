@@ -36,10 +36,19 @@ def fake_stages() -> Stages:
 
 
 def real_stages() -> Stages:
+    """Build the vendor-backed stages, sharing **one** LLM client between the three.
+
+    One client, not three: each holds its own connection pool, and OpenRouter's sticky
+    upstream routing — which is what keeps the dedup prompt cache warm — is per client.
+    Three clients would triple the pools and split the routing three ways for no gain.
+    """
+    from .llm import build_client  # noqa: PLC0415  — keeps fake mode off the HTTP path
+
+    client = build_client()
     return Stages(
-        integrator=ClaudeIntegrator(),
-        script_generator=ClaudeScriptGenerator(),
-        grounding_validator=ClaudeGroundingValidator(),
+        integrator=ClaudeIntegrator(client),
+        script_generator=ClaudeScriptGenerator(client),
+        grounding_validator=ClaudeGroundingValidator(client),
         speech_synthesizer=CartesiaSpeechSynthesizer(),
     )
 

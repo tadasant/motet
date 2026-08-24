@@ -1,0 +1,17 @@
+{
+  "why": "Funding numbers are exactly what a briefing must never invent, so a case whose whole content is numbers keeps the span machinery honest about them.",
+  "news_items": [
+    {
+      "title": "Solstice posts $14.2M in ARR",
+      "source_count": 1
+    }
+  ],
+  "script": [
+    {
+      "news_item_title": "Solstice posts $14.2M in ARR",
+      "claims": [
+        "Solstice posts $14.2M in ARR."
+      ]
+    }
+  ]
+}

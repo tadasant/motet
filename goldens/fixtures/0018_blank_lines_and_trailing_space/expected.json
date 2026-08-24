@@ -1,0 +1,9 @@
+{
+  "why": "Ragged whitespace is what pasted text actually looks like. Titles, spans, and dedup keys must not depend on it.",
+  "news_items": [
+    {
+      "title": "Alder publishes its roadmap",
+      "source_count": 2
+    }
+  ]
+}

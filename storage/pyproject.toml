@@ -1,0 +1,15 @@
+[project]
+name = "motet-storage"
+version = "0.1.0"
+description = "Object storage for episode audio: GCS with V4 signed URLs, plus a local fake"
+requires-python = ">=3.13"
+# google-cloud-storage is imported lazily by the GCS backend, so a local-backend process
+# — every test and every laptop — never pulls in the cloud SDK or its transitive deps.
+dependencies = ["google-cloud-storage>=2.19"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/motet_storage"]
