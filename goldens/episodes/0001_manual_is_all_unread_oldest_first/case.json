@@ -1,0 +1,35 @@
+{
+  "why": "A manual episode is the rule with every default left alone: unread, no window, oldest first. Asserted against the same selector a smart episode uses, so the two cannot drift into disagreeing about what 'unread' means (invariant 5).",
+  "stories": [
+    {
+      "title": "Oldest unread",
+      "age_days": 9,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Middle unread",
+      "age_days": 4,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Newest unread",
+      "age_days": 0,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Already read",
+      "age_days": 2,
+      "sources": 1,
+      "read": true
+    }
+  ],
+  "rule": "manual",
+  "expected": [
+    "Oldest unread",
+    "Middle unread",
+    "Newest unread"
+  ]
+}

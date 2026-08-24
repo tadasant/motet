@@ -3,7 +3,15 @@ name = "motet-db"
 version = "0.1.0"
 description = "Schema, forward-only SQL migrations, and the migration runner"
 requires-python = ">=3.13"
-dependencies = ["psycopg[binary]>=3.2"]
+dependencies = [
+    "psycopg[binary]>=3.2",
+    # The credential vault. `motet_db.phase2` seals and unseals at the row boundary, so
+    # that no caller has to remember to encrypt — see invariant 8 in AGENTS.md.
+    "motet-vault",
+]
+
+[tool.uv.sources]
+motet-vault = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,27 @@
+{
+  "why": "'Just my Gmail newsletters'. A story backed by several qualifying source items must appear exactly once — an EXISTS rather than a join, or the episode would contain the same segment three times over.",
+  "stories": [
+    {
+      "title": "From Gmail",
+      "age_days": 2,
+      "sources": 3,
+      "read": false,
+      "source_kind": "gmail"
+    },
+    {
+      "title": "Pasted in",
+      "age_days": 1,
+      "sources": 1,
+      "read": false
+    }
+  ],
+  "rule": {
+    "window_days": 0,
+    "source_ids": [
+      "@gmail"
+    ]
+  },
+  "expected": [
+    "From Gmail"
+  ]
+}

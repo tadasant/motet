@@ -12,6 +12,7 @@ transaction, and it can only do that if this module stays out of transaction man
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -22,6 +23,7 @@ from psycopg.rows import dict_row
 
 from .ids import claim_id, episode_id, feed_token, news_item_id, segment_id, source_item_id
 from .models import (
+    EpisodeKind,
     EpisodeState,
     SourceItemState,
     StoredClaim,
@@ -319,12 +321,34 @@ def mark_news_items_read(
 
 
 def create_episode(
-    conn: psycopg.Connection[Any], *, user_id: str, title: str, max_duration_ms: int
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str,
+    title: str,
+    max_duration_ms: int,
+    kind: EpisodeKind = EpisodeKind.MANUAL,
+    rule: dict[str, Any] | None = None,
 ) -> str:
+    """Create an episode. ``rule`` is a snapshot, stored on the row and never referenced.
+
+    A smart episode must carry one — the schema has a CHECK saying so, because an episode
+    that claimed to be smart with nothing to select by would fail at assembly, hours after
+    the mistake was made.
+    """
     new_id = episode_id()
     conn.execute(
-        "INSERT INTO episodes (id, user_id, title, max_duration_ms) VALUES (%s, %s, %s, %s)",
-        (new_id, user_id, title, max_duration_ms),
+        """
+        INSERT INTO episodes (id, user_id, title, max_duration_ms, kind, rule)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+        """,
+        (
+            new_id,
+            user_id,
+            title,
+            max_duration_ms,
+            kind.value,
+            json.dumps(rule) if rule is not None else None,
+        ),
     )
     return new_id
 
@@ -335,8 +359,9 @@ def get_episode(
     row = _maybe_one(
         conn,
         """
-        SELECT id, user_id, title, state, max_duration_ms, duration_ms, audio_key,
-               audio_bytes, audio_media_type, last_error, created_at, published_at
+        SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
+               audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
+               created_at, published_at
         FROM episodes
         WHERE id = %s AND (%s::text IS NULL OR user_id = %s)
         """,
@@ -351,8 +376,9 @@ def list_episodes(conn: psycopg.Connection[Any], user_id: str) -> list[StoredEpi
     rows = _all(
         conn,
         """
-        SELECT id, user_id, title, state, max_duration_ms, duration_ms, audio_key,
-               audio_bytes, audio_media_type, last_error, created_at, published_at
+        SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
+               audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
+               created_at, published_at
         FROM episodes
         WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
@@ -368,8 +394,9 @@ def list_published_episodes(conn: psycopg.Connection[Any], user_id: str) -> list
     rows = _all(
         conn,
         """
-        SELECT id, user_id, title, state, max_duration_ms, duration_ms, audio_key,
-               audio_bytes, audio_media_type, last_error, created_at, published_at
+        SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
+               audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
+               created_at, published_at
         FROM episodes
         WHERE user_id = %s AND state = 'ready' AND audio_key IS NOT NULL
         ORDER BY published_at DESC, id DESC
@@ -659,7 +686,8 @@ def _segments_for(
     claim_rows = _all(
         conn,
         """
-        SELECT id, segment_id, position, text, source_item_id, span_start, span_end
+        SELECT id, segment_id, position, text, source_item_id, span_start, span_end,
+               start_ms, duration_ms
         FROM segment_claims WHERE segment_id = ANY(%s) ORDER BY segment_id, position
         """,
         ([row["id"] for row in segment_rows],),
@@ -674,6 +702,8 @@ def _segments_for(
                 source_item_id=row["source_item_id"],
                 span_start=row["span_start"],
                 span_end=row["span_end"],
+                start_ms=row["start_ms"],
+                duration_ms=row["duration_ms"],
             )
         )
 
@@ -699,12 +729,15 @@ def _episode(row: dict[str, Any], segments: tuple[StoredSegment, ...]) -> Stored
         user_id=row["user_id"],
         title=row["title"],
         state=EpisodeState(row["state"]),
+        kind=EpisodeKind(row["kind"]),
+        rule=dict(row["rule"]) if row["rule"] else None,
         max_duration_ms=row["max_duration_ms"],
         duration_ms=row["duration_ms"],
         audio_key=row["audio_key"],
         audio_bytes=row["audio_bytes"],
         audio_media_type=row["audio_media_type"],
         last_error=row["last_error"],
+        listened_through_ms=row["listened_through_ms"],
         created_at=row["created_at"],
         published_at=row["published_at"],
         segments=segments,

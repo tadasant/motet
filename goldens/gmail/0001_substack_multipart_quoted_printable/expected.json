@@ -1,0 +1,16 @@
+{
+  "why": "The canonical newsletter shape — multipart/alternative with a quoted-printable plain part, a hidden preheader, a tracking pixel and an unsubscribe footer. text/plain must win, and none of the machinery may reach the briefing.",
+  "title": "Northbridge cuts its outlook on export controls",
+  "text_contains": [
+    "Northbridge Semiconductor cut its full-year revenue outlook to $4.1 billion",
+    "Shares fell 12% in after-hours trading.",
+    "free-cash-flow positive for the year"
+  ],
+  "text_excludes": [
+    "Chip tariffs",
+    "View this email in your browser",
+    "Unsubscribe",
+    "All rights reserved",
+    "px.example"
+  ]
+}

@@ -25,6 +25,13 @@ from typing import Any
 import psycopg
 import pytest
 
+#: Truncated before every test. Ordered for readability only — `CASCADE` handles the
+#: dependencies.
+#:
+#: ``sources`` is deliberately **absent**: migration 0002 seeds ``src_paste``, and
+#: truncating the table would take that row with it and break paste-in — Phase 1's only
+#: ingestion route — in a way that looks like an application bug. Connected sources added
+#: by a test are removed by :data:`_DELETE_NON_SEED_SOURCES` instead.
 TABLES = (
     "jobs",
     "source_items",
@@ -34,7 +41,14 @@ TABLES = (
     "episode_segments",
     "segment_claims",
     "feed_tokens",
+    "source_credentials",
+    "oauth_states",
+    "highlights",
 )
+
+#: Sources a test connected, without disturbing the seeded paste source. Cascades to that
+#: source's credentials and source items, which is what makes the ordering above harmless.
+_DELETE_NON_SEED_SOURCES = "DELETE FROM sources WHERE id <> 'src_paste'"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -71,6 +85,7 @@ def db(_migrated: str) -> Iterator[psycopg.Connection[Any]]:
 
     with repo.connect(_migrated) as conn:
         conn.execute(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE")
+        conn.execute(_DELETE_NON_SEED_SOURCES)
         conn.commit()
         yield conn
 

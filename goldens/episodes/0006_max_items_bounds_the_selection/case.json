@@ -1,0 +1,37 @@
+{
+  "why": "The duration cap is the real limit, applied downstream against an estimate; `max_items` bounds the work done to discover it. It truncates the ranking rather than sampling, so the cheapest stories are not the ones that survive.",
+  "stories": [
+    {
+      "title": "First",
+      "age_days": 5,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Second",
+      "age_days": 4,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Third",
+      "age_days": 3,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Fourth",
+      "age_days": 2,
+      "sources": 1,
+      "read": false
+    }
+  ],
+  "rule": {
+    "window_days": 0,
+    "max_items": 2
+  },
+  "expected": [
+    "First",
+    "Second"
+  ]
+}

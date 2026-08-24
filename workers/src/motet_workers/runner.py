@@ -48,10 +48,7 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
     """Claim and run every ready job on ``queue``. Returns the number processed."""
     handler = HANDLERS.get(queue)
     if handler is None:
-        raise ValueError(
-            f"queue {queue.value!r} has no handler in Phase 1. `poll` and `extract` belong "
-            "to Gmail and X ingestion, which is Phase 2 — see AGENTS.md."
-        )
+        raise ValueError(f"queue {queue.value!r} has no handler registered")
     stages = get_stages()
     store = build_store()
     recorders = failure_recorders()

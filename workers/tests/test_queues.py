@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 from motet_inference.llm import LlmConfigError
-from motet_workers import Queue, drain, runner
+from motet_workers import Queue, runner
 
 
 def test_queue_names_cover_every_pipeline_stage() -> None:
@@ -27,16 +27,18 @@ def test_queues_are_plain_strings() -> None:
     assert Queue.TTS == "tts"
 
 
-def test_draining_a_phase_2_queue_says_so_rather_than_succeeding_emptily(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`poll` and `extract` belong to Gmail and X ingestion, which Phase 1 cuts.
+def test_every_queue_has_a_handler() -> None:
+    """`poll` and `extract` were named in the enum from the start and now have handlers.
 
-    They stay in the enum because the pipeline shape is settled — but a worker pointed at
-    one has been misconfigured, and reporting "drained 0 jobs" would hide that indefinitely.
+    Asserted as a set rather than per queue, so adding a queue without a handler fails here
+    instead of reporting "drained 0 jobs" forever — which is what a misconfigured worker
+    pointed at an unimplemented stage would otherwise look like.
     """
-    with pytest.raises(ValueError, match="no handler in Phase 1"):
-        drain(Queue.POLL, "postgresql://unused")
+    from motet_workers.handlers import HANDLERS
+
+    assert set(HANDLERS) == set(Queue), (
+        "a queue with no handler is a worker that silently does nothing"
+    )
 
 
 def test_the_worker_refuses_to_start_without_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:

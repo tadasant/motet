@@ -1,0 +1,12 @@
+{
+  "why": "Some templates put a compact 'Unsubscribe' in the masthead. Cutting at the FIRST occurrence anywhere would reduce this newsletter to its header — which looks ingested-and-empty rather than failed. The cut is bounded to the tail, so the body survives and the real footer still goes.",
+  "title": "Two things happened in payments this week",
+  "text_contains": [
+    "Meridian Pay raised $60 million at a $700 million valuation",
+    "the central bank published its long-awaited consultation",
+    "the plumbing is finally getting attention"
+  ],
+  "text_excludes": [
+    "(c) 2026 Payments Weekly"
+  ]
+}

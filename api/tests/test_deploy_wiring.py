@@ -9,6 +9,9 @@ None of it needs a database.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -233,3 +236,57 @@ class TestObsStatus:
         env = {OTLP_ENDPOINT_ENV: "https://obs.example.invalid", OTLP_TOKEN_ENV: "tok"}
         assert status(env).fully_configured is False
         assert status({**env, GLITCHTIP_DSN_ENV: "dsn"}).fully_configured is True
+
+
+class TestDockerfileCoversTheWorkspace:
+    """The Dockerfile's COPY list must match `[tool.uv.workspace] members`.
+
+    `uv sync --frozen` plans the whole workspace: `uv.lock` records each member as a path
+    source, so a member missing from the build context fails the sync outright rather than
+    being quietly skipped. The image does not have to *import* a member for this to matter
+    — `voice` is a separate deployable that neither image imports, and omitting it still
+    broke the build.
+
+    This is a check rather than the comment that was there before, because a comment
+    saying "keep this list in step" is exactly what was in place when the list went out of
+    step. It went out of step in the way CI could not see: the Dockerfile was written on a
+    branch whose workspace had five members while a sixth was added on main in parallel,
+    so both branches were green and only their merge was broken. A test that reads both
+    lists out of the two files catches that on the merge commit, where the mismatch first
+    exists — and it needs no Docker daemon, so it belongs in `bin/ci` rather than in the
+    images job that cannot run on a laptop.
+    """
+
+    @staticmethod
+    def _repo_root() -> Path:
+        # api/tests/test_deploy_wiring.py -> api/tests -> api -> repo root
+        return Path(__file__).resolve().parents[2]
+
+    def test_every_workspace_member_is_copied(self) -> None:
+        root = self._repo_root()
+        members = set(
+            tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"][
+                "members"
+            ]
+        )
+        dockerfile = (root / "Dockerfile").read_text()
+
+        # Two lists, and both have to be complete: the metadata copy feeds the cached
+        # dependency layer and the source copy feeds the install. Missing from either one
+        # fails the build, at a different line.
+        metadata = {
+            member
+            for member in members
+            if f"COPY {member}/pyproject.toml {member}/pyproject.toml" in dockerfile
+        }
+        sources = {member for member in members if f"COPY {member} {member}\n" in dockerfile}
+
+        assert members - metadata == set(), (
+            "Dockerfile is missing `COPY <member>/pyproject.toml` for these workspace "
+            "members, so `uv sync --frozen` cannot plan: "
+            f"{sorted(members - metadata)}"
+        )
+        assert members - sources == set(), (
+            "Dockerfile is missing `COPY <member> <member>` for these workspace members, "
+            f"so `uv sync --frozen` cannot install them: {sorted(members - sources)}"
+        )

@@ -1,0 +1,15 @@
+{
+  "why": "A rule that matches nothing selects nothing rather than falling back to something. Assembly turns this into a visible permanent failure, which is the honest outcome — silently widening the rule would produce an episode the user did not ask for.",
+  "stories": [
+    {
+      "title": "Old and read",
+      "age_days": 20,
+      "sources": 1,
+      "read": true
+    }
+  ],
+  "rule": {
+    "window_days": 2
+  },
+  "expected": []
+}

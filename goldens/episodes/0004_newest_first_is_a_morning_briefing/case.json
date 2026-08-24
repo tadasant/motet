@@ -1,0 +1,32 @@
+{
+  "why": "The inverse of draining a backlog: what happened since you last listened. Ordering is selection as much as presentation, because the duration cap is applied by walking this order and stopping.",
+  "stories": [
+    {
+      "title": "Monday",
+      "age_days": 6,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Wednesday",
+      "age_days": 4,
+      "sources": 1,
+      "read": false
+    },
+    {
+      "title": "Friday",
+      "age_days": 2,
+      "sources": 1,
+      "read": false
+    }
+  ],
+  "rule": {
+    "ranking": "newest_first",
+    "window_days": 0
+  },
+  "expected": [
+    "Friday",
+    "Wednesday",
+    "Monday"
+  ]
+}

@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 
 class EpisodeState(StrEnum):
@@ -84,6 +85,11 @@ class StoredClaim:
     source_item_id: str
     span_start: int
     span_end: int
+    #: Where this claim sits in the episode audio. Apportioned from the segment's measured
+    #: duration by the TTS stage — see `motet_workers.handlers.apportion_claim_timings`.
+    #: Zero until TTS has run, which is what the subtitle route checks.
+    start_ms: int = 0
+    duration_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -103,12 +109,23 @@ class StoredEpisode:
     user_id: str
     title: str
     state: EpisodeState
+    #: How this episode chose its stories. ``MANUAL`` for every Phase 1 episode, which is
+    #: why the column defaults rather than being backfilled.
+    kind: EpisodeKind
+    #: The rule snapshot a smart episode was built from, or ``None`` for a manual one.
+    #: A snapshot rather than a reference: "why does this episode contain these stories"
+    #: has to stay answerable after the rule is edited.
+    rule: dict[str, Any] | None
     max_duration_ms: int
     duration_ms: int
     audio_key: str | None
     audio_bytes: int | None
     audio_media_type: str | None
     last_error: str | None
+    #: How far the listener has actually got, in milliseconds. We own playback position
+    #: (invariant 4) and this is written by our own API from a client's report — never
+    #: read back out of a vendor SDK. Its only job is deciding which news items are read.
+    listened_through_ms: int
     created_at: datetime
     published_at: datetime | None
     segments: tuple[StoredSegment, ...]
@@ -116,3 +133,77 @@ class StoredEpisode:
     @property
     def has_audio(self) -> bool:
         return self.state is EpisodeState.READY and self.audio_key is not None
+
+
+@dataclass(frozen=True)
+class StoredSource:
+    """A place source items come from: pasted text, or a connected mailbox.
+
+    ``config`` is the user's intent (which Gmail query to poll) and ``sync_state`` is our
+    bookmark (where the last poll got to). Conflating the two would mean "change your
+    Gmail query" silently re-ingested the archive.
+    """
+
+    id: str
+    user_id: str
+    kind: str
+    name: str
+    config: dict[str, Any]
+    sync_state: dict[str, Any]
+    active: bool
+    last_polled_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class Highlight:
+    """A saved passage, anchored to the span of source text it quotes.
+
+    The anchor is ``(source_item_id, span_start, span_end)`` and nothing else. Claims are
+    rewritten on every script retry and audio offsets move on every re-render, so neither
+    can hold a highlight; ``source_items.text`` never changes, so it can. ``episode_id``
+    and ``anchor_ms`` record where the listener was when they saved it — provenance, not
+    the anchor. See migration 0003 for the full argument.
+    """
+
+    id: str
+    user_id: str
+    news_item_id: str
+    source_item_id: str
+    span_start: int
+    span_end: int
+    quote: str
+    note: str | None
+    episode_id: str | None
+    anchor_ms: int | None
+    created_at: datetime
+
+
+class EpisodeKind(StrEnum):
+    """How an episode chose its stories.
+
+    ``MANUAL`` is Phase 1's "everything unread, oldest first, until the cap".
+    ``SMART`` selected by a rule, a snapshot of which is stored on the episode.
+    """
+
+    MANUAL = "manual"
+    SMART = "smart"
+
+
+class SourceKind(StrEnum):
+    PASTE = "paste"
+    GMAIL = "gmail"
+
+
+class CredentialPurpose(StrEnum):
+    """Which half of an OAuth grant a sealed credential holds.
+
+    ``REFRESH`` is the long-lived grant, issued once at consent. ``ACCESS`` is the
+    short-lived token derived from it. Both are sealed; the distinction matters because
+    overwriting a refresh token with the ``None`` a refresh returns is how an integration
+    silently disconnects an hour after being connected.
+    """
+
+    REFRESH = "refresh"
+    ACCESS = "access"

@@ -23,15 +23,41 @@ import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from motet_db import StoredEpisode, StoredNewsItem, repo
+from motet_db import (
+    CredentialPurpose,
+    Highlight,
+    RuleError,
+    SmartRule,
+    SourceKind,
+    StoredEpisode,
+    StoredNewsItem,
+    StoredSource,
+    phase2,
+    repo,
+)
 from motet_inference.llm import load_config as load_llm_config
+from motet_sources import (
+    GMAIL_READONLY_SCOPE,
+    PROVIDER,
+    SourceError,
+    build_oauth_client,
+    new_oauth_state,
+    new_pkce_pair,
+)
 from motet_storage import ObjectStore, StorageError
-from motet_workers import enqueue_episode, enqueue_paste
+from motet_vault import DekWrapper, VaultError
+from motet_workers import (
+    enqueue_episode,
+    enqueue_paste,
+    enqueue_smart_episode,
+    enqueue_source_poll,
+)
 
 from . import obs
 from .config import APP_BASE_URL_ENV, Settings
 from .deps import (
     connection,
+    dek_wrapper,
     public_base_url,
     require_api_token,
     require_feed_token,
@@ -41,18 +67,28 @@ from .deps import (
 from .feed import FeedMetadata, feed_url, render_feed
 from .schemas import (
     ClaimModel,
+    ConnectSourceRequest,
+    ConnectSourceResponse,
     CreateEpisodeRequest,
+    CreateSmartEpisodeRequest,
     EpisodeResponse,
     FeedInfoResponse,
     HealthResponse,
+    HighlightResponse,
+    ListenProgressRequest,
+    ListenProgressResponse,
     MarkListenedResponse,
     NewsItemResponse,
+    OAuthCallbackRequest,
     PasteRequest,
     ReadStateRequest,
+    SaveHighlightRequest,
     SegmentResponse,
     SourceItemResponse,
+    SourceResponse,
     SourceSpanModel,
 )
+from .shownotes import chapters_json, transcript_vtt
 
 logger = logging.getLogger("motet.api")
 
@@ -61,6 +97,11 @@ User = Annotated[str, Depends(require_api_token)]
 FeedUser = Annotated[str, Depends(require_feed_token)]
 Config = Annotated[Settings, Depends(settings)]
 Store = Annotated[ObjectStore, Depends(store)]
+#: The **encrypt-only** half of the credential vault. The API seals third-party tokens
+#: because the OAuth callback lands on an HTTP route; it must never hold anything that can
+#: unseal one (invariant 8). `DekWrapper` has no `unwrap`, and the deployed service
+#: account has no `useToDecrypt` — the type is the reminder, IAM is the control.
+Wrapper = Annotated[DekWrapper, Depends(dek_wrapper)]
 
 
 @asynccontextmanager
@@ -443,3 +484,467 @@ def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeRe
         published_at=episode.published_at,
         segments=segments,
     )
+
+
+# --- Phase 2: connected sources ------------------------------------------------------
+
+
+@app.get("/v1/sources", response_model=list[SourceResponse], tags=["sources"])
+def list_sources(conn: Conn, user_id: User) -> list[SourceResponse]:
+    """Every source, connected or paused, with whether a credential exists.
+
+    "Connected" is answered *without* decrypting anything: the credential row's existence
+    is the answer, and reading it needs no key. Invariant 8 means only workers can open
+    one, so a screen that had to decrypt to render would have to break the invariant.
+    """
+    out = []
+    for source in repo_sources(conn, user_id):
+        credential = phase2.get_source_credential(
+            conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
+        )
+        out.append(
+            SourceResponse(
+                id=source.id,
+                kind=source.kind,
+                name=source.name,
+                active=source.active,
+                connected=credential is not None,
+                scopes=list(credential.scopes) if credential else [],
+                last_polled_at=source.last_polled_at,
+                last_error=source.last_error,
+                created_at=source.created_at,
+            )
+        )
+    return out
+
+
+@app.post(
+    "/v1/sources/connect",
+    response_model=ConnectSourceResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["sources"],
+)
+def connect_source(body: ConnectSourceRequest, conn: Conn, user_id: User) -> ConnectSourceResponse:
+    """Start connecting a mailbox: create the source and return a consent URL.
+
+    **The source row is created before consent completes**, and stays inactive until a
+    credential lands. That ordering is what lets the callback identify what it is
+    connecting *to* without trusting anything in the redirect: the source id is bound to
+    the stored `oauth_states` row, not carried in a parameter an attacker could change.
+
+    PKCE and a stored `state` are both required. `state` alone is a CSRF token; the PKCE
+    verifier is what makes an intercepted authorization code unusable.
+
+    **`redirect_uri` comes from the client, and that is safe rather than an oversight.**
+    The provider validates it against the URIs registered on the OAuth client and rejects
+    anything else, so this route cannot be used to redirect a grant somewhere the owner of
+    that client did not allow — and reaching this route at all requires the API bearer
+    token. It is a parameter because the SPA, a local dev server, and a future iOS app each
+    have a different one, and hardcoding one would mean a code change per client.
+    """
+    if body.provider != PROVIDER:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Only {PROVIDER!r} is supported. X bookmarks are not built — the API tier is "
+            "a spend decision that has not been made.",
+        )
+
+    source = phase2.create_source(
+        conn,
+        user_id=user_id,
+        kind=SourceKind.GMAIL.value,
+        name=body.name.strip(),
+        config={"query": body.query.strip()} if body.query and body.query.strip() else {},
+    )
+    # Inactive until a credential exists: a source with no token would otherwise be
+    # picked up by the poll scheduler and fail on every run.
+    phase2.set_source_active(conn, source.id, active=False)
+
+    verifier, challenge = new_pkce_pair()
+    state = new_oauth_state()
+    phase2.start_oauth(
+        conn,
+        state=state,
+        user_id=user_id,
+        provider=PROVIDER,
+        source_id_=source.id,
+        code_verifier=verifier,
+        redirect_uri=body.redirect_uri,
+        scopes=[GMAIL_READONLY_SCOPE],
+    )
+
+    try:
+        url = build_oauth_client().authorization_url(
+            redirect_uri=body.redirect_uri,
+            state=state,
+            code_challenge=challenge,
+            scopes=[GMAIL_READONLY_SCOPE],
+        )
+    except SourceError as exc:
+        # In real mode with no Google OAuth client provisioned. A 503 rather than a 500:
+        # nothing is wrong with the request, the capability is not configured yet.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    return ConnectSourceResponse(source_id=source.id, authorization_url=url, state=state)
+
+
+@app.post("/v1/sources/callback", response_model=SourceResponse, tags=["sources"])
+def oauth_callback(
+    body: OAuthCallbackRequest, conn: Conn, user_id: User, wrapper: Wrapper
+) -> SourceResponse:
+    """Complete consent: exchange the code, seal the tokens, and start polling.
+
+    **This is the one place in the API that touches a third-party credential**, and it can
+    only seal — `wrapper` is the encrypt-only half of the vault, and the deployed service
+    account has no KMS decrypt permission (invariant 8). The plaintext token exists only
+    as a local variable inside this function; it is never logged and never returned.
+
+    The state is consumed exactly once by a `DELETE ... RETURNING`, so a replayed callback
+    finds nothing rather than racing a concurrent one into two token exchanges.
+    """
+    pending = phase2.consume_oauth_state(conn, body.state.strip())
+    if pending is None or pending["user_id"] != user_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This authorization is unknown, already used, or expired. Start again.",
+        )
+
+    source_id = pending["source_id"]
+    source = phase2.get_source(conn, source_id, user_id=user_id) if source_id else None
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The source being connected is gone.")
+
+    try:
+        grant = build_oauth_client().exchange_code(
+            code=body.code,
+            redirect_uri=pending["redirect_uri"],
+            code_verifier=pending["code_verifier"],
+        )
+    except SourceError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    if not grant.refresh_token:
+        # Without a refresh token the connection dies in an hour and cannot be renewed.
+        # Refusing now, with an explanation, beats a mailbox that stops working silently.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The provider returned no refresh token, so this connection could not be "
+            "kept alive. Revoke Motet's access in your account settings and try again.",
+        )
+
+    scopes = grant.scopes or (GMAIL_READONLY_SCOPE,)
+    try:
+        phase2.store_source_credential(
+            conn,
+            wrapper,
+            user_id=user_id,
+            source_id_=source.id,
+            provider=PROVIDER,
+            purpose=CredentialPurpose.REFRESH.value,
+            secret=grant.refresh_token,
+            scopes=scopes,
+        )
+    except VaultError as exc:
+        # The vault refused — in a deployed environment that means KMS is not reachable or
+        # not permitted. Never fall back to storing the token unsealed: invariant 8 has no
+        # degraded mode.
+        logger.error("could not seal the credential for source %s: %s", source.id, exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "This credential could not be stored securely, so it was not stored at all.",
+        ) from exc
+
+    phase2.set_source_active(conn, source.id, active=True)
+    enqueue_source_poll(conn, source.id)
+
+    return SourceResponse(
+        id=source.id,
+        kind=source.kind,
+        name=source.name,
+        active=True,
+        connected=True,
+        scopes=list(scopes),
+        last_polled_at=source.last_polled_at,
+        last_error=None,
+        created_at=source.created_at,
+    )
+
+
+@app.post("/v1/sources/{source_id}/poll", response_model=SourceResponse, tags=["sources"])
+def poll_source(conn: Conn, user_id: User, source_id: Annotated[str, Path()]) -> SourceResponse:
+    """Queue a poll now, rather than waiting for the scheduler.
+
+    Enqueues; it does not fetch. Polling is serialized per source, so asking twice in a row
+    produces one run and one deferral rather than two overlapping fetches.
+    """
+    source = phase2.get_source(conn, source_id, user_id=user_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
+    if not source.active:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This source is paused or not connected yet.")
+    enqueue_source_poll(conn, source.id)
+    credential = phase2.get_source_credential(
+        conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
+    )
+    return SourceResponse(
+        id=source.id,
+        kind=source.kind,
+        name=source.name,
+        active=source.active,
+        connected=credential is not None,
+        scopes=list(credential.scopes) if credential else [],
+        last_polled_at=source.last_polled_at,
+        last_error=source.last_error,
+        created_at=source.created_at,
+    )
+
+
+@app.delete(
+    "/v1/sources/{source_id}/credentials",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["sources"],
+)
+def disconnect_source(conn: Conn, user_id: User, source_id: Annotated[str, Path()]) -> Response:
+    """Forget a mailbox's credentials and stop polling it.
+
+    The source row and everything it ingested survive: deleting the source would cascade
+    to its source items and take the claims that cite them with it, which would silently
+    break the transcript of an episode the user has already heard.
+    """
+    source = phase2.get_source(conn, source_id, user_id=user_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
+    phase2.delete_source_credentials(conn, source.id)
+    phase2.set_source_active(conn, source.id, active=False)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Phase 2: smart episodes ---------------------------------------------------------
+
+
+@app.post(
+    "/v1/episodes/smart",
+    response_model=EpisodeResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["episodes"],
+)
+def create_smart_episode(
+    body: CreateSmartEpisodeRequest, conn: Conn, user_id: User
+) -> EpisodeResponse:
+    """Assemble an episode by rule rather than by "everything unread".
+
+    The rule is validated **here**, at creation, and stored as a snapshot on the episode.
+    Validating at assembly time instead would surface a typo as a failed episode minutes
+    later on a queue, with the mistake and the error in different places.
+    """
+    try:
+        rule = SmartRule.from_json(body.rule.model_dump())
+    except RuleError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    episode_id = enqueue_smart_episode(
+        conn,
+        user_id=user_id,
+        title=body.title.strip(),
+        max_duration_ms=body.max_duration_ms,
+        rule=rule,
+    )
+    episode = repo.get_episode(conn, episode_id, user_id=user_id)
+    assert episode is not None
+    return _episode(conn, episode)
+
+
+# --- Phase 2: read state from the audio side -----------------------------------------
+
+
+@app.post(
+    "/v1/episodes/{episode_id}/progress",
+    response_model=ListenProgressResponse,
+    tags=["episodes"],
+)
+def report_listen_progress(
+    body: ListenProgressRequest,
+    conn: Conn,
+    user_id: User,
+    episode_id: Annotated[str, Path()],
+) -> ListenProgressResponse:
+    """Record how far the listener has got, and mark what they have passed as read.
+
+    **This is how the audio surface participates in invariant 5.** Phase 1 only had the
+    visual side plus an all-or-nothing "mark listened"; this makes partial listening count.
+    A story is read once its segment has been *passed* — the comparison is against the end
+    of the segment, because marking at the start would tick a story off on its first word.
+
+    Position is monotonic on the server (invariant 4: we own it). A client that seeks
+    backwards is reviewing, not un-listening, so a lower report never lowers the recorded
+    position and never un-marks a story.
+    """
+    try:
+        position, marked = phase2.record_listen_progress(
+            conn,
+            user_id=user_id,
+            episode_id_=episode_id,
+            listened_through_ms=body.listened_through_ms,
+        )
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.") from exc
+    return ListenProgressResponse(
+        episode_id=episode_id, listened_through_ms=position, news_items_marked_read=marked
+    )
+
+
+# --- Phase 2: highlights -------------------------------------------------------------
+
+
+@app.get("/v1/highlights", response_model=list[HighlightResponse], tags=["highlights"])
+def list_highlights(conn: Conn, user_id: User) -> list[HighlightResponse]:
+    """Every saved passage, newest first."""
+    return [_highlight(item) for item in phase2.list_highlights(conn, user_id)]
+
+
+@app.post(
+    "/v1/highlights",
+    response_model=HighlightResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["highlights"],
+)
+def save_highlight(body: SaveHighlightRequest, conn: Conn, user_id: User) -> HighlightResponse:
+    """Save a passage — what the `save_highlight` platform tool calls.
+
+    **The quote is read out of the source item, not taken from the caller.** That is the
+    whole trust property: in the voice case the caller is a model, and a model that quoted
+    loosely would otherwise write its own paraphrase into the user's highlights where it
+    would look verbatim.
+
+    Anchored to the source span and nothing else. Claims are rewritten on every script
+    retry and audio offsets move on every re-render; `source_items.text` never changes.
+    `episode_id` and `anchor_ms` record where the listener was — provenance, not anchor.
+
+    `news_item_id` is checked against the source item's actual story rather than trusted,
+    for the same reason the quote is — a source item belongs to exactly one news item, so
+    the caller's copy of that pairing can only ever be redundant or wrong.
+    """
+    if body.span_end <= body.span_start:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "span_end must be greater than span_start: an empty span anchors nothing.",
+        )
+    saved = phase2.save_highlight(
+        conn,
+        user_id=user_id,
+        news_item_id=body.news_item_id,
+        source_item_id_=body.source_item_id,
+        span_start=body.span_start,
+        span_end=body.span_end,
+        note=body.note,
+        episode_id_=body.episode_id,
+        anchor_ms=body.anchor_ms,
+    )
+    if saved is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "That span does not resolve inside that source item, or that source item is "
+            "not part of that news item. Either way it is not an anchor.",
+        )
+    return _highlight(saved)
+
+
+@app.delete(
+    "/v1/highlights/{highlight_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["highlights"]
+)
+def delete_highlight(conn: Conn, user_id: User, highlight_id: Annotated[str, Path()]) -> Response:
+    if not phase2.delete_highlight(conn, user_id=user_id, highlight_id_=highlight_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such highlight.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Phase 2: subtitles and chapters -------------------------------------------------
+
+
+@app.get(
+    "/v1/episodes/{episode_id}/transcript.vtt",
+    tags=["feed"],
+    response_class=Response,
+    responses={200: {"content": {"text/vtt": {}}, "description": "WebVTT captions"}},
+)
+def episode_transcript(
+    conn: Conn, user_id: FeedUser, episode_id: Annotated[str, Path()]
+) -> Response:
+    """WebVTT captions, one cue per spoken claim.
+
+    Authenticated by the **feed** token rather than the API token, because the client that
+    fetches this is the podcast app — it found the URL in a `<podcast:transcript>` tag and
+    will send exactly the credential that was in it.
+    """
+    episode, titles = _episode_with_titles(conn, user_id, episode_id)
+    return Response(
+        content=transcript_vtt(episode, titles),
+        media_type="text/vtt",
+        headers={"Content-Disposition": f'inline; filename="{episode.id}.vtt"'},
+    )
+
+
+@app.get(
+    "/v1/episodes/{episode_id}/chapters.json",
+    tags=["feed"],
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/json+chapters": {}},
+            "description": "Podcasting 2.0 chapters",
+        }
+    },
+)
+def episode_chapters(conn: Conn, user_id: FeedUser, episode_id: Annotated[str, Path()]) -> Response:
+    """The Podcasting 2.0 chapters document, one chapter per story.
+
+    Served with `application/json+chapters`, the media type the namespace specifies and the
+    one the `<podcast:chapters>` tag declares. A client that fetched `application/json`
+    here and got a mismatch would be within its rights to ignore the document.
+    """
+    episode, titles = _episode_with_titles(conn, user_id, episode_id)
+    return Response(content=chapters_json(episode, titles), media_type="application/json+chapters")
+
+
+def _episode_with_titles(
+    conn: psycopg.Connection[Any], user_id: str, episode_id: str
+) -> tuple[StoredEpisode, dict[str, str]]:
+    """An episode plus its story titles, or a 404.
+
+    Requires the episode to have audio: before TTS runs, every claim's timing is zero, so
+    a transcript would be a stack of cues at 00:00 and chapters would all point at the
+    start. An absent document reads as "not available yet"; a wrong one reads as broken.
+    """
+    episode = repo.get_episode(conn, episode_id, user_id=user_id)
+    if episode is None or not episode.has_audio:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "This episode has no rendered audio to caption yet."
+        )
+    titles = {
+        item_id: item.title
+        for item_id, item in repo.load_news_items(
+            conn, [segment.news_item_id for segment in episode.segments]
+        ).items()
+    }
+    return episode, titles
+
+
+def _highlight(item: Highlight) -> HighlightResponse:
+    return HighlightResponse(
+        id=item.id,
+        news_item_id=item.news_item_id,
+        source_item_id=item.source_item_id,
+        span=SourceSpanModel(
+            source_item_id=item.source_item_id, start=item.span_start, end=item.span_end
+        ),
+        quote=item.quote,
+        note=item.note,
+        episode_id=item.episode_id,
+        anchor_ms=item.anchor_ms,
+        created_at=item.created_at,
+    )
+
+
+def repo_sources(conn: psycopg.Connection[Any], user_id: str) -> list[StoredSource]:
+    """Named separately so the route's own name can be `list_sources`."""
+    return phase2.list_sources(conn, user_id)

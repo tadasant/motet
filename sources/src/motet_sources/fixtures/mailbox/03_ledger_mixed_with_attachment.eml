@@ -1,0 +1,41 @@
+From: The Ledger <editor@ledger.example>
+To: reader@example.com
+Subject: =?iso-8859-1?Q?The_Ledger_=97_Cedar=27s_fourth_fund?=
+Date: Thu, 20 Aug 2026 11:45:02 +0100
+Message-ID: <ledger-0820@ledger.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed-9a"
+
+--mixed-9a
+Content-Type: multipart/alternative; boundary="alt-7b"
+
+--alt-7b
+Content-Type: text/html; charset="utf-8"
+
+<html><body><p>Cedar Capital closed a $400 million growth fund.</p></body></html>
+--alt-7b
+Content-Type: text/plain; charset="utf-8"
+
+The Ledger — Thursday
+
+Cedar Capital closed a $400 million growth fund on Thursday, its fourth and
+largest, the firm said in a statement.
+
+The fund will write cheques of $15 million to $40 million into software
+companies with more than $10 million of revenue. Cedar has backed 61 companies
+since 2016, including three that have since gone public.
+
+Managing partner Ines Duarte said the firm turned away roughly $150 million of
+demand to keep the fund at its target size.
+
+Unsubscribe from this list
+(c) 2026 The Ledger
+
+--alt-7b--
+--mixed-9a
+Content-Type: application/pdf; name="fund-deck.pdf"
+Content-Disposition: attachment; filename="fund-deck.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgbm90IGEgcmVhbCBwZGY=
+--mixed-9a--

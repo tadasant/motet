@@ -1,0 +1,20 @@
+[project]
+name = "motet-vault"
+version = "0.1.0"
+description = "Envelope encryption for third-party source credentials"
+requires-python = ">=3.13"
+dependencies = [
+    "cryptography>=44.0",
+]
+
+[project.optional-dependencies]
+# Only a process that actually reaches Cloud KMS needs the SDK. Local and CI never do,
+# which is what keeps `bin/ci` offline.
+kms = ["google-cloud-kms>=3.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/motet_vault"]
