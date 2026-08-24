@@ -1396,21 +1396,18 @@ paths:
       - sources
   /v1/sources/connect:
     post:
-      description: 'Start connecting a mailbox: create the source and return a consent URL.
-
-
-        **The source row is created before consent completes**, and stays inactive until a
-
-        credential lands. That ordering is what lets the callback identify what it is
-
-        connecting *to* without trusting anything in the redirect: the source id is bound to
-
-        the stored `oauth_states` row, not carried in a parameter an attacker could change.
-
-
-        PKCE and a stored `state` are both required. `state` alone is a CSRF token; the PKCE
-
-        verifier is what makes an intercepted authorization code unusable.'
+      description: "Start connecting a mailbox: create the source and return a consent URL.\n\n**The source\
+        \ row is created before consent completes**, and stays inactive until a\ncredential lands. That\
+        \ ordering is what lets the callback identify what it is\nconnecting *to* without trusting anything\
+        \ in the redirect: the source id is bound to\nthe stored `oauth_states` row, not carried in a\
+        \ parameter an attacker could change.\n\nPKCE and a stored `state` are both required. `state`\
+        \ alone is a CSRF token; the PKCE\nverifier is what makes an intercepted authorization code unusable.\n\
+        \n**`redirect_uri` comes from the client, and that is safe rather than an oversight.**\nThe provider\
+        \ validates it against the URIs registered on the OAuth client and rejects\nanything else, so\
+        \ this route cannot be used to redirect a grant somewhere the owner of\nthat client did not allow\
+        \ \u2014 and reaching this route at all requires the API bearer\ntoken. It is a parameter because\
+        \ the SPA, a local dev server, and a future iOS app each\nhave a different one, and hardcoding\
+        \ one would mean a code change per client."
       operationId: connect_source_v1_sources_connect_post
       parameters:
       - in: header

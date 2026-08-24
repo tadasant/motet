@@ -143,11 +143,28 @@ def test_the_credential_never_appears_in_a_response(api: TestClient) -> None:
         json={"state": started.json()["state"], "code": "fake-auth-code"},
         headers=AUTH,
     )
-    rendered = json.dumps(done.json())
-    assert "fake-refresh" not in rendered
-    assert "fake-access" not in rendered
-    for body in (rendered, json.dumps(api.get("/v1/sources", headers=AUTH).json())):
-        assert "token" not in body.lower() or "api token" in body.lower()
+    # The exact values the fake provider issued — derived by hash from the code, so they
+    # are specific to this exchange rather than a constant a passing test could be blind to.
+    from motet_sources.fakes import _fake_token
+
+    issued = {
+        _fake_token("refresh", "fake-auth-code"),
+        _fake_token("access", "fake-auth-code"),
+    }
+    assert all(issued), "the fake must actually have issued something to look for"
+
+    for body in (
+        json.dumps(done.json()),
+        json.dumps(api.get("/v1/sources", headers=AUTH).json()),
+    ):
+        for secret in issued:
+            assert secret not in body
+        # And no field *shaped* like a credential, so a future response model that added
+        # one is caught even though its value would be unknown to this test.
+        for key in json.loads(body) if body.startswith("[") else [json.loads(body)]:
+            assert not any(
+                "token" in name or "secret" in name or "credential" in name for name in (key or {})
+            ), f"a credential-shaped field reached a response: {sorted(key)}"
 
 
 def test_a_replayed_callback_is_refused(api: TestClient) -> None:

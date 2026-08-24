@@ -463,6 +463,13 @@ export interface paths {
          *
          *     PKCE and a stored `state` are both required. `state` alone is a CSRF token; the PKCE
          *     verifier is what makes an intercepted authorization code unusable.
+         *
+         *     **`redirect_uri` comes from the client, and that is safe rather than an oversight.**
+         *     The provider validates it against the URIs registered on the OAuth client and rejects
+         *     anything else, so this route cannot be used to redirect a grant somewhere the owner of
+         *     that client did not allow — and reaching this route at all requires the API bearer
+         *     token. It is a parameter because the SPA, a local dev server, and a future iOS app each
+         *     have a different one, and hardcoding one would mean a code change per client.
          */
         post: operations["connect_source_v1_sources_connect_post"];
         delete?: never;
