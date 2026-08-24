@@ -53,7 +53,9 @@ COPY pyproject.toml uv.lock ./
 COPY api/pyproject.toml api/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
 COPY inference/pyproject.toml inference/pyproject.toml
+COPY sources/pyproject.toml sources/pyproject.toml
 COPY storage/pyproject.toml storage/pyproject.toml
+COPY vault/pyproject.toml vault/pyproject.toml
 COPY voice/pyproject.toml voice/pyproject.toml
 COPY workers/pyproject.toml workers/pyproject.toml
 
@@ -65,7 +67,9 @@ RUN uv sync --frozen --no-dev --no-install-workspace
 COPY api api
 COPY db db
 COPY inference inference
+COPY sources sources
 COPY storage storage
+COPY vault vault
 COPY voice voice
 COPY workers workers
 
