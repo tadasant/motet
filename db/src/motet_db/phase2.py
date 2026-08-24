@@ -551,7 +551,16 @@ def save_highlight(
     loosely would otherwise write its paraphrase into the user's saved highlights and it
     would look verbatim.
 
-    Returns ``None`` when the span does not resolve, which is the same rule
+    The same argument governs the *story* the highlight is filed under, so
+    ``news_item_id`` is written from ``news_item_sources`` rather than from the caller.
+    A source item belongs to exactly one news item — that column is UNIQUE — so the
+    pairing is a fact the database already holds, and the caller's copy of it is nothing
+    but an opportunity to be wrong. It is still required to *match*: a caller naming a
+    different story is confused about something, and quietly filing the passage under the
+    right story would hide that rather than report it.
+
+    Returns ``None`` when the span does not resolve, when the source item is not yet part
+    of any story, or when the caller names the wrong one. That is the same rule
     ``segment_claims`` enforces with a CHECK: an anchor that points at nothing is not an
     anchor. Saving the same span twice returns the existing highlight rather than a
     duplicate — voice and touch can both reach for one sentence.
@@ -562,10 +571,12 @@ def save_highlight(
         INSERT INTO highlights
             (id, user_id, news_item_id, source_item_id, span_start, span_end, quote,
              note, episode_id, anchor_ms)
-        SELECT %s, %s, %s, si.id, %s, %s, substring(si.text FROM %s FOR %s), %s, %s, %s
+        SELECT %s, %s, nis.news_item_id, si.id, %s, %s,
+               substring(si.text FROM %s FOR %s), %s, %s, %s
         FROM source_items si
-        WHERE si.id = %s AND si.user_id = %s AND %s >= 0 AND %s > %s
-          AND %s <= length(si.text)
+        JOIN news_item_sources nis ON nis.source_item_id = si.id
+        WHERE si.id = %s AND si.user_id = %s AND nis.news_item_id = %s
+          AND %s >= 0 AND %s > %s AND %s <= length(si.text)
         ON CONFLICT (user_id, source_item_id, span_start, span_end) DO UPDATE
             SET note = coalesce(EXCLUDED.note, highlights.note)
         RETURNING id, user_id, news_item_id, source_item_id, span_start, span_end,
@@ -574,7 +585,6 @@ def save_highlight(
         (
             highlight_id(),
             user_id,
-            news_item_id,
             span_start,
             span_end,
             # `substring` is 1-indexed and takes a length; the span is a half-open
@@ -586,6 +596,7 @@ def save_highlight(
             anchor_ms,
             source_item_id_,
             user_id,
+            news_item_id,
             span_start,
             span_end,
             span_start,

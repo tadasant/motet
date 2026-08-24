@@ -770,6 +770,10 @@ def save_highlight(body: SaveHighlightRequest, conn: Conn, user_id: User) -> Hig
     Anchored to the source span and nothing else. Claims are rewritten on every script
     retry and audio offsets move on every re-render; `source_items.text` never changes.
     `episode_id` and `anchor_ms` record where the listener was — provenance, not anchor.
+
+    `news_item_id` is checked against the source item's actual story rather than trusted,
+    for the same reason the quote is — a source item belongs to exactly one news item, so
+    the caller's copy of that pairing can only ever be redundant or wrong.
     """
     if body.span_end <= body.span_start:
         raise HTTPException(
@@ -790,7 +794,8 @@ def save_highlight(body: SaveHighlightRequest, conn: Conn, user_id: User) -> Hig
     if saved is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "That span does not resolve inside that source item, so it is not an anchor.",
+            "That span does not resolve inside that source item, or that source item is "
+            "not part of that news item. Either way it is not an anchor.",
         )
     return _highlight(saved)
 

@@ -1173,7 +1173,10 @@ paths:
         \ its own paraphrase into the user's highlights where it\nwould look verbatim.\n\nAnchored to\
         \ the source span and nothing else. Claims are rewritten on every script\nretry and audio offsets\
         \ move on every re-render; `source_items.text` never changes.\n`episode_id` and `anchor_ms` record\
-        \ where the listener was \u2014 provenance, not anchor."
+        \ where the listener was \u2014 provenance, not anchor.\n\n`news_item_id` is checked against the\
+        \ source item's actual story rather than trusted,\nfor the same reason the quote is \u2014 a source\
+        \ item belongs to exactly one news item, so\nthe caller's copy of that pairing can only ever be\
+        \ redundant or wrong."
       operationId: save_highlight_v1_highlights_post
       parameters:
       - in: header

@@ -323,6 +323,10 @@ export interface paths {
          *     Anchored to the source span and nothing else. Claims are rewritten on every script
          *     retry and audio offsets move on every re-render; `source_items.text` never changes.
          *     `episode_id` and `anchor_ms` record where the listener was — provenance, not anchor.
+         *
+         *     `news_item_id` is checked against the source item's actual story rather than trusted,
+         *     for the same reason the quote is — a source item belongs to exactly one news item, so
+         *     the caller's copy of that pairing can only ever be redundant or wrong.
          */
         post: operations["save_highlight_v1_highlights_post"];
         delete?: never;

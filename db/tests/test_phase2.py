@@ -674,6 +674,59 @@ def test_a_span_that_does_not_resolve_is_not_an_anchor(
     )
 
 
+def test_a_highlight_is_refused_when_the_caller_names_the_wrong_story(
+    db: psycopg.Connection[Any],
+) -> None:
+    """The pairing is read from `news_item_sources`, not taken from the caller.
+
+    A source item belongs to exactly one news item, so a caller's copy of that pairing can
+    only be redundant or wrong. Trusting it would file a passage quoting one story under
+    an unrelated one — and because the quote itself is read from the *source* item, the
+    row would look entirely well-formed: a real quote, a real story, no error anywhere.
+    """
+    news_id, source_id = story_with_source(db)
+    other_news_id, _ = story_with_source(db, text="Cedar closed its fourth fund at $400M.")
+    assert other_news_id != news_id
+
+    assert (
+        phase2.save_highlight(
+            db,
+            user_id=USER,
+            news_item_id=other_news_id,
+            source_item_id_=source_id,
+            span_start=0,
+            span_end=27,
+        )
+        is None
+    ), "a passage must not be filed under a story its source item does not belong to"
+    assert phase2.list_highlights(db, USER) == []
+
+
+def test_a_highlight_naming_a_story_that_does_not_exist_is_refused_not_raised(
+    db: psycopg.Connection[Any],
+) -> None:
+    """A hallucinated id is a 422, not a foreign-key violation surfacing as a 500.
+
+    In the voice case the caller is a model, and a stale or invented `news_item_id` is
+    exactly what it produces. Letting the FK constraint be the check turns an ordinary bad
+    argument into an unhandled error — and one that aborts the surrounding transaction.
+    """
+    _, source_id = story_with_source(db)
+    assert (
+        phase2.save_highlight(
+            db,
+            user_id=USER,
+            news_item_id="ni_does_not_exist",
+            source_item_id_=source_id,
+            span_start=0,
+            span_end=27,
+        )
+        is None
+    )
+    # The connection must still be usable — an FK violation would have poisoned it.
+    assert phase2.list_highlights(db, USER) == []
+
+
 def test_a_highlight_survives_its_episode(db: psycopg.Connection[Any]) -> None:
     """`episode_id` is provenance, not the anchor — so losing the episode keeps the quote.
 

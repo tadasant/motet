@@ -473,6 +473,31 @@ def test_a_highlight_with_an_unresolvable_span_is_refused(api: TestClient, _migr
     assert "anchor" in refused.json()["detail"]
 
 
+def test_a_highlight_naming_a_story_that_does_not_exist_is_a_422_not_a_500(
+    api: TestClient, _migrated: str
+) -> None:
+    """A hallucinated `news_item_id` must be an ordinary bad argument.
+
+    This is what the voice tool call actually gets wrong. If the foreign key were the only
+    check, the same request would surface as an unhandled 500 — and the span here is
+    valid, so nothing upstream would have caught it first.
+    """
+    episode = paste_and_render(api, _migrated)
+    claim = episode["segments"][0]["claims"][0]
+    refused = api.post(
+        "/v1/highlights",
+        json={
+            "news_item_id": "ni_hallucinated",
+            "source_item_id": claim["span"]["source_item_id"],
+            "span_start": claim["span"]["start"],
+            "span_end": claim["span"]["end"],
+        },
+        headers=AUTH,
+    )
+    assert refused.status_code == 422, refused.text
+    assert api.get("/v1/highlights", headers=AUTH).json() == []
+
+
 def test_an_inverted_span_is_refused(api: TestClient) -> None:
     refused = api.post(
         "/v1/highlights",
