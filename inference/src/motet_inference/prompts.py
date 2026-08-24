@@ -140,8 +140,10 @@ Every factual assertion you speak must be covered by the quote attached to it. D
 state a number, a name, or a date that its quote does not contain. If a source does not
 support something, leave it out — an omission is fine, an invention ends the product.
 
-Two to four claims per segment. Open the first segment with a one-line greeting inside
-its first claim's text if it reads naturally; do not add a sign-off segment."""
+Two to four claims per segment, and no greeting or sign-off. Every word you write has to
+be covered by the quote attached to it, and "good morning" is not in anybody's newsletter
+— an opening pleasantry would be dropped by the grounding gate along with the claim
+carrying it, which would cost the lead story its first sentence."""
 
 SCRIPT_SCHEMA = JsonSchemaFormat(
     name="briefing_script",

@@ -312,12 +312,15 @@ def episode_audio(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "This episode's audio is no longer available."
         ) from exc
+    # Deliberately no `Accept-Ranges: bytes`. Podcast clients do range-request large files,
+    # but this branch serves the whole body and ignores `Range` — advertising support we do
+    # not have would tell a resuming client it had resumed when it had started over. The
+    # deployed backend hands out a signed URL above and gets real range support from object
+    # storage; this path is dev and CI only.
     return Response(
         content=data,
         media_type=episode.audio_media_type or "audio/mpeg",
-        # Podcast clients range-request large files; advertising support keeps a resumed
-        # download from starting over.
-        headers={"Accept-Ranges": "bytes", "Content-Length": str(len(data))},
+        headers={"Content-Length": str(len(data))},
     )
 
 

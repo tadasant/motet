@@ -48,6 +48,32 @@ logger = logging.getLogger("motet.worker.handlers")
 #: they download the file, and a `.mp3` that is really a WAV is a support ticket.
 _EXTENSIONS = {MPEG_MEDIA_TYPE: "mp3", WAV_MEDIA_TYPE: "wav"}
 
+#: How much longer the spoken script is than the summary assembly estimates from.
+#:
+#: Assembly has to apply the duration cap before a script exists, so it estimates from
+#: each story's one-or-two-sentence summary. The script then writes two to four narrated
+#: claims for that story — several times longer. Estimating from the summary alone made
+#: assembly pick far more stories than could fit, and the script-stage trim then threw
+#: most of them away after they had already been written.
+#:
+#: A blunt multiplier rather than anything cleverer: the honest answer is that nobody
+#: knows the length until the script exists, and this only has to be close enough that
+#: the trim downstream is a backstop rather than the normal path.
+SCRIPT_EXPANSION = 3
+
+#: How much longer the spoken script is than the summary it is written from.
+#:
+#: Assembly has to apply the duration cap before any script exists, so it estimates from
+#: each story's summary — one or two sentences. The script stage then writes two to four
+#: narrated claims for that story, which is several times more words. Estimating 1:1 makes
+#: assembly systematically over-fill the episode, and the script-stage trim would then have
+#: to throw stories away on nearly every run.
+#:
+#: A crude constant rather than a model of the script, deliberately: the script stage
+#: re-applies the cap against the real copy, so this only has to be close enough to keep
+#: that backstop from firing routinely.
+SCRIPT_EXPANSION = 3
+
 
 class HandlerError(RuntimeError):
     """A stage failed in a way that is worth retrying."""
@@ -136,8 +162,11 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
     building a product instead of a factory.
 
     The cap is applied against an *estimate*, because no audio exists yet and the
-    alternative is synthesizing everything and discarding some of it — which is the
-    largest cost line in the system.
+    alternative is synthesizing everything and discarding some of it — which is the largest
+    cost line in the system. The estimate is scaled by :data:`SCRIPT_EXPANSION`, because
+    what gets spoken is the script rather than the summary this is measuring. The script
+    stage applies the cap again against the real copy; this pass is what keeps that one
+    from having to discard stories on every run.
     """
     episode_id = _require(payload, "episode_id")
     episode = repo.get_episode(context.conn, episode_id)
@@ -154,7 +183,7 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
     chosen: list[repo.SegmentSpec] = []
     budget_ms = episode.max_duration_ms
     for item in unread:
-        estimate = estimate_duration_ms(item.summary)
+        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION * SCRIPT_EXPANSION
         if chosen and estimate > budget_ms:
             break
         # The first item always goes in, even if it alone exceeds the cap: an episode with
@@ -232,23 +261,27 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
             + "; ".join(f"{f.claim_text[:80]!r}: {f.reason}" for f in report.failures[:5])
         )
 
-    specs = [
-        repo.SegmentSpec(
-            news_item_id=segment.news_item_id,
-            text=segment.text,
-            duration_ms=estimate_duration_ms(segment.text),
-            claims=tuple(
-                repo.ClaimSpec(
-                    text=claim.text,
-                    source_item_id=claim.span.source_item_id,
-                    span_start=claim.span.start,
-                    span_end=claim.span.end,
-                )
-                for claim in segment.claims
-            ),
-        )
-        for segment in grounded.segments
-    ]
+    specs = _within_cap(
+        [
+            repo.SegmentSpec(
+                news_item_id=segment.news_item_id,
+                text=segment.text,
+                duration_ms=estimate_duration_ms(segment.text),
+                claims=tuple(
+                    repo.ClaimSpec(
+                        text=claim.text,
+                        source_item_id=claim.span.source_item_id,
+                        span_start=claim.span.start,
+                        span_end=claim.span.end,
+                    )
+                    for claim in segment.claims
+                ),
+            )
+            for segment in grounded.segments
+        ],
+        episode.max_duration_ms,
+        episode_id,
+    )
     repo.replace_segments(context.conn, episode_id, specs)
     repo.set_episode_state(context.conn, episode_id, EpisodeState.RENDERING)
     enqueue(context.conn, Queue.TTS, {"episode_id": episode_id})
@@ -283,6 +316,45 @@ def _drop_ungrounded(script: Script, report: GroundingReport) -> Script:
 
 def _claim_count(script: Script) -> int:
     return sum(len(segment.claims) for segment in script.segments)
+
+
+def _within_cap(
+    specs: list[repo.SegmentSpec], max_duration_ms: int, episode_id: str
+) -> list[repo.SegmentSpec]:
+    """Enforce the episode's duration cap against the *script*, before any audio is paid for.
+
+    The assemble stage already applied the cap, but it could only apply it to an estimate
+    made from each story's one-or-two-sentence summary — and the script then writes two to
+    four narrated claims per story. That is several times longer, so an episode capped at
+    twenty minutes could comfortably publish forty. Nobody would see it until it was on a
+    phone, because every stage in between succeeded.
+
+    So the cap is applied a second time here, against the copy that will actually be
+    spoken. This is the last point at which trimming is free: after this the segments go to
+    TTS, and TTS is the largest cost line in the system.
+
+    The first segment always survives, however long it is — the same rule assembly uses.
+    An episode that runs over is a worse briefing; an episode with nothing in it is not a
+    briefing at all.
+    """
+    kept: list[repo.SegmentSpec] = []
+    total = 0
+    for spec in specs:
+        if kept and total + spec.duration_ms > max_duration_ms:
+            break
+        kept.append(spec)
+        total += spec.duration_ms
+
+    if len(kept) < len(specs):
+        logger.warning(
+            "episode %s scripted to ~%d ms against a %d ms cap; keeping %d of %d segments",
+            episode_id,
+            sum(spec.duration_ms for spec in specs),
+            max_duration_ms,
+            len(kept),
+            len(specs),
+        )
+    return kept
 
 
 # --- TTS -----------------------------------------------------------------------------

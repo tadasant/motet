@@ -370,3 +370,38 @@ class TestLocateQuote:
         span = locate_quote(text, quote)
         assert span is not None
         assert text[span[0] : span[1]] == quote
+
+
+class TestScriptSegmentDedup:
+    def test_a_second_segment_for_one_story_is_dropped(self) -> None:
+        """`UNIQUE (episode_id, news_item_id)` means the database refuses the repeat.
+
+        Letting it through turns a model quirk into a unique violation that fails the whole
+        episode five times over before anyone sees it, instead of a story told once.
+        """
+        claim = {
+            "text": "Acme closed a round.",
+            "quote": "Acme announced the round on Tuesday",
+            "source_item_id": "si_1",
+        }
+        client = canned(
+            {
+                "segments": [
+                    {"news_item_id": "ni_1", "claims": [claim]},
+                    {"news_item_id": "ni_1", "claims": [claim]},
+                ]
+            }
+        )
+        script = ClaudeScriptGenerator(client).generate([STORY], SOURCES)
+
+        assert [segment.news_item_id for segment in script.segments] == ["ni_1"]
+
+
+class TestScriptPrompt:
+    def test_does_not_ask_for_an_ungroundable_greeting(self) -> None:
+        """A greeting cannot be covered by a quote, so the grounding gate would drop the
+        claim carrying it — costing the lead story its first sentence."""
+        from motet_inference.prompts import SCRIPT_SYSTEM
+
+        assert "greeting" in SCRIPT_SYSTEM  # it is addressed...
+        assert "no greeting or sign-off" in SCRIPT_SYSTEM  # ...by forbidding it

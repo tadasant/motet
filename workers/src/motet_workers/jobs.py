@@ -45,6 +45,18 @@ BACKOFF_SECONDS: tuple[int, ...] = (5, 30, 120, 600)
 #: holder is another ingestion run for the same user, which finishes in seconds.
 BUSY_RETRY_SECONDS = 5
 
+#: How long a ``running`` job may go untouched before another worker may take it.
+#:
+#: Without this a worker killed mid-job — a Cloud Run task timeout, an OOM, a revision
+#: replacement, a SIGKILL — leaves its row in ``running`` forever. Nothing would ever
+#: claim it again, the episode would sit in ``rendering``, and the only recovery would be
+#: hand-written SQL against production, which invariant 10 forbids outright.
+#:
+#: Longer than the slowest stage can legitimately take: TTS for a full episode is many
+#: Cartesia calls at a 180s timeout each. Reclaiming a job that is merely slow would run
+#: it twice, which is the more expensive mistake of the two.
+STALE_LEASE_SECONDS = 1800
+
 
 @dataclass(frozen=True)
 class Job:
@@ -85,10 +97,14 @@ def claim(conn: psycopg.Connection[Any], queue: Queue) -> Job | None:
     several workers at once: a row another transaction already holds is skipped rather
     than waited on, so N workers claim N different jobs instead of queueing behind one.
 
-    Commit before running the job. The row is marked ``running`` so a crash leaves
-    evidence, and ``attempts`` is incremented on claim rather than on failure so a job
-    that kills its worker outright still counts toward the retry ceiling — otherwise a
-    poison job retries forever.
+    Commit before running the job. ``attempts`` is incremented on claim rather than on
+    failure so a job that kills its worker outright still counts toward the retry ceiling
+    — otherwise a poison job retries forever.
+
+    A ``running`` row whose lease has expired is claimable again. That is the only thing
+    standing between a worker killed mid-job and a job nobody ever runs: the process that
+    would have marked it done is gone, so without a lease the row is stranded and the only
+    fix is manual SQL against production.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -97,14 +113,22 @@ def claim(conn: psycopg.Connection[Any], queue: Queue) -> Job | None:
             SET state = 'running', locked_at = now(), attempts = attempts + 1, updated_at = now()
             WHERE id = (
                 SELECT id FROM jobs
-                WHERE queue = %s AND state = 'ready' AND run_at <= now()
+                WHERE queue = %s
+                  AND (
+                    (state = 'ready' AND run_at <= now())
+                    -- Lease reclaim. A worker that died mid-job left this row `running`
+                    -- and nothing else would ever pick it up. `attempts` was already
+                    -- incremented when it was first claimed, so the retry ceiling still
+                    -- bounds a job that kills every worker that touches it.
+                    OR (state = 'running' AND locked_at < now() - make_interval(secs => %s))
+                  )
                 ORDER BY run_at, id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
             RETURNING id, queue, payload, attempts, serialize_key
             """,
-            (queue.value,),
+            (queue.value, STALE_LEASE_SECONDS),
         )
         row = cur.fetchone()
     if row is None:

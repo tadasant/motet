@@ -419,3 +419,95 @@ class TestFeedTokens:
     ) -> None:
         assert repo.user_for_feed_token(db, "") is None
         assert repo.user_for_feed_token(db, "not-a-token") is None
+
+
+class TestDurationCap:
+    def test_the_cap_is_applied_again_to_the_script_not_just_the_summary(self) -> None:
+        """The finding this test exists for: assembly capped an estimate, scripting did not.
+
+        Assembly measures a story's one-or-two-sentence summary; the script then writes two
+        to four narrated claims for it. Without a second pass an episode capped at twenty
+        minutes could publish forty, and nothing between here and a phone would notice.
+        """
+        from motet_workers.handlers import _within_cap
+
+        specs = [
+            repo.SegmentSpec(news_item_id=f"ni_{i}", text="x", duration_ms=10_000, claims=())
+            for i in range(6)
+        ]
+        # Two fit inside 25s; the third would take the total to 30s, so it is cut.
+        kept = _within_cap(specs, 25_000, "ep_x")
+        assert [spec.news_item_id for spec in kept] == ["ni_0", "ni_1"]
+
+    def test_the_first_segment_survives_however_long_it_is(self) -> None:
+        """An episode that runs over is a worse briefing; an empty one is not a briefing."""
+        from motet_workers.handlers import _within_cap
+
+        specs = [repo.SegmentSpec(news_item_id="ni_0", text="x", duration_ms=999_999, claims=())]
+        assert _within_cap(specs, 1_000, "ep_x") == specs
+
+    def test_assembly_estimates_the_script_rather_than_the_summary(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """Assembly's estimate is scaled, so the script-stage trim is a backstop.
+
+        Estimating from the summary alone made assembly pick far more stories than could
+        fit, and the trim then discarded scripts that had already been written and paid for.
+        """
+        from motet_workers.handlers import SCRIPT_EXPANSION
+
+        assert SCRIPT_EXPANSION > 1
+        for index in range(6):
+            enqueue_paste(
+                db,
+                user_id=USER,
+                title=f"Story number {index}",
+                text=f"Story number {index}. " + " ".join(["word"] * 60),
+            )
+        db.commit()
+        drain(Queue.INTEGRATE, _migrated)
+
+        # ~24s of summary per story unscaled, ~72s scaled: the cap has to bite sooner.
+        episode_id = enqueue_episode(db, user_id=USER, title="Short", max_duration_ms=100_000)
+        db.commit()
+        drain(Queue.ASSEMBLE, _migrated)
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert 0 < len(episode.segments) <= 2
+
+
+class TestDedupWindow:
+    def test_the_cap_keeps_the_most_recent_stories(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """Capping an oldest-first ordering would keep only the stale end of the backlog.
+
+        A follow-up about something from this morning would then find nothing to merge
+        into — exactly the large-paste case the cap is supposed to bound.
+        """
+        for index in range(5):
+            item_id = repo.insert_news_item(
+                db,
+                user_id=USER,
+                title=f"Story {index}",
+                summary="s",
+                source_item_id_=repo.insert_source_item(
+                    db, user_id=USER, title=f"Story {index}", text=f"Story {index}. Body."
+                ).id,
+            )
+            # Distinct timestamps, explicitly. `now()` is *transaction* time in Postgres, so
+            # rows written in one transaction share it and the ordering falls through to a
+            # random id. Real ingestion writes one source item per job, and therefore per
+            # transaction, so this is what production actually looks like.
+            db.execute(
+                "UPDATE news_items SET created_at = now() - make_interval(mins => %s) "
+                "WHERE id = %s",
+                (10 - index, item_id),
+            )
+        db.commit()
+
+        window = repo.news_item_window(db, USER, max_items=2)
+        titles = [item.title for item in window]
+
+        assert titles == ["Story 3", "Story 4"]  # newest two, re-sorted oldest-first

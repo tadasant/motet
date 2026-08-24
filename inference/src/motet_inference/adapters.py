@@ -168,11 +168,22 @@ class ClaudeScriptGenerator:
         known = {item.id: item for item in news_items}
 
         segments: list[ScriptSegment] = []
+        spoken_for: set[str] = set()
         for raw_segment in _list_of_objects(data.get("segments"), what="script segments"):
             news_item_id = require_str(raw_segment, "news_item_id", what="script segment")
             news_item = known.get(news_item_id)
             if news_item is None:
                 logger.warning("script names unknown news item %r; dropping segment", news_item_id)
+                continue
+            if news_item_id in spoken_for:
+                # An episode holds at most one segment per news item — the database says so
+                # with a UNIQUE constraint. Dropping the repeat here turns a model quirk
+                # into a story told once, rather than into a unique violation that fails the
+                # whole episode five times over before anyone sees it.
+                logger.warning(
+                    "script returned a second segment for %s; keeping only the first",
+                    news_item_id,
+                )
                 continue
             claims = self._claims_for(raw_segment, news_item, sources)
             if not claims:
@@ -181,6 +192,7 @@ class ClaudeScriptGenerator:
                     news_item_id,
                 )
                 continue
+            spoken_for.add(news_item_id)
             segments.append(ScriptSegment(news_item_id=news_item_id, claims=claims))
         return Script(segments=tuple(segments))
 

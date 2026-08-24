@@ -153,13 +153,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
+    # Before anything else, and before claiming any job. A Cloud Run job that cannot reach
+    # a model should fail immediately and visibly, rather than claim work it will then fail
+    # to finish — and it should report *that* rather than whichever check happens to run
+    # first. Ordering this ahead of the database check keeps the credential failure the one
+    # you see when both are wrong.
+    logger.info("llm: %s", validate_llm_startup().describe())
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         parser.error("DATABASE_URL is not set")
-
-    # Before claiming any job. A Cloud Run job that cannot reach a model should fail
-    # immediately and visibly, rather than claim work it will then fail to finish.
-    logger.info("llm: %s", validate_llm_startup().describe())
 
     queue = Queue(args.queue)
     if args.poll_seconds <= 0:

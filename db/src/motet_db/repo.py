@@ -136,19 +136,29 @@ def news_item_window(
     """The stories a newly arrived source item is integrated against.
 
     Everything unread, plus anything recent enough that a follow-up should still merge
-    into it. Ordered oldest-first and capped, so the rendering of this window is stable
-    across calls in one ingestion run — which is what makes the prompt cache pay off
-    (the window is the large, stable prefix; the source item being integrated is not).
+    into it. Ordered oldest-first, so the rendering of this window is stable across calls
+    in one ingestion run — which is what makes the prompt cache pay off (the window is the
+    large, stable prefix; the source item being integrated is not).
+
+    **The cap keeps the most RECENT items, then re-sorts them oldest-first.** Applying the
+    limit to an oldest-first ordering would do the opposite of what the cap is for: once a
+    user has more than ``max_items`` qualifying stories, the window would contain only the
+    stale end of the backlog, so a follow-up newsletter about something from this morning
+    would find nothing to merge into and duplicate the story. That is precisely the
+    large-paste case the cap exists to bound.
     """
     cutoff = (now or _now(conn)) - timedelta(days=WINDOW_DAYS)
     rows = _all(
         conn,
         """
-        SELECT id, user_id, title, summary, read_at, created_at
-        FROM news_items
-        WHERE user_id = %s AND (read_at IS NULL OR created_at >= %s)
+        SELECT * FROM (
+            SELECT id, user_id, title, summary, read_at, created_at
+            FROM news_items
+            WHERE user_id = %s AND (read_at IS NULL OR created_at >= %s)
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+        ) recent
         ORDER BY created_at, id
-        LIMIT %s
         """,
         (user_id, cutoff, max_items),
     )
