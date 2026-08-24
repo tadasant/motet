@@ -1,9 +1,10 @@
 """Contract tests for the LLM provider seam.
 
-Every test here runs offline. The OpenRouter adapter is exercised end to end through an
-``httpx.MockTransport``, which drives the real translate-send-parse path without a
-network or a key — invariant 7 says no test in this repo may make a vendor call, and the
-one test that *would* is skipped unless someone deliberately opts in (see the bottom).
+Every test here runs offline, with no exceptions. The OpenRouter adapter is exercised
+end to end through an ``httpx.MockTransport``, which drives the real translate-send-parse
+path without a network and without a key — invariant 7 says no test in this repo may make
+a real vendor call, and that is meant absolutely. Confirming a slug or a reasoning config
+against the live vendor is a thing to do by hand, outside the suite.
 
 Three of these are the ones worth understanding, because each pins a specific way this
 integration is known to fail quietly:
@@ -23,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 import httpx
@@ -529,34 +529,6 @@ def test_a_connection_failure_becomes_a_transport_error() -> None:
 
     with pytest.raises(LlmTransportError, match="request failed"):
         a_client(httpx.MockTransport(fail)).complete(a_request())
-
-
-# ------------------------------------------------------------------------- live smoke
-
-
-@pytest.mark.skipif(
-    os.environ.get("MOTET_LLM_LIVE_TEST") != "1",
-    reason="live vendor call: opt in with MOTET_LLM_LIVE_TEST=1 and a real key",
-)
-def test_live_openrouter_call() -> None:
-    """A single real call, run by hand — never by CI.
-
-    Guarded by an opt-in variable rather than by the presence of a key, so that a
-    developer with ``OPENROUTER_API_KEY`` in their shell cannot spend money by running
-    the suite. Asserts the two things that a stub cannot prove: that the slug resolves at
-    the vendor, and that a reasoning request actually takes effect there.
-    """
-    client = OpenRouterClient(resolve_credential())
-    response = client.complete(
-        LlmRequest(
-            model=DEFAULT_MODEL,
-            messages=(Message.of("user", "Reply with the single word: motet"),),
-            max_output_tokens=64,
-            reasoning=Reasoning(effort="low"),
-        )
-    )
-    assert response.text.strip()
-    assert response.reasoning_applied
 
 
 # ------------------------------------------------- regressions from the fresh-eyes review

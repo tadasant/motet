@@ -88,11 +88,9 @@ bin/check-openrouter-models sonnet   # also list live slugs matching a substring
 It is **not** part of `bin/ci`, because CI is offline by design. Run it when adding a model
 or when a slug looks stale, and update `KNOWN_MODELS` from what it reports.
 
-There is one live-vendor test, and it never runs by accident:
-
-```bash
-MOTET_LLM_LIVE_TEST=1 OPENROUTER_API_KEY=... uv run pytest inference/tests/test_llm.py -k live
-```
+**No test here calls a vendor**, not even behind an opt-in flag — invariant 7 is
+absolute. The adapter is covered end to end against a stub transport instead. To confirm
+a slug or a reasoning config against the live API, do it by hand outside the suite.
 
 ## Migrations
 
