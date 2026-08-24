@@ -2,9 +2,14 @@
 #
 # The one CI command: migrations, tests, typecheck — both halves of the repo.
 #
-# The GitHub Actions workflow calls this and nothing else, so anything CI checks can be
-# reproduced locally with one command. If you add a check, add it HERE, not to the
-# workflow: a check that only exists in YAML cannot be run on a laptop and will rot.
+# If you add a check, add it HERE, not to the workflow: a check that only exists in YAML
+# cannot be run on a laptop and will rot.
+#
+# ONE DELIBERATE EXCEPTION: the container images are built by `bin/build-images`, which
+# CI runs as its own job. They are not in here because they need a Docker daemon, and
+# this script needs only a Postgres — a laptop without Docker must still be able to run
+# everything below. `bin/build-images` is still a script rather than YAML, for the same
+# reason this one is.
 #
 # Needs a Postgres. See CONTRIBUTING.md; DATABASE_URL below is the local default.
 set -euo pipefail

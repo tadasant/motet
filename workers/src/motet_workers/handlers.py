@@ -52,26 +52,13 @@ _EXTENSIONS = {MPEG_MEDIA_TYPE: "mp3", WAV_MEDIA_TYPE: "wav"}
 #:
 #: Assembly has to apply the duration cap before a script exists, so it estimates from
 #: each story's one-or-two-sentence summary. The script then writes two to four narrated
-#: claims for that story — several times longer. Estimating from the summary alone made
-#: assembly pick far more stories than could fit, and the script-stage trim then threw
-#: most of them away after they had already been written.
+#: claims for that story — several times longer. Estimating 1:1 made assembly pick far
+#: more stories than could fit, and the script-stage trim then threw most of them away
+#: after they had already been written.
 #:
 #: A blunt multiplier rather than anything cleverer: the honest answer is that nobody
 #: knows the length until the script exists, and this only has to be close enough that
 #: the trim downstream is a backstop rather than the normal path.
-SCRIPT_EXPANSION = 3
-
-#: How much longer the spoken script is than the summary it is written from.
-#:
-#: Assembly has to apply the duration cap before any script exists, so it estimates from
-#: each story's summary — one or two sentences. The script stage then writes two to four
-#: narrated claims for that story, which is several times more words. Estimating 1:1 makes
-#: assembly systematically over-fill the episode, and the script-stage trim would then have
-#: to throw stories away on nearly every run.
-#:
-#: A crude constant rather than a model of the script, deliberately: the script stage
-#: re-applies the cap against the real copy, so this only has to be close enough to keep
-#: that backstop from firing routinely.
 SCRIPT_EXPANSION = 3
 
 
@@ -183,7 +170,7 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
     chosen: list[repo.SegmentSpec] = []
     budget_ms = episode.max_duration_ms
     for item in unread:
-        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION * SCRIPT_EXPANSION
+        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION
         if chosen and estimate > budget_ms:
             break
         # The first item always goes in, even if it alone exceeds the cap: an episode with

@@ -21,6 +21,7 @@ from typing import Annotated, Any
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from motet_db import StoredEpisode, StoredNewsItem, repo
 from motet_inference.llm import load_config as load_llm_config
@@ -28,7 +29,7 @@ from motet_storage import ObjectStore, StorageError
 from motet_workers import enqueue_episode, enqueue_paste
 
 from . import obs
-from .config import Settings
+from .config import APP_BASE_URL_ENV, Settings
 from .deps import (
     connection,
     public_base_url,
@@ -78,9 +79,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     day the API calls a model directly, this becomes ``validate_startup`` and the key
     becomes its business.
     """
+    # First, so that everything below is logged through the configured handler rather
+    # than through whatever `logging` falls back to.
+    obs.configure()
     config = load_llm_config()
     obs.logger.info("llm: %s", config.describe())
     current = Settings.from_env()
+    if not current.cors_origins:
+        obs.logger.warning(
+            "%s is unset: no browser origin is allowed to call /v1. The SPA is served "
+            "from a different hostname than this API in every deployed environment, so "
+            "this means the web app cannot reach it at all.",
+            APP_BASE_URL_ENV,
+        )
     if not current.authenticated:
         obs.logger.warning(
             "MOTET_API_TOKEN is unset: /v1 is open to anyone who can reach this process. "
@@ -100,6 +111,28 @@ app = FastAPI(
         "the TypeScript client is generated from it in turn. Do not hand-edit either."
     ),
 )
+
+# CORS, because the SPA is on `app.` and this API is on `api.` — two origins, so every
+# call the web app makes is cross-origin and a browser blocks it by default. Without this
+# the SPA loads, renders, and fails every request with an opaque network error that says
+# nothing about the cause.
+#
+# Read once at import rather than per request: an origin policy that could change under a
+# running process would be a policy nobody could reason about, and Cloud Run gives a new
+# revision for an environment change anyway.
+_cors_origins = Settings.from_env().cors_origins
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        # Exact origins, never `*`. See Settings.cors_origins.
+        allow_origins=_cors_origins,
+        # The SPA sends `Authorization`, which makes every request preflighted and
+        # credentialed. Both halves have to be allowed or the browser drops the header
+        # and the API answers 401 to a request that looked correct in the network tab.
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 
 @app.get("/healthz", response_model=HealthResponse, tags=["ops"])

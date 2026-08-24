@@ -90,6 +90,32 @@ jobs:
       - name: Run the one CI command
         run: bin/ci
 
+  # The container images Cloud Run runs. A separate job because it needs a Docker daemon
+  # and nothing else in bin/ci does — a laptop without Docker must still be able to run
+  # the full check suite, so this lives in bin/build-images rather than in bin/ci.
+  #
+  # It BUILDS AND SMOKE-TESTS, and deliberately does not push. This repo is public and
+  # holds no cloud credential of any kind; publishing belongs to the private
+  # infrastructure repo. Nothing here authenticates to anything.
+  images:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: self-hosted
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and smoke-test the container images
+        run: bin/build-images
+
+      - name: Remove the images built by this run
+        # The runner pool is shared and its disk is not ours to fill. `if: always()` so a
+        # failed build does not leave its layers behind either.
+        if: always()
+        run: |
+          docker rmi -f motet-api:local motet-worker:local motet-web:local 2>/dev/null || true
+          docker image prune -f >/dev/null 2>&1 || true
+
   # Single aggregate gate. Set THIS job — `all-checks-pass` — as the one required status
   # check, rather than enumerating every job above.
   #
@@ -110,6 +136,7 @@ jobs:
     runs-on: self-hosted
     needs:
       - ci
+      - images
     steps:
       - name: Verify no required check failed or was cancelled
         run: |

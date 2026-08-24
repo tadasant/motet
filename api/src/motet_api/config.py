@@ -10,9 +10,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Final
+from urllib.parse import urlsplit
 
 API_TOKEN_ENV: Final = "MOTET_API_TOKEN"
 PUBLIC_BASE_URL_ENV: Final = "MOTET_PUBLIC_BASE_URL"
+
+#: Where the SPA is served from. The API and the SPA are two different hostnames in every
+#: deployed environment — ``api.`` and ``app.`` — which makes every call the SPA makes a
+#: cross-origin one. A browser refuses those unless the API says otherwise, so this is
+#: what the CORS policy is built from. Unset means no cross-origin access is granted,
+#: which is right on a laptop, where the Vite dev server proxies and the origin is shared.
+APP_BASE_URL_ENV: Final = "MOTET_APP_BASE_URL"
 
 #: What a podcast client shows for the feed. Configurable because "Motet" is a working
 #: name for one user's briefing and Phase 3 gives the product a brand; not secret, and not
@@ -34,6 +42,7 @@ class Settings:
     inference_mode: str
     api_token: str | None
     public_base_url: str | None
+    app_base_url: str | None
     feed_title: str
     feed_description: str
     feed_author: str
@@ -45,6 +54,7 @@ class Settings:
             inference_mode=os.environ.get("MOTET_INFERENCE_MODE", "fake"),
             api_token=_clean(os.environ.get(API_TOKEN_ENV)),
             public_base_url=_clean(os.environ.get(PUBLIC_BASE_URL_ENV)),
+            app_base_url=_clean(os.environ.get(APP_BASE_URL_ENV)),
             feed_title=_clean(os.environ.get(FEED_TITLE_ENV)) or DEFAULT_FEED_TITLE,
             feed_description=(
                 _clean(os.environ.get(FEED_DESCRIPTION_ENV)) or DEFAULT_FEED_DESCRIPTION
@@ -62,6 +72,28 @@ class Settings:
         it looks exactly like a working one.
         """
         return self.api_token is not None
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """The exact origins allowed to call ``/v1`` from a browser.
+
+        A list of one, and never ``["*"]``. The SPA sends ``Authorization``, and a
+        wildcard origin cannot carry credentialed requests — but more to the point, a
+        wildcard would let any page on the internet drive this API with a token it
+        tricked out of a browser. One known origin is the whole requirement.
+
+        Only the origin is kept: a browser compares scheme, host and port, and a trailing
+        path in the configured value would never match an ``Origin`` header.
+        """
+        if self.app_base_url is None:
+            return []
+        return [_origin(self.app_base_url)]
+
+
+def _origin(url: str) -> str:
+    """Reduce a URL to the ``scheme://host[:port]`` a browser puts in ``Origin``."""
+    parsed = urlsplit(url if "//" in url else f"//{url}", scheme="https")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _clean(value: str | None) -> str | None:
