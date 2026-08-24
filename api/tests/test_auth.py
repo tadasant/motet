@@ -401,8 +401,13 @@ class TestTheSessionRoutesAreThemselvesGuarded:
 
         Without the guard this is an unhandled TypeError — a 500, and a reported error,
         from an unauthenticated request anybody can make.
+
+        Sent as raw bytes because that is the only way to produce it: a `str` header would
+        be rejected by the client on its way out, while a real request arrives as bytes
+        off a socket and is decoded latin-1 by the server.
         """
-        assert api.get("/v1/news-items", headers={"Authorization": "Bearer é"}).status_code == 401
+        response = api.get("/v1/news-items", headers={"Authorization": b"Bearer \xe9"})
+        assert response.status_code == 401
 
     def test_an_unlocked_deployment_says_so_rather_than_pretending(
         self, api: TestClient, monkeypatch: pytest.MonkeyPatch

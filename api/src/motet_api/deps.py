@@ -176,6 +176,11 @@ def require_caller(
                 ALLOWED_EMAILS_ENV,
             )
             auth_repo.delete_session(conn, session.id)
+            # Committed here, not left to the request. `connection` rolls back on the
+            # exception this is about to raise, which would undo the delete and leave the
+            # row to linger until its expiry — refused on every request, but present, and
+            # quietly contradicting everything this comment and the migration claim.
+            conn.commit()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="This session is no longer allowed. Sign in again.",
