@@ -34,7 +34,12 @@ import logging
 from typing import Any, Final
 from urllib.parse import urlencode
 
-from .interfaces import IdentityConfigError, IdentityError, VerifiedIdentity
+from .interfaces import (
+    IdentityConfigError,
+    IdentityError,
+    IdentityUnavailableError,
+    VerifiedIdentity,
+)
 
 logger = logging.getLogger("motet.api.auth")
 
@@ -112,7 +117,6 @@ class GoogleIdentityProvider:
         self._jwks_uri = jwks_uri
         self._transport = transport
         self._signing_key = signing_key
-        self._jwk_client: Any | None = None
 
     def authorization_url(
         self, *, redirect_uri: str, state: str, nonce: str, code_challenge: str
@@ -190,10 +194,15 @@ class GoogleIdentityProvider:
         """
         import jwt  # noqa: PLC0415 — fake mode never verifies a token
 
+        # Outside the `try`: a JWKS fetch that fails is Google being unreachable, not a
+        # bad token, and reporting it as "your token did not verify" would answer a
+        # transient outage with a 400 and blame the caller for it.
+        key = self._key_for(id_token)
+
         try:
             claims: dict[str, Any] = jwt.decode(
                 id_token,
-                key=self._key_for(id_token),
+                key=key,
                 algorithms=["RS256"],
                 audience=self._client_id,
                 leeway=LEEWAY_SECONDS,
@@ -206,7 +215,12 @@ class GoogleIdentityProvider:
 
         if claims.get("iss") not in GOOGLE_ISSUERS:
             raise IdentityError("Google's ID token was issued by someone else.")
-        if nonce and claims.get("nonce") != nonce:
+        # No `if nonce and ...`: a missing expectation must fail, not disable the check.
+        # The column is nullable because the Gmail flow has no ID token to bind, so a
+        # sign-in row that somehow carried no nonce would otherwise switch OIDC's replay
+        # defence off silently — a fail-open inside the one function whose job is failing
+        # closed.
+        if not nonce or claims.get("nonce") != nonce:
             raise IdentityError(
                 "This sign-in's ID token does not match the request that started it."
             )
@@ -217,15 +231,20 @@ class GoogleIdentityProvider:
         return claims
 
     def _key_for(self, id_token: str) -> Any:
+        """Google's public key for this token, out of its published JWKS.
+
+        The client is cached at *module* scope rather than on the instance, because both
+        routes build a provider per request — an instance-level cache would be discarded
+        every time and re-fetch Google's certificates on every sign-in.
+        """
         if self._signing_key is not None:
             return self._signing_key
-        from jwt import PyJWKClient  # noqa: PLC0415
-
-        if self._jwk_client is None:
-            # Caches the key set, so a signed-in browser's sign-in does not re-fetch
-            # Google's certificates every time.
-            self._jwk_client = PyJWKClient(self._jwks_uri, timeout=int(self._timeout) or 1)
-        return self._jwk_client.get_signing_key_from_jwt(id_token).key
+        try:
+            return _jwk_client(self._jwks_uri, self._timeout).get_signing_key_from_jwt(id_token).key
+        except Exception as exc:  # noqa: BLE001 — PyJWT wraps network and parse failures alike
+            raise IdentityUnavailableError(
+                f"Google's signing keys could not be fetched: {type(exc).__name__}"
+            ) from exc
 
     def _post(self, url: str, form: dict[str, str]) -> Any:
         if self._transport is not None:
@@ -262,3 +281,21 @@ def _error_detail(response: Any) -> str:
         detail = body.get("error_description") or body.get("error") or ""
         return str(detail)[:200]
     return str(body)[:200]
+
+
+#: One JWKS client per endpoint, for the whole process.
+#:
+#: `PyJWKClient` caches the key set it fetched; a provider built per request would throw
+#: that cache away and hit Google on every sign-in. Keyed by URI so a test pointing at a
+#: stub endpoint cannot inherit the real one's cache.
+_JWK_CLIENTS: dict[str, Any] = {}
+
+
+def _jwk_client(jwks_uri: str, timeout: float) -> Any:
+    from jwt import PyJWKClient  # noqa: PLC0415 — fake mode never verifies a token
+
+    client = _JWK_CLIENTS.get(jwks_uri)
+    if client is None:
+        client = PyJWKClient(jwks_uri, timeout=int(timeout) or 1)
+        _JWK_CLIENTS[jwks_uri] = client
+    return client

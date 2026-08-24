@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
 
+from motet_inference.mode import current_mode
+
 from .auth import CLIENT_ID_ENV, allowed_emails
 
 API_TOKEN_ENV: Final = "MOTET_API_TOKEN"
@@ -110,7 +112,17 @@ class Settings:
         """
         if not self.allowed_emails:
             return False
-        return self.inference_mode.strip().lower() != "real" or self.google_client_id is not None
+        # Through `current_mode` rather than comparing the stored string: AGENTS.md says
+        # MOTET_INFERENCE_MODE is parsed in exactly one place, because two readings can
+        # disagree silently. A second `== "real"` here would be one of them.
+        try:
+            mode = current_mode({"MOTET_INFERENCE_MODE": self.inference_mode})
+        except ValueError:
+            # An unrecognized mode is somebody else's crash — the worker entry point and
+            # the LLM seam both raise on it. Here it only means "cannot claim this is
+            # configured", which is the fail-closed answer.
+            return False
+        return mode != "real" or self.google_client_id is not None
 
     def callback_uri_allowed(self, redirect_uri: str) -> bool:
         """Whether the SPA may ask for a sign-in that returns to this URI.

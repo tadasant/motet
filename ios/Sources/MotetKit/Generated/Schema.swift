@@ -442,6 +442,15 @@ public struct ReadStateRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// How many sessions a revoke-everywhere took out.
+public struct RevokedResponse: Codable, Hashable, Sendable {
+    public var revoked: Int
+
+    public init(revoked: Int) {
+        self.revoked = revoked
+    }
+}
+
 /// Save a passage. The platform tool `save_highlight` posts exactly this.
 public struct SaveHighlightRequest: Codable, Hashable, Sendable {
     public var anchorMs: Int?
@@ -735,6 +744,11 @@ public enum MotetEndpoints {
     /// `POST /v1/auth/logout` — Logout
     public static var logout: HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/auth/logout")
+    }
+
+    /// `POST /v1/auth/logout-all` — Logout Everywhere
+    public static var logoutEverywhere: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/logout-all")
     }
 
     /// `GET /v1/auth/session` — Current Session

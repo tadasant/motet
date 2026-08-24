@@ -49,8 +49,16 @@ export function SignInCallback({
   const exchanged = useRef(false)
 
   useEffect(() => {
-    if (callback.kind !== 'granted' || exchanged.current) return
+    if (exchanged.current) return
     exchanged.current = true
+
+    if (callback.kind !== 'granted') {
+      // Spend the remembered state even on a refusal. It is good for one callback, and
+      // one that stayed behind could only ever make the *next* sign-in fail the cheap
+      // check — never pass it.
+      takeState()
+      return
+    }
 
     const expected = takeState()
     if (!stateMatches(expected, callback.state)) {

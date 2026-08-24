@@ -484,6 +484,17 @@ components:
       - read
       title: ReadStateRequest
       type: object
+    RevokedResponse:
+      description: How many sessions a revoke-everywhere took out.
+      properties:
+        revoked:
+          description: Sessions destroyed, including the caller's own if it had one.
+          title: Revoked
+          type: integer
+      required:
+      - revoked
+      title: RevokedResponse
+      type: object
     SaveHighlightRequest:
       description: Save a passage. The platform tool `save_highlight` posts exactly this.
       properties:
@@ -934,6 +945,41 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Logout
+      tags:
+      - auth
+  /v1/auth/logout-all:
+    post:
+      description: "Revoke every session, including this one. The answer to a lost phone.\n\nIt exists\
+        \ because the alternative is not an operation. `/v1/auth/logout` needs the\nvery token you are\
+        \ trying to revoke, and invariant 10 says nobody has a shell to run\na `DELETE` from \u2014 so\
+        \ without this, \"I left my laptop on a train\" would mean waiting\nout a thirty-day expiry, or\
+        \ taking your own address off `MOTET_ALLOWED_EMAILS` and\nredeploying twice.\n\nReachable with\
+        \ the shared API token as well as with a session, which is what makes it\nusable from a *different*\
+        \ device than the compromised one."
+      operationId: logout_everywhere_v1_auth_logout_all_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokedResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Logout Everywhere
       tags:
       - auth
   /v1/auth/session:

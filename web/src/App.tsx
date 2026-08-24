@@ -56,13 +56,23 @@ export default function App() {
   // Read once, in an initializer, so every later render works from state rather than
   // from an address bar the callback is about to rewrite.
   const [callback, setCallback] = useState(readCallback)
-  // Who the *server* says this browser is. Best-effort: an older API with no /v1/auth
-  // answers 404 and this stays null, which renders exactly as it did before.
+  // Who the *server* says this browser is, or null when it says nobody. Best-effort: an
+  // older API with no /v1/auth answers 404 and this stays null.
   const [who, setWho] = useState<SessionInfo | null>(null)
+  // A deployment with MOTET_API_TOKEN unset has no lock on it at all — the documented
+  // local setup. Showing a sign-in door in front of an API that is already answering
+  // would be a dead end, and clicking the button there 503s because a laptop has no
+  // allowlist either.
+  const unlocked = who?.how === 'open'
 
   // A sign-in and a mailbox connection come back on the same path. Only `state` can tell
   // them apart, because it is the one value Google echoes back verbatim.
   const signingIn = callback !== null && callback.kind !== 'empty' && isLoginState(callback.state)
+
+  const saveToken = useCallback((value: string) => {
+    setToken(value)
+    setTokenState(value)
+  }, [])
 
   const refresh = useCallback(() => {
     api
@@ -74,12 +84,13 @@ export default function App() {
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
   }, [])
 
-  // Not while the callback is on screen: it has its own request to make, and a backlog
-  // fetch that 401s behind it would put an unrelated error above the answer the user is
-  // waiting for.
+  // Not while the callback is on screen, and not before there is a token: each has its
+  // own thing to say, and a backlog fetch that 401s behind it would put an unrelated
+  // error above the answer the user is actually waiting for — "GET /v1/news-items failed:
+  // 401" over the top of a sign-in button being the silliest version of that.
   useEffect(() => {
-    if (!callback) refresh()
-  }, [callback, refresh, token])
+    if (!callback && (token || unlocked)) refresh()
+  }, [callback, refresh, token, unlocked])
 
   // Take the code out of the address bar as soon as it has been read into state. A reload
   // would otherwise re-POST a code the API has already consumed and report a flow that
@@ -88,18 +99,23 @@ export default function App() {
     if (callback) forgetCallbackUrl()
   }, [callback])
 
-  // Not gated on: the app is usable whenever a token is present, and this only decides
-  // whether the header can say whose session it is and offer to end it.
+  // Asked unconditionally, including with no token at all: that is how an *unlocked*
+  // deployment is recognised, and it is the only way to recognise one — a browser cannot
+  // tell "no credential" apart from "no credential needed" without asking.
+  //
+  // A 401 clears the token as well as `who`. A session expires after 30 days and can be
+  // revoked from another device, and without this the SPA would keep a dead string in
+  // storage, show a tab strip whose every screen 401s, and offer no way back to the door
+  // except realising that emptying the *API token* field is what signs you out.
   useEffect(() => {
-    if (!token) {
-      setWho(null)
-      return
-    }
     api
       .session()
       .then(setWho)
-      .catch(() => setWho(null))
-  }, [token])
+      .catch((err) => {
+        setWho(null)
+        if (err instanceof ApiError && err.status === 401 && token) saveToken('')
+      })
+  }, [token, saveToken])
 
   const finishCallback = () => {
     setCallback(null)
@@ -112,11 +128,6 @@ export default function App() {
     setEpisode(next)
     setTab('episode')
   }
-
-  const saveToken = useCallback((value: string) => {
-    setToken(value)
-    setTokenState(value)
-  }, [])
 
   const signOut = () => {
     // Fire and forget the revoke, then drop the token locally whatever the server said —
@@ -143,7 +154,7 @@ export default function App() {
         )}
         {/* Hidden during the callback, and before there is anything to navigate: there is
             one thing to do on either screen, and the screen offers it. */}
-        {!callback && token && (
+        {!callback && (token || unlocked) && (
           <nav aria-label="Screens">
             {TABS.map((entry) => (
               <button
@@ -187,7 +198,7 @@ export default function App() {
         <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
       ) : callback ? (
         <OAuthCallback callback={callback} onDone={finishCallback} />
-      ) : !token ? (
+      ) : !token && !unlocked ? (
         <SignIn />
       ) : (
         <>

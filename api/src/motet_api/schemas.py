@@ -419,3 +419,11 @@ class SessionResponse(BaseModel):
     login_configured: bool = Field(
         description="Whether this deployment can complete a Google sign-in at all."
     )
+
+
+class RevokedResponse(BaseModel):
+    """How many sessions a revoke-everywhere took out."""
+
+    revoked: int = Field(
+        description="Sessions destroyed, including the caller's own if it had one."
+    )

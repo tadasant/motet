@@ -7,7 +7,14 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { forgetCallbackUrl, readCallback, redirectUri, stateMatches, takeState } from './oauth'
+import {
+  forgetCallbackUrl,
+  isLoginState,
+  readCallback,
+  redirectUri,
+  stateMatches,
+  takeState,
+} from './oauth'
 
 /** jsdom has a real History, so this is how the tests put the app on a path. */
 function visit(url: string) {
@@ -17,6 +24,24 @@ function visit(url: string) {
 afterEach(() => {
   visit('/')
   window.sessionStorage.clear()
+})
+
+describe('isLoginState', () => {
+  it('tells a sign-in callback from a mailbox one', () => {
+    // Both flows land on the one /oauth/callback path, and `state` is the only value
+    // guaranteed to survive the round trip through the provider — so it is the only
+    // thing that can say which finished.
+    expect(isLoginState('login.abc123')).toBe(true)
+    expect(isLoginState('abc123')).toBe(false)
+  })
+
+  it('uses a marker the API cannot mint by accident', () => {
+    // The API's own copy of this prefix lives in `motet_api.auth.registry`, pinned by a
+    // test there for the same reason. A dot is safe because `secrets.token_urlsafe`
+    // emits only [A-Za-z0-9_-], so a mailbox state can never look like a sign-in one.
+    expect(isLoginState('login_abc')).toBe(false)
+    expect(isLoginState('loginabc')).toBe(false)
+  })
 })
 
 describe('redirectUri', () => {

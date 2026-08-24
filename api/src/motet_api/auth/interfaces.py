@@ -34,6 +34,15 @@ class IdentityConfigError(IdentityError):
     """
 
 
+class IdentityUnavailableError(IdentityError):
+    """The provider could not be reached, so nothing is known either way.
+
+    Distinct from :class:`IdentityError` because it is not the caller's fault and must not
+    be answered as though their token were bad — a Google outage that surfaced as "your
+    sign-in did not verify" would send someone hunting a problem on their own account.
+    """
+
+
 @dataclass(frozen=True)
 class VerifiedIdentity:
     """Who just signed in, according to an ID token that has already been verified.

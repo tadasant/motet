@@ -537,6 +537,45 @@ describe('the /oauth/callback landing, for a sign-in', () => {
   })
 })
 
+describe('a session that stops working', () => {
+  it('drops the dead token and shows the door again', async () => {
+    // A session expires after 30 days and can be revoked from another device. Without
+    // this the SPA keeps a dead string in storage, renders a tab strip whose every screen
+    // 401s, and offers no way back except realising that emptying the *API token* field
+    // is what signs you out.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: async () => ({ detail: 'This session is no longer allowed. Sign in again.' }),
+      })) as unknown as typeof fetch,
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
+    expect(window.localStorage.getItem('motet.apiToken')).toBeNull()
+  })
+
+  it('shows the app on an unlocked deployment, which has no door to pass', async () => {
+    // MOTET_API_TOKEN unset is the documented local setup: the API answers everything.
+    // A browser cannot tell "I have no credential" from "no credential is needed" without
+    // asking, and a sign-in screen in front of an open API is a dead end — the button
+    // 503s, because a laptop has no allowlist either.
+    window.localStorage.clear()
+    mockApi({
+      '/v1/auth/session': { how: 'open', email: null, expires_at: null, login_configured: false },
+    })
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Paste in' })).toBeDefined()
+    expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
+  })
+})
+
 describe('signing out', () => {
   it('says who is signed in and revokes the session', async () => {
     const calls = mockApi({ '/v1/auth/logout': {} })

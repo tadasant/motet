@@ -29,7 +29,13 @@ from .google import (
     PROVIDER,
     GoogleIdentityProvider,
 )
-from .interfaces import IdentityConfigError, IdentityError, IdentityProvider, VerifiedIdentity
+from .interfaces import (
+    IdentityConfigError,
+    IdentityError,
+    IdentityProvider,
+    IdentityUnavailableError,
+    VerifiedIdentity,
+)
 from .registry import (
     LOGIN_STATE_PREFIX,
     build_identity_provider,
@@ -51,6 +57,7 @@ __all__ = [
     "IdentityConfigError",
     "IdentityError",
     "IdentityProvider",
+    "IdentityUnavailableError",
     "VerifiedIdentity",
     "allowed_emails",
     "build_identity_provider",

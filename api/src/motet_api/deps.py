@@ -35,6 +35,7 @@ from motet_db import repo
 from motet_storage import ObjectStore, build_store
 from motet_vault import DekWrapper, build_dek_wrapper
 
+from .auth import ALLOWED_EMAILS_ENV, is_allowed
 from .config import Settings
 
 logger = logging.getLogger("motet.api")
@@ -154,11 +155,32 @@ def require_caller(
         )
         return Caller(user_id=repo.OWNER_USER_ID, how="open")
 
-    if presented and secrets.compare_digest(presented, config.api_token):
+    # `isascii` before the comparison: Starlette decodes headers as latin-1, and
+    # `compare_digest` raises TypeError on a str with a codepoint above 127 — so
+    # `Authorization: Bearer é` would be a 500 from an unauthenticated request rather
+    # than the 401 it is. A token this process generated is always URL-safe ASCII.
+    if presented and presented.isascii() and secrets.compare_digest(presented, config.api_token):
         return Caller(user_id=repo.OWNER_USER_ID, how="token")
 
     session = auth_repo.session_for_token(conn, presented) if presented else None
     if session is not None:
+        # **The allowlist is re-checked on every request, not only at sign-in.** Otherwise
+        # taking an address off `MOTET_ALLOWED_EMAILS` would revoke nothing for up to the
+        # session's whole 30-day life, and there is no other lever: `/v1/auth/logout`
+        # needs the very token you are trying to revoke, and invariant 10 says nobody has
+        # a shell to run a DELETE from. De-listed has to mean gone, so the row goes.
+        if not is_allowed(session.email, config.allowed_emails):
+            logger.warning(
+                "revoking a session for %s: no longer on %s",
+                session.email,
+                ALLOWED_EMAILS_ENV,
+            )
+            auth_repo.delete_session(conn, session.id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="This session is no longer allowed. Sign in again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return Caller(
             user_id=session.user_id,
             how="session",

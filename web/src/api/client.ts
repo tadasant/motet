@@ -224,6 +224,9 @@ export const api = {
     apiPost('/v1/auth/google/callback', { state, code }),
   session: () => apiGet('/v1/auth/session'),
   logout: () => apiPostNoContent('/v1/auth/logout'),
+  // Every session, from any device. The answer to a lost phone: `logout` needs the token
+  // you are trying to revoke, so it cannot be the one on the device you no longer hold.
+  logoutEverywhere: () => apiPost('/v1/auth/logout-all'),
   newsItems: () => apiGet('/v1/news-items'),
   episodes: () => apiGet('/v1/episodes'),
   feed: () => apiGet('/v1/feed'),

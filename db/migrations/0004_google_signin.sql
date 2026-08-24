@@ -48,8 +48,10 @@ CREATE TABLE auth_sessions (
     -- Hex SHA-256 of the bearer token. Unique so that a collision is a write failure
     -- rather than two browsers sharing a session.
     token_sha256 text        NOT NULL UNIQUE,
-    -- Which Google account signed in. Recorded so "who is this browser" is answerable and
-    -- so a session survives being removed from the allowlist visibly rather than silently.
+    -- Which Google account signed in. Recorded so "who is this browser" is answerable —
+    -- and because the allowlist is re-checked against it on *every* request, so taking an
+    -- address off `MOTET_ALLOWED_EMAILS` destroys the sessions it already had rather than
+    -- leaving them live for the rest of their thirty days.
     email        text        NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
     last_seen_at timestamptz NOT NULL DEFAULT now(),

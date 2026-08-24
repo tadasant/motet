@@ -627,6 +627,13 @@ Four things about it are load-bearing:
   means deny everybody**. `/internal/health` reports `login_configured` for the same reason
   it reports `authenticated`: a login that denies silently looks exactly like one nobody
   has tried.
+- **It is checked on every request, not once at the door**, and a session whose address
+  has left the list is *deleted* rather than refused. Checked only at sign-in, taking
+  somebody off the list would revoke nothing for the rest of a thirty-day session — and
+  there would be no lever to do it with, because `/v1/auth/logout` needs the very token
+  being revoked and invariant 10 says nobody has a shell to run a `DELETE` from. For the
+  same reason there is `/v1/auth/logout-all`, which takes the shared API token too: the
+  answer to a lost phone has to be reachable from a *different* device.
 - **The ID token is verified, not read.** Signature against Google's JWKS over RS256 only,
   `aud` equal to our client id, `iss` Google, `exp`/`iat` inside a minute of leeway, the
   `nonce` we stored for that authorization, and `email_verified` true. An email claim out

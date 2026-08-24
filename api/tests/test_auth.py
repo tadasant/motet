@@ -189,6 +189,61 @@ class TestTheAllowlistIsTheLock:
         counted = db.execute("SELECT count(*) AS n FROM auth_sessions").fetchone()
         assert counted is not None and counted["n"] == 0
 
+    def test_removing_an_address_revokes_the_sessions_it_already_had(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch, db: psycopg.Connection[Any]
+    ) -> None:
+        """The allowlist is an ongoing control, not a one-time gate at the door.
+
+        Checked at sign-in only, taking somebody off the list would revoke nothing for up
+        to the session's whole 30-day life — and there would be no lever to do it with,
+        since `/v1/auth/logout` needs the token being revoked and invariant 10 says nobody
+        has a shell to run a DELETE from.
+        """
+        login = sign_in(api)
+        headers = {"Authorization": f"Bearer {login['token']}"}
+        assert api.get("/v1/news-items", headers=headers).status_code == 200
+
+        monkeypatch.setenv(ALLOWED_EMAILS_ENV, "somebody-else@example.invalid")
+        assert api.get("/v1/news-items", headers=headers).status_code == 401
+        # The row is gone, not merely refused: putting the address back must not silently
+        # restore a session somebody was removed from.
+        counted = db.execute("SELECT count(*) AS n FROM auth_sessions").fetchone()
+        assert counted is not None and counted["n"] == 0
+
+    def test_revoking_everywhere_takes_out_a_session_on_another_device(
+        self, api: TestClient
+    ) -> None:
+        """The answer to a lost phone, reachable from a device you still have."""
+        lost = sign_in(api)
+        kept = sign_in(api)
+
+        revoked = api.post("/v1/auth/logout-all", headers=AUTH)
+        assert revoked.status_code == 200
+        assert revoked.json()["revoked"] == 2
+        for session in (lost, kept):
+            headers = {"Authorization": f"Bearer {session['token']}"}
+            assert api.get("/v1/news-items", headers=headers).status_code == 401
+
+    def test_fake_mode_cannot_mint_a_session_for_a_real_deployment(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fake identity provider is the *default*, so this is the guard that matters.
+
+        A deployment that forgot `MOTET_INFERENCE_MODE=real` would hand out verified
+        identities with no Google involved at all. It is closed anyway, and this is why:
+        the fake answers as a `.test` address (RFC 6761 — never a real mailbox), so it can
+        only get in on a deployment whose allowlist literally names it.
+        """
+        monkeypatch.setenv(ALLOWED_EMAILS_ENV, "a-real-person@example.invalid")
+        started = api.post("/v1/auth/google/start", json={"redirect_uri": REDIRECT})
+        query = parse_qs(urlsplit(started.json()["authorization_url"]).query)
+
+        refused = api.post(
+            "/v1/auth/google/callback",
+            json={"state": query["state"][0], "code": query["code"][0]},
+        )
+        assert refused.status_code == 403
+
     def test_health_reports_whether_anyone_could_sign_in(
         self, api: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -250,6 +305,43 @@ class TestTheHandshake:
         assert api.post("/v1/auth/google/callback", json=payload).status_code == 200
         assert api.post("/v1/auth/google/callback", json=payload).status_code == 400
 
+    def test_a_sign_in_state_survives_being_sent_to_the_wrong_route(self, api: TestClient) -> None:
+        """Refused *before* the consume, so the authorization is still spendable.
+
+        Checking the provider on the consumed row would be too late: consuming is what
+        destroys it, and the user would start again for no visible reason.
+        """
+        started = api.post("/v1/auth/google/start", json={"redirect_uri": REDIRECT})
+        query = parse_qs(urlsplit(started.json()["authorization_url"]).query)
+
+        misdelivered = api.post(
+            "/v1/sources/callback",
+            json={"state": query["state"][0], "code": query["code"][0]},
+            headers=AUTH,
+        )
+        assert misdelivered.status_code == 400
+
+        # And now the same authorization still completes, at the route that owns it.
+        completed = api.post(
+            "/v1/auth/google/callback",
+            json={"state": query["state"][0], "code": query["code"][0]},
+        )
+        assert completed.status_code == 200
+
+    def test_an_unset_allowlist_does_not_burn_the_authorization(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 503 means "come back when this is configured", so the code must survive it."""
+        started = api.post("/v1/auth/google/start", json={"redirect_uri": REDIRECT})
+        query = parse_qs(urlsplit(started.json()["authorization_url"]).query)
+        payload = {"state": query["state"][0], "code": query["code"][0]}
+
+        monkeypatch.delenv(ALLOWED_EMAILS_ENV, raising=False)
+        assert api.post("/v1/auth/google/callback", json=payload).status_code == 503
+
+        monkeypatch.setenv(ALLOWED_EMAILS_ENV, FAKE_EMAIL)
+        assert api.post("/v1/auth/google/callback", json=payload).status_code == 200
+
     def test_an_unknown_state_is_refused(self, api: TestClient) -> None:
         response = api.post(
             "/v1/auth/google/callback",
@@ -296,6 +388,35 @@ class TestTheHandshake:
         """
         response = api.post("/v1/auth/google/start", json={"redirect_uri": redirect_uri})
         assert response.status_code == 400
+
+
+class TestTheSessionRoutesAreThemselvesGuarded:
+    def test_session_and_logout_refuse_an_unauthenticated_caller(self, api: TestClient) -> None:
+        assert api.get("/v1/auth/session").status_code == 401
+        assert api.post("/v1/auth/logout").status_code == 401
+        assert api.post("/v1/auth/logout-all").status_code == 401
+
+    def test_a_non_ascii_bearer_is_a_401_rather_than_a_500(self, api: TestClient) -> None:
+        """Starlette decodes headers as latin-1 and `compare_digest` rejects non-ASCII str.
+
+        Without the guard this is an unhandled TypeError — a 500, and a reported error,
+        from an unauthenticated request anybody can make.
+        """
+        assert api.get("/v1/news-items", headers={"Authorization": "Bearer é"}).status_code == 401
+
+    def test_an_unlocked_deployment_says_so_rather_than_pretending(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`how: 'open'` is what lets a laptop's SPA skip a sign-in door it cannot pass.
+
+        A browser cannot tell "I have no credential" from "no credential is needed"
+        without asking, and a door in front of an API that is already answering is a dead
+        end — the button 503s, because a laptop has no allowlist either.
+        """
+        monkeypatch.delenv("MOTET_API_TOKEN", raising=False)
+        body = api.get("/v1/auth/session").json()
+        assert body["how"] == "open"
+        assert body["email"] is None
 
 
 class TestAllowlistParsing:
@@ -434,6 +555,19 @@ class TestIdTokenVerification:
                 id_token(signing_key, nonce="someone-elses-nonce"), nonce=NONCE
             )
 
+    def test_a_missing_expectation_fails_rather_than_disabling_the_check(
+        self, signing_key: Any
+    ) -> None:
+        """`nonce=""` must not mean "skip the nonce".
+
+        The column is nullable because the Gmail flow has no ID token to bind, so a
+        sign-in row that somehow carried no nonce would otherwise switch OIDC's replay
+        defence off silently — a fail-open inside the one function whose job is failing
+        closed.
+        """
+        with pytest.raises(IdentityError):
+            provider(signing_key)._verify(id_token(signing_key), nonce="")
+
     def test_an_unverified_address_is_not_proof_of_anything(self, signing_key: Any) -> None:
         """`email_verified: false` means Google is repeating a string somebody typed.
 
@@ -551,6 +685,19 @@ class TestTheRealExchange:
         assert query["nonce"] == [NONCE]
         assert "access_type" not in query
         assert query["prompt"] == ["select_account"]
+
+
+def test_the_login_state_prefix_is_the_literal_the_spa_also_hardcodes() -> None:
+    """`web/src/oauth.ts` has its own copy, and there is no way to share one.
+
+    Pinned on both sides so that changing it here without changing it there fails a test
+    rather than routing every sign-in callback into the mailbox handler.
+    """
+    assert LOGIN_STATE_PREFIX == "login."
+    # The marker has to be a character `secrets.token_urlsafe` cannot emit, or a mailbox
+    # state could accidentally look like a sign-in one.
+    assert not LOGIN_STATE_PREFIX[-1].isalnum()
+    assert LOGIN_STATE_PREFIX[-1] not in "-_"
 
 
 class TestSessionsAreOneAccount:

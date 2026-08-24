@@ -97,30 +97,54 @@ def create_session(
     return _session(row)
 
 
+#: How stale ``last_seen_at`` may get before a request bothers to write it.
+#:
+#: See :func:`session_for_token`: the point of the coarseness is that the *common* request
+#: takes no row lock at all.
+TOUCH_INTERVAL_SECONDS: int = 5 * 60
+
+
 def session_for_token(conn: psycopg.Connection[Any], token: str) -> AuthSession | None:
-    """Resolve a presented token to its session, touching ``last_seen_at``.
+    """Resolve a presented token to its session, touching ``last_seen_at`` occasionally.
 
     Expired rows are filtered in the predicate rather than swept first: a session that
     lapsed a second ago must stop working immediately, and waiting for a cleanup job to
     notice would make expiry advisory.
 
-    ``last_seen_at`` is written on every request, which is one small update per call and
-    is what makes "is anything still using this session" answerable. The expiry is
-    deliberately **not** extended by it: a sliding window on a 30-day session is an
-    unbounded one for anything in daily use.
+    **A `SELECT`, and only sometimes an `UPDATE`** — which matters more than it looks.
+    Writing `last_seen_at` on every call takes an exclusive lock on the session row and
+    holds it until the request commits, so two concurrent requests from one signed-in
+    browser serialize: the second waits out the whole of the first. The SPA fires several
+    calls at once on boot and pasting text is the slow one, so that is a UI that stalls
+    behind itself, on a path no test with one shared API token would ever exercise.
+
+    So the touch happens at most every :data:`TOUCH_INTERVAL_SECONDS`. It only ever
+    answers "is anything still using this session", and five minutes of resolution is
+    plenty for that. The expiry is deliberately **not** extended by it either: a sliding
+    window on a 30-day session is an unbounded one for anything in daily use.
     """
     if not token:
         return None
     row = _maybe_one(
         conn,
         """
-        UPDATE auth_sessions SET last_seen_at = now()
+        SELECT id, user_id, email, created_at, last_seen_at, expires_at
+        FROM auth_sessions
         WHERE token_sha256 = %s AND expires_at > now()
-        RETURNING id, user_id, email, created_at, last_seen_at, expires_at
         """,
         (token_digest(token),),
     )
-    return _session(row) if row is not None else None
+    if row is None:
+        return None
+    session = _session(row)
+    conn.execute(
+        """
+        UPDATE auth_sessions SET last_seen_at = now()
+        WHERE id = %s AND last_seen_at < now() - make_interval(secs => %s)
+        """,
+        (session.id, TOUCH_INTERVAL_SECONDS),
+    )
+    return session
 
 
 def delete_session(conn: psycopg.Connection[Any], session_id: str) -> bool:

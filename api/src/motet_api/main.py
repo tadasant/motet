@@ -60,6 +60,7 @@ from .auth import (
     LOGIN_SCOPES,
     IdentityConfigError,
     IdentityError,
+    IdentityUnavailableError,
     build_identity_provider,
     is_allowed,
     is_login_state,
@@ -99,6 +100,7 @@ from .schemas import (
     OAuthCallbackRequest,
     PasteRequest,
     ReadStateRequest,
+    RevokedResponse,
     SaveHighlightRequest,
     SegmentResponse,
     SessionResponse,
@@ -332,6 +334,13 @@ def start_login(body: StartLoginRequest, conn: Conn, config: Config) -> StartLog
             f"redirect_uri must be this deployment's app origin plus {CALLBACK_PATH}.",
         )
 
+    # Starting a sign-in is necessarily unauthenticated, so this is the one route on the
+    # API that lets anybody who can reach it write a row. Sweeping here bounds the table
+    # by its own TTL rather than letting it grow at request rate: the normal outcome of a
+    # sign-in is a closed tab, and nothing else was ever going to collect those.
+    phase2.purge_expired_oauth_states(conn)
+    auth_repo.purge_expired_sessions(conn)
+
     verifier, challenge = new_pkce_pair()
     state = new_login_state()
     nonce = new_nonce()
@@ -382,17 +391,21 @@ def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> Lo
             "/v1/sources/callback.",
         )
 
+    # Before the consume, like `start_login`: a deployment that lost its allowlist
+    # mid-flow must not spend the authorization on its way to a 503, because the answer
+    # is "come back when this is configured" and the user would find the code already
+    # burned when they did.
+    if not config.allowed_emails:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{ALLOWED_EMAILS_ENV} is unset, so no Google account would be accepted.",
+        )
+
     pending = phase2.consume_oauth_state(conn, state)
     if pending is None or pending["provider"] != GOOGLE_PROVIDER:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "This sign-in is unknown, already used, or expired. Start again.",
-        )
-
-    if not config.allowed_emails:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"{ALLOWED_EMAILS_ENV} is unset, so no Google account would be accepted.",
         )
 
     try:
@@ -402,7 +415,9 @@ def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> Lo
             code_verifier=pending["code_verifier"],
             nonce=pending["nonce"] or "",
         )
-    except IdentityConfigError as exc:
+    except (IdentityConfigError, IdentityUnavailableError) as exc:
+        # Not configured, or Google unreachable. Neither is the caller's fault, and a 400
+        # would send someone hunting a problem on their own Google account.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except IdentityError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
@@ -453,6 +468,24 @@ def logout(conn: Conn, caller: Who) -> Response:
     if caller.session_id is not None:
         auth_repo.delete_session(conn, caller.session_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/v1/auth/logout-all", response_model=RevokedResponse, tags=["auth"])
+def logout_everywhere(conn: Conn, caller: Who) -> RevokedResponse:
+    """Revoke every session, including this one. The answer to a lost phone.
+
+    It exists because the alternative is not an operation. `/v1/auth/logout` needs the
+    very token you are trying to revoke, and invariant 10 says nobody has a shell to run
+    a `DELETE` from — so without this, "I left my laptop on a train" would mean waiting
+    out a thirty-day expiry, or taking your own address off `MOTET_ALLOWED_EMAILS` and
+    redeploying twice.
+
+    Reachable with the shared API token as well as with a session, which is what makes it
+    usable from a *different* device than the compromised one.
+    """
+    revoked = auth_repo.delete_sessions_for_user(conn, caller.user_id)
+    logger.info("revoked %d session(s) at the owner's request", revoked)
+    return RevokedResponse(revoked=revoked)
 
 
 @app.post(
@@ -845,11 +878,18 @@ def oauth_callback(
     The state is consumed exactly once by a `DELETE ... RETURNING`, so a replayed callback
     finds nothing rather than racing a concurrent one into two token exchanges.
     """
+    # Refused *before* the consume, mirroring `complete_login`. `oauth_states` now holds
+    # two kinds of authorization — connecting a mailbox, and signing in — and they land on
+    # the same SPA path; a sign-in consumed here would be spent on a flow that cannot
+    # finish it, and the user would start again for no visible reason. Checking the
+    # provider on the row afterwards is too late, because consuming is what destroys it.
+    if is_login_state(body.state.strip()):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That callback came from a sign-in. It finishes at /v1/auth/google/callback.",
+        )
+
     pending = phase2.consume_oauth_state(conn, body.state.strip())
-    # The provider is checked as well as the owner because `oauth_states` now holds two
-    # kinds of authorization — connecting a mailbox, and signing in — and they land on the
-    # same SPA path. A sign-in consumed here would otherwise be spent on a flow that
-    # cannot finish it, and the user would have to start again for no visible reason.
     if pending is None or pending["user_id"] != user_id or pending["provider"] != PROVIDER:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

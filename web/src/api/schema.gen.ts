@@ -141,6 +141,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/logout-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Logout Everywhere
+         * @description Revoke every session, including this one. The answer to a lost phone.
+         *
+         *     It exists because the alternative is not an operation. `/v1/auth/logout` needs the
+         *     very token you are trying to revoke, and invariant 10 says nobody has a shell to run
+         *     a `DELETE` from — so without this, "I left my laptop on a train" would mean waiting
+         *     out a thirty-day expiry, or taking your own address off `MOTET_ALLOWED_EMAILS` and
+         *     redeploying twice.
+         *
+         *     Reachable with the shared API token as well as with a session, which is what makes it
+         *     usable from a *different* device than the compromised one.
+         */
+        post: operations["logout_everywhere_v1_auth_logout_all_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/session": {
         parameters: {
             query?: never;
@@ -1007,6 +1036,17 @@ export interface components {
             read: boolean;
         };
         /**
+         * RevokedResponse
+         * @description How many sessions a revoke-everywhere took out.
+         */
+        RevokedResponse: {
+            /**
+             * Revoked
+             * @description Sessions destroyed, including the caller's own if it had one.
+             */
+            revoked: number;
+        };
+        /**
          * SaveHighlightRequest
          * @description Save a passage. The platform tool `save_highlight` posts exactly this.
          */
@@ -1351,6 +1391,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    logout_everywhere_v1_auth_logout_all_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedResponse"];
+                };
             };
             /** @description Validation Error */
             422: {
