@@ -313,19 +313,23 @@ def start_oauth(
     code_verifier: str,
     redirect_uri: str,
     scopes: Sequence[str],
+    nonce: str | None = None,
     ttl_seconds: int = 600,
 ) -> None:
     """Record an in-flight authorization so its callback can be believed.
 
     The state and the PKCE verifier have to be *stored* to be checked — a callback that
     validated a state it derived from its own parameters would defend against nothing.
+    ``nonce`` is the same argument one layer up: OpenID Connect binds it into the signed
+    ID token, so it is only a replay defence if what we sent is remembered here. It is
+    ``None`` for the Gmail flow, which is plain OAuth 2.0 and has no ID token.
     """
     conn.execute(
         """
         INSERT INTO oauth_states
             (state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-             expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))
+             nonce, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))
         """,
         (
             state,
@@ -335,6 +339,7 @@ def start_oauth(
             code_verifier,
             redirect_uri,
             " ".join(scopes),
+            nonce,
             ttl_seconds,
         ),
     )
@@ -352,7 +357,8 @@ def consume_oauth_state(conn: psycopg.Connection[Any], state: str) -> dict[str, 
         """
         DELETE FROM oauth_states
         WHERE state = %s AND expires_at > now()
-        RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes
+        RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
+                  nonce
         """,
         (state,),
     )

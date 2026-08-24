@@ -27,6 +27,22 @@ components:
       - source_title
       title: ClaimModel
       type: object
+    CompleteLoginRequest:
+      description: What Google redirected back with.
+      properties:
+        code:
+          minLength: 1
+          title: Code
+          type: string
+        state:
+          minLength: 1
+          title: State
+          type: string
+      required:
+      - state
+      - code
+      title: CompleteLoginRequest
+      type: object
     ConnectSourceRequest:
       description: Begin connecting a mailbox. Returns a URL for the user to visit.
       properties:
@@ -218,6 +234,13 @@ components:
           description: '''fake'' or ''real''. ''fake'' means no vendor is ever called.'
           title: Inference Mode
           type: string
+        login_configured:
+          description: "Whether signing in with Google can succeed for anyone. False means either no allowlist\
+            \ is set \u2014 which denies everybody, deliberately \u2014 or, in real mode, no Google OAuth\
+            \ client is configured. Reported for the same reason as 'authenticated': a login that denies\
+            \ silently looks exactly like one nobody has tried."
+          title: Login Configured
+          type: boolean
         service:
           description: OTel service name this process reports as
           title: Service
@@ -243,6 +266,7 @@ components:
       - telemetry_exporting
       - errors_configured
       - authenticated
+      - login_configured
       - inference_mode
       title: HealthResponse
       type: object
@@ -339,6 +363,29 @@ components:
       - listened_through_ms
       - news_items_marked_read
       title: ListenProgressResponse
+      type: object
+    LoginResponse:
+      description: "A session, and the token that presents it.\n\n``token`` is returned exactly once,\
+        \ here \u2014 the API stores only its hash, so it cannot\nbe read back. A client that loses it\
+        \ signs in again."
+      properties:
+        email:
+          description: The Google account that signed in.
+          title: Email
+          type: string
+        expires_at:
+          format: date-time
+          title: Expires At
+          type: string
+        token:
+          description: 'Send as ''Authorization: Bearer <token>'', like the API token.'
+          title: Token
+          type: string
+      required:
+      - token
+      - email
+      - expires_at
+      title: LoginResponse
       type: object
     MarkListenedResponse:
       description: "The result of \"I listened to this\" \u2014 read state, synced (invariant 5)."
@@ -437,6 +484,17 @@ components:
       - read
       title: ReadStateRequest
       type: object
+    RevokedResponse:
+      description: How many sessions a revoke-everywhere took out.
+      properties:
+        revoked:
+          description: Sessions destroyed, including the caller's own if it had one.
+          title: Revoked
+          type: integer
+      required:
+      - revoked
+      title: RevokedResponse
+      type: object
     SaveHighlightRequest:
       description: Save a passage. The platform tool `save_highlight` posts exactly this.
       properties:
@@ -513,6 +571,36 @@ components:
       - duration_ms
       - claims
       title: SegmentResponse
+      type: object
+    SessionResponse:
+      description: "Who the caller is, as far as this API is concerned.\n\nAnswers for the shared API\
+        \ token too, which is what lets the SPA show \"signed in as\n\u2026\" or \"using an API token\"\
+        \ without guessing from what it has in storage."
+      properties:
+        email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Email
+        expires_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Expires At
+        how:
+          description: '''session'' for a signed-in browser, ''token'' for the shared API token, ''open''
+            when MOTET_API_TOKEN is unset and this deployment has no lock on it at all.'
+          title: How
+          type: string
+        login_configured:
+          description: Whether this deployment can complete a Google sign-in at all.
+          title: Login Configured
+          type: boolean
+      required:
+      - how
+      - login_configured
+      title: SessionResponse
       type: object
     SmartRuleModel:
       description: "Filter, window, duration, ranking \u2014 how a smart episode chooses its stories.\n\
@@ -643,6 +731,39 @@ components:
       - end
       title: SourceSpanModel
       type: object
+    StartLoginRequest:
+      description: Begin a Google sign-in. Answered with a URL for the browser to visit.
+      properties:
+        redirect_uri:
+          description: "Where Google sends the browser back to \u2014 this deployment's SPA origin plus\
+            \ /oauth/callback. Supplied by the client for the same reason connecting a mailbox supplies\
+            \ it: one bundle serves three environments, each with its own origin. It must be registered\
+            \ on the OAuth client, and when MOTET_APP_BASE_URL is set the API additionally requires it\
+            \ to match."
+          minLength: 1
+          title: Redirect Uri
+          type: string
+      required:
+      - redirect_uri
+      title: StartLoginRequest
+      type: object
+    StartLoginResponse:
+      description: Where to send the browser, and the state that identifies this sign-in.
+      properties:
+        authorization_url:
+          title: Authorization Url
+          type: string
+        state:
+          description: The CSRF token for this sign-in. Returned so a client can verify the callback it
+            receives is the one it started, and prefixed 'login.' so the single /oauth/callback path can
+            tell a sign-in from a mailbox connection.
+          title: State
+          type: string
+      required:
+      - authorization_url
+      - state
+      title: StartLoginResponse
+      type: object
     ValidationError:
       properties:
         ctx:
@@ -734,6 +855,164 @@ paths:
       summary: Health
       tags:
       - ops
+  /v1/auth/google/callback:
+    post:
+      description: "Finish a sign-in: verify the ID token, check the allowlist, mint a session.\n\nThe\
+        \ order is the point. The identity is established first and completely \u2014 signature\nagainst\
+        \ Google's JWKS, audience, issuer, expiry, nonce, and ``email_verified`` \u2014 and\nonly then\
+        \ is the address compared against ``MOTET_ALLOWED_EMAILS``. An email claim out\nof an unverified\
+        \ token is a string somebody typed, and authorizing on one would be the\nwhole vulnerability this\
+        \ route exists to avoid.\n\nThe state is consumed exactly once by a ``DELETE ... RETURNING``,\
+        \ so a replayed\ncallback finds nothing rather than racing a concurrent one into two sessions."
+      operationId: complete_login_v1_auth_google_callback_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteLoginRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Complete Login
+      tags:
+      - auth
+  /v1/auth/google/start:
+    post:
+      description: "Begin a sign-in: record the pending authorization and return a consent URL.\n\nThe\
+        \ state and the PKCE verifier are stored rather than derived, for the same reason\nconnecting\
+        \ a mailbox stores them \u2014 a callback that validated a state it recomputed\nfrom its own parameters\
+        \ would defend against nothing. The OIDC ``nonce`` goes in the\nsame row: it travels out in the\
+        \ request and comes back inside the signed ID token, so\nchecking it means remembering what was\
+        \ sent.\n\nRefused before anything is written when no allowlist is configured. Sending someone\n\
+        through Google's consent screen only to deny them afterwards is a worse answer than\nsaying the\
+        \ deployment cannot do this yet."
+      operationId: start_login_v1_auth_google_start_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartLoginRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartLoginResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Start Login
+      tags:
+      - auth
+  /v1/auth/logout:
+    post:
+      description: "Revoke this browser's session.\n\nA no-op for the shared API token, which is not a\
+        \ session and cannot be revoked by a\nrequest \u2014 rotating it is a deploy. Answering 204 either\
+        \ way is what lets a client sign\nout without first working out which kind of token it holds."
+      operationId: logout_v1_auth_logout_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Logout
+      tags:
+      - auth
+  /v1/auth/logout-all:
+    post:
+      description: "Revoke every session, including this one. The answer to a lost phone.\n\nIt exists\
+        \ because the alternative is not an operation. `/v1/auth/logout` needs the\nvery token you are\
+        \ trying to revoke, and invariant 10 says nobody has a shell to run\na `DELETE` from \u2014 so\
+        \ without this, \"I left my laptop on a train\" would mean waiting\nout a thirty-day expiry, or\
+        \ taking your own address off `MOTET_ALLOWED_EMAILS` and\nredeploying twice.\n\nReachable with\
+        \ the shared API token as well as with a session, which is what makes it\nusable from a *different*\
+        \ device than the compromised one."
+      operationId: logout_everywhere_v1_auth_logout_all_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokedResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Logout Everywhere
+      tags:
+      - auth
+  /v1/auth/session:
+    get:
+      description: "Who this request is, and how it proved it.\n\nAnswers for the shared API token too,\
+        \ so the SPA can say \"signed in as \u2026\" or \"using an\nAPI token\" from what the *server*\
+        \ believes rather than by inferring it from what it\nhappens to have in storage."
+      operationId: current_session_v1_auth_session_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Current Session
+      tags:
+      - auth
   /v1/episodes:
     get:
       description: Every episode, newest first, whatever state it is in.

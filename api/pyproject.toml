@@ -5,6 +5,11 @@ description = "Motet HTTP API (FastAPI, Cloud Run)"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
+    # The API talks to Google's token endpoint directly — for a sign-in, and for the Gmail
+    # code exchange the OAuth callback performs. `motet-sources` declares httpx as an
+    # optional extra because a *worker* in fake mode needs no HTTP client; the API's
+    # dependency on it is not optional, and the image is built with default extras only.
+    "httpx>=0.28",
     "motet-db",
     "motet-inference",
     "motet-obs",
@@ -16,6 +21,11 @@ dependencies = [
     "motet-vault",
     "motet-workers",
     "pydantic>=2.10",
+    # Google Sign-In verifies an ID token's RS256 signature against Google's published
+    # JWKS. Pure Python on top of `cryptography`, which motet-vault already brings — and
+    # hand-rolling JWT verification is precisely the code that must not be hand-rolled,
+    # because a bug in it authenticates the attacker rather than crashing.
+    "pyjwt[crypto]>=2.10",
     "pyyaml>=6.0",
     "uvicorn>=0.34",
 ]

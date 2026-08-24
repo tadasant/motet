@@ -113,6 +113,22 @@ With `MOTET_INFERENCE_MODE=fake` (the default) none of this touches a vendor: th
 produce deterministic news items, a script whose claims quote their sources verbatim, and
 silent WAV audio whose length tracks the text. That is enough to exercise every seam.
 
+**Signing in locally, if you want to exercise that seam too:**
+
+```bash
+MOTET_ALLOWED_EMAILS=owner@motet.test uv run uvicorn motet_api:app --reload
+```
+
+The fake identity provider answers as `owner@motet.test` and its consent URL redirects
+straight back to the SPA, so the whole round trip runs with no Google client and no
+network. Without the allowlist, "Sign in with Google" answers 503 saying so — unset means
+deny everybody, deliberately.
+
+You do not *need* it: with `MOTET_API_TOKEN` unset the API is open, `/v1/auth/session`
+reports `how: "open"`, and the SPA skips the sign-in screen and just works. Reach the SPA
+at `localhost` rather than `127.0.0.1` if you are testing either OAuth flow — Google
+matches a redirect URI as an exact string, and only one of those two is registered.
+
 ## Migrations
 
 Plain numbered SQL in `db/migrations/`, named `NNNN_lower_snake_case.sql`, applied in order

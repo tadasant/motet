@@ -7,7 +7,14 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { forgetCallbackUrl, readCallback, redirectUri, stateMatches, takeState } from './oauth'
+import {
+  forgetCallbackUrl,
+  isLoginState,
+  readCallback,
+  redirectUri,
+  stateMatches,
+  takeState,
+} from './oauth'
 
 /** jsdom has a real History, so this is how the tests put the app on a path. */
 function visit(url: string) {
@@ -17,6 +24,24 @@ function visit(url: string) {
 afterEach(() => {
   visit('/')
   window.sessionStorage.clear()
+})
+
+describe('isLoginState', () => {
+  it('tells a sign-in callback from a mailbox one', () => {
+    // Both flows land on the one /oauth/callback path, and `state` is the only value
+    // guaranteed to survive the round trip through the provider — so it is the only
+    // thing that can say which finished.
+    expect(isLoginState('login.abc123')).toBe(true)
+    expect(isLoginState('abc123')).toBe(false)
+  })
+
+  it('uses a marker the API cannot mint by accident', () => {
+    // The API's own copy of this prefix lives in `motet_api.auth.registry`, pinned by a
+    // test there for the same reason. A dot is safe because `secrets.token_urlsafe`
+    // emits only [A-Za-z0-9_-], so a mailbox state can never look like a sign-in one.
+    expect(isLoginState('login_abc')).toBe(false)
+    expect(isLoginState('loginabc')).toBe(false)
+  })
 })
 
 describe('redirectUri', () => {
@@ -47,7 +72,15 @@ describe('readCallback', () => {
     // The user pressed Cancel. There is no code, and asking the API to exchange one
     // would turn a supported answer into an error.
     visit('/oauth/callback?error=access_denied&state=st_1')
-    expect(readCallback()).toEqual({ kind: 'denied', error: 'access_denied', description: '' })
+    // `state` comes back even on a refusal: it is what says *which* flow was refused,
+    // and "you did not grant access to your mailbox" and "you did not finish signing in"
+    // are different sentences.
+    expect(readCallback()).toEqual({
+      kind: 'denied',
+      error: 'access_denied',
+      description: '',
+      state: 'st_1',
+    })
   })
 
   it('is empty on the callback path with nothing to exchange', () => {

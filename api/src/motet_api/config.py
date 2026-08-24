@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
 
+from motet_inference.mode import current_mode
+
+from .auth import CLIENT_ID_ENV, allowed_emails
+
 API_TOKEN_ENV: Final = "MOTET_API_TOKEN"
 PUBLIC_BASE_URL_ENV: Final = "MOTET_PUBLIC_BASE_URL"
 
@@ -37,6 +41,13 @@ DEFAULT_FEED_DESCRIPTION: Final = (
 DEFAULT_FEED_AUTHOR: Final = "Motet"
 
 
+#: The one path the SPA hands back to after a provider redirect, for both signing in and
+#: connecting a mailbox. It is registered on the Google OAuth client — three URIs, one per
+#: environment, each that environment's own origin plus this path — and the registrations
+#: live in the private infrastructure repo. Nothing in this repo can tell you it drifted.
+CALLBACK_PATH: Final = "/oauth/callback"
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str | None
@@ -47,6 +58,16 @@ class Settings:
     feed_title: str
     feed_description: str
     feed_author: str
+    #: Who may sign in with Google. Empty means nobody — see `motet_api.auth.allowlist`.
+    #:
+    #: Defaulted, unlike every field above it, and the default is the *closed* one. These
+    #: two decide who gets in, so a `Settings` built for some other purpose — a test that
+    #: only cares about the CORS policy, say — must land on "nobody signs in" rather than
+    #: forcing every such caller to remember to say so.
+    allowed_emails: frozenset[str] = frozenset()
+    #: Present only so that "is sign-in actually wired" is answerable. The secret half is
+    #: never read here: the API resolves it when it completes a sign-in, not at startup.
+    google_client_id: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -61,6 +82,8 @@ class Settings:
                 _clean(os.environ.get(FEED_DESCRIPTION_ENV)) or DEFAULT_FEED_DESCRIPTION
             ),
             feed_author=_clean(os.environ.get(FEED_AUTHOR_ENV)) or DEFAULT_FEED_AUTHOR,
+            allowed_emails=allowed_emails(os.environ),
+            google_client_id=_clean(os.environ.get(CLIENT_ID_ENV)),
         )
 
     @property
@@ -73,6 +96,61 @@ class Settings:
         it looks exactly like a working one.
         """
         return self.api_token is not None
+
+    @property
+    def login_configured(self) -> bool:
+        """Whether anybody can actually sign in with Google.
+
+        Both halves are required and both fail closed. An empty allowlist means the
+        deployment would deny every verified identity, and in real mode a missing OAuth
+        client means the flow cannot start at all — so a deployment in either state must
+        say so rather than offering a button that ends in a wall.
+
+        Reported on ``/internal/health`` in the same spirit as ``authenticated``: an
+        exporter that no-ops silently and a login that denies silently are the same class
+        of problem, which is that nothing distinguishes them from working.
+        """
+        if not self.allowed_emails:
+            return False
+        # Through `current_mode` rather than comparing the stored string: AGENTS.md says
+        # MOTET_INFERENCE_MODE is parsed in exactly one place, because two readings can
+        # disagree silently. A second `== "real"` here would be one of them.
+        try:
+            mode = current_mode({"MOTET_INFERENCE_MODE": self.inference_mode})
+        except ValueError:
+            # An unrecognized mode is somebody else's crash — the worker entry point and
+            # the LLM seam both raise on it. Here it only means "cannot claim this is
+            # configured", which is the fail-closed answer.
+            return False
+        return mode != "real" or self.google_client_id is not None
+
+    def callback_uri_allowed(self, redirect_uri: str) -> bool:
+        """Whether the SPA may ask for a sign-in that returns to this URI.
+
+        Google is the real check — it matches a redirect URI against the ones registered
+        on the OAuth client, by exact string, and refuses anything else — so this cannot
+        be the thing that stops a grant going somewhere it should not. It is here because
+        *starting* a sign-in is necessarily unauthenticated, and an unauthenticated route
+        that echoes an arbitrary caller-supplied URL into a redirect is a shape worth not
+        having even when it is provably harmless.
+
+        With ``MOTET_APP_BASE_URL`` unset the origin is not checked: that is a laptop,
+        where the Vite dev server and the API share an origin and there is no configured
+        answer to compare against.
+        """
+        try:
+            path = urlsplit(redirect_uri).path
+        except ValueError:
+            return False
+        if path.rstrip("/") != CALLBACK_PATH:
+            return False
+        origins = self.cors_origins
+        if not origins:
+            return True
+        try:
+            return _origin(redirect_uri) in origins
+        except ConfigError:
+            return False
 
     @property
     def cors_origins(self) -> list[str]:

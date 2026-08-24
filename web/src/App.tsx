@@ -9,15 +9,33 @@
 // rather than back into a running app. It is handled by reading `location` once at boot
 // (see oauth.ts) and rendering the callback instead of the tabs — a few lines, against a
 // dependency that would then be available for every future "shouldn't this be a route?".
+// Two flows come back on that one path — signing in, and connecting a mailbox — and the
+// `state` says which, because it is the only thing that survives the round trip.
+//
+// **A browser holding no token sees the door and nothing else.** That is the whole point
+// of Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN"
+// is now a button. The disclosure stays, because the shared token still works and is
+// still the answer when there is no Google account to hand — it has just stopped being
+// the thing a human is expected to type into a phone.
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { ApiError, type Episode, type NewsItem, api, getToken, setToken } from './api/client'
-import { forgetCallbackUrl, readCallback } from './oauth'
+import {
+  ApiError,
+  type Episode,
+  type NewsItem,
+  type SessionInfo,
+  api,
+  getToken,
+  setToken,
+} from './api/client'
+import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
 import { Backlog } from './screens/Backlog'
 import { EpisodeScreen } from './screens/EpisodeScreen'
 import { OAuthCallback } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
+import { SignIn } from './screens/SignIn'
+import { SignInCallback } from './screens/SignInCallback'
 import { Sources } from './screens/Sources'
 
 type Tab = 'paste' | 'backlog' | 'episode' | 'sources'
@@ -38,6 +56,23 @@ export default function App() {
   // Read once, in an initializer, so every later render works from state rather than
   // from an address bar the callback is about to rewrite.
   const [callback, setCallback] = useState(readCallback)
+  // Who the *server* says this browser is, or null when it says nobody. Best-effort: an
+  // older API with no /v1/auth answers 404 and this stays null.
+  const [who, setWho] = useState<SessionInfo | null>(null)
+  // A deployment with MOTET_API_TOKEN unset has no lock on it at all — the documented
+  // local setup. Showing a sign-in door in front of an API that is already answering
+  // would be a dead end, and clicking the button there 503s because a laptop has no
+  // allowlist either.
+  const unlocked = who?.how === 'open'
+
+  // A sign-in and a mailbox connection come back on the same path. Only `state` can tell
+  // them apart, because it is the one value Google echoes back verbatim.
+  const signingIn = callback !== null && callback.kind !== 'empty' && isLoginState(callback.state)
+
+  const saveToken = useCallback((value: string) => {
+    setToken(value)
+    setTokenState(value)
+  }, [])
 
   const refresh = useCallback(() => {
     api
@@ -49,12 +84,13 @@ export default function App() {
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
   }, [])
 
-  // Not while the callback is on screen: it has its own request to make, and a backlog
-  // fetch that 401s behind it would put an unrelated error above the answer the user is
-  // waiting for.
+  // Not while the callback is on screen, and not before there is a token: each has its
+  // own thing to say, and a backlog fetch that 401s behind it would put an unrelated
+  // error above the answer the user is actually waiting for — "GET /v1/news-items failed:
+  // 401" over the top of a sign-in button being the silliest version of that.
   useEffect(() => {
-    if (!callback) refresh()
-  }, [callback, refresh, token])
+    if (!callback && (token || unlocked)) refresh()
+  }, [callback, refresh, token, unlocked])
 
   // Take the code out of the address bar as soon as it has been read into state. A reload
   // would otherwise re-POST a code the API has already consumed and report a flow that
@@ -63,9 +99,29 @@ export default function App() {
     if (callback) forgetCallbackUrl()
   }, [callback])
 
+  // Asked unconditionally, including with no token at all: that is how an *unlocked*
+  // deployment is recognised, and it is the only way to recognise one — a browser cannot
+  // tell "no credential" apart from "no credential needed" without asking.
+  //
+  // A 401 clears the token as well as `who`. A session expires after 30 days and can be
+  // revoked from another device, and without this the SPA would keep a dead string in
+  // storage, show a tab strip whose every screen 401s, and offer no way back to the door
+  // except realising that emptying the *API token* field is what signs you out.
+  useEffect(() => {
+    api
+      .session()
+      .then(setWho)
+      .catch((err) => {
+        setWho(null)
+        if (err instanceof ApiError && err.status === 401 && token) saveToken('')
+      })
+  }, [token, saveToken])
+
   const finishCallback = () => {
     setCallback(null)
-    setTab('sources')
+    // Back to where the flow started from: a mailbox connection belongs on Sources, and a
+    // sign-in belongs at the front of the app the person was trying to reach.
+    setTab(signingIn ? 'paste' : 'sources')
   }
 
   const openEpisode = (next: Episode) => {
@@ -73,18 +129,32 @@ export default function App() {
     setTab('episode')
   }
 
-  const saveToken = (value: string) => {
-    setToken(value)
-    setTokenState(value)
+  const signOut = () => {
+    // Fire and forget the revoke, then drop the token locally whatever the server said —
+    // a browser that has decided to sign out must not stay signed in because a request
+    // failed. The row expires on its own if the call never lands.
+    api.logout().catch(() => undefined)
+    saveToken('')
+    setWho(null)
   }
 
   return (
     <main>
       <header>
         <h1>Motet</h1>
-        {/* Hidden during the callback: there is one thing to do there, and the screen
-            offers it. */}
-        {!callback && (
+        {/* The address alone, not "signed in as …": the button beside it already says
+            what state this is, and the callback screen is the place that spells it out. */}
+        {who?.email && (
+          <p className="hint">
+            {who.email}{' '}
+            <button type="button" onClick={signOut}>
+              Sign out
+            </button>
+          </p>
+        )}
+        {/* Hidden during the callback, and before there is anything to navigate: there is
+            one thing to do on either screen, and the screen offers it. */}
+        {!callback && (token || unlocked) && (
           <nav aria-label="Screens">
             {TABS.map((entry) => (
               <button
@@ -103,9 +173,11 @@ export default function App() {
       <details className="token">
         <summary>API token</summary>
         <p className="hint">
-          One shared token for the single Phase 1 account — no signup, no login. Stored in
-          this browser only. (Connecting a mailbox under Sources is a different thing: that
-          is Google&rsquo;s consent, and its token never comes back here.)
+          One shared token for the single Phase 1 account — the same one the RSS feed and
+          any script use. Signing in with Google puts a session token in this same slot,
+          so this field is the fallback rather than the way in. Stored in this browser
+          only. (Connecting a mailbox under Sources is a different thing again: that is
+          Google&rsquo;s consent, and its token never comes back here.)
         </p>
         <input
           aria-label="API token"
@@ -122,8 +194,12 @@ export default function App() {
         </p>
       )}
 
-      {callback ? (
+      {callback && signingIn ? (
+        <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
+      ) : callback ? (
         <OAuthCallback callback={callback} onDone={finishCallback} />
+      ) : !token && !unlocked ? (
+        <SignIn />
       ) : (
         <>
           {tab === 'paste' && <PasteIn onIngested={refresh} />}
