@@ -134,9 +134,9 @@ def require_caller(
     """Authorize a ``/v1`` request, by shared token or by browser session.
 
     The shared token is tried first and compared in constant time; a session lookup only
-    happens for a bearer value that is not it. That ordering means the path every
-    non-browser client takes never touches the database, and it keeps the constant-time
-    comparison unconditional rather than something an early return could skip.
+    happens for a bearer value that is not it. That ordering is what keeps the path every
+    non-browser client takes — the feed tooling, the iOS app, any script — off the
+    database entirely.
 
     When no token is configured the API is open, and says so in the log on every request
     rather than only at startup — a warning nobody sees after the first minute of uptime

@@ -16,7 +16,11 @@
 -- second one, against the *same* Google OAuth client: adding a value beats a second table
 -- that would need its own single-use consume path, its own expiry sweep, and its own
 -- chance of getting one of them wrong.
-ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
+--
+-- Dropped by name and *without* `IF EXISTS`: PostgreSQL names an unnamed column check
+-- `<table>_<column>_check`, so if that assumption is ever wrong this fails here, loudly,
+-- rather than adding a second constraint beside a first one that still refuses 'google'.
+ALTER TABLE oauth_states DROP CONSTRAINT oauth_states_provider_check;
 ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
     CHECK (provider IN ('gmail', 'google'));
 

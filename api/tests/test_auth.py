@@ -148,7 +148,7 @@ class TestSigningIn:
         """Nothing ever needs to read this value back, so nothing keeps it."""
         login = sign_in(api)
         rows = db.execute("SELECT token_sha256 FROM auth_sessions").fetchall()
-        stored = [row[0] for row in rows]
+        stored = [row["token_sha256"] for row in rows]
         assert login["token"] not in stored
         assert stored == [auth_repo.token_digest(login["token"])]
 
@@ -186,7 +186,8 @@ class TestTheAllowlistIsTheLock:
             json={"state": query["state"][0], "code": query["code"][0]},
         )
         assert refused.status_code == 403
-        assert db.execute("SELECT count(*) FROM auth_sessions").fetchone()[0] == 0  # type: ignore[index]
+        counted = db.execute("SELECT count(*) AS n FROM auth_sessions").fetchone()
+        assert counted is not None and counted["n"] == 0
 
     def test_health_reports_whether_anyone_could_sign_in(
         self, api: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -267,11 +268,10 @@ class TestTheHandshake:
             (started.json()["state"],),
         ).fetchone()
         assert row is not None
-        provider, source_id, nonce = row
-        assert provider == "google"
+        assert row["provider"] == "google"
         # A sign-in connects nothing. The column is nullable for exactly this.
-        assert source_id is None
-        assert nonce == query["nonce"][0]
+        assert row["source_id"] is None
+        assert row["nonce"] == query["nonce"][0]
 
     @pytest.mark.parametrize(
         "redirect_uri",
@@ -560,4 +560,4 @@ class TestSessionsAreOneAccount:
         """
         sign_in(api)
         owners = db.execute("SELECT DISTINCT user_id FROM auth_sessions").fetchall()
-        assert owners == [(repo.OWNER_USER_ID,)]
+        assert [row["user_id"] for row in owners] == [repo.OWNER_USER_ID]
