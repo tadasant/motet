@@ -1,4 +1,4 @@
-"""Deterministic tool transports — invariant 9, applied to the tool seam.
+"""Deterministic tool transports — invariant 7, applied to the tool seam.
 
 A voice session's tools are the only thing in the service that reaches outside the process,
 so they are the only thing that needs a fake. These two cover both halves of what a test

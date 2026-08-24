@@ -5,7 +5,7 @@ from __future__ import annotations
 from motet_voice.audio import iter_frames
 from motet_voice.bargein import BargeInDecision, BargeInPolicy, VadTurnDetector
 from motet_voice.harness import synthesize_walk
-from motet_voice.vad import EnergyVad, ScriptedVad
+from motet_voice.vad import EnergyVad, ScriptedVad, VadReading
 
 
 def _run(pcm: bytes, policy: BargeInPolicy) -> list[BargeInDecision]:
@@ -135,3 +135,32 @@ def test_the_noise_floor_still_follows_the_environment() -> None:
         return floor
 
     assert settled(windy.pcm) > settled(quiet.pcm) + 10.0
+
+
+def test_leading_digital_silence_does_not_poison_the_noise_floor() -> None:
+    """A phone export that starts with exact zeros must not ruin the next twenty seconds.
+
+    ``dbfs()`` reports digital silence as -100 dBFS. An unclamped quantile floor walks down
+    to meet it and then climbs back at 0.05 dB a frame, so ordinary ambient reads as a huge
+    positive SNR for the rest of the recording and the headline number says "push-to-talk is
+    the product" because of a codec rather than because of the weather.
+    """
+    walk = synthesize_walk(duration_ms=20_000, speech_at_ms=(8_000,), speech_duration_ms=1_500)
+    silence = b"\x00" * (16_000 * 2)  # one second of exact zeros, as an export produces
+
+    clean = _run(walk.pcm, BargeInPolicy(name="clean"))
+    with_silence = _run(silence + walk.pcm, BargeInPolicy(name="lead-in"))
+
+    assert len(with_silence) <= len(clean) + 1, (
+        f"a second of leading silence turned {len(clean)} decision(s) into "
+        f"{len(with_silence)}; the noise floor is not clamped"
+    )
+    assert with_silence, "the real utterance must still be caught after the silence"
+
+
+def test_the_floor_is_clamped_at_the_absolute_floor() -> None:
+    vad = EnergyVad()
+    reading = VadReading(0.0, 0.0, 0.0, 0.0, 0.0)
+    for frame in iter_frames(b"\x00" * (16_000 * 2 * 5)):
+        reading = vad.observe(frame)
+    assert reading.noise_floor_dbfs >= vad.absolute_floor_dbfs

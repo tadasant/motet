@@ -10,7 +10,13 @@ import json
 from pathlib import Path
 
 import pytest
-from motet_voice.audio import PcmFormat, pcm_from_samples, write_wav
+from motet_voice.audio import (
+    PcmFormat,
+    pcm_from_samples,
+    read_wav,
+    samples_from_pcm,
+    write_wav,
+)
 from motet_voice.bargein import BargeInPolicy
 from motet_voice.cli import main
 from motet_voice.config import VoiceSettings
@@ -28,7 +34,7 @@ from motet_voice.harness import (
     sweep,
     synthesize_walk,
 )
-from motet_voice.harness.metrics import ScoredRun
+from motet_voice.harness.metrics import ArmMetrics, ScoredRun
 from motet_voice.harness.replay import policies_for_measurement
 
 
@@ -176,17 +182,25 @@ def test_the_report_survives_a_run_with_nothing_in_it() -> None:
     assert "No arms were replayed" in render_report([ScoredRun(run_label="empty")])
 
 
-def test_ingest_converts_a_phone_recording_to_the_canonical_format(tmp_path: Path) -> None:
-    stereo = tmp_path / "phone.wav"
+def test_ingest_converts_a_real_48k_stereo_recording(tmp_path: Path) -> None:
+    """What a phone actually exports: 48 kHz, two channels. Anything less tests nothing."""
     walk = synthesize_walk(duration_ms=3_000)
-    samples = list(walk.pcm)
-    write_wav(stereo, bytes(samples), PcmFormat(sample_rate=16_000, channels=1))
+    mono_16k = samples_from_pcm(walk.pcm)
+    # Upsample 16k -> 48k by triplication and duplicate into two channels, which is the
+    # shape `to_mono_16k` has to undo.
+    stereo_48k = pcm_from_samples(
+        [value for sample in mono_16k for _ in range(3) for value in (sample, sample)]
+    )
+    source = tmp_path / "phone.wav"
+    write_wav(source, stereo_48k, PcmFormat(sample_rate=48_000, channels=2))
 
-    run = ingest_recording(stereo, tmp_path / "run", label="phone")
+    run = ingest_recording(source, tmp_path / "run", label="phone")
 
     assert run.ground_truth == "silent"
     assert load_run(run.path).label == "phone"
-    assert run.pcm(), "the ingested audio must be readable back as target-format PCM"
+    assert run.duration_ms == pytest.approx(3_000, abs=20)
+    fmt, _ = read_wav(run.audio_path)
+    assert fmt == PcmFormat(), f"ingest left the recording at {fmt.describe()}"
 
 
 def test_ingest_refuses_a_non_wav_with_an_actionable_message(tmp_path: Path) -> None:
@@ -303,3 +317,42 @@ def test_an_unknown_arm_or_variant_is_rejected(tmp_path: Path, settings: VoiceSe
 
 def test_pcm_helpers_round_trip() -> None:
     assert pcm_from_samples([1, -1, 32_767, -32_768])
+
+
+def test_a_configuration_that_heard_nothing_is_never_the_winner() -> None:
+    """A detector that never fires scores a perfect zero and, unguarded, wins.
+
+    This is not hypothetical — it is exactly what an arm wired to a decision source nobody
+    asks produces, and it is the failure mode that would have quietly declared the dormant
+    realtime arm the best of the two.
+    """
+    deaf = ArmMetrics(
+        arm="openai_realtime",
+        variant="default",
+        open_mic_ms=60_000,
+        decisions=0,
+        false_positives=0,
+        true_positives=0,
+        missed=3,
+        median_latency_ms=None,
+        ground_truth="labelled",
+    )
+    working = ArmMetrics(
+        arm="composed",
+        variant="default",
+        open_mic_ms=60_000,
+        decisions=4,
+        false_positives=1,
+        true_positives=3,
+        missed=0,
+        median_latency_ms=120,
+        ground_truth="labelled",
+    )
+
+    assert deaf.deaf and not working.deaf
+    assert deaf.false_per_minute < working.false_per_minute, "the trap: it looks best"
+
+    scored = ScoredRun(run_label="x", metrics=[deaf, working])
+    best = scored.best()
+    assert best is not None and best.arm == "composed"
+    assert "heard nothing" in render_report([scored])

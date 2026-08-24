@@ -1,4 +1,4 @@
-"""Invariant 3, as a test rather than as a comment.
+"""Invariant 2, as a test rather than as a comment.
 
 **The voice service never touches the news DB.** That is an architectural boundary, and the
 failure mode it guards against is not a bug that shows up in a diff review — it is somebody
@@ -48,5 +48,5 @@ def test_no_module_imports_the_database() -> None:
                 if root in FORBIDDEN_MODULES:
                     offenders.append(f"{path.relative_to(PACKAGE)}:{node.lineno} imports {name}")
     assert not offenders, (
-        "the voice service must not reach the news database (invariant 3):\n" + "\n".join(offenders)
+        "the voice service must not reach the news database (invariant 2):\n" + "\n".join(offenders)
     )

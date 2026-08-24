@@ -42,7 +42,7 @@ One habit that matters: **walk for ten seconds before the first sentence.** The 
 noise floor spends the first second or two learning the street, and a barge-in inside that
 window can be missed for a reason that has nothing to do with the weather.
 
-### 3. Back inside — three commands
+### 3. Back inside — four commands
 
 Export both recordings as **WAV** (any voice-memo app can share as WAV; so can QuickTime or
 `ffmpeg -i memo.m4a memo.wav`), then:
@@ -87,7 +87,7 @@ the object-storage seam afterwards.
 |---|---|
 | Barge-in harness, composed arm's turn detection | **Live.** No credential of any kind |
 | `openai_realtime` arm — live vendor session | **Dormant:** `OPENAI_API_KEY` is not provisioned |
-| `openai_realtime` arm — offline turn detection | Runs, as a **labelled emulation** of that vendor's documented server-VAD parameters. Not a measurement of the vendor |
+| `openai_realtime` arm — offline turn detection | Runs, as a **labelled emulation** of that vendor's documented server-VAD parameters. Not a measurement of the vendor, and it stays an emulation even once the key exists — see below |
 | Composed arm — LLM leg | Live, through the existing OpenRouter seam (Claude Sonnet 5) |
 | Composed arm — TTS leg | Live, through the existing Cartesia adapter |
 | Composed arm — STT leg | **Dormant:** no speech-to-text vendor provisioned. Does not affect barge-in |
@@ -95,9 +95,17 @@ the object-storage seam afterwards.
 | `mark_read` | **Live** — the route exists today |
 | `start_research` | **Dormant:** `EXA_API_KEY` is not provisioned |
 
-Turning the realtime arm on is `OPENAI_API_KEY` plus `MOTET_VOICE_ARM=openai_realtime`, and
-re-running `motet-voice replay` on the *same* recordings — no code change, and the comparison
-with tonight's numbers stays valid.
+**A key wakes the conversation, not the measurement**, and the distinction is deliberate.
+`OPENAI_API_KEY` plus `MOTET_VOICE_ARM=openai_realtime` gives the arm a live vendor session
+with no code change. Offline *replay* keeps using the labelled emulation, because a replay
+sends recorded audio to a detector rather than to a socket — and the vendor's relay reports
+what its socket says, so a replay through it would produce **zero decisions**, score a perfect
+zero false positives per minute, and be crowned the winner of the comparison this harness
+exists to run. `build_turn_detector` therefore never hands back the relay; the live path uses
+`build_live_turn_detector` explicitly, and until something streams a recording through a real
+socket, every realtime row stays marked `*(emulated)*`. A report also flags any configuration
+that produced no decisions at all and excludes it from the winner, so that failure cannot
+reappear silently in some other guise.
 
 ---
 

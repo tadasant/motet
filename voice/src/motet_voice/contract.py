@@ -1,11 +1,11 @@
 """The voice service's own protocol — the seam clients speak instead of a vendor's.
 
-**Invariant 2: the client never speaks a vendor protocol.** Nothing in this module names
+**Invariant 1: the client never speaks a vendor protocol.** Nothing in this module names
 OpenAI, Cartesia, or anyone else. A client sends a session config and receives a stream of
 events; which provider produced them is a service-side detail, so swapping providers is a
 deploy, not an App Store release.
 
-**Invariant 3: no database.** A session config arrives *complete* — the persona, the tools
+**Invariant 2: no database.** A session config arrives *complete* — the persona, the tools
 the session may call, the MCP servers it may reach, the context it should already know, and
 the turn policy. The voice service never looks anything up. Whoever starts the session
 (Motet's API today; Zimmer tomorrow, which is the reason this shape exists at all) has the
@@ -48,7 +48,7 @@ class Persona(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     instructions: str = Field(min_length=1, max_length=8_000)
     #: A provider-neutral voice label. Mapped to a vendor voice id by the arm, never here:
-    #: a Cartesia voice uuid in a client request would be invariant 2 gone in one field.
+    #: a Cartesia voice uuid in a client request would be invariant 1 gone in one field.
     voice: str = Field(default="narrator", min_length=1, max_length=80)
 
 
@@ -106,14 +106,14 @@ class McpServerBinding(BaseModel):
 class SessionContext(BaseModel):
     """What the session already knows, passed in whole because it cannot look anything up.
 
-    This is invariant 3 in its most concrete form. Everything the conversation needs about
+    This is invariant 2 in its most concrete form. Everything the conversation needs about
     the episode — the segments, the news items, where the listener is — arrives here, from
     a caller that does have the database.
     """
 
     episode_id: str | None = None
     #: Where narration had reached when the session opened. **Ours, not a provider's**
-    #: (invariant 5): the caller reports it and :class:`~motet_voice.clock.PlaybackClock`
+    #: (invariant 4): the caller reports it and :class:`~motet_voice.clock.PlaybackClock`
     #: takes it from here.
     spoken_through_ms: Annotated[int, Field(ge=0)] = 0
     #: Free-form briefing material — segment texts, item titles, the listener's own notes.
@@ -145,7 +145,7 @@ class StartSessionResponse(BaseModel):
     websocket_path: str
     #: Which provider arm this session will run on, echoed back so a client's logs say
     #: which one produced a transcript. Informational: the client's behaviour does not
-    #: change, which is the point of invariant 2.
+    #: change, which is the point of invariant 1.
     arm: str
     #: ``False`` when the arm is configured but its credential is not provisioned. The
     #: session still opens and still runs turn detection — that is what the harness needs —

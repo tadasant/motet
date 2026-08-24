@@ -1,6 +1,6 @@
 """What a tool is, what it answers, and how it reaches the outside world.
 
-**Tools are how the voice service does anything at all** — that is invariant 3 restated as
+**Tools are how the voice service does anything at all** — that is invariant 2 restated as
 a design. The service holds no database credential and no schema knowledge, so "what is
 this story about" and "remember that bit" are not lookups, they are calls back to whoever
 owns the data. If a change to this service seems to need a database handle, the answer is a

@@ -34,12 +34,17 @@ SPEECH_LEVEL: Final = 0.62
 
 #: The microphone's own noise, always present. Around −48 dBFS.
 #:
-#: Not decoration. Without it the gust envelopes can multiply out to near-digital-silence,
-#: and an adaptive noise floor tracking a signal that briefly reaches −70 dBFS settles far
-#: below anything real — after which ordinary ambient reads as a +25 dB event and the
-#: detector fires on nothing. That is a property of the *generator*, not of the detector: a
-#: real microphone outdoors never goes quiet, and a synthetic adversary that does is testing
-#: a situation that cannot happen.
+#: Realism, not a workaround. A real microphone outdoors never goes quiet, and without this
+#: the gust envelopes can multiply out to near-silence — a situation the generator would be
+#: inventing rather than reproducing.
+#:
+#: It was *introduced* as a workaround, and the distinction is worth recording. Near-silence
+#: exposed a real defect — an adaptive floor that walked down to meet it and then read
+#: ordinary ambient as a +25 dB event — and papering over that in the generator would have
+#: hidden a bug that a phone's own export triggers every time, since those begin with exact
+#: zeros. The defect is fixed in :class:`~motet_voice.vad.EnergyVad`, which now refuses to
+#: learn anything from a frame below its absolute floor, and
+#: ``test_leading_digital_silence_does_not_poison_the_noise_floor`` holds that line.
 MIC_NOISE_LEVEL: Final = 0.004
 
 

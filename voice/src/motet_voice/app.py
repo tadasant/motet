@@ -19,12 +19,13 @@ accident:
 3. **WebSockets are supported but bounded.** A request — including a socket — has a maximum
    duration, so the client must be able to reconnect, which the stateless token makes free.
 
-**A client never speaks a vendor protocol here** (invariant 2): the events below are ours,
+**A client never speaks a vendor protocol here** (invariant 1): the events below are ours,
 and swapping the arm underneath changes none of them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -52,6 +53,10 @@ from .tools import HttpToolTransport, ToolRegistry, ToolTransport, build_platfor
 logger = logging.getLogger("motet.voice.app")
 
 WEBSOCKET_PATH = "/v1/voice/sessions/{session_id}/stream"
+
+#: How long an accepted socket may go without authenticating. Short: a client that
+#: has just been handed a token sends it immediately.
+AUTHENTICATE_TIMEOUT_SECONDS = 10.0
 
 
 class HealthResponse(BaseModel):
@@ -242,8 +247,15 @@ async def _authenticate(
     token cannot be paired with a different tool list.
     """
     try:
-        raw = await websocket.receive_text()
+        # Bounded: an accepted socket that never authenticates holds a Cloud Run concurrency
+        # slot until the platform's own request timeout, which is minutes. Anyone can open
+        # one, so the cheapest denial-of-service against this service is silence.
+        async with asyncio.timeout(AUTHENTICATE_TIMEOUT_SECONDS):
+            raw = await websocket.receive_text()
         payload = json.loads(raw)
+    except TimeoutError:
+        await _close(websocket, "no authenticate frame arrived in time")
+        return None
     except (WebSocketDisconnect, ValueError):
         await _close(websocket, "malformed authentication frame")
         return None
@@ -345,7 +357,7 @@ async def _handle_control(
         return False
 
     if kind == "provider_position":
-        # Recorded as drift and otherwise ignored. Invariant 5.
+        # Recorded as drift and otherwise ignored. Invariant 4.
         session.provider_reported_position(_as_int(payload.get("spoken_through_ms")))
         return False
 

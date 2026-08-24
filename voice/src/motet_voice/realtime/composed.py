@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -159,7 +159,7 @@ def _system_prompt(request: TurnRequest) -> str:
     """Persona plus context, and nothing fetched.
 
     Every fact the model may use arrives in :attr:`TurnRequest.context_notes`, placed there
-    by the caller that owns the database. Invariant 3 is not a rule this prompt obeys; it
+    by the caller that owns the database. Invariant 2 is not a rule this prompt obeys; it
     is the reason the prompt is built this way.
     """
     parts = [request.persona_instructions.strip()]
@@ -174,9 +174,15 @@ def _system_prompt(request: TurnRequest) -> str:
 
 @dataclass
 class ComposedArm:
-    """VAD + STT + LLM + TTS, assembled."""
+    """VAD + STT + LLM + TTS, assembled.
 
-    vad: Vad = field(default_factory=EnergyVad)
+    ``vad_factory`` rather than a VAD, because a VAD is **stateful**: it carries the adaptive
+    noise floor for one stream of audio. The arm is process-wide and Cloud Run serves many
+    sessions per instance, so a shared instance would have two listeners driving one floor
+    and either one's ``reset()`` wiping the other's. Each detector gets its own.
+    """
+
+    vad_factory: Callable[[], Vad] = EnergyVad
     recognizer: SpeechRecognizer = field(default_factory=DormantSpeechRecognizer)
     model: ConversationModel = field(default_factory=FakeConversationModel)
     synthesizer: SpeechSynthesizer | None = None
@@ -195,15 +201,17 @@ class ComposedArm:
             replayable=True,
             dormant_reason=self.dormant_reason,
             notes=(
-                f"vad={self.vad.name} stt={self.recognizer.name} llm={self.model.name} "
+                f"vad={self.vad_factory().name} stt={self.recognizer.name} "
+                f"llm={self.model.name} "
                 f"tts={'wired' if self.synthesizer is not None else 'none'}"
             ),
         )
 
     def build_turn_detector(self, policy: BargeInPolicy) -> TurnDetector:
         """No credential, no network, fully deterministic — the measurable half."""
+        vad = self.vad_factory()
         return VadTurnDetector(
-            vad=self.vad, policy=policy, arm_name=self.name, trigger=f"local_vad:{self.vad.name}"
+            vad=vad, policy=policy, arm_name=self.name, trigger=f"local_vad:{vad.name}"
         )
 
     async def respond(self, request: TurnRequest) -> AssistantTurn:
@@ -227,14 +235,14 @@ def build_composed_arm(
     """Assemble the arm for this process, honouring ``MOTET_INFERENCE_MODE``.
 
     In ``fake`` mode — every test, every laptop, all of CI — nothing here reaches a vendor.
-    That is invariant 9 and it is why the mode is read from the one parser rather than from
+    That is invariant 7 and it is why the mode is read from the one parser rather than from
     a second variable of this module's own.
     """
     environ = os.environ if env is None else env
 
     if not settings.real:
         return ComposedArm(
-            vad=EnergyVad(),
+            vad_factory=EnergyVad,
             recognizer=FakeSpeechRecognizer(),
             model=FakeConversationModel(),
             synthesizer=_fake_synthesizer(),
@@ -251,7 +259,7 @@ def build_composed_arm(
         or DEFAULT_MODEL
     )
     return ComposedArm(
-        vad=EnergyVad(),
+        vad_factory=EnergyVad,
         recognizer=DormantSpeechRecognizer(),
         model=LlmConversationModel(client=build_client(), model=model),
         synthesizer=CartesiaSpeechSynthesizer(),

@@ -43,8 +43,9 @@ class BargeInPolicy:
     consecutive_speech_frames: int = 6
     #: A qualifying frame must also be this far above the adaptive noise floor. Largely
     #: redundant with the probability for :class:`~motet_voice.vad.EnergyVad`, which derives
-    #: probability from SNR — but not for a binary VAD such as WebRTC's, where it is the only
-    #: loudness gate there is.
+    #: probability from SNR — but for a binary VAD such as WebRTC's it is the only loudness
+    #: gate there is, which is why :class:`~motet_voice.vad.WebrtcVad` measures a real floor
+    #: rather than reporting a nominal one.
     min_snr_db: float = 12.0
     #: Once triggered, ignore everything for this long. Without it a single utterance
     #: produces a decision every frame and the headline metric counts syllables.
@@ -93,7 +94,14 @@ class BargeInDecision:
 
     @property
     def latency_ms(self) -> int:
-        """How long the detector took to commit, from onset to trigger."""
+        """How long the detector took to commit, from reported onset to trigger.
+
+        *Reported* onset: an arm that emulates a provider's ``prefix_padding_ms`` backs the
+        onset off by that much, so its latency legitimately includes the padding. Comparing
+        latency across arms is comparing "how long after the listener started did we act",
+        which is the quantity that matters and is not the same as "how many frames did the
+        detector need".
+        """
         return self.at_ms - self.onset_ms
 
     def with_snippet(self, snippet: str) -> BargeInDecision:
@@ -173,6 +181,12 @@ class VadTurnDetector:
     arm_name: str = "composed"
     trigger: str = "local_vad"
     frame_ms: int = DEFAULT_FRAME_MS
+    #: How far before the first qualifying frame the utterance is *reported* to have begun.
+    #: Zero for a local VAD, which has no opinion about it; non-zero for an arm emulating a
+    #: provider whose ``prefix_padding_ms`` says the turn started before its detector
+    #: committed. It moves ``onset_ms``, and therefore ``latency_ms``, which is correct: that
+    #: is the interval between when the listener started and when we acted.
+    onset_back_off_ms: int = 0
 
     _run: int = field(default=0, init=False)
     _run_started_ms: int = field(default=0, init=False)
@@ -237,7 +251,7 @@ class VadTurnDetector:
     ) -> BargeInDecision:
         return BargeInDecision(
             at_ms=frame.end_ms,
-            onset_ms=self._run_started_ms,
+            onset_ms=max(0, self._run_started_ms - self.onset_back_off_ms),
             arm=self.arm,
             variant=self.variant,
             trigger=self.trigger,

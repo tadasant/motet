@@ -75,6 +75,18 @@ class ArmMetrics:
         total = self.true_positives + self.missed
         return self.true_positives / total if total else None
 
+    @property
+    def deaf(self) -> bool:
+        """Did this configuration hear nothing at all on a recording that had speech in it?
+
+        A detector that never fires scores a perfect zero false positives per minute, and on
+        the raw number it wins. It is not a winner, it is broken — and the shape of failure
+        that produces one is not hypothetical: an arm wired to a decision source that is
+        never asked produces exactly this. Flagged here so that :meth:`ScoredRun.best` can
+        refuse it and the report can say why.
+        """
+        return self.detection_rate == 0.0
+
     def to_json(self) -> dict[str, Any]:
         return {
             "arm": self.arm,
@@ -90,6 +102,7 @@ class ArmMetrics:
                 None if self.detection_rate is None else round(self.detection_rate, 3)
             ),
             "median_latency_ms": self.median_latency_ms,
+            "deaf": self.deaf,
             "ground_truth": self.ground_truth,
             "emulated": self.emulated,
             "note": self.note,
@@ -108,12 +121,16 @@ class ScoredRun:
 
         The tiebreak is not decoration: on a silent recording several variants routinely
         reach zero, and the useful answer among them is the most responsive one, not
-        whichever happened to be listed first.
+        whichever happened to be listed first. Configurations that heard nothing at all are
+        excluded first — see :attr:`ArmMetrics.deaf`.
         """
         if not self.metrics:
             return None
+        # A configuration that heard nothing on a labelled recording is excluded outright
+        # rather than ranked last: on `false_per_minute` alone it sorts first.
+        eligible = [metric for metric in self.metrics if not metric.deaf] or self.metrics
         return min(
-            self.metrics,
+            eligible,
             key=lambda m: (
                 m.false_per_minute,
                 -(m.detection_rate if m.detection_rate is not None else 0.0),

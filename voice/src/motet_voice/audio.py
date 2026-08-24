@@ -158,7 +158,12 @@ def duration_ms(pcm: bytes, fmt: PcmFormat = TARGET_FORMAT) -> int:
 
 
 def iter_frames(
-    pcm: bytes, *, frame_ms: int = DEFAULT_FRAME_MS, fmt: PcmFormat = TARGET_FORMAT
+    pcm: bytes,
+    *,
+    frame_ms: int = DEFAULT_FRAME_MS,
+    fmt: PcmFormat = TARGET_FORMAT,
+    start_index: int = 0,
+    start_ms: int = 0,
 ) -> Iterator[PcmFrame]:
     """Cut mono 16-bit PCM into fixed frames, dropping a short final remainder.
 
@@ -166,6 +171,14 @@ def iter_frames(
     silence, which reads to any energy VAD as a sudden drop to the noise floor. At most one
     frame — 20 ms — is lost, and a decision at the very last instant of a recording is not
     a decision anyone can review anyway.
+
+    ``start_index`` and ``start_ms`` exist because **a live session does not arrive as one
+    buffer.** Offline the whole recording is a single call and the defaults are right; over
+    a socket the audio arrives in packets, and numbering each packet from zero gives every
+    frame an offset near zero. Everything downstream keys off those offsets — the refractory
+    window compares ``frame.end_ms`` against the last decision, so a detector fed
+    packet-local offsets fires once and then believes itself permanently inside its own
+    cooldown. A caller streaming audio passes its running offsets here.
     """
     if not fmt.is_target:
         raise AudioError(f"frames must be {TARGET_FORMAT.describe()}, got {fmt.describe()}")
@@ -177,8 +190,8 @@ def iter_frames(
     for index in range(total):
         window = samples[index * per_frame : (index + 1) * per_frame]
         yield PcmFrame(
-            index=index,
-            start_ms=round(index * per_frame * 1000 / fmt.sample_rate),
+            index=start_index + index,
+            start_ms=start_ms + round(index * per_frame * 1000 / fmt.sample_rate),
             duration_ms=frame_ms,
             samples=window,
         )

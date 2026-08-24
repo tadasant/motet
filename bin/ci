@@ -33,7 +33,7 @@ uv run ruff format --check .
 step "Typecheck (mypy)"
 uv run mypy
 
-step "Test (pytest — api, db, inference, storage, workers, golden set)"
+step "Test (pytest — api, db, inference, storage, voice, workers, golden set)"
 uv run pytest
 
 # The contract chain: FastAPI app -> openapi.yaml -> web/src/api/schema.gen.ts.

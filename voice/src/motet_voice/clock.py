@@ -1,4 +1,4 @@
-"""``spoken_through_ms`` — ours, not the provider's. Invariant 5, made a type.
+"""``spoken_through_ms`` — ours, not the provider's. Invariant 4, made a type.
 
 This is the smallest module in the service and the one with the most rules attached, so
 they are written here rather than in a review comment:
@@ -77,7 +77,7 @@ class PlaybackClock:
         """The worst disagreement seen between our clock and a provider's.
 
         Reported on the session summary. A large number is not an error — it is the
-        evidence for invariant 5, and it is the kind of thing that is only ever noticed
+        evidence for invariant 4, and it is the kind of thing that is only ever noticed
         if something writes it down.
         """
         return max((abs(drift) for drift in self._provider_drifts_ms), default=0)
@@ -140,7 +140,7 @@ class PlaybackClock:
     def note_provider_position(self, provider_position_ms: int) -> int:
         """Record what a provider thinks the position is. Returns the drift.
 
-        **This never mutates the clock.** If it ever does, invariant 5 is gone and nothing
+        **This never mutates the clock.** If it ever does, invariant 4 is gone and nothing
         in the test suite would notice, which is why the assertion lives in
         ``tests/test_clock.py`` rather than in a comment here.
         """
@@ -149,7 +149,7 @@ class PlaybackClock:
         if abs(drift) >= DRIFT_WARN_MS:
             logger.warning(
                 "provider playback position differs from ours by %dms "
-                "(provider=%dms, ours=%dms) — ours is authoritative (invariant 5)",
+                "(provider=%dms, ours=%dms) — ours is authoritative (invariant 4)",
                 drift,
                 provider_position_ms,
                 self._spoken_through_ms,
@@ -161,9 +161,13 @@ class PlaybackClock:
     def _settle(self) -> int:
         """Fold elapsed playing time into the position, clamped to what was delivered."""
         if self._playing_since is not None:
-            elapsed_ms = int((self.now() - self._playing_since) * 1000)
+            # One reading, used for both the elapsed span and the new mark. Two calls would
+            # silently discard whatever passed between them, and the loss compounds because
+            # this runs on every frame.
+            now = self.now()
+            elapsed_ms = int((now - self._playing_since) * 1000)
             if elapsed_ms > 0:
                 self._spoken_through_ms += elapsed_ms
-                self._playing_since = self.now()
+                self._playing_since = now
         self._spoken_through_ms = min(self._spoken_through_ms, self._delivered_ms)
         return self._spoken_through_ms

@@ -1,4 +1,4 @@
-"""Voice activity detection, behind a Protocol, with a fake — invariant 9.
+"""Voice activity detection, behind a Protocol, with a fake — invariant 7.
 
 **The VAD is the thing being measured, so it is the thing that has to be swappable.** The
 provider question the walk settles is really two questions stacked: does a hosted realtime
@@ -33,7 +33,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from .audio import SILENCE_DBFS, PcmFrame, dbfs, zero_crossing_rate
+from .audio import PcmFrame, dbfs, zero_crossing_rate
 
 
 class VadUnavailable(RuntimeError):
@@ -119,8 +119,9 @@ class EnergyVad:
     snr_midpoint_db: float = 18.0
     #: Logistic width. Larger is a softer decision; smaller approaches a hard threshold.
     snr_scale_db: float = 3.0
-    #: Below this dBFS nothing counts, whatever the SNR says. A 60 dB SNR over a -95 dBFS
-    #: floor is a recording of a quiet room, not somebody talking.
+    #: Below this dBFS nothing counts, whatever the SNR says — a 60 dB SNR over a -95 dBFS
+    #: floor is a recording of a quiet room, not somebody talking. It doubles as the hard
+    #: lower bound on the floor itself; see the clamp in :meth:`observe`.
     absolute_floor_dbfs: float = -55.0
     #: Voiced speech at 16 kHz sits roughly in this zero-crossing band. Below it is wind,
     #: handling noise and engine rumble; above it is hiss, tyre noise and clothing rustle.
@@ -158,25 +159,49 @@ class EnergyVad:
         level = dbfs(frame.samples)
         zcr = zero_crossing_rate(frame.samples)
 
+        # A frame below the absolute floor carries no information about the environment: it
+        # is a dropout, a muted mic, or the exact zeros a phone's voice-memo export puts at
+        # the head of a file. It neither seeds nor moves the floor, and the warm-up counter
+        # does not start until the first frame that is actually a recording of something.
+        #
+        # This is not tidiness. `dbfs()` reports digital silence as -100 dBFS; a floor that
+        # walks toward it — or seeds from it — reads ordinary ambient afterwards as a 25 dB
+        # event and fires on the first second of every export. The walk's headline number
+        # would then be about a codec rather than about the weather.
+        measurable = level >= self.absolute_floor_dbfs
+
         if self._floor_dbfs is None:
-            # Seed from the first frame rather than from a constant: recordings differ by
-            # 30 dB of gain between a phone in a pocket and a headset, and a constant seed
-            # means the first seconds of every recording are measured against the wrong scale.
+            if not measurable:
+                return VadReading(
+                    speech_probability=0.0,
+                    rms_dbfs=level,
+                    noise_floor_dbfs=self.absolute_floor_dbfs,
+                    snr_db=0.0,
+                    zero_crossing_rate=zcr,
+                )
+            # Seed from the first measurable frame rather than from a constant: recordings
+            # differ by 30 dB of gain between a phone in a pocket and a headset, and a
+            # constant seed measures the first seconds against the wrong scale.
             self._floor_dbfs = level
 
         snr = level - self._floor_dbfs
         probability = _logistic((snr - self.snr_midpoint_db) / max(self.snr_scale_db, 1e-6))
-        if level < self.absolute_floor_dbfs:
+        if not measurable:
             probability = 0.0
         elif not (self.min_zcr <= zcr <= self.max_zcr):
             probability *= self.out_of_band_weight
 
-        self._seen += 1
-        scale = self.warmup_multiplier if self._seen <= self.warmup_frames else 1.0
-        if level > self._floor_dbfs:
-            self._floor_dbfs += self.up_step_db * scale
-        else:
-            self._floor_dbfs -= self.down_step_db * scale
+        if measurable:
+            self._seen += 1
+            scale = self.warmup_multiplier if self._seen <= self.warmup_frames else 1.0
+            if level > self._floor_dbfs:
+                self._floor_dbfs += self.up_step_db * scale
+            else:
+                self._floor_dbfs -= self.down_step_db * scale
+        # Belt and braces on top of the measurable check above: a long quiet stretch that is
+        # not quite silent could still walk the floor below anything real, and the recovery
+        # from there is 0.05 dB a frame.
+        self._floor_dbfs = max(self._floor_dbfs, self.absolute_floor_dbfs)
 
         return VadReading(
             speech_probability=probability,
@@ -194,13 +219,20 @@ class WebrtcVad:
     Included because it is the incumbent every voice stack reaches for, which makes it the
     honest baseline for "is our own gate any good". It is binary — speech or not — so its
     probability is 0.0 or 1.0 and a policy's probability threshold degenerates to its
-    consecutive-frame count. dBFS and ZCR are still measured and logged, so a decision from
-    this arm is reviewable in the same terms as one from :class:`EnergyVad`.
+    consecutive-frame count.
+
+    **It still runs an :class:`EnergyVad` alongside, purely to measure.** WebRTC's detector
+    reports a verdict and nothing else, so without a floor estimate of our own a decision
+    from this arm would carry no reviewable evidence — and, worse, ``BargeInPolicy.min_snr_db``
+    would be silently inert here, because a nominal floor makes every frame clear any gate.
+    Composing the two keeps one policy meaning the same thing on both arms, which is the
+    whole point of putting them behind one interface.
 
     Not a declared dependency: see the module docstring.
     """
 
     aggressiveness: int = 2
+    meter: Vad = field(default_factory=lambda: EnergyVad())
     _detector: Any = field(default=None, init=False)
 
     @property
@@ -209,6 +241,7 @@ class WebrtcVad:
 
     def reset(self) -> None:
         self._detector = None
+        self.meter.reset()
 
     def _ensure(self) -> Any:
         if self._detector is None:
@@ -227,13 +260,13 @@ class WebrtcVad:
 
         detector = self._ensure()
         speech = bool(detector.is_speech(pcm_from_samples(frame.samples), TARGET_SAMPLE_RATE))
-        level = dbfs(frame.samples)
+        measured = self.meter.observe(frame)
         return VadReading(
             speech_probability=1.0 if speech else 0.0,
-            rms_dbfs=level,
-            noise_floor_dbfs=SILENCE_DBFS,
-            snr_db=level - SILENCE_DBFS,
-            zero_crossing_rate=zero_crossing_rate(frame.samples),
+            rms_dbfs=measured.rms_dbfs,
+            noise_floor_dbfs=measured.noise_floor_dbfs,
+            snr_db=measured.snr_db,
+            zero_crossing_rate=measured.zero_crossing_rate,
         )
 
 

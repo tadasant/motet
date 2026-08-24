@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from motet_voice.bargein import BargeInPolicy
+from motet_voice.bargein import BargeInPolicy, VadTurnDetector
 from motet_voice.config import COMPOSED_ARM, OPENAI_REALTIME_ARM, VoiceSettings
 from motet_voice.realtime import (
+    DEFAULT_SERVER_VAD,
     ArmDormant,
     DormantSpeechRecognizer,
     ScriptedRealtimeTransport,
@@ -47,10 +48,37 @@ def test_the_dormant_openai_arm_still_replays_but_is_labelled_as_emulated(
     assert getattr(detector, "trigger", "") == "openai_server_vad_emulated"
 
 
-def test_a_key_switches_the_openai_arm_to_the_provider_relay(settings: VoiceSettings) -> None:
+def test_a_key_never_swaps_the_replayable_detector_for_the_relay(
+    settings: VoiceSettings,
+) -> None:
+    """The relay decides nothing on its own, so handing it to a replay is a silent zero.
+
+    A replay through the relay produces no decisions, scores a perfect zero false positives
+    per minute, and wins the comparison the harness exists to run — a silently wrong
+    measurement, which is worse than none. The relay stays behind its own constructor.
+    """
     arm = build_openai_arm(settings, transport=ScriptedRealtimeTransport())
     assert arm.capabilities().conversational
-    assert isinstance(arm.build_turn_detector(BargeInPolicy(name="probe")), ServerVadRelay)
+
+    detector = arm.build_turn_detector(BargeInPolicy(name="probe"))
+    assert not isinstance(detector, ServerVadRelay)
+    assert getattr(detector, "trigger", "") == "openai_server_vad_emulated"
+    assert arm.capabilities().turn_detection_emulated, (
+        "a key must not make the emulation stop announcing itself as one"
+    )
+    assert isinstance(arm.build_live_turn_detector(BargeInPolicy(name="probe")), ServerVadRelay)
+
+
+def test_the_emulated_dials_actually_do_something(settings: VoiceSettings) -> None:
+    """`prefix_padding_ms` and `silence_duration_ms` were stored and never read."""
+    arm = build_openai_arm(settings)
+    detector = arm.build_turn_detector(BargeInPolicy(name="probe", refractory_ms=100))
+    assert isinstance(detector, VadTurnDetector)
+
+    assert detector.onset_back_off_ms == int(DEFAULT_SERVER_VAD["prefix_padding_ms"])
+    assert detector.policy.refractory_ms >= int(DEFAULT_SERVER_VAD["silence_duration_ms"]), (
+        "the vendor needs this much quiet to end a turn, so it cannot start one sooner"
+    )
 
 
 def test_the_relay_reports_the_providers_decision_with_local_evidence() -> None:
@@ -72,7 +100,7 @@ def test_the_relay_reports_the_providers_decision_with_local_evidence() -> None:
 def test_the_openai_session_update_carries_everything_and_fetches_nothing(
     settings: VoiceSettings,
 ) -> None:
-    """Invariant 3 as a wire format: no second channel to look anything up through."""
+    """Invariant 2 as a wire format: no second channel to look anything up through."""
     transport = ScriptedRealtimeTransport()
     arm = build_openai_arm(settings, transport=transport)
     payload = arm.session_update(

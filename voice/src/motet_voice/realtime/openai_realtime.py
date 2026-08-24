@@ -26,11 +26,12 @@ events into barge-in decisions with ``trigger="openai_server_vad"``. It delibera
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Final, Protocol, runtime_checkable
 
 from ..audio import DEFAULT_FRAME_MS, PcmFrame, dbfs, zero_crossing_rate
@@ -112,16 +113,26 @@ class WebsocketRealtimeTransport:
         self._api_key = api_key
         self._model = model
         self._socket: Any = None
+        self._lock = asyncio.Lock()
 
     async def _connect(self) -> Any:
-        if self._socket is None:
-            from websockets.asyncio.client import connect  # noqa: PLC0415
+        """Open the socket once, under a lock.
 
-            self._socket = await connect(
-                f"{REALTIME_URL}?model={self._model}",
-                additional_headers={"Authorization": f"Bearer {self._api_key}"},
-            )
-        return self._socket
+        **One transport is one conversation.** The socket is stateful on the vendor's side —
+        a `session.update` applies to it, and responses interleave on it — so a caller that
+        wants concurrent sessions must build a transport per session rather than sharing this
+        one. The lock only stops two coroutines racing to open the *same* connection; it does
+        not make the connection multi-session, and nothing here pretends otherwise.
+        """
+        async with self._lock:
+            if self._socket is None:
+                from websockets.asyncio.client import connect  # noqa: PLC0415
+
+                self._socket = await connect(
+                    f"{REALTIME_URL}?model={self._model}",
+                    additional_headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+            return self._socket
 
     async def send(self, event: Mapping[str, Any]) -> None:
         socket = await self._connect()
@@ -260,6 +271,9 @@ class OpenAiRealtimeArm:
     transport: RealtimeTransport | None = None
     api_key_present: bool = False
     server_vad: Mapping[str, Any] = field(default_factory=lambda: dict(DEFAULT_SERVER_VAD))
+    #: How long one conversational turn may take before it is abandoned. Generous for a
+    #: model that thinks, far short of a listener standing in the street forever.
+    turn_timeout_seconds: float = 30.0
 
     @property
     def name(self) -> str:
@@ -280,31 +294,66 @@ class OpenAiRealtimeArm:
             turn_detection="server",
             conversational=self.api_key_present,
             replayable=True,
+            # Always True today, key or no key. The replayable detector is the emulation,
+            # because the live relay has no path by which recorded audio could reach the
+            # vendor — see `build_turn_detector`. It becomes False the day a live capture
+            # path exists, and until then a report that said otherwise would be presenting
+            # emulated numbers as a measurement.
+            turn_detection_emulated=True,
             dormant_reason=dormant,
             notes=f"model={self.model} server_vad={json.dumps(dict(self.server_vad))}",
         )
 
     def build_turn_detector(self, policy: BargeInPolicy) -> TurnDetector:
-        """The live relay when a key exists; the labelled emulation when it does not."""
-        if self.api_key_present:
-            return ServerVadRelay(arm_name=self.name, policy=policy)
+        """The labelled emulation — **always**, key or no key.
+
+        It is tempting to hand back :class:`ServerVadRelay` once a key exists, and that was
+        the first version of this method. It is wrong, and wrong in the worst available
+        direction: the relay decides nothing on its own — it reports what the vendor's socket
+        says — and nothing feeds recorded audio to a socket, so a replay through it produces
+        *zero decisions*, scores a perfect zero false positives per minute, and gets crowned
+        the winner of the very comparison this harness exists to run. A silently wrong
+        measurement is worse than no measurement.
+
+        The relay is reachable through :meth:`build_live_turn_detector`, for the live session
+        path that will use it. When that path exists, this method can return it for a replay
+        that streams audio through the vendor, and ``turn_detection_emulated`` goes false.
+
+        The vendor's documented dials are applied rather than merely stored:
+        ``prefix_padding_ms`` becomes the onset back-off, and ``silence_duration_ms`` becomes
+        a floor on the refractory window — the vendor needs that much quiet to end a turn, so
+        it cannot start a second one sooner.
+        """
+        padding = int(self.server_vad.get("prefix_padding_ms", 300))
+        silence = int(self.server_vad.get("silence_duration_ms", 500))
         return VadTurnDetector(
             vad=ServerVadEmulator(
                 threshold=float(self.server_vad.get("threshold", 0.5)),
-                prefix_padding_ms=int(self.server_vad.get("prefix_padding_ms", 300)),
-                silence_duration_ms=int(self.server_vad.get("silence_duration_ms", 500)),
+                prefix_padding_ms=padding,
+                silence_duration_ms=silence,
             ),
-            policy=policy,
+            policy=replace(policy, refractory_ms=max(policy.refractory_ms, silence)),
             arm_name=self.name,
             trigger="openai_server_vad_emulated",
             frame_ms=DEFAULT_FRAME_MS,
+            onset_back_off_ms=padding,
         )
+
+    def build_live_turn_detector(self, policy: BargeInPolicy) -> ServerVadRelay:
+        """The relay that reports the *vendor's* decisions, for a live session.
+
+        Not reachable from :meth:`build_turn_detector` on purpose — see there. A caller using
+        this is responsible for forwarding audio to the socket and calling
+        :meth:`ServerVadRelay.on_speech_started` when the provider reports one; a relay that
+        is merely fed frames produces nothing, which is exactly the trap being avoided.
+        """
+        return ServerVadRelay(arm_name=self.name, policy=policy)
 
     def session_update(self, request: TurnRequest) -> dict[str, Any]:
         """The ``session.update`` payload. Public so a test can assert its shape.
 
         Everything the session may know is in it: there is no second channel through which
-        this arm could fetch anything, which is invariant 3 expressed as a wire format.
+        this arm could fetch anything, which is invariant 2 expressed as a wire format.
         """
         instructions = request.persona_instructions
         if request.context_notes.strip():
@@ -346,9 +395,13 @@ class OpenAiRealtimeArm:
                 }
             )
         await self.transport.send({"type": "response.create"})
-        return await self._collect()
+        # Bounded. `_collect` reads until `response.done`, and a provider that stalls without
+        # sending it would hang the turn *and* the listener's WebSocket behind it, with no
+        # error anywhere. A voice product cannot wait indefinitely on a sentence.
+        async with asyncio.timeout(self.turn_timeout_seconds):
+            return await self._collect()
 
-    async def _collect(self) -> AssistantTurn:
+    async def _collect(self) -> AssistantTurn:  # noqa: D401
         """Fold the provider's event stream into one turn.
 
         Unknown event types are ignored rather than raised on: a realtime API adds events

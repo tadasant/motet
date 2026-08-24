@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from .metrics import ArmMetrics, ScoredRun
 
 _EMULATED_MARK = " *(emulated)*"
+_DEAF_MARK = " **⚠ heard nothing**"
 
 
 def render_report(scored: Sequence[ScoredRun], *, title: str = "Barge-in walk") -> str:
@@ -52,6 +53,19 @@ def render_report(scored: Sequence[ScoredRun], *, title: str = "Barge-in walk") 
             )
             lines.append("")
 
+    if any(metric.deaf for run in scored for metric in run.metrics):
+        lines.extend(
+            [
+                "## Rows marked ⚠",
+                "",
+                "That configuration produced **no decisions at all** on a recording that had",
+                "speech in it. Its zero false-positives-per-minute is not a result — it is a",
+                "detector that is not detecting. It is excluded from the winner above, and it",
+                "wants investigating rather than celebrating.",
+                "",
+            ]
+        )
+
     if any(metric.emulated for run in scored for metric in run.metrics):
         lines.extend(_emulation_caveat())
 
@@ -64,8 +78,9 @@ def _row(metric: ArmMetrics) -> str:
     caught = "—" if metric.detection_rate is None else f"{metric.detection_rate:.0%}"
     missed = "—" if metric.ground_truth == "silent" else str(metric.missed)
     mark = _EMULATED_MARK if metric.emulated else ""
+    variant = f"`{metric.variant}`" + (_DEAF_MARK if metric.deaf else "")
     return (
-        f"| `{metric.arm}`{mark} | `{metric.variant}` | **{metric.false_per_minute:.2f}** | "
+        f"| `{metric.arm}`{mark} | {variant} | **{metric.false_per_minute:.2f}** | "
         f"{metric.false_positives} | {caught} | {missed} | {latency} |"
     )
 

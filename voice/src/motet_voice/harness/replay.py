@@ -41,7 +41,7 @@ def replay_detector(
     """Push one recording through one arm's turn detector, frame by frame.
 
     The clock is wound forward from the *recording's* offsets rather than from wall time, so
-    a decision's ``spoken_through_ms`` is reproducible. That is invariant 5 doing something
+    a decision's ``spoken_through_ms`` is reproducible. That is invariant 4 doing something
     useful offline: because we own the clock, we can rewind it.
     """
     detector = arm.build_turn_detector(policy)
@@ -94,7 +94,7 @@ def replay_run(
     for arm_name in sorted(wanted):
         arm = built[arm_name]
         capabilities = arm.capabilities()
-        emulated = bool(capabilities.dormant_reason) and capabilities.turn_detection == "server"
+        emulated = capabilities.turn_detection_emulated
         for policy in policies:
             decisions = replay_detector(run, pcm, arm, policy)
             target = replay_dir(run, arm_name, policy.name)

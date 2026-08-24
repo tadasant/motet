@@ -25,7 +25,7 @@ The run directory is the unit of everything downstream:
 **It is a directory rather than a database** because it has to survive being carried around:
 copied off a phone, dropped in a folder, re-run a week later against a new variant, and
 uploaded to object storage whole. A row in Postgres would be none of those things — and this
-service has no database anyway (invariant 3).
+service has no database anyway (invariant 2).
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Fixtures for the voice tests.
 
 Nothing here touches a network, a vendor, or a database. The root ``conftest.py`` already
-pins ``MOTET_INFERENCE_MODE=fake`` for the whole session (invariant 9); this file adds the
+pins ``MOTET_INFERENCE_MODE=fake`` for the whole session (invariant 7); this file adds the
 voice-specific settings so a test never depends on what happens to be in the developer's
 environment.
 """

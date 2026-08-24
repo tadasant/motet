@@ -177,7 +177,7 @@ def test_an_assistant_reply_does_not_advance_the_narration_clock(client: Any) ->
 
 
 def test_audio_frames_produce_interrupted_at_with_our_own_offset(client: Any) -> None:
-    """`interrupted_at(offset)` — and the offset is ours, not any provider's (invariant 5)."""
+    """`interrupted_at(offset)` — and the offset is ours, not any provider's (invariant 4)."""
     walk = synthesize_walk(duration_ms=10_000, speech_at_ms=(3_000,), speech_duration_ms=2_000)
     with _authenticated(
         client,
@@ -191,6 +191,61 @@ def test_audio_frames_produce_interrupted_at_with_our_own_offset(client: Any) ->
     assert event["offset_ms"] == 42_000, "the offset comes from our clock, not from the audio"
     assert event["decision"]["trigger"].startswith("local_vad")
     assert "snr_db" in event["decision"], "the evidence travels with the interruption"
+
+
+def test_streamed_audio_produces_one_barge_in_per_utterance(client: Any) -> None:
+    """Audio arrives in packets, and a frame's offset is into the *session*, not the packet.
+
+    The bug this guards against was invisible to every other test in this file, because they
+    all send a whole recording in one message. Numbering each packet's frames from zero gives
+    every frame an offset near zero, and the refractory window compares the current frame's
+    end against the last decision — so the detector fires once and then believes itself
+    permanently inside its own cooldown for the rest of the walk.
+    """
+    walk = synthesize_walk(
+        duration_ms=30_000, speech_at_ms=(6_000, 16_000, 26_000), speech_duration_ms=1_500
+    )
+    chunk = 16_000 * 2 // 5  # 200 ms of PCM16, the sort of packet a client actually sends
+
+    events = []
+    with _authenticated(
+        client, turn_policy={"mode": "open_mic", "require_narration_playing": False}
+    ) as socket:
+        for offset in range(0, len(walk.pcm), chunk):
+            socket.send_bytes(walk.pcm[offset : offset + chunk])
+        socket.send_text(json.dumps({"type": "close"}))
+        while True:
+            event = json.loads(socket.receive_text())
+            if event["type"] == "session_state" and event["state"] == "closed":
+                break
+            events.append(event)
+
+    barge_ins = [event for event in events if event["type"] == "interrupted_at"]
+    assert len(barge_ins) >= 2, (
+        f"streaming three utterances produced {len(barge_ins)} barge-in(s); the detector is "
+        "stuck in its own refractory window"
+    )
+    assert barge_ins[0]["decision"]["at_ms"] > 1_000, (
+        "a decision's offset must be into the session, not into whichever packet carried it"
+    )
+    assert [b["decision"]["at_ms"] for b in barge_ins] == sorted(
+        b["decision"]["at_ms"] for b in barge_ins
+    )
+
+
+def test_a_session_does_not_close_the_process_wide_arm(
+    client: Any, transport: RecordingToolTransport
+) -> None:
+    """Cloud Run serves many sessions per instance; one hanging up must not close the arm."""
+    voice_app = client.app.state.voice
+    with _authenticated(client) as socket:
+        socket.send_text(json.dumps({"type": "close"}))
+        json.loads(socket.receive_text())
+
+    assert voice_app.arm.capabilities().name == "composed"
+    with _authenticated(client) as socket:
+        socket.send_text(json.dumps({"type": "text", "text": "still here?"}))
+        assert json.loads(socket.receive_text())["type"] == "transcript"
 
 
 def test_a_provider_reported_position_does_not_move_the_clock(client: Any) -> None:

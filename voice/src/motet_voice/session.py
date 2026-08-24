@@ -1,11 +1,11 @@
 """One live voice session: the clock, the turn detector, the tools, and the arm.
 
 Everything a session *is* lives in this object, and nothing a session needs lives outside
-the process. There is no session store, no database handle, and no lookup — invariant 3 —
+the process. There is no session store, no database handle, and no lookup — invariant 2 —
 so a session is entirely reconstructible from its config, which is what lets Cloud Run kill
 an instance mid-walk without losing anything but the socket.
 
-**The clock is the part to read carefully.** ``spoken_through_ms`` is ours (invariant 5):
+**The clock is the part to read carefully.** ``spoken_through_ms`` is ours (invariant 4):
 this class advances it, freezes it on a barge-in, and hands that frozen offset to the client
 as ``interrupted_at(offset)``. A provider that volunteers its own position gets it recorded
 as drift and ignored.
@@ -68,6 +68,11 @@ class VoiceSession:
     history: list[dict[str, str]] = field(default_factory=list)
     decisions: list[BargeInDecision] = field(default_factory=list)
     _residue: bytes = field(default=b"", init=False)
+    #: Frames consumed so far in this session. Audio arrives in packets that do not respect
+    #: frame boundaries *or* start at zero, and every offset downstream — the refractory
+    #: window, a decision's ``at_ms``, the snippet a reviewer listens to — is an offset into
+    #: the session rather than into whichever packet happened to carry the frame.
+    _frames_seen: int = field(default=0, init=False)
 
     @classmethod
     def create(
@@ -107,12 +112,17 @@ class VoiceSession:
             return []
 
         buffer = self._residue + pcm
-        frame_bytes = int(16_000 * DEFAULT_FRAME_MS / 1000) * 2
+        frame_bytes = int(TARGET_SAMPLE_RATE * DEFAULT_FRAME_MS / 1000) * 2
         usable = len(buffer) - (len(buffer) % frame_bytes)
         self._residue = buffer[usable:]
 
         events: list[SessionEvent] = []
-        for frame in iter_frames(buffer[:usable], frame_ms=DEFAULT_FRAME_MS):
+        for frame in iter_frames(
+            buffer[:usable],
+            frame_ms=DEFAULT_FRAME_MS,
+            start_index=self._frames_seen,
+            start_ms=self._frames_seen * DEFAULT_FRAME_MS,
+        ):
             decision = self.detector.observe(
                 frame,
                 narration_playing=self.clock.playing,
@@ -120,6 +130,7 @@ class VoiceSession:
             )
             if decision is not None:
                 events.append(self._interrupt(decision))
+        self._frames_seen += usable // frame_bytes
         return events
 
     def barge_in(self, *, trigger: str = "client") -> InterruptedAtEvent:
@@ -149,7 +160,7 @@ class VoiceSession:
         self.clock.seek(position_ms)
 
     def provider_reported_position(self, position_ms: int) -> int:
-        """Record a provider's claim about position. Never acts on it. Invariant 5."""
+        """Record a provider's claim about position. Never acts on it. Invariant 4."""
         return self.clock.note_provider_position(position_ms)
 
     # -- turns --------------------------------------------------------------------------
@@ -242,5 +253,11 @@ class VoiceSession:
         }
 
     async def aclose(self) -> None:
+        """End the session. Deliberately does **not** close the arm.
+
+        The arm is process-wide — one per :class:`~motet_voice.app.VoiceApp`, shared by every
+        concurrent session on the instance — and Cloud Run serves many requests per instance.
+        A session closing it would take the vendor socket out from under whoever else is
+        mid-conversation. The app owns the arm's lifetime; a session owns only its own state.
+        """
         logger.info("voice session closed: %s", self.summary())
-        await self.arm.aclose()

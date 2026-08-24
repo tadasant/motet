@@ -2,7 +2,7 @@
 
 **Cloud Run has no sticky sessions and no shared memory**, and this service is deliberately
 allowed to scale to more than one instance. So there is no session table — there could not
-be one anyway, because invariant 3 says this service has no database. The token carries the
+be one anyway, because invariant 2 says this service has no database. The token carries the
 session: an id, an expiry, and a digest of the config it was minted for, all under an HMAC.
 
 That last part is what makes it more than an opaque string. The WebSocket handshake arrives

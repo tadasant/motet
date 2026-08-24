@@ -1,4 +1,4 @@
-"""``spoken_through_ms`` is ours — invariant 5, asserted rather than asserted about."""
+"""``spoken_through_ms`` is ours — invariant 4, asserted rather than asserted about."""
 
 from __future__ import annotations
 

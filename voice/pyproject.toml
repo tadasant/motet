@@ -3,7 +3,7 @@ name = "motet-voice"
 version = "0.1.0"
 description = "Voice service: the session contract, the provider arms, and the barge-in harness"
 requires-python = ">=3.13"
-# NOTE THE ABSENCE: `motet-db` is not here and must never be. Invariant 3 — the voice
+# NOTE THE ABSENCE: `motet-db` is not here and must never be. Invariant 2 — the voice
 # service takes a session config and calls tools; it has no database credential and no
 # schema knowledge. `tests/test_no_database_access.py` asserts this list, so adding the
 # dependency fails CI rather than quietly crossing the boundary.

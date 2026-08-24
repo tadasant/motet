@@ -1,4 +1,4 @@
-"""The provider seam: two arms, one interface, a fake for each — invariants 2 and 9.
+"""The provider seam: two arms, one interface, a fake for each — invariants 1 and 7.
 
 **The whole barge-in spike reduces to this file.** The question Tadas walks outside to
 settle is whether a hosted realtime model's server-side turn detection beats a composed
@@ -53,6 +53,11 @@ class ArmCapabilities:
     conversational: bool
     #: Can its turn detection be replayed offline, deterministically?
     replayable: bool
+    #: **Is the replayable detector an emulation rather than the real thing?** Reported by
+    #: the arm rather than inferred by the harness from some other flag, because getting it
+    #: wrong is the worst failure this system has: a table that silently presents emulated
+    #: numbers as a measurement of a vendor.
+    turn_detection_emulated: bool = False
     dormant_reason: str = ""
     notes: str = ""
 
@@ -62,6 +67,7 @@ class ArmCapabilities:
             "turn_detection": self.turn_detection,
             "conversational": self.conversational,
             "replayable": self.replayable,
+            "turn_detection_emulated": self.turn_detection_emulated,
             "dormant_reason": self.dormant_reason,
             "notes": self.notes,
         }
@@ -91,7 +97,7 @@ class TurnRequest:
     #: text, which is the path the harness and the tests use.
     user_pcm: bytes | None = None
     user_text: str | None = None
-    #: Everything the session knows — passed in, never looked up. Invariant 3.
+    #: Everything the session knows — passed in, never looked up. Invariant 2.
     context_notes: str = ""
     history: Sequence[Mapping[str, str]] = ()
     tools: Sequence[Mapping[str, Any]] = ()
