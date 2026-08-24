@@ -40,6 +40,13 @@ web/dist/
 *.tfvars
 !*.tfvars.example
 
+# Swift / iOS: SwiftPM's build directory, Xcode's per-user state, and the toolchain
+# `ios/bin/install-swift-toolchain` unpacks if it is pointed inside the checkout.
+ios/.build/
+*.xcuserdatad/
+xcuserdata/
+.swiftpm/
+
 # Editors / OS
 .DS_Store
 .idea/
