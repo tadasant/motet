@@ -34,6 +34,9 @@ export type FeedInfo = GetResponse<'/v1/feed'>
 export type SourceItem = PostResponse<'/v1/sources/paste'>
 export type Source = GetResponse<'/v1/sources'>[number]
 export type Connection = PostResponse<'/v1/sources/connect'>
+export type SignInStart = PostResponse<'/v1/auth/google/start'>
+export type SignedIn = PostResponse<'/v1/auth/google/callback'>
+export type SessionInfo = GetResponse<'/v1/auth/session'>
 
 export class ApiError extends Error {
   constructor(
@@ -90,12 +93,17 @@ function normalise(value: unknown): string {
 const TOKEN_STORAGE_KEY = 'motet.apiToken'
 
 /**
- * The API token, kept in localStorage.
+ * The bearer token this browser presents, kept in localStorage.
  *
- * Phase 1 has one hardcoded account and no signup, so this is a shared secret typed in
- * once rather than a session. It is a lock on the door: without it a deployed API is one
- * paste away from spending inference budget for anyone who finds it. Real accounts arrive
- * in Phase 3, and the only thing that changes here is where the token comes from.
+ * **One slot, two ways of filling it**, which is the whole shape of Google Sign-In here:
+ * signing in mints a *session* token and puts it in this same place, so every request
+ * below is made exactly as it was before and no call site knows the difference. The
+ * shared `MOTET_API_TOKEN` still works and is still typed in by hand under the API-token
+ * disclosure — the feed, the iOS app and any script use it — it just stops being the
+ * thing a human has to paste into a phone.
+ *
+ * There is still exactly one account behind either. This is a lock on the door, not an
+ * identity system; real accounts are Phase 3.
  */
 export function getToken(): string {
   try {
@@ -127,19 +135,21 @@ function headers(): Record<string, string> {
   }
 }
 
-async function parse<T>(response: Response, method: string, path: string): Promise<T> {
-  if (!response.ok) {
-    // The API answers with `{"detail": "..."}`; a proxy or a crash might not. Falling back
-    // to the status keeps an error message from being the literal string "undefined".
-    let detail = `${response.status}`
-    try {
-      const body = (await response.json()) as { detail?: unknown }
-      if (typeof body.detail === 'string') detail = body.detail
-    } catch {
-      detail = response.statusText || detail
-    }
-    throw new ApiError(response.status, `${method} ${path} failed: ${detail}`)
+async function refuse(response: Response, method: string, path: string): Promise<ApiError> {
+  // The API answers with `{"detail": "..."}`; a proxy or a crash might not. Falling back
+  // to the status keeps an error message from being the literal string "undefined".
+  let detail = `${response.status}`
+  try {
+    const body = (await response.json()) as { detail?: unknown }
+    if (typeof body.detail === 'string') detail = body.detail
+  } catch {
+    detail = response.statusText || detail
   }
+  return new ApiError(response.status, `${method} ${path} failed: ${detail}`)
+}
+
+async function parse<T>(response: Response, method: string, path: string): Promise<T> {
+  if (!response.ok) throw await refuse(response, method, path)
   return (await response.json()) as T
 }
 
@@ -158,6 +168,21 @@ export async function apiPost<P extends keyof paths>(
     body: JSON.stringify(body ?? {}),
   })
   return parse<PostResponse<P>>(response, 'POST', path)
+}
+
+/**
+ * A POST whose success is 204 and therefore has no body to parse.
+ *
+ * Its own function rather than a flag on `apiPost`, because `response.json()` on an empty
+ * body throws — so "no content" has to be a different code path, not a different argument.
+ */
+export async function apiPostNoContent<P extends keyof paths>(path: P): Promise<void> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  if (!response.ok) throw await refuse(response, 'POST', path)
 }
 
 /**
@@ -191,6 +216,14 @@ export async function apiPostPath<P extends keyof paths>(
 
 export const api = {
   health: () => apiGet('/internal/health'),
+  // Signing in. `startLogin` and `completeLogin` are the only two calls in this file that
+  // work without a token — they are how a browser holding nothing gets something.
+  startLogin: (redirectUri: string) =>
+    apiPost('/v1/auth/google/start', { redirect_uri: redirectUri }),
+  completeLogin: (state: string, code: string) =>
+    apiPost('/v1/auth/google/callback', { state, code }),
+  session: () => apiGet('/v1/auth/session'),
+  logout: () => apiPostNoContent('/v1/auth/logout'),
   newsItems: () => apiGet('/v1/news-items'),
   episodes: () => apiGet('/v1/episodes'),
   feed: () => apiGet('/v1/feed'),

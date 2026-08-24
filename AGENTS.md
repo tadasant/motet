@@ -606,6 +606,70 @@ spent code. And **`error=access_denied` is an answer, not a failure** — someon
 Cancel, which is a supported response to being asked for a mailbox, and it must not read
 like a crash.
 
+### Signing in is a second key to the same lock, not a user system
+
+`api/src/motet_api/auth/`, and the `auth_sessions` table. Tadas asked for it twice: he did
+not want to type `MOTET_API_TOKEN` into the deployed SPA's Settings screen any more.
+
+**Nothing about "one account" changed.** Signup is still out, multi-user identity is still
+Phase 3, and `auth_sessions.user_id` references the single `motet-owner` row seeded in
+migration 0002 — there is a test that asserts exactly that, and if it ever fails somebody
+has built the user system this file still says is out of scope. What changed is only how a
+*browser* proves it may talk to `/v1`.
+
+Four things about it are load-bearing:
+
+- **The allowlist is the security control; Google is not.** This deployment's consent
+  screen is published and **unverified**, so anyone on the internet with a Google account
+  can complete the flow. A naive "Sign in with Google" would therefore be strictly *worse*
+  than the shared secret it replaces — an open door where there was a lock. So
+  `MOTET_ALLOWED_EMAILS` is checked server-side, after the ID token verifies, and **unset
+  means deny everybody**. `/internal/health` reports `login_configured` for the same reason
+  it reports `authenticated`: a login that denies silently looks exactly like one nobody
+  has tried.
+- **The ID token is verified, not read.** Signature against Google's JWKS over RS256 only,
+  `aud` equal to our client id, `iss` Google, `exp`/`iat` inside a minute of leeway, the
+  `nonce` we stored for that authorization, and `email_verified` true. An email claim out
+  of an unverified token is a string somebody typed; authorizing on one would hand the
+  whole API to anyone who put an allowlisted address on their own Google account. `PyJWT`
+  does the cryptography — this is the code that must not be hand-rolled, because a bug in
+  it authenticates the attacker instead of crashing.
+- **A session is a bearer token in the same slot, not a cookie.** The SPA and the API are
+  different origins, so a cookie would need `SameSite=None; Secure`, `allow_credentials`
+  on the CORS policy, and a CSRF story to go with it — three moving parts to reach a place
+  the existing `Authorization: Bearer` header already reaches. Signing in puts a session
+  token where the API token went, so **no call site in `client.ts` knows the difference**,
+  and the CORS policy is untouched and still does not allow credentials. The trade is that
+  the token sits in `localStorage` rather than in an `HttpOnly` cookie — which is exactly
+  where the shared secret already sat, except this one expires and can be revoked.
+- **`MOTET_API_TOKEN` still works, everywhere it worked before.** The RSS feed, the iOS
+  app, any script. It stopped being something a *human types into a browser*; it did not
+  stop being accepted.
+
+Sessions are **rows, not signed tokens**, and only their SHA-256 is stored. Rows are what
+make logout actually revoke — a self-contained token stays valid until it expires however
+loudly a client throws it away — and they mean a deployment needs no session signing key to
+provision, rotate, or leak. Nothing ever reads the token back, so nothing keeps it. (The
+feed token is the deliberate opposite, and its section says why.)
+
+**Both flows come back on the one `/oauth/callback` path, and `state` is what tells them
+apart.** Signing in and connecting a mailbox are two authorizations against the *same*
+Google OAuth client — reusing it was the point, since a second client is a one-time
+human-owned provisioning step (invariant 9) for no gain. But they finish at different API
+routes and each spends a single-use `state` doing it, so a callback sent to the wrong one
+burns the authorization and the user starts again for no visible reason. `state` is the
+only value guaranteed to survive a round trip through the provider, so the flow is encoded
+in it: sign-in states carry a `login.` prefix, and the dot is a safe marker because
+`secrets.token_urlsafe` emits only `[A-Za-z0-9_-]`. Keep `LOGIN_STATE_PREFIX` in
+`motet_api.auth.registry` and in `web/src/oauth.ts` in step.
+
+Sign-in asks for `openid email profile` and sends **neither** `access_type=offline` nor
+`prompt=consent` — those exist so a *mailbox* grant issues a refresh token and survives,
+and re-prompting on every sign-in would be friction with no security value. That is why
+identity is its own seam (`motet_api.auth`) rather than another caller of
+`motet_sources`' `OAuthClient`: one class serving two sets of parameters is how the two
+quietly become one wrong set.
+
 ### The vault is the seam to a credential that is not ours
 
 `vault/` holds the envelope-encryption path: a per-record DEK, a KEK in Cloud KMS, and an

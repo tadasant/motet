@@ -1,4 +1,4 @@
-// The callback path, and the two things that have to survive a round trip to Google.
+// The callback path, and the three things that have to survive a round trip to Google.
 //
 // **This is the whole of the SPA's routing**, and it is deliberately not a router.
 // App.tsx says "three screens, one tab strip, no router" — adding a routing library to
@@ -11,6 +11,29 @@
 // bundle and the bundle reads the path.
 
 const CALLBACK_PATH = '/oauth/callback'
+
+/**
+ * How a callback says which flow it belongs to.
+ *
+ * **Two flows land on this one path**: signing in, and connecting a mailbox. They finish
+ * at different API routes and spend a single-use `state` doing it, so sending one to the
+ * other's route burns the authorization and the user has to start again for no visible
+ * reason.
+ *
+ * `state` is the discriminator because it is the only value guaranteed to survive the
+ * round trip — Google echoes it back verbatim, and the browser arrives here with a fresh
+ * page load and no memory of anything else. The API mints sign-in states with this
+ * prefix; the dot is safe as a marker because `secrets.token_urlsafe` emits only
+ * `[A-Za-z0-9_-]`, so a mailbox state can never accidentally look like a sign-in one.
+ *
+ * Keep in step with `LOGIN_STATE_PREFIX` in `motet_api.auth.registry`.
+ */
+const LOGIN_STATE_PREFIX = 'login.'
+
+/** Whether a callback's `state` belongs to a sign-in rather than to a mailbox. */
+export function isLoginState(state: string): boolean {
+  return state.startsWith(LOGIN_STATE_PREFIX)
+}
 
 /**
  * Where Google sends the user back to.
@@ -46,8 +69,14 @@ export function beginConsent(url: string): void {
 /** What Google put in the query string when it sent the user back. */
 export type OAuthCallback =
   | { kind: 'granted'; code: string; state: string }
-  /** The user said no, or Google refused. `error` is its own code, e.g. access_denied. */
-  | { kind: 'denied'; error: string; description: string }
+  /**
+   * The user said no, or Google refused. `error` is its own code, e.g. access_denied.
+   *
+   * `state` is carried even though nothing is exchanged, because it is still what says
+   * which flow was refused — "you did not grant access to your mailbox" and "you did not
+   * finish signing in" are different sentences.
+   */
+  | { kind: 'denied'; error: string; description: string; state: string }
   /** On the callback path with nothing usable — a bookmark, or a reload after finishing. */
   | { kind: 'empty' }
 
@@ -64,7 +93,12 @@ export function readCallback(location: Location = window.location): OAuthCallbac
   const params = new URLSearchParams(location.search)
   const error = params.get('error')
   if (error) {
-    return { kind: 'denied', error, description: params.get('error_description') ?? '' }
+    return {
+      kind: 'denied',
+      error,
+      description: params.get('error_description') ?? '',
+      state: params.get('state') ?? '',
+    }
   }
 
   const code = params.get('code')

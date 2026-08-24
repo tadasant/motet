@@ -47,7 +47,15 @@ describe('readCallback', () => {
     // The user pressed Cancel. There is no code, and asking the API to exchange one
     // would turn a supported answer into an error.
     visit('/oauth/callback?error=access_denied&state=st_1')
-    expect(readCallback()).toEqual({ kind: 'denied', error: 'access_denied', description: '' })
+    // `state` comes back even on a refusal: it is what says *which* flow was refused,
+    // and "you did not grant access to your mailbox" and "you did not finish signing in"
+    // are different sentences.
+    expect(readCallback()).toEqual({
+      kind: 'denied',
+      error: 'access_denied',
+      description: '',
+      state: 'st_1',
+    })
   })
 
   it('is empty on the callback path with nothing to exchange', () => {
