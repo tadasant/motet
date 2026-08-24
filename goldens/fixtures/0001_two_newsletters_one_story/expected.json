@@ -1,6 +1,17 @@
 {
-  "why": "Two newsletters covering the same funding round must collapse into one news item. This is the dedup case the 'one call per source item against the in-prompt window' design exists for. The two headlines differ in case, punctuation, and word order only — which is as much as the deterministic fake can be expected to see through. Wording differences ('raises' vs 'raised') are the real adapter's job, and belong in a fixture added alongside it.",
+  "why": "Two newsletters covering the same funding round must collapse into one news item. This is the dedup case the 'one call per source item against the in-prompt window' design exists for. The two headlines differ in case, punctuation, and word order only \u2014 which is as much as the deterministic fake can be expected to see through. Wording differences ('raises' vs 'raised') are the real adapter's job, and belong in a fixture added alongside it.",
   "news_items": [
-    { "title": "Acme raises $20M Series A", "source_count": 2 }
+    {
+      "title": "Acme raises $20M Series A",
+      "source_count": 2
+    }
+  ],
+  "script": [
+    {
+      "news_item_title": "Acme raises $20M Series A",
+      "claims": [
+        "Acme raises $20M Series A."
+      ]
+    }
   ]
 }

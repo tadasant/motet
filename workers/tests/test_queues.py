@@ -1,7 +1,7 @@
-"""Tests for the worker scaffold.
+"""The worker's queue names and entry-point guards.
 
 The queue names are a contract between whatever enqueues and whatever drains, so they get
-pinned even though no worker runs yet.
+pinned. The pipeline behaviour itself lives in ``test_pipeline.py``, which needs a database.
 """
 
 from __future__ import annotations
@@ -27,8 +27,15 @@ def test_queues_are_plain_strings() -> None:
     assert Queue.TTS == "tts"
 
 
-def test_drain_is_not_built_yet() -> None:
-    with pytest.raises(NotImplementedError):
+def test_draining_a_phase_2_queue_says_so_rather_than_succeeding_emptily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`poll` and `extract` belong to Gmail and X ingestion, which Phase 1 cuts.
+
+    They stay in the enum because the pipeline shape is settled — but a worker pointed at
+    one has been misconfigured, and reporting "drained 0 jobs" would hide that indefinitely.
+    """
+    with pytest.raises(ValueError, match="no handler in Phase 1"):
         drain(Queue.POLL, "postgresql://unused")
 
 
@@ -48,8 +55,14 @@ def test_the_worker_refuses_to_start_without_a_credential(monkeypatch: pytest.Mo
 def test_the_worker_starts_with_no_credential_when_inference_is_faked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config validation must not need a key in CI or on a laptop."""
+    """Config validation must not need a key in CI or on a laptop.
+
+    It still needs somewhere to drain *from*, so with no database configured the entry
+    point stops on that rather than on a missing key — which is the point: the credential
+    was never the obstacle.
+    """
     monkeypatch.delenv("MOTET_INFERENCE_MODE", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(NotImplementedError, match="factory scaffold"):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(SystemExit):
         runner.main(["integrate"])

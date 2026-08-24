@@ -4,6 +4,13 @@ Import stages through :func:`get_stages` rather than constructing an implementat
 directly — that is what keeps invariant 7 true.
 """
 
+from .audio import (
+    MPEG_MEDIA_TYPE,
+    WAV_MEDIA_TYPE,
+    AudioError,
+    estimate_duration_ms,
+    join_audio,
+)
 from .fakes import first_sentence
 from .interfaces import (
     GroundingValidator,
@@ -28,8 +35,8 @@ from .types import (
 )
 
 __all__ = [
-    "MODE_ENV_VAR",
     "Audio",
+    "AudioError",
     "Briefing",
     "Claim",
     "GroundingFailure",
@@ -37,6 +44,8 @@ __all__ = [
     "GroundingValidator",
     "IntegrationResult",
     "Integrator",
+    "MODE_ENV_VAR",
+    "MPEG_MEDIA_TYPE",
     "NewsItem",
     "Script",
     "ScriptGenerator",
@@ -45,10 +54,13 @@ __all__ = [
     "SourceSpan",
     "SpeechSynthesizer",
     "Stages",
+    "WAV_MEDIA_TYPE",
     "build_briefing",
     "current_mode",
-    "first_sentence",
+    "estimate_duration_ms",
     "fake_stages",
+    "first_sentence",
     "get_stages",
+    "join_audio",
     "real_stages",
 ]

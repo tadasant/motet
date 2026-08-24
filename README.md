@@ -16,9 +16,14 @@ and eyes aren't.
 **Phase 1 — Infra MVP.** Paste text in, get an episode out, listen on a dog walk. One
 hardcoded user, shipped as a private authenticated RSS feed rather than a player.
 
-Right now this repo holds the **factory**, not the feature: the CI command, the OpenAPI
-contract, the fake inference adapters, and the golden set. Phase 1's question is *"does the
-factory work?"* — the pipeline itself is the next piece of work.
+The Phase 1 path is built end to end: paste text in, it is deduplicated into news items,
+an episode is assembled from what is unread, scripted, grounding-validated, synthesized,
+and published to a private authenticated feed you can subscribe to in Overcast or Apple
+Podcasts. Three plain SPA screens cover paste-in, the backlog, and an episode's transcript
+with every claim shown beside the source span it came from.
+
+The factory around it is the real deliverable: one CI command, the OpenAPI contract, fake
+adapters behind every vendor seam, and a twenty-case golden set.
 
 ## How it fits together
 
@@ -28,6 +33,7 @@ factory work?"* — the pipeline itself is the next piece of work.
 | Ingestion workers | Cloud Run jobs | [`workers/`](workers) |
 | Inference adapters | library | [`inference/`](inference) |
 | Schema + migrations | library | [`db/`](db) |
+| Object storage | library | [`storage/`](storage) |
 | Web SPA | Vite + React, static behind Cloudflare | [`web/`](web) |
 | Voice service | Pipecat, Cloud Run — *Phase 2* | [`voice/`](voice) |
 | iOS app | Swift — *Phase 2* | [`ios/`](ios) |

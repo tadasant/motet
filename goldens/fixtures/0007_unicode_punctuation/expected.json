@@ -1,0 +1,17 @@
+{
+  "why": "Em dashes, curly quotes, and accented characters are ordinary newsletter punctuation, not edge cases. Dedup, span resolution, and the RSS encoding all have to survive them.",
+  "news_items": [
+    {
+      "title": "Gr\u00fcner Labs \u2014 the \u201cquiet\u201d biotech \u2014 files for an IPO",
+      "source_count": 2
+    }
+  ],
+  "script": [
+    {
+      "news_item_title": "Gr\u00fcner Labs \u2014 the \u201cquiet\u201d biotech \u2014 files for an IPO",
+      "claims": [
+        "Gr\u00fcner Labs \u2014 the \u201cquiet\u201d biotech \u2014 files for an IPO."
+      ]
+    }
+  ]
+}

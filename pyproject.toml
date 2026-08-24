@@ -9,6 +9,7 @@ dependencies = [
     "motet-api",
     "motet-db",
     "motet-inference",
+    "motet-storage",
     "motet-workers",
 ]
 
@@ -18,17 +19,24 @@ dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["api", "db", "inference", "workers"]
+members = ["api", "db", "inference", "storage", "workers"]
 
 [tool.uv.sources]
 motet-api = { workspace = true }
 motet-db = { workspace = true }
 motet-inference = { workspace = true }
+motet-storage = { workspace = true }
 motet-workers = { workspace = true }
 
 [dependency-groups]
 dev = [
+    # Two independent RSS parsers, because "valid XML" and "a podcast client will play it"
+    # are different claims. `podcastparser` is the parser inside gPodder, an actual podcast
+    # client; `feedparser` is what most other tooling uses. A feed both accept is a feed
+    # Overcast and Apple Podcasts accept.
+    "feedparser>=6.0",
     "httpx>=0.28",
+    "podcastparser>=0.6",
     "mypy>=1.14",
     "pytest>=8.3",
     "ruff>=0.9",
@@ -51,8 +59,15 @@ select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logge
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["api/src", "db/src", "inference/src", "workers/src", "goldens"]
+files = ["api/src", "db/src", "inference/src", "storage/src", "workers/src", "goldens"]
+
+# The Google Cloud SDK ships no py.typed marker, so every symbol from it is untyped as
+# far as strict mode is concerned. Scoped to the one package rather than relaxed globally:
+# our own code stays strict, including the thin GCS wrapper around it.
+[[tool.mypy.overrides]]
+module = ["google.cloud.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["api/tests", "db/tests", "inference/tests", "workers/tests", "goldens"]
+testpaths = ["api/tests", "db/tests", "inference/tests", "storage/tests", "workers/tests", "goldens"]
 addopts = "-q"

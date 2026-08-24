@@ -1,0 +1,27 @@
+{
+  "why": "Interleaved arrivals. A source item that merges into the first story, then an unrelated one, then another that merges into the first again \u2014 which is what a real day of newsletters looks like, and what breaks an integrator that only compares against the newest item.",
+  "news_items": [
+    {
+      "title": "Kestrel wins a federal contract",
+      "source_count": 3
+    },
+    {
+      "title": "Marlow delays its hardware launch",
+      "source_count": 1
+    }
+  ],
+  "script": [
+    {
+      "news_item_title": "Kestrel wins a federal contract",
+      "claims": [
+        "Kestrel wins a federal contract."
+      ]
+    },
+    {
+      "news_item_title": "Marlow delays its hardware launch",
+      "claims": [
+        "Marlow delays its hardware launch."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "why": "A headline containing & and < is normal in finance newsletters and fatal to a feed built by string formatting. This case carries those characters all the way through to the RSS enclosure.",
+  "news_items": [
+    {
+      "title": "Mercer & Vale <acquires> Tidewater",
+      "source_count": 1
+    }
+  ]
+}

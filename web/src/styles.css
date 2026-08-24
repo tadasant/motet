@@ -1,0 +1,48 @@
+/* Plain on purpose. Brand identity is Phase 3 — with one user it reduces zero risk, and
+   an hour spent on colour here is an hour not spent on the factory. This is legibility
+   and nothing else. */
+
+:root {
+  --fg: #1a1a1a;
+  --muted: #666;
+  --line: #ddd;
+  --bad: #a11;
+  --good: #161;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, sans-serif;
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+body { margin: 0; }
+main { max-width: 62rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+header { border-bottom: 1px solid var(--line); margin-bottom: 1.5rem; }
+h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1rem; margin-bottom: .25rem; }
+nav { display: flex; gap: .5rem; padding-bottom: .75rem; flex-wrap: wrap; }
+nav button[aria-current="page"] { font-weight: 700; text-decoration: underline; }
+
+button { font: inherit; padding: .35rem .7rem; cursor: pointer; }
+input, textarea { font: inherit; padding: .4rem; width: 100%; box-sizing: border-box; }
+input[type="number"] { width: 6rem; }
+form { display: grid; gap: .35rem; max-width: 46rem; }
+form button { justify-self: start; margin-top: .5rem; }
+label { font-weight: 600; font-size: .9rem; }
+
+.row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .75rem 0; }
+.hint { color: var(--muted); font-size: .9rem; }
+.error { color: var(--bad); }
+.ok { color: var(--good); }
+.token { margin-bottom: 1rem; }
+.feed-url { word-break: break-all; }
+
+.items { list-style: none; padding: 0; }
+.items li { border-top: 1px solid var(--line); padding: .75rem 0; }
+.items li.read strong { color: var(--muted); font-weight: 400; }
+.item-head { display: flex; gap: 1rem; justify-content: space-between; align-items: baseline; }
+
+.segment { border-top: 1px solid var(--line); padding-top: 1rem; margin-top: 1rem; }
+.claims { border-collapse: collapse; width: 100%; }
+.claims th { text-align: left; font-size: .8rem; color: var(--muted); text-transform: uppercase; }
+.claims th, .claims td { border-bottom: 1px solid var(--line); padding: .5rem; vertical-align: top; width: 50%; }
+.claims blockquote { margin: 0 0 .25rem; padding-left: .6rem; border-left: 3px solid var(--line); color: #333; }

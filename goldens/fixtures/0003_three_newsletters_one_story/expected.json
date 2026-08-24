@@ -1,0 +1,9 @@
+{
+  "why": "Three newsletters on one story collapse to a single news item with three sources. Two is the case everyone thinks of; three is where an integrator that only ever compares against the most recent item starts producing duplicates.",
+  "news_items": [
+    {
+      "title": "Nimbus acquires Halyard for $410M",
+      "source_count": 3
+    }
+  ]
+}

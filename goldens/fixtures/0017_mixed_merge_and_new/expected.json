@@ -1,0 +1,37 @@
+{
+  "why": "A realistic morning: six newsletters, three stories, one of them covered three times. The end-to-end shape the pipeline was designed around.",
+  "news_items": [
+    {
+      "title": "Bellweather ships v3",
+      "source_count": 3
+    },
+    {
+      "title": "Harrow raises $8M",
+      "source_count": 2
+    },
+    {
+      "title": "Cobalt sunsets its legacy API",
+      "source_count": 1
+    }
+  ],
+  "script": [
+    {
+      "news_item_title": "Bellweather ships v3",
+      "claims": [
+        "Bellweather ships v3."
+      ]
+    },
+    {
+      "news_item_title": "Harrow raises $8M",
+      "claims": [
+        "Harrow raises $8M."
+      ]
+    },
+    {
+      "news_item_title": "Cobalt sunsets its legacy API",
+      "claims": [
+        "Cobalt sunsets its legacy API."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "why": "Two stories about the same company are not one story. Over-merging on a shared subject is the most tempting mistake a dedup stage can make, and it silently deletes news.",
+  "news_items": [
+    {
+      "title": "Sable closes a Series B",
+      "source_count": 1
+    },
+    {
+      "title": "Sable faces a patent suit",
+      "source_count": 1
+    }
+  ]
+}

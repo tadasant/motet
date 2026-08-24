@@ -1,0 +1,57 @@
+{
+  "why": "Five unrelated stories stay five news items. Over-merging is as wrong as under-merging, and a briefing that silently dropped four of five stories would look fine.",
+  "news_items": [
+    {
+      "title": "Corvid launches a public beta",
+      "source_count": 1
+    },
+    {
+      "title": "Tessera cuts its enterprise price",
+      "source_count": 1
+    },
+    {
+      "title": "Lyra appoints a new chief executive",
+      "source_count": 1
+    },
+    {
+      "title": "Basalt reports a security incident",
+      "source_count": 1
+    },
+    {
+      "title": "Verdant opens source to its scheduler",
+      "source_count": 1
+    }
+  ],
+  "script": [
+    {
+      "news_item_title": "Corvid launches a public beta",
+      "claims": [
+        "Corvid launches a public beta."
+      ]
+    },
+    {
+      "news_item_title": "Tessera cuts its enterprise price",
+      "claims": [
+        "Tessera cuts its enterprise price."
+      ]
+    },
+    {
+      "news_item_title": "Lyra appoints a new chief executive",
+      "claims": [
+        "Lyra appoints a new chief executive."
+      ]
+    },
+    {
+      "news_item_title": "Basalt reports a security incident",
+      "claims": [
+        "Basalt reports a security incident."
+      ]
+    },
+    {
+      "news_item_title": "Verdant opens source to its scheduler",
+      "claims": [
+        "Verdant opens source to its scheduler."
+      ]
+    }
+  ]
+}

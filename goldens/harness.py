@@ -31,11 +31,27 @@ class ExpectedNewsItem:
 
 
 @dataclass(frozen=True)
+class ExpectedSegment:
+    """A segment of the script this case considers good.
+
+    Optional per case, because pinning the spoken copy is only worth its maintenance
+    cost where the *wording* is the thing under test. Where a case declares one, the
+    generated script has to match it exactly — that is the "a script considered good"
+    half of the golden set the plan asks for, and it is what would catch a script stage
+    that started dropping claims or reordering stories.
+    """
+
+    news_item_title: str
+    claims: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class GoldenCase:
     name: str
     why: str
     sources: tuple[SourceItem, ...]
     expected: tuple[ExpectedNewsItem, ...]
+    script: tuple[ExpectedSegment, ...] | None
 
     def __str__(self) -> str:
         return self.name
@@ -55,7 +71,25 @@ def load_case(directory: Path) -> GoldenCase:
         ExpectedNewsItem(title=item["title"], source_count=item["source_count"])
         for item in spec["news_items"]
     )
-    return GoldenCase(name=directory.name, why=spec["why"], sources=sources, expected=expected)
+    raw_script = spec.get("script")
+    script = (
+        tuple(
+            ExpectedSegment(
+                news_item_title=segment["news_item_title"],
+                claims=tuple(segment["claims"]),
+            )
+            for segment in raw_script
+        )
+        if raw_script is not None
+        else None
+    )
+    return GoldenCase(
+        name=directory.name,
+        why=spec["why"],
+        sources=sources,
+        expected=expected,
+        script=script,
+    )
 
 
 def load_cases() -> Iterator[GoldenCase]:

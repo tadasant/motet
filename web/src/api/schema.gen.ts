@@ -16,8 +16,8 @@ export interface paths {
          * @description The private, authenticated RSS feed Phase 1 ships instead of a player.
          *
          *     RSS buys background audio, offline, lockscreen, CarPlay, and speed control with zero
-         *     iOS code. Audio is served from GCS behind signed URLs, so this document carries links,
-         *     never bytes.
+         *     iOS code. Audio is served from object storage behind signed URLs, so this document
+         *     carries links, never bytes.
          */
         get: operations["rss_feed_feed_xml_get"];
         put?: never;
@@ -37,10 +37,12 @@ export interface paths {
         };
         /**
          * Healthz
-         * @description Liveness, plus whether telemetry is actually wired.
+         * @description Liveness, plus whether telemetry and authentication are actually wired.
          *
-         *     The telemetry flags are not decoration. Exporters no-op silently when unconfigured, so
-         *     without this an unmonitored process is indistinguishable from a quiet one.
+         *     The flags are not decoration. Exporters no-op silently when unconfigured, so without
+         *     this an unmonitored process is indistinguishable from a quiet one — and an
+         *     unauthenticated deployment is indistinguishable from a working one until the bill
+         *     arrives.
          */
         get: operations["healthz_healthz_get"];
         put?: never;
@@ -58,14 +60,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Episodes
+         * @description Every episode, newest first, whatever state it is in.
+         */
+        get: operations["list_episodes_v1_episodes_get"];
         put?: never;
         /**
          * Create Episode
          * @description Assemble a manual episode from unread news items, capped by duration.
          *
-         *     Scripting, grounding validation, and TTS happen on the queue afterwards. Nothing is
-         *     synthesized until grounding passes (invariant 3).
+         *     Returns immediately, in ``pending``. Assembly, scripting, grounding validation, and TTS
+         *     happen on the queue afterwards, and nothing is synthesized until grounding passes
+         *     (invariant 3) — so the episode a client polls for moves through states rather than
+         *     appearing finished.
          */
         post: operations["create_episode_v1_episodes_post"];
         delete?: never;
@@ -94,6 +102,101 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/episodes/{episode_id}/audio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Episode Audio
+         * @description Serve an episode's audio, or redirect to a signed URL for it.
+         *
+         *     Which of the two depends on the storage backend, and the *store* decides rather than
+         *     this route: a backend that can mint a signed URL returns one, and one that cannot
+         *     returns ``None``. A podcast client cannot tell the difference — it follows the
+         *     redirect — so the enclosure URL in the feed is stable across both, and a signed URL's
+         *     expiry never ends up cached inside a feed document.
+         */
+        get: operations["episode_audio_v1_episodes__episode_id__audio_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/episodes/{episode_id}/listened": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Episode Listened
+         * @description Mark every news item in this episode read.
+         *
+         *     Phase 1's stand-in for playback tracking: RSS gives background audio and CarPlay for
+         *     free, and takes away any way for a client to report where the listener got to. Phase
+         *     2's iOS app reports ``spoken_through_ms`` and this becomes automatic — but the fact it
+         *     writes is the same one, on the same column, which is why swapping the trigger later
+         *     changes nothing about read state.
+         */
+        post: operations["mark_episode_listened_v1_episodes__episode_id__listened_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/feed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Feed Info
+         * @description The private feed URL, minting a token on first ask.
+         */
+        get: operations["get_feed_info_v1_feed_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/feed/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate Feed
+         * @description Revoke the current feed URL and mint a new one.
+         *
+         *     This unsubscribes every client using the old URL, which is the point — it is the
+         *     answer to a leaked feed link, and there is no other way to take one back.
+         */
+        post: operations["rotate_feed_v1_feed_rotate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/news-items": {
         parameters: {
             query?: never;
@@ -114,6 +217,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/news-items/{news_item_id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set News Item Read
+         * @description Mark a news item read or unread.
+         *
+         *     The same write that "I listened to this episode" performs, which is what invariant 5
+         *     means in practice: one fact, one column, two ways of reaching it.
+         */
+        post: operations["set_news_item_read_v1_news_items__news_item_id__read_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources/paste": {
         parameters: {
             query?: never;
@@ -128,7 +254,9 @@ export interface paths {
          * @description Ingest pasted text as a source item.
          *
          *     Enqueues rather than processes: ingestion is serialized per user (invariant 6), so the
-         *     work belongs to a worker draining the queue, never to the request thread.
+         *     work belongs to a worker draining the queue, never to the request thread. The row and
+         *     the job are written in the same transaction — with two systems there would always be a
+         *     window where the source item exists and nothing will ever pick it up.
          */
         post: operations["paste_source_v1_sources_paste_post"];
         delete?: never;
@@ -144,8 +272,17 @@ export interface components {
         /**
          * ClaimModel
          * @description A reported assertion beside the span it came from (invariant 3).
+         *
+         *     ``text`` is what gets spoken and may paraphrase; ``source_excerpt`` is the source text
+         *     the span actually covers, resolved server-side. Both are sent because the episode
+         *     screen shows them side by side — that display *is* the trust surface, and a client
+         *     that had to fetch the source separately to render it would sometimes not bother.
          */
         ClaimModel: {
+            /** Source Excerpt */
+            source_excerpt: string;
+            /** Source Title */
+            source_title: string;
             span: components["schemas"]["SourceSpanModel"];
             /** Text */
             text: string;
@@ -162,14 +299,48 @@ export interface components {
         };
         /** EpisodeResponse */
         EpisodeResponse: {
+            /** Audio Bytes */
+            audio_bytes: number | null;
+            /** Audio Media Type */
+            audio_media_type: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
             /** Duration Ms */
             duration_ms: number;
             /** Id */
             id: string;
+            /** Last Error */
+            last_error: string | null;
+            /** Max Duration Ms */
+            max_duration_ms: number;
+            /** Published At */
+            published_at: string | null;
             /** Segments */
             segments: components["schemas"]["SegmentResponse"][];
+            /**
+             * State
+             * @description pending -> scripting -> rendering -> ready, or failed.
+             */
+            state: string;
             /** Title */
             title: string;
+        };
+        /**
+         * FeedInfoResponse
+         * @description The private feed URL, ready to paste into a podcast client.
+         *
+         *     The token is returned in full rather than masked. It has to be: a feed URL is copied
+         *     to a new device months after it was minted, and a secret the owner cannot read back is
+         *     one that forces a rotation — which unsubscribes every client already using it.
+         */
+        FeedInfoResponse: {
+            /** Token */
+            token: string;
+            /** Url */
+            url: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -178,14 +349,24 @@ export interface components {
         };
         /**
          * HealthResponse
-         * @description Liveness plus enough telemetry wiring to tell 'quiet' from 'unmonitored'.
+         * @description Liveness plus enough wiring detail to tell 'quiet' from 'unmonitored'.
          */
         HealthResponse: {
+            /**
+             * Authenticated
+             * @description Whether /v1 requires a bearer token. False means this deployment is open to anyone who can reach it — legitimate on a laptop, a mistake anywhere else.
+             */
+            authenticated: boolean;
             /**
              * Errors Configured
              * @description Whether error reporting is configured. False means errors go nowhere.
              */
             errors_configured: boolean;
+            /**
+             * Inference Mode
+             * @description 'fake' or 'real'. 'fake' means no vendor is ever called.
+             */
+            inference_mode: string;
             /**
              * Service
              * @description OTel service name this process reports as
@@ -203,10 +384,25 @@ export interface components {
             telemetry_configured: boolean;
         };
         /**
+         * MarkListenedResponse
+         * @description The result of "I listened to this" — read state, synced (invariant 5).
+         */
+        MarkListenedResponse: {
+            /** Episode Id */
+            episode_id: string;
+            /** News Items Marked Read */
+            news_items_marked_read: number;
+        };
+        /**
          * NewsItemResponse
          * @description A deduped story. Read state lives here, per invariant 5 — not per episode.
          */
         NewsItemResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
             /** Id */
             id: string;
             /** Read */
@@ -228,17 +424,45 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * ReadStateRequest
+         * @description Mark one news item read or unread.
+         *
+         *     A body rather than two endpoints, because "unread" is a real thing a user wants: the
+         *     backlog is the product's memory, and being unable to put something back is worse than
+         *     never having marked it.
+         */
+        ReadStateRequest: {
+            /** Read */
+            read: boolean;
+        };
         /** SegmentResponse */
         SegmentResponse: {
             /** Claims */
             claims: components["schemas"]["ClaimModel"][];
+            /** Duration Ms */
+            duration_ms: number;
             /** News Item Id */
             news_item_id: string;
+            /** News Item Title */
+            news_item_title: string;
+            /**
+             * Start Ms
+             * @description Where this segment starts in the episode audio. We own playback position (invariant 4); this never comes from a player.
+             */
+            start_ms: number;
+            /** Text */
+            text: string;
         };
         /** SourceItemResponse */
         SourceItemResponse: {
             /** Id */
             id: string;
+            /**
+             * State
+             * @description 'pending' until a worker integrates it, then 'integrated' or 'failed'.
+             */
+            state: string;
             /** Title */
             title: string;
         };
@@ -278,7 +502,10 @@ export type $defs = Record<string, never>;
 export interface operations {
     rss_feed_feed_xml_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The feed's secret, from GET /v1/feed. */
+                token?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -292,6 +519,15 @@ export interface operations {
                 };
                 content: {
                     "application/rss+xml": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -316,10 +552,43 @@ export interface operations {
             };
         };
     };
+    list_episodes_v1_episodes_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpisodeResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_episode_v1_episodes_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -352,7 +621,9 @@ export interface operations {
     get_episode_v1_episodes__episode_id__get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 episode_id: string;
             };
@@ -380,10 +651,148 @@ export interface operations {
             };
         };
     };
+    episode_audio_v1_episodes__episode_id__audio_get: {
+        parameters: {
+            query?: {
+                /** @description The feed's secret, from GET /v1/feed. */
+                token?: string;
+            };
+            header?: never;
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The episode audio */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/mpeg": unknown;
+                };
+            };
+            /** @description Redirect to a time-limited signed URL */
+            307: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_episode_listened_v1_episodes__episode_id__listened_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarkListenedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_feed_info_v1_feed_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedInfoResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotate_feed_v1_feed_rotate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedInfoResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_news_items_v1_news_items_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -398,12 +807,60 @@ export interface operations {
                     "application/json": components["schemas"]["NewsItemResponse"][];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_news_item_read_v1_news_items__news_item_id__read_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                news_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReadStateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewsItemResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     paste_source_v1_sources_paste_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };

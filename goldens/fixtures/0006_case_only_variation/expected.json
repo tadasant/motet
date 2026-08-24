@@ -1,0 +1,9 @@
+{
+  "why": "Case is not signal. A newsletter that sets headlines in all caps must not produce a second copy of every story it shares with one that does not.",
+  "news_items": [
+    {
+      "title": "quill raises a seed round",
+      "source_count": 2
+    }
+  ]
+}
