@@ -185,6 +185,7 @@ describe('the generated contract', () => {
       status: 'ok',
       service: 'motet-api',
       telemetry_configured: false,
+      telemetry_exporting: false,
       errors_configured: false,
       authenticated: true,
       inference_mode: 'fake',

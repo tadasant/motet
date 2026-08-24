@@ -155,8 +155,30 @@ and CI need no obs stack at all.
 
 > **The trap that comes with that**, learned on Zimmer: a silent no-op is indistinguishable
 > from a healthy, quiet service. **Never infer "no errors" from "no data."** Ask the app
-> instead — `motet_api.obs.status()` reports which exporters are actually configured, and
-> it is exposed on the API's health surface.
+> instead — `motet_obs.status()` reports which exporters are actually configured, and it is
+> exposed on the API's health surface.
+
+**The wiring lives in `obs/` (`motet-obs`), not in `api/`, and that is structural.** The
+worker is the process that makes every vendor call, has no health route to ask, and is the
+one whose silence costs money — and it could not reach a module inside `api/`, because
+`motet-api` depends on `motet-workers` and the arrow only goes one way. Telemetry that only
+the API can reach is telemetry the interesting half of the system does not have.
+`motet-obs` therefore depends on **no `motet-*` package** and must not start: every
+deployable imports it, and each passes its own fallback service name
+(`motet-api`, `motet-worker`) because that label is what an operator filters on.
+
+**"Configured" and "exporting" are two questions.** `telemetry_configured` says somebody
+set the variables; `telemetry_exporting` says this process built a provider and is batching
+data out of it. The first was true for months while the second was false — the SDKs were
+not a dependency at all — which is exactly how a service looks monitored and emits nothing.
+The health route reports both, and `obs/tests/test_export.py` asserts the second by running
+a real process against a local OTLP collector and decoding what arrived, because that is
+the one claim no flag can support.
+
+Only **`http/protobuf`** is installed: the obs stack ingests OTLP over HTTP, and the gRPC
+exporter would drag `grpcio` into both images for nothing. A different
+`OTEL_EXPORTER_OTLP_PROTOCOL` is logged as an error at startup rather than silently
+half-honoured.
 
 **Health is served at `/internal/health`, never at `/healthz`.** Google's Cloud Run frontend
 answers `/healthz` with its own 404 *before the request reaches the container*, so an
@@ -320,6 +342,7 @@ the voice/interaction path, and the iOS app.
 | Inference adapters | library | `inference/` |
 | Ingestion sources | library | `sources/` |
 | Credential vault | library | `vault/` |
+| Telemetry wiring | library | `obs/` |
 | Schema + migrations | library | `db/` |
 | Object storage | library | `storage/` |
 | Web SPA | Vite + React, static files on Cloud Run | `web/` |

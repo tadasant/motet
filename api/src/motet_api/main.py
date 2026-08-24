@@ -139,7 +139,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             "Fine on a laptop; on a deployed environment it means anyone can ingest text "
             "and spend inference budget."
         )
-    yield
+    try:
+        yield
+    finally:
+        # Cloud Run stops a revision with SIGTERM, and the OTel SDK's own `atexit` hook
+        # does not save us: measured locally, a terminate immediately after a request
+        # exported *nothing at all*, because the batch processors were still holding it.
+        # Up to a batch interval of spans and logs is therefore lost on every deploy and
+        # every scale-down — including, for a revision that is failing to start, the only
+        # records that would say why.
+        obs.shutdown()
 
 
 app = FastAPI(
@@ -185,6 +194,14 @@ def configure_cors(target: FastAPI, config: Settings) -> None:
         # ever set a cookie.
     )
 
+
+# At import, deliberately. Instrumenting adds ASGI middleware, and Starlette refuses that
+# once the middleware stack is built — which it is by the time the lifespan runs, so doing
+# this next to `obs.configure()` would raise. No provider exists yet and that is fine: the
+# middleware holds OpenTelemetry's proxy tracer, which resolves the moment the lifespan
+# installs the real one. Before `configure_cors` so that CORS ends up the outer
+# middleware, where a rejected preflight is not a traced request.
+obs.instrument(app)
 
 # Read once at import rather than per request: an origin policy that could change under a
 # running process would be a policy nobody could reason about, and Cloud Run gives a new
@@ -236,6 +253,7 @@ def health(config: Config) -> HealthResponse:
         status="ok",
         service=current.service_name,
         telemetry_configured=current.otlp_configured,
+        telemetry_exporting=current.exporting,
         errors_configured=current.errors_configured,
         authenticated=config.authenticated,
         inference_mode=config.inference_mode,

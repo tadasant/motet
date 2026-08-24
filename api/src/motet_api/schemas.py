@@ -24,6 +24,14 @@ class HealthResponse(BaseModel):
     telemetry_configured: bool = Field(
         description="Whether OTLP export is configured. False means telemetry is a no-op."
     )
+    telemetry_exporting: bool = Field(
+        description=(
+            "Whether this process actually installed an exporter, which is a different "
+            "question from whether the variables were set. False with "
+            "telemetry_configured true means the wiring is right and the SDK did not "
+            "start — check the startup log."
+        )
+    )
     errors_configured: bool = Field(
         description="Whether error reporting is configured. False means errors go nowhere."
     )

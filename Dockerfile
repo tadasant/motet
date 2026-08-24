@@ -2,7 +2,7 @@
 #
 # `motet-api` and `motet-worker` are separate images in Artifact Registry because the
 # infrastructure pins them separately, but they are the same tree — the API writes rows
-# and enqueues jobs, the worker drains the queues, and both import the same five
+# and enqueues jobs, the worker drains the queues, and both import the same
 # workspace packages. Two Dockerfiles would be two copies of one dependency graph that
 # drift the first time somebody edits only one of them, so this is one file with a
 # shared `runtime` stage and a thin target on top of it:
@@ -53,6 +53,7 @@ COPY pyproject.toml uv.lock ./
 COPY api/pyproject.toml api/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
 COPY inference/pyproject.toml inference/pyproject.toml
+COPY obs/pyproject.toml obs/pyproject.toml
 COPY sources/pyproject.toml sources/pyproject.toml
 COPY storage/pyproject.toml storage/pyproject.toml
 COPY vault/pyproject.toml vault/pyproject.toml
@@ -67,6 +68,7 @@ RUN uv sync --frozen --no-dev --no-install-workspace
 COPY api api
 COPY db db
 COPY inference inference
+COPY obs obs
 COPY sources sources
 COPY storage storage
 COPY vault vault

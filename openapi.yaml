@@ -230,10 +230,17 @@ components:
           description: Whether OTLP export is configured. False means telemetry is a no-op.
           title: Telemetry Configured
           type: boolean
+        telemetry_exporting:
+          description: "Whether this process actually installed an exporter, which is a different question\
+            \ from whether the variables were set. False with telemetry_configured true means the wiring\
+            \ is right and the SDK did not start \u2014 check the startup log."
+          title: Telemetry Exporting
+          type: boolean
       required:
       - status
       - service
       - telemetry_configured
+      - telemetry_exporting
       - errors_configured
       - authenticated
       - inference_mode
