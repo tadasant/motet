@@ -50,6 +50,7 @@ TABLES = (
     "source_credentials",
     "oauth_states",
     "highlights",
+    "auth_sessions",
 )
 
 #: Sources a test connected, without disturbing the seeded paste source. Cascades to that

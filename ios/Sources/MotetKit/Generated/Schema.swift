@@ -34,6 +34,17 @@ public struct ClaimModel: Codable, Hashable, Sendable {
     }
 }
 
+/// What Google redirected back with.
+public struct CompleteLoginRequest: Codable, Hashable, Sendable {
+    public var code: String
+    public var state: String
+
+    public init(code: String, state: String) {
+        self.code = code
+        self.state = state
+    }
+}
+
 /// Begin connecting a mailbox. Returns a URL for the user to visit.
 public struct ConnectSourceRequest: Codable, Hashable, Sendable {
     public var name: String?
@@ -197,6 +208,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var authenticated: Bool
     public var errorsConfigured: Bool
     public var inferenceMode: String
+    public var loginConfigured: Bool
     public var service: String
     public var status: String
     public var telemetryConfigured: Bool
@@ -206,6 +218,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         authenticated: Bool,
         errorsConfigured: Bool,
         inferenceMode: String,
+        loginConfigured: Bool,
         service: String,
         status: String,
         telemetryConfigured: Bool,
@@ -214,6 +227,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.authenticated = authenticated
         self.errorsConfigured = errorsConfigured
         self.inferenceMode = inferenceMode
+        self.loginConfigured = loginConfigured
         self.service = service
         self.status = status
         self.telemetryConfigured = telemetryConfigured
@@ -224,6 +238,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case authenticated
         case errorsConfigured = "errors_configured"
         case inferenceMode = "inference_mode"
+        case loginConfigured = "login_configured"
         case service
         case status
         case telemetryConfigured = "telemetry_configured"
@@ -316,6 +331,28 @@ public struct ListenProgressResponse: Codable, Hashable, Sendable {
         case episodeId = "episode_id"
         case listenedThroughMs = "listened_through_ms"
         case newsItemsMarkedRead = "news_items_marked_read"
+    }
+}
+
+/// A session, and the token that presents it.
+///
+/// ``token`` is returned exactly once, here — the API stores only its hash, so it cannot
+/// be read back. A client that loses it signs in again.
+public struct LoginResponse: Codable, Hashable, Sendable {
+    public var email: String
+    public var expiresAt: Date
+    public var token: String
+
+    public init(email: String, expiresAt: Date, token: String) {
+        self.email = email
+        self.expiresAt = expiresAt
+        self.token = token
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case email
+        case expiresAt = "expires_at"
+        case token
     }
 }
 
@@ -478,6 +515,31 @@ public struct SegmentResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// Who the caller is, as far as this API is concerned.
+///
+/// Answers for the shared API token too, which is what lets the SPA show "signed in as
+/// …" or "using an API token" without guessing from what it has in storage.
+public struct SessionResponse: Codable, Hashable, Sendable {
+    public var email: String?
+    public var expiresAt: Date?
+    public var how: String
+    public var loginConfigured: Bool
+
+    public init(email: String? = nil, expiresAt: Date? = nil, how: String, loginConfigured: Bool) {
+        self.email = email
+        self.expiresAt = expiresAt
+        self.how = how
+        self.loginConfigured = loginConfigured
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case email
+        case expiresAt = "expires_at"
+        case how
+        case loginConfigured = "login_configured"
+    }
+}
+
 /// Filter, window, duration, ranking — how a smart episode chooses its stories.
 ///
 /// Duration is deliberately absent: it is ``max_duration_ms`` on the episode itself. Two
@@ -590,6 +652,35 @@ public struct SourceSpanModel: Codable, Hashable, Sendable {
     }
 }
 
+/// Begin a Google sign-in. Answered with a URL for the browser to visit.
+public struct StartLoginRequest: Codable, Hashable, Sendable {
+    public var redirectUri: String
+
+    public init(redirectUri: String) {
+        self.redirectUri = redirectUri
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case redirectUri = "redirect_uri"
+    }
+}
+
+/// Where to send the browser, and the state that identifies this sign-in.
+public struct StartLoginResponse: Codable, Hashable, Sendable {
+    public var authorizationUrl: String
+    public var state: String
+
+    public init(authorizationUrl: String, state: String) {
+        self.authorizationUrl = authorizationUrl
+        self.state = state
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case authorizationUrl = "authorization_url"
+        case state
+    }
+}
+
 public struct ValidationError: Codable, Hashable, Sendable {
     public var ctx: JSONValue?
     public var input: JSONValue?
@@ -629,6 +720,26 @@ public enum MotetEndpoints {
     /// `GET /internal/health` — Health
     public static var health: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/internal/health")
+    }
+
+    /// `POST /v1/auth/google/callback` — Complete Login
+    public static var completeLogin: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/google/callback")
+    }
+
+    /// `POST /v1/auth/google/start` — Start Login
+    public static var startLogin: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/google/start")
+    }
+
+    /// `POST /v1/auth/logout` — Logout
+    public static var logout: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/logout")
+    }
+
+    /// `GET /v1/auth/session` — Current Session
+    public static var currentSession: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/auth/session")
     }
 
     /// `GET /v1/episodes` — List Episodes

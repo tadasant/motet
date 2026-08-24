@@ -9,7 +9,8 @@ slightly differently, and a slight difference in the definition of "unread" is h
 invariant 5 stops being true.
 """
 
-from . import phase2, repo
+from . import auth, phase2, repo
+from .auth import AuthSession
 from .migrate import MIGRATIONS_DIR, Migration, MigrationError, discover, migrate
 from .models import (
     CredentialPurpose,
@@ -34,6 +35,7 @@ __all__ = [
     "MIGRATIONS_DIR",
     "OWNER_USER_ID",
     "PASTE_SOURCE_ID",
+    "AuthSession",
     "CredentialPurpose",
     "EpisodeKind",
     "EpisodeState",
@@ -51,6 +53,7 @@ __all__ = [
     "StoredSegment",
     "StoredSource",
     "StoredSourceItem",
+    "auth",
     "connect",
     "discover",
     "migrate",

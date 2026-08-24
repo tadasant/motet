@@ -41,6 +41,15 @@ class HealthResponse(BaseModel):
             "anyone who can reach it — legitimate on a laptop, a mistake anywhere else."
         )
     )
+    login_configured: bool = Field(
+        description=(
+            "Whether signing in with Google can succeed for anyone. False means either no "
+            "allowlist is set — which denies everybody, deliberately — or, in real mode, "
+            "no Google OAuth client is configured. Reported for the same reason as "
+            "'authenticated': a login that denies silently looks exactly like one nobody "
+            "has tried."
+        )
+    )
     inference_mode: str = Field(
         description="'fake' or 'real'. 'fake' means no vendor is ever called."
     )
@@ -340,3 +349,73 @@ class SaveHighlightRequest(BaseModel):
         default=None, description="Where the user was listening. Provenance, not the anchor."
     )
     anchor_ms: int | None = Field(default=None, ge=0)
+
+
+# --- signing in ----------------------------------------------------------------------
+
+
+class StartLoginRequest(BaseModel):
+    """Begin a Google sign-in. Answered with a URL for the browser to visit."""
+
+    redirect_uri: str = Field(
+        min_length=1,
+        description=(
+            "Where Google sends the browser back to — this deployment's SPA origin plus "
+            "/oauth/callback. Supplied by the client for the same reason connecting a "
+            "mailbox supplies it: one bundle serves three environments, each with its own "
+            "origin. It must be registered on the OAuth client, and when "
+            "MOTET_APP_BASE_URL is set the API additionally requires it to match."
+        ),
+    )
+
+
+class StartLoginResponse(BaseModel):
+    """Where to send the browser, and the state that identifies this sign-in."""
+
+    authorization_url: str
+    state: str = Field(
+        description=(
+            "The CSRF token for this sign-in. Returned so a client can verify the "
+            "callback it receives is the one it started, and prefixed 'login.' so the "
+            "single /oauth/callback path can tell a sign-in from a mailbox connection."
+        )
+    )
+
+
+class CompleteLoginRequest(BaseModel):
+    """What Google redirected back with."""
+
+    state: str = Field(min_length=1)
+    code: str = Field(min_length=1)
+
+
+class LoginResponse(BaseModel):
+    """A session, and the token that presents it.
+
+    ``token`` is returned exactly once, here — the API stores only its hash, so it cannot
+    be read back. A client that loses it signs in again.
+    """
+
+    token: str = Field(description="Send as 'Authorization: Bearer <token>', like the API token.")
+    email: str = Field(description="The Google account that signed in.")
+    expires_at: datetime
+
+
+class SessionResponse(BaseModel):
+    """Who the caller is, as far as this API is concerned.
+
+    Answers for the shared API token too, which is what lets the SPA show "signed in as
+    …" or "using an API token" without guessing from what it has in storage.
+    """
+
+    how: str = Field(
+        description=(
+            "'session' for a signed-in browser, 'token' for the shared API token, 'open' "
+            "when MOTET_API_TOKEN is unset and this deployment has no lock on it at all."
+        )
+    )
+    email: str | None = None
+    expires_at: datetime | None = None
+    login_configured: bool = Field(
+        description="Whether this deployment can complete a Google sign-in at all."
+    )

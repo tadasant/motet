@@ -58,6 +58,113 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/google/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Complete Login
+         * @description Finish a sign-in: verify the ID token, check the allowlist, mint a session.
+         *
+         *     The order is the point. The identity is established first and completely — signature
+         *     against Google's JWKS, audience, issuer, expiry, nonce, and ``email_verified`` — and
+         *     only then is the address compared against ``MOTET_ALLOWED_EMAILS``. An email claim out
+         *     of an unverified token is a string somebody typed, and authorizing on one would be the
+         *     whole vulnerability this route exists to avoid.
+         *
+         *     The state is consumed exactly once by a ``DELETE ... RETURNING``, so a replayed
+         *     callback finds nothing rather than racing a concurrent one into two sessions.
+         */
+        post: operations["complete_login_v1_auth_google_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/google/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Login
+         * @description Begin a sign-in: record the pending authorization and return a consent URL.
+         *
+         *     The state and the PKCE verifier are stored rather than derived, for the same reason
+         *     connecting a mailbox stores them — a callback that validated a state it recomputed
+         *     from its own parameters would defend against nothing. The OIDC ``nonce`` goes in the
+         *     same row: it travels out in the request and comes back inside the signed ID token, so
+         *     checking it means remembering what was sent.
+         *
+         *     Refused before anything is written when no allowlist is configured. Sending someone
+         *     through Google's consent screen only to deny them afterwards is a worse answer than
+         *     saying the deployment cannot do this yet.
+         */
+        post: operations["start_login_v1_auth_google_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Logout
+         * @description Revoke this browser's session.
+         *
+         *     A no-op for the shared API token, which is not a session and cannot be revoked by a
+         *     request — rotating it is a deploy. Answering 204 either way is what lets a client sign
+         *     out without first working out which kind of token it holds.
+         */
+        post: operations["logout_v1_auth_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current Session
+         * @description Who this request is, and how it proved it.
+         *
+         *     Answers for the shared API token too, so the SPA can say "signed in as …" or "using an
+         *     API token" from what the *server* believes rather than by inferring it from what it
+         *     happens to have in storage.
+         */
+        get: operations["current_session_v1_auth_session_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes": {
         parameters: {
             query?: never;
@@ -582,6 +689,16 @@ export interface components {
             text: string;
         };
         /**
+         * CompleteLoginRequest
+         * @description What Google redirected back with.
+         */
+        CompleteLoginRequest: {
+            /** Code */
+            code: string;
+            /** State */
+            state: string;
+        };
+        /**
          * ConnectSourceRequest
          * @description Begin connecting a mailbox. Returns a URL for the user to visit.
          */
@@ -715,6 +832,11 @@ export interface components {
              */
             inference_mode: string;
             /**
+             * Login Configured
+             * @description Whether signing in with Google can succeed for anyone. False means either no allowlist is set — which denies everybody, deliberately — or, in real mode, no Google OAuth client is configured. Reported for the same reason as 'authenticated': a login that denies silently looks exactly like one nobody has tried.
+             */
+            login_configured: boolean;
+            /**
              * Service
              * @description OTel service name this process reports as
              */
@@ -796,6 +918,30 @@ export interface components {
             listened_through_ms: number;
             /** News Items Marked Read */
             news_items_marked_read: number;
+        };
+        /**
+         * LoginResponse
+         * @description A session, and the token that presents it.
+         *
+         *     ``token`` is returned exactly once, here — the API stores only its hash, so it cannot
+         *     be read back. A client that loses it signs in again.
+         */
+        LoginResponse: {
+            /**
+             * Email
+             * @description The Google account that signed in.
+             */
+            email: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /**
+             * Token
+             * @description Send as 'Authorization: Bearer <token>', like the API token.
+             */
+            token: string;
         };
         /**
          * MarkListenedResponse
@@ -902,6 +1048,29 @@ export interface components {
             text: string;
         };
         /**
+         * SessionResponse
+         * @description Who the caller is, as far as this API is concerned.
+         *
+         *     Answers for the shared API token too, which is what lets the SPA show "signed in as
+         *     …" or "using an API token" without guessing from what it has in storage.
+         */
+        SessionResponse: {
+            /** Email */
+            email?: string | null;
+            /** Expires At */
+            expires_at?: string | null;
+            /**
+             * How
+             * @description 'session' for a signed-in browser, 'token' for the shared API token, 'open' when MOTET_API_TOKEN is unset and this deployment has no lock on it at all.
+             */
+            how: string;
+            /**
+             * Login Configured
+             * @description Whether this deployment can complete a Google sign-in at all.
+             */
+            login_configured: boolean;
+        };
+        /**
          * SmartRuleModel
          * @description Filter, window, duration, ranking — how a smart episode chooses its stories.
          *
@@ -1001,6 +1170,30 @@ export interface components {
             /** Start */
             start: number;
         };
+        /**
+         * StartLoginRequest
+         * @description Begin a Google sign-in. Answered with a URL for the browser to visit.
+         */
+        StartLoginRequest: {
+            /**
+             * Redirect Uri
+             * @description Where Google sends the browser back to — this deployment's SPA origin plus /oauth/callback. Supplied by the client for the same reason connecting a mailbox supplies it: one bundle serves three environments, each with its own origin. It must be registered on the OAuth client, and when MOTET_APP_BASE_URL is set the API additionally requires it to match.
+             */
+            redirect_uri: string;
+        };
+        /**
+         * StartLoginResponse
+         * @description Where to send the browser, and the state that identifies this sign-in.
+         */
+        StartLoginResponse: {
+            /** Authorization Url */
+            authorization_url: string;
+            /**
+             * State
+             * @description The CSRF token for this sign-in. Returned so a client can verify the callback it receives is the one it started, and prefixed 'login.' so the single /oauth/callback path can tell a sign-in from a mailbox connection.
+             */
+            state: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -1071,6 +1264,132 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    complete_login_v1_auth_google_callback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CompleteLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_login_v1_auth_google_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartLoginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    logout_v1_auth_logout_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    current_session_v1_auth_session_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

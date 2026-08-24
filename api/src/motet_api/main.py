@@ -35,6 +35,7 @@ from motet_db import (
     phase2,
     repo,
 )
+from motet_db import auth as auth_repo
 from motet_inference.llm import load_config as load_llm_config
 from motet_sources import (
     GMAIL_READONLY_SCOPE,
@@ -54,12 +55,26 @@ from motet_workers import (
 )
 
 from . import obs
-from .config import APP_BASE_URL_ENV, Settings
+from .auth import (
+    ALLOWED_EMAILS_ENV,
+    LOGIN_SCOPES,
+    IdentityConfigError,
+    IdentityError,
+    build_identity_provider,
+    is_allowed,
+    is_login_state,
+    new_login_state,
+    new_nonce,
+)
+from .auth import PROVIDER as GOOGLE_PROVIDER
+from .config import APP_BASE_URL_ENV, CALLBACK_PATH, Settings
 from .deps import (
+    Caller,
     connection,
     dek_wrapper,
     public_base_url,
     require_api_token,
+    require_caller,
     require_feed_token,
     settings,
     store,
@@ -67,6 +82,7 @@ from .deps import (
 from .feed import FeedMetadata, feed_url, render_feed
 from .schemas import (
     ClaimModel,
+    CompleteLoginRequest,
     ConnectSourceRequest,
     ConnectSourceResponse,
     CreateEpisodeRequest,
@@ -77,6 +93,7 @@ from .schemas import (
     HighlightResponse,
     ListenProgressRequest,
     ListenProgressResponse,
+    LoginResponse,
     MarkListenedResponse,
     NewsItemResponse,
     OAuthCallbackRequest,
@@ -84,9 +101,12 @@ from .schemas import (
     ReadStateRequest,
     SaveHighlightRequest,
     SegmentResponse,
+    SessionResponse,
     SourceItemResponse,
     SourceResponse,
     SourceSpanModel,
+    StartLoginRequest,
+    StartLoginResponse,
 )
 from .shownotes import chapters_json, transcript_vtt
 
@@ -94,6 +114,10 @@ logger = logging.getLogger("motet.api")
 
 Conn = Annotated[psycopg.Connection[Any], Depends(connection)]
 User = Annotated[str, Depends(require_api_token)]
+#: The caller *and how they proved it* — a signed-in browser, the shared API token, or an
+#: unlocked deployment. Only the sign-in routes need the distinction; every other route
+#: takes ``User``, because there is one account and the answer is always the same row.
+Who = Annotated[Caller, Depends(require_caller)]
 FeedUser = Annotated[str, Depends(require_feed_token)]
 Config = Annotated[Settings, Depends(settings)]
 Store = Annotated[ObjectStore, Depends(store)]
@@ -256,8 +280,179 @@ def health(config: Config) -> HealthResponse:
         telemetry_exporting=current.exporting,
         errors_configured=current.errors_configured,
         authenticated=config.authenticated,
+        login_configured=config.login_configured,
         inference_mode=config.inference_mode,
     )
+
+
+# --- signing in ----------------------------------------------------------------------
+#
+# **This is not a user system.** Motet has one account and signup is still Phase 3. What
+# these four routes change is how a *browser* proves it may talk to /v1: a Google sign-in
+# that mints a session, instead of MOTET_API_TOKEN typed into a text field. The bearer
+# token keeps working everywhere it already works — the RSS feed, the iOS app, any script
+# — it just stops being something a human types.
+#
+# **The allowlist is the security control, not Google.** This deployment's consent screen
+# is published and unverified, so anyone on the internet with a Google account can reach
+# the end of the flow. Completing it therefore proves identity and nothing else;
+# MOTET_ALLOWED_EMAILS decides authorization, server-side, after the ID token verifies.
+# Unset denies everybody, deliberately.
+#
+# The first two routes are **unauthenticated**, necessarily: they are how a browser that
+# holds nothing gets something. Everything they can do is create a short-lived
+# `oauth_states` row and, on a verified and allowlisted identity, a session.
+
+
+@app.post("/v1/auth/google/start", response_model=StartLoginResponse, tags=["auth"])
+def start_login(body: StartLoginRequest, conn: Conn, config: Config) -> StartLoginResponse:
+    """Begin a sign-in: record the pending authorization and return a consent URL.
+
+    The state and the PKCE verifier are stored rather than derived, for the same reason
+    connecting a mailbox stores them — a callback that validated a state it recomputed
+    from its own parameters would defend against nothing. The OIDC ``nonce`` goes in the
+    same row: it travels out in the request and comes back inside the signed ID token, so
+    checking it means remembering what was sent.
+
+    Refused before anything is written when no allowlist is configured. Sending someone
+    through Google's consent screen only to deny them afterwards is a worse answer than
+    saying the deployment cannot do this yet.
+    """
+    if not config.allowed_emails:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{ALLOWED_EMAILS_ENV} is unset, so no Google account would be accepted and "
+            "signing in is switched off. This deployment still takes the API token.",
+        )
+
+    redirect_uri = body.redirect_uri.strip()
+    if not config.callback_uri_allowed(redirect_uri):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"redirect_uri must be this deployment's app origin plus {CALLBACK_PATH}.",
+        )
+
+    verifier, challenge = new_pkce_pair()
+    state = new_login_state()
+    nonce = new_nonce()
+    phase2.start_oauth(
+        conn,
+        state=state,
+        # The one account. A sign-in does not create a user and never has: it decides
+        # whether this browser may act as the owner, which is the only thing to be.
+        user_id=repo.OWNER_USER_ID,
+        provider=GOOGLE_PROVIDER,
+        source_id_=None,
+        code_verifier=verifier,
+        redirect_uri=redirect_uri,
+        scopes=LOGIN_SCOPES,
+        nonce=nonce,
+    )
+
+    try:
+        url = build_identity_provider().authorization_url(
+            redirect_uri=redirect_uri, state=state, nonce=nonce, code_challenge=challenge
+        )
+    except IdentityError as exc:
+        # Real mode with no Google OAuth client provisioned. A 503 rather than a 500:
+        # nothing is wrong with the request, the capability is not configured.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    return StartLoginResponse(authorization_url=url, state=state)
+
+
+@app.post("/v1/auth/google/callback", response_model=LoginResponse, tags=["auth"])
+def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> LoginResponse:
+    """Finish a sign-in: verify the ID token, check the allowlist, mint a session.
+
+    The order is the point. The identity is established first and completely — signature
+    against Google's JWKS, audience, issuer, expiry, nonce, and ``email_verified`` — and
+    only then is the address compared against ``MOTET_ALLOWED_EMAILS``. An email claim out
+    of an unverified token is a string somebody typed, and authorizing on one would be the
+    whole vulnerability this route exists to avoid.
+
+    The state is consumed exactly once by a ``DELETE ... RETURNING``, so a replayed
+    callback finds nothing rather than racing a concurrent one into two sessions.
+    """
+    state = body.state.strip()
+    if not is_login_state(state):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That callback did not come from a sign-in. Connecting a mailbox finishes at "
+            "/v1/sources/callback.",
+        )
+
+    pending = phase2.consume_oauth_state(conn, state)
+    if pending is None or pending["provider"] != GOOGLE_PROVIDER:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This sign-in is unknown, already used, or expired. Start again.",
+        )
+
+    if not config.allowed_emails:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{ALLOWED_EMAILS_ENV} is unset, so no Google account would be accepted.",
+        )
+
+    try:
+        identity = build_identity_provider().complete(
+            code=body.code,
+            redirect_uri=pending["redirect_uri"],
+            code_verifier=pending["code_verifier"],
+            nonce=pending["nonce"] or "",
+        )
+    except IdentityConfigError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except IdentityError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    if not is_allowed(identity.email, config.allowed_emails):
+        # Logged with the address, and that is deliberate: this consent screen is open to
+        # the internet, so "somebody who is not you finished a Google sign-in here" is a
+        # thing an operator wants to be able to see. It is an identity, not a credential.
+        logger.warning("refused a sign-in for %s: not on %s", identity.email, ALLOWED_EMAILS_ENV)
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "That Google account is not allowed to use this Motet.",
+        )
+
+    token = auth_repo.new_session_token()
+    session = auth_repo.create_session(
+        conn, user_id=repo.OWNER_USER_ID, email=identity.email, token=token
+    )
+    logger.info("signed in %s until %s", session.email, session.expires_at.isoformat())
+    # The only time the token is ever readable. Only its hash is stored.
+    return LoginResponse(token=token, email=session.email, expires_at=session.expires_at)
+
+
+@app.get("/v1/auth/session", response_model=SessionResponse, tags=["auth"])
+def current_session(caller: Who, config: Config) -> SessionResponse:
+    """Who this request is, and how it proved it.
+
+    Answers for the shared API token too, so the SPA can say "signed in as …" or "using an
+    API token" from what the *server* believes rather than by inferring it from what it
+    happens to have in storage.
+    """
+    return SessionResponse(
+        how=caller.how,
+        email=caller.email,
+        expires_at=caller.expires_at,
+        login_configured=config.login_configured,
+    )
+
+
+@app.post("/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])
+def logout(conn: Conn, caller: Who) -> Response:
+    """Revoke this browser's session.
+
+    A no-op for the shared API token, which is not a session and cannot be revoked by a
+    request — rotating it is a deploy. Answering 204 either way is what lets a client sign
+    out without first working out which kind of token it holds.
+    """
+    if caller.session_id is not None:
+        auth_repo.delete_session(conn, caller.session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post(
@@ -651,7 +846,11 @@ def oauth_callback(
     finds nothing rather than racing a concurrent one into two token exchanges.
     """
     pending = phase2.consume_oauth_state(conn, body.state.strip())
-    if pending is None or pending["user_id"] != user_id:
+    # The provider is checked as well as the owner because `oauth_states` now holds two
+    # kinds of authorization — connecting a mailbox, and signing in — and they land on the
+    # same SPA path. A sign-in consumed here would otherwise be spent on a flow that
+    # cannot finish it, and the user would have to start again for no visible reason.
+    if pending is None or pending["user_id"] != user_id or pending["provider"] != PROVIDER:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "This authorization is unknown, already used, or expired. Start again.",
