@@ -139,19 +139,24 @@ unproven.
     setting, then test with the simulator's CarPlay window and in a car.
 12. **TestFlight and device installs.** Both need the membership.
 
-## One thing the API does not offer yet
+## Playback position is still device-local, and that is now a client gap
 
-There is no endpoint for reporting a playback position. `POST /v1/episodes/{id}/listened`
-marks a whole episode read; `POST /v1/news-items/{id}/read` marks one item. So the app does
-what the contract allows and what invariant 5 actually asks for: it converts position into
-*completed news items* via the segment map and writes those, and it keeps
-`spoken_through_ms` durably **on the device** for resume.
+Read state syncs: position becomes *completed news items* via the segment map, and each one
+is written with `POST /v1/news-items/{id}/read` — the same fact the web backlog writes.
+That part is done, and it is what invariant 5 asks for.
 
-That is a real implementation of read-state sync, and an incomplete implementation of shared
-playback position: a second device would not know where you got to. Filed as
-[issue #11](https://github.com/tadasant/motet/issues/11) against the API rather than papered
-over here — when the endpoint exists, `ListeningPositionStore` gains a sink and the outbox
-gains a third entry kind. Nothing else changes.
+`spoken_through_ms` is a different fact, and it is still kept **on the device only**, so a
+second device does not know where you got to. When this app was written the contract had
+nowhere to put it, which is why it was filed as
+[issue #11](https://github.com/tadasant/motet/issues/11). The backend has since answered:
+`POST /v1/episodes/{id}/listen-progress` arrived with the Phase 2 backend, and the
+generated client already carries `reportListenProgress` because the generator picks up
+whatever `openapi.yaml` says.
+
+**Wiring it up is deliberately not in this change.** It is a behaviour change, not a
+rebase, and it wants its own tests: `ListeningPositionStore` gains a remote sink, the outbox
+gains a third entry kind, and resume has to decide what to do when the device and the server
+disagree. Small, and worth doing on its own.
 
 ## Configuration
 
