@@ -260,9 +260,13 @@ class TestTheHandshake:
     def test_the_pending_authorization_records_the_nonce(
         self, api: TestClient, db: psycopg.Connection[Any]
     ) -> None:
-        """OIDC's replay defence only means something if what was sent is remembered."""
+        """OIDC's replay defence only means something if what was sent is remembered.
+
+        That it is also *sent* is asserted against the real adapter below, not here: the
+        fake provider redirects straight back with a code and a state and renders no
+        consent URL to read a nonce out of.
+        """
         started = api.post("/v1/auth/google/start", json={"redirect_uri": REDIRECT})
-        query = parse_qs(urlsplit(started.json()["authorization_url"]).query)
         row = db.execute(
             "SELECT provider, source_id, nonce FROM oauth_states WHERE state = %s",
             (started.json()["state"],),
@@ -271,7 +275,7 @@ class TestTheHandshake:
         assert row["provider"] == "google"
         # A sign-in connects nothing. The column is nullable for exactly this.
         assert row["source_id"] is None
-        assert row["nonce"] == query["nonce"][0]
+        assert row["nonce"]
 
     @pytest.mark.parametrize(
         "redirect_uri",
