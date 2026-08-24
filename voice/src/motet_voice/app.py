@@ -4,7 +4,7 @@
 POST /v1/voice/sessions                      StartSession(...) -> session_token
 WS   /v1/voice/sessions/{session_id}/stream  audio in; transcripts, tool calls,
                                              audio chunks and interrupted_at out
-GET  /healthz                                what is wired, and what is dormant
+GET  /internal/health                        what is wired, and what is dormant
 ```
 
 **Three Cloud Run facts shape this file**, and each of them is a decision rather than an
@@ -54,6 +54,17 @@ from .tools import HttpToolTransport, ToolRegistry, ToolTransport, build_platfor
 logger = logging.getLogger("motet.voice.app")
 
 WEBSOCKET_PATH = "/v1/voice/sessions/{session_id}/stream"
+
+#: Health, and deliberately **not** ``/healthz``: Cloud Run's frontend answers that path
+#: with its own 404 before the request reaches the container, so a health endpoint served
+#: there is unreadable from everywhere health is actually checked. This service runs on
+#: the same platform as the API, so it takes the same path. See ``motet_api.main`` for the
+#: full account, and motet#16.
+HEALTH_PATH = "/internal/health"
+
+#: Namespaces the platform claims. Prefix-matched, and guarded by a test — see
+#: ``voice/tests/test_app.py``.
+PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
 
 #: How long an accepted socket may go without authenticating. Short: a client that
 #: has just been handed a token sends it immediately.
@@ -158,8 +169,8 @@ def create_app(
     )
     app.state.voice = state
 
-    @app.get("/healthz", response_model=HealthResponse, tags=["ops"])
-    def healthz() -> HealthResponse:
+    @app.get(HEALTH_PATH, response_model=HealthResponse, tags=["ops"])
+    def health() -> HealthResponse:
         """Liveness, and — more usefully — what is dormant and why.
 
         The dormancy fields are the point. An exporter that no-ops and an arm with no

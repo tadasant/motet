@@ -28,7 +28,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/v1': DEV_API,
-      '/healthz': DEV_API,
+      '/internal/health': DEV_API,
       '/feed.xml': DEV_API,
     },
   },

@@ -707,13 +707,13 @@ paths:
       summary: Rss Feed
       tags:
       - feed
-  /healthz:
+  /internal/health:
     get:
       description: "Liveness, plus whether telemetry and authentication are actually wired.\n\nThe flags\
         \ are not decoration. Exporters no-op silently when unconfigured, so without\nthis an unmonitored\
         \ process is indistinguishable from a quiet one \u2014 and an\nunauthenticated deployment is indistinguishable\
         \ from a working one until the bill\narrives."
-      operationId: healthz_healthz_get
+      operationId: health_internal_health_get
       responses:
         '200':
           content:
@@ -721,7 +721,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
           description: Successful Response
-      summary: Healthz
+      summary: Health
       tags:
       - ops
   /v1/episodes:

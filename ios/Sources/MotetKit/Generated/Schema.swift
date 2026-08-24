@@ -622,9 +622,9 @@ public enum MotetEndpoints {
         return HTTPEndpoint(method: "GET", path: "/feed.xml", query: query)
     }
 
-    /// `GET /healthz` — Healthz
-    public static var healthz: HTTPEndpoint {
-        return HTTPEndpoint(method: "GET", path: "/healthz")
+    /// `GET /internal/health` — Health
+    public static var health: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/internal/health")
     }
 
     /// `GET /v1/episodes` — List Episodes

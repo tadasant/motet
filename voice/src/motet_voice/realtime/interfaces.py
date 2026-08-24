@@ -40,7 +40,7 @@ class ArmDormant(RuntimeError):
 class ArmCapabilities:
     """What an arm can actually do in this process, and what it cannot.
 
-    Surfaced on ``/healthz`` and echoed in the ``StartSession`` response. The point is that
+    Surfaced on ``/internal/health`` and echoed in the ``StartSession`` response. The point is that
     "dormant" is something the system *says*, at boot, rather than something discovered
     when a listener asks a question into a silence.
     """

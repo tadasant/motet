@@ -7,7 +7,7 @@ question with a number instead of an argument.
 POST /v1/voice/sessions                      StartSession(...) -> session_token
 WS   /v1/voice/sessions/{id}/stream          audio in; transcripts, tool calls,
                                              audio chunks and interrupted_at out
-GET  /healthz                                what is wired, and what is dormant
+GET  /internal/health                        what is wired, and what is dormant
 ```
 
 Runs on Cloud Run: `uvicorn motet_voice.app:create_app --factory`.
@@ -176,7 +176,7 @@ Every variable is optional; the service starts with none of them set.
 | `MOTET_VOICE_SESSION_TTL_SECONDS` | Token lifetime, default 3600 |
 | `MOTET_VOICE_API_BASE_URL` | Where the platform tools call Motet's API |
 | `MOTET_VOICE_API_TOKEN` | Bearer token for that API |
-| `MOTET_VOICE_START_SESSION_TOKEN` | Bearer required to mint a session. **Unset means open**, and an open `StartSession` is a confused deputy: a session's tools carry the credential above. `/healthz` reports which it is |
+| `MOTET_VOICE_START_SESSION_TOKEN` | Bearer required to mint a session. **Unset means open**, and an open `StartSession` is a confused deputy: a session's tools carry the credential above. `/internal/health` reports which it is |
 | `MOTET_VOICE_LLM_MODEL` | Conversation model override; falls back to `MOTET_LLM_MODEL` |
 | `MOTET_VOICE_OPENAI_REALTIME_MODEL` | Realtime model slug |
 | `OPENAI_API_KEY` | Not provisioned. Wakes the realtime arm |

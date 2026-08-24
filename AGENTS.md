@@ -158,6 +158,13 @@ and CI need no obs stack at all.
 > instead — `motet_api.obs.status()` reports which exporters are actually configured, and
 > it is exposed on the API's health surface.
 
+**Health is served at `/internal/health`, never at `/healthz`.** Google's Cloud Run frontend
+answers `/healthz` with its own 404 *before the request reaches the container*, so an
+endpoint there is unreadable from everywhere health is actually checked — and a container-
+local smoke test cannot see that, because there is no frontend in front of `docker run`.
+That is how it shipped (motet#16). `/_ah/*` is reserved on the same infrastructure. Both
+are listed in `motet_api.main.PLATFORM_RESERVED_PATHS` and guarded by a test.
+
 Two of those names have a second spelling, and it is not cosmetic. Secret Manager holds one
 value per secret and the CI identity that applies the infrastructure **cannot read a secret
 back** — so a service definition can inject a secret under its own name and nothing more.
@@ -172,8 +179,8 @@ job, and `GLITCHTIP_DSN` is the same story without the formatting:
 
 **An endpoint without a credential is not "configured."** obs rejects an unauthenticated
 export, so that combination buys a 401 per export rather than data — which reads as an obs
-fault. `/healthz` reports `telemetry_configured: false` for it deliberately, and startup
-logs a warning saying so.
+fault. `/internal/health` reports `telemetry_configured: false` for it deliberately, and
+startup logs a warning saying so.
 
 ---
 

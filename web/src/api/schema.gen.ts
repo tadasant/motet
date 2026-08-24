@@ -28,7 +28,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/healthz": {
+    "/internal/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -36,7 +36,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Healthz
+         * Health
          * @description Liveness, plus whether telemetry and authentication are actually wired.
          *
          *     The flags are not decoration. Exporters no-op silently when unconfigured, so without
@@ -44,7 +44,7 @@ export interface paths {
          *     unauthenticated deployment is indistinguishable from a working one until the bill
          *     arrives.
          */
-        get: operations["healthz_healthz_get"];
+        get: operations["health_internal_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1045,7 +1045,7 @@ export interface operations {
             };
         };
     };
-    healthz_healthz_get: {
+    health_internal_health_get: {
         parameters: {
             query?: never;
             header?: never;

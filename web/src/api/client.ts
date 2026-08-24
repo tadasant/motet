@@ -25,7 +25,7 @@ export type PostResponse<P extends keyof paths> = paths[P] extends {
       : never
   : never
 
-export type HealthResponse = GetResponse<'/healthz'>
+export type HealthResponse = GetResponse<'/internal/health'>
 export type NewsItem = GetResponse<'/v1/news-items'>[number]
 export type Episode = GetResponse<'/v1/episodes'>[number]
 export type EpisodeSegment = Episode['segments'][number]
@@ -188,7 +188,7 @@ export async function apiPostPath<P extends keyof paths>(
 }
 
 export const api = {
-  health: () => apiGet('/healthz'),
+  health: () => apiGet('/internal/health'),
   newsItems: () => apiGet('/v1/news-items'),
   episodes: () => apiGet('/v1/episodes'),
   feed: () => apiGet('/v1/feed'),

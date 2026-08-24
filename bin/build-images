@@ -74,24 +74,49 @@ build_api() {
   docker build --target api -t "motet-api:${TAG}" -f Dockerfile .
 }
 
+# Health lives here and NOT on /healthz. Cloud Run's frontend answers /healthz with its
+# own HTML 404 before the request reaches the container, so the endpoint was unreachable
+# in both deployed environments while this smoke test passed — see motet#16.
+#
+# READ THIS BEFORE TRUSTING THE CHECK BELOW. It runs the image under `docker run`, where
+# there is no Google frontend in front of the container. So it proves the *application*
+# serves health at this path without a database and without a vendor key, and it proves
+# the path is not one we already know the platform eats. It proves NOTHING about what
+# Google's frontend does with any given path — that is only observable against a deployed
+# revision, and it is exactly the gap that let motet#16 ship green.
+API_HEALTH_PATH="/internal/health"
+
 smoke_api() {
   local name="motet-smoke-api-$$" port
   CONTAINERS+=("$name")
-  # No DATABASE_URL and no vendor key on purpose. /healthz must answer without either —
-  # it is what Cloud Run's startup probe hits, and a health check that needed the
-  # database would report the database's health rather than the revision's.
+  # No DATABASE_URL and no vendor key on purpose. Health must answer without either — it
+  # is what Cloud Run's startup probe hits, and a health check that needed the database
+  # would report the database's health rather than the revision's.
   docker run -d --name "$name" -P "motet-api:${TAG}" >/dev/null
   port="$(host_port "$name")"
 
   local body
-  body="$(wait_for_http "http://127.0.0.1:${port}/healthz" "$name")"
-  echo "    /healthz -> ${body}"
+  body="$(wait_for_http "http://127.0.0.1:${port}${API_HEALTH_PATH}" "$name")"
+  echo "    ${API_HEALTH_PATH} -> ${body}"
   case "$body" in
     *'"status":"ok"'*) ;;
-    *) echo "smoke: /healthz did not report ok" >&2; return 1 ;;
+    *) echo "smoke: ${API_HEALTH_PATH} did not report ok" >&2; return 1 ;;
   esac
+
+  # And the reserved path must NOT be the health path. A local 404 here is the app's own
+  # JSON 404, not Google's — the point is not to reproduce the frontend, it is to fail
+  # loudly if someone moves health back onto a path the frontend never forwards.
+  local reserved
+  reserved="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    "http://127.0.0.1:${port}/healthz")"
+  echo "    /healthz -> ${reserved} (reserved by the platform; must not be our health path)"
+  if [ "$reserved" != "404" ]; then
+    echo "smoke: the container answers /healthz, which Cloud Run 404s before it arrives" >&2
+    return 1
+  fi
+
   # The generated contract has to be reachable too: it is what proves the app booted as
-  # the real FastAPI application rather than as something that merely answers /healthz.
+  # the real FastAPI application rather than as something that merely answers health.
   curl -fsS --max-time 5 "http://127.0.0.1:${port}/openapi.json" >/dev/null
   echo "    /openapi.json -> ok"
 }

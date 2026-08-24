@@ -177,7 +177,7 @@ describe('App', () => {
 })
 
 describe('the generated contract', () => {
-  it('types /healthz off openapi.yaml', () => {
+  it('types /internal/health off openapi.yaml', () => {
     // Compile-time assertion: if the API drops a field, `bin/ci` regenerates
     // schema.gen.ts, this stops type-checking, and the drift is caught here rather
     // than in a browser.
