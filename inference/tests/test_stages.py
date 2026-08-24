@@ -51,18 +51,29 @@ def test_registry_rejects_an_unknown_mode(monkeypatch: pytest.MonkeyPatch) -> No
         get_stages()
 
 
-def test_real_stages_refuse_to_build_without_vendor_configuration() -> None:
+def test_real_stages_refuse_to_build_without_vendor_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The real stages exist now, and they fail *before* doing any work without a key.
 
     This is the safe direction for the mode switch to fail in: asking for real adapters in
     an environment that cannot pay for them stops at construction, not partway through an
     episode. The fake path below needs no configuration at all, which is what lets CI run
     the whole pipeline (invariant 7).
+
+    The LLM credential is what fails, and only that one: TTS credentials are checked by the
+    TTS worker's own entry point, so a dedup worker never has to hold a secret it does not
+    use. The mode is set rather than passed as an argument because `get_stages(mode=...)`
+    selects *stages* — the model still follows `MOTET_INFERENCE_MODE`, so passing it would
+    prove something weaker than it looks.
     """
-    with pytest.raises(Exception, match="CARTESIA_API_KEY|OPENROUTER_API_KEY"):
-        get_stages(mode="real")
+    monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(Exception, match="OPENROUTER_API_KEY"):
+        get_stages()
 
     # And the fake path builds with nothing set.
+    monkeypatch.setenv("MOTET_INFERENCE_MODE", "fake")
     assert get_stages(mode="fake").speech_synthesizer.synthesize("hello there").duration_ms > 0
 
 

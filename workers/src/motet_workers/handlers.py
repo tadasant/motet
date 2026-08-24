@@ -61,18 +61,13 @@ _EXTENSIONS = {MPEG_MEDIA_TYPE: "mp3", WAV_MEDIA_TYPE: "wav"}
 #: the trim downstream is a backstop rather than the normal path.
 SCRIPT_EXPANSION = 3
 
-#: How much longer the spoken script is than the summary it is written from.
+#: A ceiling on stories per episode, independent of the duration cap.
 #:
-#: Assembly has to apply the duration cap before any script exists, so it estimates from
-#: each story's summary — one or two sentences. The script stage then writes two to four
-#: narrated claims for that story, which is several times more words. Estimating 1:1 makes
-#: assembly systematically over-fill the episode, and the script-stage trim would then have
-#: to throw stories away on nearly every run.
-#:
-#: A crude constant rather than a model of the script, deliberately: the script stage
-#: re-applies the cap against the real copy, so this only has to be close enough to keep
-#: that backstop from firing routinely.
-SCRIPT_EXPANSION = 3
+#: The script stage puts the *full text* of every chosen item's sources into one prompt, so
+#: an unbounded segment count is an unbounded prompt. The duration cap alone does not bound
+#: it: a hundred one-line summaries all fit inside it, and drag a hundred whole newsletters
+#: along with them.
+MAX_SEGMENTS_PER_EPISODE = 30
 
 
 class HandlerError(RuntimeError):
@@ -183,8 +178,8 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
     chosen: list[repo.SegmentSpec] = []
     budget_ms = episode.max_duration_ms
     for item in unread:
-        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION * SCRIPT_EXPANSION
-        if chosen and estimate > budget_ms:
+        estimate = estimate_duration_ms(item.summary) * SCRIPT_EXPANSION
+        if chosen and (estimate > budget_ms or len(chosen) >= MAX_SEGMENTS_PER_EPISODE):
             break
         # The first item always goes in, even if it alone exceeds the cap: an episode with
         # no segments is worse than an episode that runs slightly long, and the caller

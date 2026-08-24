@@ -32,6 +32,7 @@ components:
       properties:
         max_duration_ms:
           exclusiveMinimum: 0.0
+          maximum: 21600000.0
           title: Max Duration Ms
           type: integer
         title:
@@ -220,6 +221,7 @@ components:
       description: "A blob of text pasted in by hand \u2014 Phase 1's only ingestion route."
       properties:
         text:
+          maxLength: 200000
           minLength: 1
           title: Text
           type: string

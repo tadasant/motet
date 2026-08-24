@@ -38,11 +38,22 @@ class HealthResponse(BaseModel):
     )
 
 
+#: Roughly 50k words — far more than any newsletter, and small enough that one paste
+#: cannot blow up a dedup prompt. The text goes into that prompt verbatim, and then into
+#: every script prompt for the news item it becomes, so an unbounded field here is an
+#: unbounded bill retried five times over.
+MAX_PASTE_CHARS = 200_000
+
+#: Six hours. Not a plausible episode length; a guard against an integer that would
+#: overflow the `integer` column and surface as a 500 instead of a 422.
+MAX_EPISODE_DURATION_MS = 6 * 60 * 60 * 1000
+
+
 class PasteRequest(BaseModel):
     """A blob of text pasted in by hand — Phase 1's only ingestion route."""
 
     title: str = Field(min_length=1, max_length=500)
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=MAX_PASTE_CHARS)
 
 
 class SourceItemResponse(BaseModel):
@@ -130,7 +141,7 @@ class CreateEpisodeRequest(BaseModel):
     """Phase 1 has manual episodes only: 'all unread', capped by duration."""
 
     title: str = Field(min_length=1, max_length=500)
-    max_duration_ms: int = Field(gt=0)
+    max_duration_ms: int = Field(gt=0, le=MAX_EPISODE_DURATION_MS)
 
 
 class MarkListenedResponse(BaseModel):

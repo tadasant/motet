@@ -29,8 +29,9 @@ from typing import Any
 
 import psycopg
 from motet_db import repo
-from motet_inference import get_stages
+from motet_inference import get_stages, validate_tts_startup
 from motet_inference.llm import validate_startup as validate_llm_startup
+from motet_inference.mode import current_mode
 from motet_storage import build_store
 
 from . import jobs
@@ -56,10 +57,11 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
     store = build_store()
     recorders = failure_recorders()
     processed = 0
+    deferred = 0
 
     with repo.connect(database_url) as conn:
         conn.autocommit = True
-        while processed < max_jobs:
+        while processed + deferred < max_jobs:
             job = jobs.claim(conn, queue)
             if job is None:
                 break
@@ -72,6 +74,11 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
                     "job %d deferred: %r is already being processed", job.id, job.serialize_key
                 )
                 jobs.defer(conn, job)
+                # Bounded separately from `processed`, which means "jobs that ran" and is
+                # what this function returns. A deferral is cheap but not free, and a queue
+                # backed up behind one busy key would otherwise let a single pass touch
+                # every row in it with no ceiling at all.
+                deferred += 1
                 continue
 
             try:
@@ -81,7 +88,13 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
                     jobs.unlock(conn, job.serialize_key)
             processed += 1
 
-    if processed >= max_jobs:
+    if deferred:
+        logger.info(
+            "deferred %d job(s) on %s whose serialization key was busy elsewhere",
+            deferred,
+            queue.value,
+        )
+    if processed + deferred >= max_jobs:
         logger.warning(
             "stopped after %d jobs on %s; more may be ready and the next run will take them",
             processed,
@@ -160,11 +173,17 @@ def main(argv: list[str] | None = None) -> int:
     # you see when both are wrong.
     logger.info("llm: %s", validate_llm_startup().describe())
 
+    queue = Queue(args.queue)
+    if queue is Queue.TTS and current_mode() == "real":
+        # Only the worker that actually speaks needs the TTS credentials, and it needs them
+        # before it claims a job rather than after it has been handed a scripted episode.
+        validate_tts_startup()
+        logger.info("tts: credentials resolved")
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         parser.error("DATABASE_URL is not set")
 
-    queue = Queue(args.queue)
     if args.poll_seconds <= 0:
         drain(queue, database_url, max_jobs=args.max_jobs)
         return 0

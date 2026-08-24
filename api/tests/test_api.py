@@ -150,6 +150,36 @@ class TestValidation:
             == 422
         )
 
+    def test_oversized_input_is_refused_rather_than_paid_for(self, api: TestClient) -> None:
+        """Pasted text goes verbatim into a dedup prompt, and then into every script prompt
+        for the news item it becomes. Unbounded here is an unbounded bill, retried five
+        times over."""
+        from motet_api.schemas import MAX_EPISODE_DURATION_MS, MAX_PASTE_CHARS
+
+        assert (
+            api.post(
+                "/v1/sources/paste",
+                json={"title": "t", "text": "x" * (MAX_PASTE_CHARS + 1)},
+                headers=AUTH,
+            ).status_code
+            == 422
+        )
+        # And an integer that would overflow the column is a 422, not a 500.
+        assert (
+            api.post(
+                "/v1/episodes",
+                json={"title": "t", "max_duration_ms": MAX_EPISODE_DURATION_MS + 1},
+                headers=AUTH,
+            ).status_code
+            == 422
+        )
+        assert (
+            api.post(
+                "/v1/episodes", json={"title": "t", "max_duration_ms": 2**40}, headers=AUTH
+            ).status_code
+            == 422
+        )
+
 
 class TestEndToEnd:
     def test_paste_backlog_episode_feed_audio(

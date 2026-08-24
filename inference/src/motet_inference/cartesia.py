@@ -116,6 +116,18 @@ def _positive_float(environ: Mapping[str, str], var: str, default: float) -> flo
     return value
 
 
+def validate_tts_startup(env: Mapping[str, str] | None = None) -> CartesiaConfig:
+    """Fail the process now if it could not synthesize later.
+
+    Called from the worker entry point, and only for the queue that actually speaks. A
+    missing voice id would otherwise surface after the script has been written and
+    grounding-validated — the expensive part — and would then fail every retry.
+    """
+    config = CartesiaConfig(env)
+    config.validate()
+    return config
+
+
 def build_payload(text: str, config: CartesiaConfig) -> dict[str, Any]:
     """The request body. Pure and module-level, so a test can assert the exact bytes."""
     return {
@@ -146,7 +158,6 @@ class CartesiaSpeechSynthesizer:
         transport: Any | None = None,
     ) -> None:
         self._config = config or CartesiaConfig()
-        self._config.validate()
         self._transport = transport
         self._client: Any | None = None
 
@@ -169,6 +180,13 @@ class CartesiaSpeechSynthesizer:
     def synthesize(self, text: str) -> Audio:
         import httpx  # noqa: PLC0415
 
+        # Checked here rather than in ``__init__``. ``Stages`` is resolved as a bundle, so
+        # validating on construction would mean every worker — including dedup, which never
+        # speaks — refused to start without the TTS secrets mounted. That is the same
+        # blast-radius argument that keeps the LLM key out of the API. Fail-fast is not
+        # lost: ``validate_tts_startup`` runs in the TTS worker's entry point, before it
+        # claims a job.
+        self._config.validate()
         if not text.strip():
             raise TtsError("refusing to synthesize empty text")
         try:

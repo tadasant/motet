@@ -405,3 +405,40 @@ class TestScriptPrompt:
 
         assert "greeting" in SCRIPT_SYSTEM  # it is addressed...
         assert "no greeting or sign-off" in SCRIPT_SYSTEM  # ...by forbidding it
+
+
+class TestGroundingFailsClosed:
+    """The verdict-collision case, which is the one way an unsupported claim could ship.
+
+    Every other branch of the validator fails closed. Last-write-wins on a duplicated
+    index was the exception, and an exception is all invariant 3 needs to stop being true.
+    """
+
+    def test_a_later_supported_verdict_cannot_overturn_a_rejection(self) -> None:
+        client = canned(
+            {
+                "verdicts": [
+                    {"index": 0, "supported": False, "reason": "invented figure"},
+                    {"index": 0, "supported": True, "reason": "looks fine"},
+                ]
+            }
+        )
+        report = ClaudeGroundingValidator(client).validate(
+            script_with("Acme raised $90M.", 0, 26), SOURCES
+        )
+        assert not report.ok
+        assert report.failures[0].reason == "invented figure"
+
+    def test_a_rejection_arriving_second_still_rejects(self) -> None:
+        client = canned(
+            {
+                "verdicts": [
+                    {"index": 0, "supported": True, "reason": "looks fine"},
+                    {"index": 0, "supported": False, "reason": "invented figure"},
+                ]
+            }
+        )
+        report = ClaudeGroundingValidator(client).validate(
+            script_with("Acme raised $90M.", 0, 26), SOURCES
+        )
+        assert not report.ok

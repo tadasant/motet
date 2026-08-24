@@ -299,6 +299,13 @@ class ClaudeGroundingValidator:
                 continue
             if not isinstance(supported, bool):
                 continue
+            if raw_index in verdicts and not verdicts[raw_index][0]:
+                # A rejection already stands for this claim, and a later "supported" for
+                # the same index must not overwrite it. Every other branch here fails
+                # closed — an unparseable verdict, a missing one — and last-write-wins
+                # would make this the single path by which an unsupported claim reaches
+                # audio. Invariant 3 is only as strong as its most forgiving branch.
+                continue
             reason = raw.get("reason")
             verdicts[raw_index] = (supported, reason if isinstance(reason, str) else "")
 

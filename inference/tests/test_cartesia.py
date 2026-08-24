@@ -19,6 +19,7 @@ from motet_inference.cartesia import (
     TtsConfigError,
     TtsError,
     build_payload,
+    validate_tts_startup,
 )
 
 # One 128 kbps / 44.1 kHz MPEG-1 Layer III frame: 1152 samples, 417 bytes.
@@ -48,9 +49,31 @@ class TestConfig:
         monkeypatch.delenv(API_KEY_ENV, raising=False)
         monkeypatch.delenv(VOICE_ENV, raising=False)
         with pytest.raises(TtsConfigError) as excinfo:
-            CartesiaSpeechSynthesizer(CartesiaConfig())
+            validate_tts_startup()
         assert API_KEY_ENV in str(excinfo.value)
         assert VOICE_ENV in str(excinfo.value)
+
+    def test_constructing_the_synthesizer_needs_no_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``Stages`` is resolved as a bundle, so every worker builds every stage.
+
+        Validating on construction would mean the dedup worker — which never speaks —
+        refused to start without the TTS secrets mounted, the same blast-radius mistake
+        AGENTS.md rejects for the LLM key in the API.
+        """
+        monkeypatch.delenv(API_KEY_ENV, raising=False)
+        monkeypatch.delenv(VOICE_ENV, raising=False)
+        CartesiaSpeechSynthesizer(CartesiaConfig())  # no raise
+
+    def test_synthesizing_without_credentials_still_refuses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Moving the check must not remove it: the last line of defence is the call."""
+        monkeypatch.delenv(API_KEY_ENV, raising=False)
+        monkeypatch.delenv(VOICE_ENV, raising=False)
+        with pytest.raises(TtsConfigError):
+            CartesiaSpeechSynthesizer(CartesiaConfig()).synthesize("Hello.")
 
     def test_every_vendor_fact_is_overridable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A vendor deprecating a version must not require a code change to survive."""

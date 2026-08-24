@@ -11,6 +11,7 @@ from .audio import (
     estimate_duration_ms,
     join_audio,
 )
+from .cartesia import validate_tts_startup
 from .fakes import first_sentence
 from .interfaces import (
     GroundingValidator,
@@ -63,4 +64,5 @@ __all__ = [
     "get_stages",
     "join_audio",
     "real_stages",
+    "validate_tts_startup",
 ]

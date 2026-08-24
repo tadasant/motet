@@ -11,9 +11,12 @@ clients:
   than they handle HTTP auth, and a feed nobody's player can subscribe to is not a feed.
   The token resolves to a user through the database, so revoking it is a row update.
 
-Both comparisons are constant-time. A token compared with ``==`` leaks its prefix to
-anyone patient enough to measure, and this one is the only thing standing between the
-internet and a bill.
+The bearer token is compared in constant time — with ``==`` it would leak its prefix to
+anyone patient enough to measure, and it is the only thing standing between the internet
+and a bill. The feed token is *not*: it is looked up with a SQL ``=``, whose timing is the
+database's business rather than ours. Said plainly rather than papered over, because
+closing it would mean loading every token and comparing in Python — trading a timing
+channel nobody can practically exploit for a table scan on every feed poll.
 """
 
 from __future__ import annotations

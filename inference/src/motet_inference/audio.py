@@ -144,8 +144,12 @@ def mpeg_duration_ms(data: bytes) -> int:
     """
     offset = _skip_id3v2(data)
     end = _strip_id3v1(data)
-    total_samples = 0
-    sample_rate = 0
+    # Milliseconds accumulated per frame rather than a sample total over one rate. A
+    # stream whose frames disagree about their sample rate is unusual, but dividing every
+    # frame's samples by whichever rate happened to come last is wrong by however much
+    # they differ — and silently, because the answer still looks like a duration.
+    total_ms = 0.0
+    frames = 0
     while offset + 4 <= end:
         header = data[offset : offset + 4]
         if header[0] != 0xFF or (header[1] & 0xE0) != 0xE0:
@@ -158,12 +162,13 @@ def mpeg_duration_ms(data: bytes) -> int:
             offset += 1
             continue
         frame_length, samples, sample_rate = frame
-        total_samples += samples
+        total_ms += samples / sample_rate * 1000
+        frames += 1
         offset += frame_length
 
-    if total_samples == 0 or sample_rate == 0:
+    if frames == 0:
         raise AudioError("no MPEG audio frames found; this is not audio we synthesized")
-    return round(total_samples / sample_rate * 1000)
+    return round(total_ms)
 
 
 def _parse_frame(header: bytes) -> tuple[int, int, int] | None:
@@ -199,7 +204,10 @@ def _skip_id3v2(data: bytes) -> int:
     size = 0
     for byte in data[6:10]:
         size = (size << 7) | (byte & 0x7F)
-    return 10 + size
+    # Bit 4 of the flags byte says a 10-byte footer follows, and the size field excludes
+    # it. Under-skipping only costs the walker ten bytes of resync, which is exactly the
+    # confusion this function exists to spare it.
+    return 10 + size + (10 if data[5] & 0x10 else 0)
 
 
 def _strip_id3v1(data: bytes) -> int:
