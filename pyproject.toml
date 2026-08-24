@@ -10,6 +10,7 @@ dependencies = [
     "motet-db",
     "motet-inference",
     "motet-storage",
+    "motet-voice",
     "motet-workers",
 ]
 
@@ -19,13 +20,14 @@ dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["api", "db", "inference", "storage", "workers"]
+members = ["api", "db", "inference", "storage", "voice", "workers"]
 
 [tool.uv.sources]
 motet-api = { workspace = true }
 motet-db = { workspace = true }
 motet-inference = { workspace = true }
 motet-storage = { workspace = true }
+motet-voice = { workspace = true }
 motet-workers = { workspace = true }
 
 [dependency-groups]
@@ -55,11 +57,22 @@ select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logge
 # The one place print() is right: a hand-run CLI whose entire product is its stdout
 # report. Stated here rather than dodged by leaving the file out of the linter's reach.
 "inference/src/motet_inference/llm/check_models.py" = ["T201"]
+# Same exemption, same reason: `motet-voice` is a hand-run CLI whose entire product is the
+# report it prints. Stated here rather than dodged by excluding the file from the linter.
+"voice/src/motet_voice/cli.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["api/src", "db/src", "inference/src", "storage/src", "workers/src", "goldens"]
+files = [
+    "api/src",
+    "db/src",
+    "inference/src",
+    "storage/src",
+    "voice/src",
+    "workers/src",
+    "goldens",
+]
 
 # The Google Cloud SDK ships no py.typed marker, so every symbol from it is untyped as
 # far as strict mode is concerned. Scoped to the one package rather than relaxed globally:
@@ -68,6 +81,21 @@ files = ["api/src", "db/src", "inference/src", "storage/src", "workers/src", "go
 module = ["google.cloud.*"]
 ignore_missing_imports = true
 
+# `webrtcvad` is an OPTIONAL dependency of the barge-in harness — a C extension that gives
+# the sweep a second, incumbent VAD to compare ours against. It is imported lazily and the
+# harness runs without it, so it is not declared anywhere and mypy cannot see stubs for it.
+[[tool.mypy.overrides]]
+module = ["webrtcvad"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
-testpaths = ["api/tests", "db/tests", "inference/tests", "storage/tests", "workers/tests", "goldens"]
+testpaths = [
+    "api/tests",
+    "db/tests",
+    "inference/tests",
+    "storage/tests",
+    "voice/tests",
+    "workers/tests",
+    "goldens",
+]
 addopts = "-q"
