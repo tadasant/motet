@@ -6,15 +6,21 @@ requires-python = ">=3.13"
 dependencies = [
     "motet-db",
     "motet-inference",
+    "motet-obs",
     "motet-sources",
     "motet-storage",
     "motet-vault",
+    # A direct import, so a direct dependency: `runner` opens a span and records a
+    # counter per job. The API package only — no SDK — so it costs nothing until
+    # `motet_obs.configure` installs a real provider behind it.
+    "opentelemetry-api>=1.44",
     "psycopg[binary]>=3.2",
 ]
 
 [tool.uv.sources]
 motet-db = { workspace = true }
 motet-inference = { workspace = true }
+motet-obs = { workspace = true }
 motet-sources = { workspace = true }
 motet-storage = { workspace = true }
 motet-vault = { workspace = true }

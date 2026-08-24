@@ -85,6 +85,7 @@ class TestHealth:
         body = client.get(HEALTH_PATH).json()
         assert body["telemetry_configured"] is False
         assert body["errors_configured"] is False
+        assert body["telemetry_exporting"] is False
 
     def test_reports_configured_telemetry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
@@ -93,6 +94,10 @@ class TestHealth:
         body = client.get(HEALTH_PATH).json()
         assert body["telemetry_configured"] is True
         assert body["errors_configured"] is True
+        # Configured is not exporting: this process never called `obs.configure()` with
+        # those variables set, and saying otherwise is the exact confusion issue #9 was
+        # about. `api/tests/test_telemetry.py` is where a process that *did* is checked.
+        assert body["telemetry_exporting"] is False
 
     def test_an_endpoint_without_a_credential_is_not_configured(
         self, monkeypatch: pytest.MonkeyPatch

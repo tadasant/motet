@@ -9,6 +9,7 @@ dependencies = [
     "motet-api",
     "motet-db",
     "motet-inference",
+    "motet-obs",
     "motet-sources",
     "motet-storage",
     "motet-vault",
@@ -22,12 +23,13 @@ dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["api", "db", "inference", "sources", "storage", "vault", "voice", "workers"]
+members = ["api", "db", "inference", "obs", "sources", "storage", "vault", "voice", "workers"]
 
 [tool.uv.sources]
 motet-api = { workspace = true }
 motet-db = { workspace = true }
 motet-inference = { workspace = true }
+motet-obs = { workspace = true }
 motet-sources = { workspace = true }
 motet-storage = { workspace = true }
 motet-vault = { workspace = true }
@@ -73,6 +75,7 @@ files = [
     "db/src",
     "inference/src",
     "ios/tools",
+    "obs/src",
     "sources/src",
     "storage/src",
     "vault/src",
@@ -100,6 +103,7 @@ testpaths = [
     "api/tests",
     "db/tests",
     "inference/tests",
+    "obs/tests",
     "sources/tests",
     "storage/tests",
     "vault/tests",

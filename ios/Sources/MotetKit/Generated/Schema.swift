@@ -200,6 +200,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var service: String
     public var status: String
     public var telemetryConfigured: Bool
+    public var telemetryExporting: Bool
 
     public init(
         authenticated: Bool,
@@ -207,7 +208,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         inferenceMode: String,
         service: String,
         status: String,
-        telemetryConfigured: Bool
+        telemetryConfigured: Bool,
+        telemetryExporting: Bool
     ) {
         self.authenticated = authenticated
         self.errorsConfigured = errorsConfigured
@@ -215,6 +217,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.service = service
         self.status = status
         self.telemetryConfigured = telemetryConfigured
+        self.telemetryExporting = telemetryExporting
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -224,6 +227,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case service
         case status
         case telemetryConfigured = "telemetry_configured"
+        case telemetryExporting = "telemetry_exporting"
     }
 }
 

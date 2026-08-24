@@ -27,17 +27,45 @@ import os
 import time
 from typing import Any
 
+import motet_obs
 import psycopg
 from motet_db import repo
 from motet_inference import get_stages
 from motet_inference.llm import validate_startup as validate_llm_startup
 from motet_storage import build_store
+from opentelemetry import metrics, trace
+from opentelemetry.trace import Status, StatusCode
 
 from . import jobs
 from .handlers import HANDLERS, Context, PermanentFailure, failure_recorders
 from .queues import Queue
 
 logger = logging.getLogger("motet.worker")
+
+#: The service name this process reports as. ``motet-api`` is the other one, and keeping
+#: them distinct is the whole reason an operator can filter the two apart at all.
+SERVICE_NAME = "motet-worker"
+
+# Created at import against OpenTelemetry's *proxy* providers, which resolve to the real
+# ones the moment `motet_obs.configure` installs them. That is what lets telemetry stay
+# entirely optional: with nothing configured these are no-ops, and no code path here has
+# to ask whether obs exists.
+_tracer = trace.get_tracer("motet.worker")
+_meter = metrics.get_meter("motet.worker")
+
+#: The worker's two numbers. Everything an operator wants to know about a queue — is it
+#: draining, is it failing, is it slow — is one of these split by its attributes, which is
+#: why they are a counter and a histogram rather than a gauge per queue.
+_jobs_processed = _meter.create_counter(
+    "motet.jobs.processed",
+    unit="{job}",
+    description="Jobs taken off a queue, by queue and outcome.",
+)
+_job_duration = _meter.create_histogram(
+    "motet.job.duration",
+    unit="ms",
+    description="Wall-clock time a job's handler took, by queue and outcome.",
+)
 
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
 #: alive indefinitely. Reaching it is not an error — the next scheduled run continues.
@@ -54,7 +82,12 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
     recorders = failure_recorders()
     processed = 0
 
-    with repo.connect(database_url) as conn:
+    with (
+        _tracer.start_as_current_span(
+            f"drain {queue.value}", attributes={"motet.queue": queue.value}
+        ) as run,
+        repo.connect(database_url) as conn,
+    ):
         conn.autocommit = True
         while processed < max_jobs:
             job = jobs.claim(conn, queue)
@@ -78,6 +111,10 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
                     jobs.unlock(conn, job.serialize_key)
             processed += 1
 
+        # Inside the `with`, because setting an attribute on an ended span is silently
+        # dropped — the span closes when this block does.
+        run.set_attribute("motet.jobs.processed", processed)
+
     if processed >= max_jobs:
         logger.warning(
             "stopped after %d jobs on %s; more may be ready and the next run will take them",
@@ -96,7 +133,41 @@ def _run_one(
     store: Any,
     recorders: Any,
 ) -> None:
-    """Run one job's handler, then record the outcome in a separate transaction."""
+    """Run one job under a span, and record how it went as a metric.
+
+    The span and the two instruments are the worker's whole observability surface. It has
+    no health route to ask and it is the process that spends the money, so "did the
+    integrate queue drain, and how long did Cartesia take" has to be answerable from
+    outside — which before this it was not, from anywhere.
+    """
+    attributes = {"motet.queue": job.queue.value}
+    started = time.perf_counter()
+    with _tracer.start_as_current_span(
+        f"job {job.queue.value}", attributes={**attributes, "motet.job.id": job.id}
+    ) as span:
+        outcome = _execute(conn, job, handler, stages, store, recorders)
+        span.set_attribute("motet.job.outcome", outcome)
+        if outcome != "completed":
+            span.set_status(Status(StatusCode.ERROR, outcome))
+
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _jobs_processed.add(1, {**attributes, "motet.job.outcome": outcome})
+    _job_duration.record(elapsed_ms, {**attributes, "motet.job.outcome": outcome})
+
+
+def _execute(
+    conn: psycopg.Connection[Any],
+    job: jobs.Job,
+    handler: Any,
+    stages: Any,
+    store: Any,
+    recorders: Any,
+) -> str:
+    """Run one job's handler, then record the outcome in a separate transaction.
+
+    Returns how it went, so the caller can put that on a span and a metric without the
+    telemetry having to re-derive it from the job row.
+    """
     context = Context(conn=conn, stages=stages, store=store)
     try:
         with conn.transaction():
@@ -104,10 +175,15 @@ def _run_one(
     except PermanentFailure as exc:
         # Retrying cannot help, so skip the backoff ladder entirely and surface it now.
         message = f"{type(exc).__name__}: {exc}"
+        # Logged at ERROR *with* the exception, which is what puts it in GlitchTip: the
+        # error reporter is wired through the logging integration precisely so the queue
+        # runner never has to import a vendor SDK. Without this line the one failure that
+        # will never be retried was also the one that reported nothing.
+        logger.exception("job %d on %s failed permanently", job.id, job.queue.value)
         with conn.transaction():
             jobs.fail(conn, job, message, max_attempts=0)
             _record_failure(conn, job, recorders, message)
-        return
+        return "failed_permanently"
     except Exception as exc:  # noqa: BLE001 — the queue's whole job is to survive these
         message = f"{type(exc).__name__}: {exc}"
         logger.exception("job %d on %s raised", job.id, job.queue.value)
@@ -115,10 +191,11 @@ def _run_one(
             will_retry = jobs.fail(conn, job, message)
             if not will_retry:
                 _record_failure(conn, job, recorders, message)
-        return
+        return "retrying" if will_retry else "failed"
 
     with conn.transaction():
         jobs.complete(conn, job.id)
+    return "completed"
 
 
 def _record_failure(
@@ -148,7 +225,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-jobs", type=int, default=MAX_JOBS_PER_RUN)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+
+    # First, so that every line below is exported rather than only printed. This is the
+    # worker's half of invariant 11 and it is the half that was missing: `motet_api` calls
+    # the same function, but it depends on `motet_workers`, so until the wiring moved into
+    # its own package the process that makes every vendor call had no way to reach it.
+    # `configure` logs its own one-line summary of what it installed, so nothing is
+    # logged here — a second line would be the same fact in a less readable shape.
+    motet_obs.configure(SERVICE_NAME)
 
     # Before anything else, and before claiming any job. A Cloud Run job that cannot reach
     # a model should fail immediately and visibly, rather than claim work it will then fail
@@ -162,13 +246,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("DATABASE_URL is not set")
 
     queue = Queue(args.queue)
-    if args.poll_seconds <= 0:
-        drain(queue, database_url, max_jobs=args.max_jobs)
-        return 0
+    try:
+        if args.poll_seconds <= 0:
+            drain(queue, database_url, max_jobs=args.max_jobs)
+            return 0
 
-    while True:
-        if drain(queue, database_url, max_jobs=args.max_jobs) == 0:
-            time.sleep(args.poll_seconds)
+        while True:
+            if drain(queue, database_url, max_jobs=args.max_jobs) == 0:
+                time.sleep(args.poll_seconds)
+    finally:
+        # A Cloud Run job drains and exits, and a batch processor that is not flushed
+        # loses what it was holding — which is the end of the run, the most interesting
+        # part. The SDK registers its own `atexit` hook, but a job killed after SIGTERM
+        # may never reach it, so the flush is here where the exit is.
+        motet_obs.shutdown()
 
 
 if __name__ == "__main__":

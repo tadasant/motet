@@ -19,7 +19,7 @@ You need **Python 3.13**, **Node 22**, **[uv](https://docs.astral.sh/uv/)**, and
 **Postgres 16**.
 
 ```bash
-uv sync --all-packages     # Python workspace: api, db, inference, storage, workers
+uv sync --all-packages     # Python workspace: api, db, inference, obs, storage, workers
 npm --prefix web ci        # the SPA
 ```
 

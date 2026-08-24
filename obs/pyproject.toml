@@ -1,0 +1,31 @@
+[project]
+name = "motet-obs"
+version = "0.1.0"
+description = "Telemetry wiring to the self-hosted obs stack — OTLP export and error reporting"
+requires-python = ">=3.13"
+# NOTE THE ABSENCE: no `motet-*` dependency of any kind, and there must never be one.
+# This package is imported by the API, by the workers, and eventually by the voice
+# service — every deployable in the tree. A dependency pointing back at any of them would
+# be a cycle (`motet-api` already depends on `motet-workers`), and the cycle is exactly
+# why telemetry was stuck in `api/` and the worker had none.
+dependencies = [
+    # The OTLP exporters over HTTP/protobuf. Not the gRPC ones: the obs stack ingests
+    # OTLP over HTTP, and `opentelemetry-exporter-otlp` (the meta-package) would drag
+    # `grpcio` — a large binary wheel — into two container images for nothing.
+    "opentelemetry-api>=1.44",
+    "opentelemetry-exporter-otlp-proto-http>=1.44",
+    "opentelemetry-sdk>=1.44",
+    # ASGI/FastAPI request spans and `http.server.request.duration`. Version-pinned as a
+    # 0.x line by OpenTelemetry's own convention — the instrumentation packages track the
+    # SDK's minor as `0.<minor>b0`, so this floor moves with the SDK floor above it.
+    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    # GlitchTip speaks the Sentry protocol; this is the client for it.
+    "sentry-sdk>=2.68",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/motet_obs"]
