@@ -165,3 +165,48 @@ def test_nothing_is_sent_when_the_environment_is_empty(otlp_collector: OtlpColle
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {"exporting": False, "configured": False}
     assert len(otlp_collector.received) == before
+
+
+def test_configuring_again_after_shutdown_refuses_rather_than_lying(
+    otlp_collector: OtlpCollector,
+) -> None:
+    """The subtlest way this package could fail, guarded.
+
+    OpenTelemetry's providers are process-global and may be set once. A second
+    `configure` after a `shutdown` therefore builds providers that can never be installed,
+    and a naive implementation would go on reporting `exporting` from a process whose
+    spans all go to a provider that has already been flushed and stopped — a service that
+    looks monitored and emits nothing, which is the whole thing this package exists to
+    prevent. It has to refuse, and say so.
+    """
+    script = (
+        "import json, motet_obs\n"
+        "from opentelemetry import trace\n"
+        "first = motet_obs.configure('motet-worker')\n"
+        "motet_obs.shutdown()\n"
+        "second = motet_obs.configure('motet-worker')\n"
+        "with trace.get_tracer('motet.worker').start_as_current_span('after shutdown'):\n"
+        "    pass\n"
+        "print(json.dumps({'first': list(first.exporters), 'second': list(second.exporters)}))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": otlp_collector.endpoint,
+            "OTEL_INGEST_TOKEN": TOKEN,
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    reported = json.loads(completed.stdout)
+    assert reported["first"] == ["traces", "metrics", "logs"]
+    # Not exporting, and honest about it, rather than claiming a provider it cannot use.
+    assert reported["second"] == []
+    assert "cannot be replaced" in completed.stderr
+    # And the span emitted afterwards genuinely goes nowhere, which is what the flag says.
+    # (The first `configure`'s own startup log still arrives — that export is the shutdown
+    # flush doing its job, and it is the *trace* emitted after the refusal that must not.)
+    assert "after shutdown" not in [span.name for span in otlp_collector.spans()]

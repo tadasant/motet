@@ -48,8 +48,21 @@ _NO_EXPORT_LOGGERS = ("opentelemetry", "urllib3", "sentry_sdk")
 
 #: What :func:`configure` actually installed, which is a different question from what the
 #: environment asked for. Read back by :func:`status` so that the health route can answer "is
-#: anything being exported" rather than only "was a variable set".
+#: anything being exported" rather than only "was a variable set". Cleared by
+#: :func:`shutdown`, because after a flush this process is no longer exporting anything.
 _installed: tuple[str, ...] = ()
+
+#: Whether :func:`configure` has ever built providers in this process — which is NOT the
+#: same question as :data:`_installed`, and the difference is load-bearing.
+#:
+#: OpenTelemetry's providers are process-global and may be set exactly once: a second
+#: ``set_tracer_provider`` is refused with a warning and the *first* provider stays. So a
+#: `configure` → `shutdown` → `configure` sequence would build a fresh set of providers,
+#: fail to install any of them, and then report `exporting` from a process whose spans all
+#: go to a provider that has already been flushed and stopped. That is exactly the
+#: looks-monitored-emits-nothing failure this package exists to prevent, so the second
+#: `configure` refuses loudly instead.
+_configured_once = False
 
 _shutdown_hooks: list[Any] = []
 
@@ -184,7 +197,9 @@ def configure(service_name: str, env: Mapping[str, str] | None = None) -> ObsSta
 
     Called once per process — from the API's lifespan and from the worker's entry point.
     Idempotent: a second call reports the first call's result rather than stacking a
-    second set of providers on the global ones.
+    second set of providers on the global ones, and a call *after* :func:`shutdown` is
+    refused with a warning rather than silently producing a process that reports
+    ``exporting`` while its providers are dead.
 
     ``service_name`` is the *fallback*; ``OTEL_SERVICE_NAME`` wins when it is set. Each
     deployable passes its own (``motet-api``, ``motet-worker``) because that label is what
@@ -194,7 +209,7 @@ def configure(service_name: str, env: Mapping[str, str] | None = None) -> ObsSta
     but it must not be silent either, so a failure is logged and left out of
     :attr:`ObsStatus.exporters`, where the health route will report it as not exporting.
     """
-    global _installed
+    global _installed, _configured_once
 
     environ = os.environ if env is None else env
     # `.upper()` because `logging.basicConfig(level="debug")` raises `ValueError: Unknown
@@ -206,6 +221,16 @@ def configure(service_name: str, env: Mapping[str, str] | None = None) -> ObsSta
     if _installed:
         logger.debug("obs: already configured (%s)", ", ".join(_installed))
         return current
+    if _configured_once:
+        # Configured and then shut down. Building providers again cannot work — see
+        # `_configured_once` — so say so rather than pretending.
+        logger.warning(
+            "obs: configure() called again after shutdown(); OpenTelemetry's providers "
+            "are process-global and cannot be replaced, so this process will export "
+            "nothing more. Start a new process instead."
+        )
+        return current
+    _configured_once = True
 
     installed: list[str] = []
     if sdk_disabled(environ):
