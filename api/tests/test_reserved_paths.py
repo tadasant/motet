@@ -19,7 +19,6 @@ The list is knowledge, not detection.
 from __future__ import annotations
 
 import pytest
-from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.main import HEALTH_PATH, PLATFORM_RESERVED_PATHS
@@ -27,7 +26,14 @@ from motet_api.openapi import document
 
 
 def declared_paths() -> list[str]:
-    return [route.path for route in app.routes if isinstance(route, APIRoute)]
+    """Every route the app declares, not just the HTTP ones.
+
+    Deliberately duck-typed rather than filtered to ``APIRoute``: a ``Mount``, a
+    ``WebSocketRoute`` or a static-files mount under a reserved prefix is intercepted by
+    the frontend exactly as an HTTP route is, and narrowing the type would let the one
+    kind of route nobody thinks about slip past the guard.
+    """
+    return [getattr(route, "path", "") for route in app.routes]
 
 
 @pytest.mark.parametrize("reserved", PLATFORM_RESERVED_PATHS)
@@ -47,7 +53,8 @@ def test_health_is_not_served_on_a_reserved_path() -> None:
     assert HEALTH_PATH == "/internal/health"
 
 
-def test_the_reserved_path_is_not_answered_at_all() -> None:
+@pytest.mark.parametrize("reserved", PLATFORM_RESERVED_PATHS)
+def test_the_reserved_path_is_not_answered_at_all(reserved: str) -> None:
     """Not even as a courtesy alias.
 
     An alias would answer on a laptop and 404 in production, which is precisely the
@@ -55,7 +62,7 @@ def test_the_reserved_path_is_not_answered_at_all() -> None:
     is worse than no path, because it teaches the reader it works.
     """
     with TestClient(app) as client:
-        response = client.get("/healthz")
+        response = client.get(reserved)
         assert response.status_code == 404
         # FastAPI's own 404, not Google's HTML one — locally there is no frontend to
         # produce the latter. Asserting on the body keeps this honest about which 404

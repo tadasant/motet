@@ -163,7 +163,8 @@ answers `/healthz` with its own 404 *before the request reaches the container*, 
 endpoint there is unreadable from everywhere health is actually checked — and a container-
 local smoke test cannot see that, because there is no frontend in front of `docker run`.
 That is how it shipped (motet#16). `/_ah/*` is reserved on the same infrastructure. Both
-are listed in `motet_api.main.PLATFORM_RESERVED_PATHS` and guarded by a test.
+are listed in `motet_api.main.PLATFORM_RESERVED_PATHS`, copied in `motet_voice.app` and in
+`bin/build-images`, and guarded by a test that walks every declared route.
 
 Two of those names have a second spelling, and it is not cosmetic. Secret Manager holds one
 value per secret and the CI identity that applies the infrastructure **cannot read a secret

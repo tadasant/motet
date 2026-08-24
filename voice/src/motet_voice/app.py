@@ -64,6 +64,11 @@ HEALTH_PATH = "/internal/health"
 
 #: Namespaces the platform claims. Prefix-matched, and guarded by a test — see
 #: ``voice/tests/test_app.py``.
+#:
+#: Deliberately a second copy of ``motet_api.main.PLATFORM_RESERVED_PATHS`` rather than an
+#: import: invariant 2 keeps this service free of Motet-side imports, and a shared package
+#: for one tuple would be a dependency edge bought for nothing. **Keep the two in step** —
+#: a path added there belongs here too, and vice versa.
 PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
 
 #: How long an accepted socket may go without authenticating. Short: a client that

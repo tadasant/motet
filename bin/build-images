@@ -86,6 +86,11 @@ build_api() {
 # revision, and it is exactly the gap that let motet#16 ship green.
 API_HEALTH_PATH="/internal/health"
 
+# Mirrors motet_api.main.PLATFORM_RESERVED_PATHS. Two copies because this is shell and
+# that is Python; keep them in step. The Python one is guarded by a test, this one is the
+# same claim made against a real container.
+PLATFORM_RESERVED_PATHS=("/healthz" "/_ah")
+
 smoke_api() {
   local name="motet-smoke-api-$$" port
   CONTAINERS+=("$name")
@@ -103,17 +108,23 @@ smoke_api() {
     *) echo "smoke: ${API_HEALTH_PATH} did not report ok" >&2; return 1 ;;
   esac
 
-  # And the reserved path must NOT be the health path. A local 404 here is the app's own
-  # JSON 404, not Google's — the point is not to reproduce the frontend, it is to fail
-  # loudly if someone moves health back onto a path the frontend never forwards.
-  local reserved
-  reserved="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-    "http://127.0.0.1:${port}/healthz")"
-  echo "    /healthz -> ${reserved} (reserved by the platform; must not be our health path)"
-  if [ "$reserved" != "404" ]; then
-    echo "smoke: the container answers /healthz, which Cloud Run 404s before it arrives" >&2
-    return 1
-  fi
+  # And nothing may be served under a path the platform claims. A local 404 here is the
+  # app's own JSON 404, not Google's — the point is not to reproduce the frontend, it is
+  # to fail loudly if someone moves health back onto a path the frontend never forwards.
+  local reserved code
+  for reserved in "${PLATFORM_RESERVED_PATHS[@]}"; do
+    # `|| true` rather than a bare curl: under `set -e` a connection failure inside a
+    # command substitution would abort the script with curl's message instead of the one
+    # below, which says what the check was actually for. curl still prints `000` itself
+    # on a failure, so the empty case and the unreachable case both trip the test.
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://127.0.0.1:${port}${reserved}" || true)"
+    echo "    ${reserved} -> ${code} (reserved by the platform; must not be ours)"
+    if [ "$code" != "404" ]; then
+      echo "smoke: the container answers ${reserved}, which Cloud Run 404s before it arrives" >&2
+      return 1
+    fi
+  done
 
   # The generated contract has to be reachable too: it is what proves the app booted as
   # the real FastAPI application rather than as something that merely answers health.
