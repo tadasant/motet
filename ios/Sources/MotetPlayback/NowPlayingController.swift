@@ -29,6 +29,12 @@ public final class NowPlayingController: @unchecked Sendable {
         to controller: PlaybackController,
         settings: PlaybackSettings
     ) {
+        // `addTarget` is additive and the command centre is a process-wide singleton, so
+        // re-attaching (a settings change, or new credentials rebuilding the controller)
+        // would leave the old handlers registered: one lockscreen press would then skip
+        // twice, then three times. Clear before registering.
+        detach()
+
         commandCenter.playCommand.addTarget { _ in
             Task { await controller.perform(.play) }
             return .success
@@ -81,6 +87,23 @@ public final class NowPlayingController: @unchecked Sendable {
             Task { await controller.perform(.setRate(Double(event.playbackRate))) }
             return .success
         }
+    }
+
+    /// Drop every registered handler. Also the right thing to call when playback ends.
+    public func detach() {
+        for command in [
+            commandCenter.playCommand,
+            commandCenter.pauseCommand,
+            commandCenter.togglePlayPauseCommand,
+            commandCenter.skipForwardCommand,
+            commandCenter.skipBackwardCommand,
+            commandCenter.nextTrackCommand,
+            commandCenter.previousTrackCommand,
+        ] {
+            command.removeTarget(nil)
+        }
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
+        commandCenter.changePlaybackRateCommand.removeTarget(nil)
     }
 
     /// Publish what is playing. Called on every snapshot the controller emits.

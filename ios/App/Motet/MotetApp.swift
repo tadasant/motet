@@ -1,3 +1,4 @@
+import CarPlay
 import MotetKit
 import SwiftUI
 import UIKit
@@ -36,19 +37,24 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         AppEnvironment.shared.downloader.backgroundCompletionHandler = completionHandler
     }
 
-    /// The CarPlay scene is declared in Info.plist and connected here.
+    /// The CarPlay scene is declared in Info.plist and given its delegate here.
+    ///
+    /// The window role is deliberately answered with an *unnamed* configuration: this is a
+    /// SwiftUI-lifecycle app, and naming a configuration the Info.plist manifest does not
+    /// define would hand back a scene with no delegate and no SwiftUI content — a black
+    /// screen. Unnamed means "the default for this role", which is SwiftUI's own.
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
-        if connectingSceneSession.role == .carTemplateApplication {
-            let configuration = UISceneConfiguration(
-                name: "CarPlay", sessionRole: connectingSceneSession.role
-            )
-            configuration.delegateClass = CarPlaySceneDelegate.self
-            return configuration
+        guard connectingSceneSession.role == .carTemplateApplication else {
+            return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
         }
-        return UISceneConfiguration(name: "Default", sessionRole: connectingSceneSession.role)
+        let configuration = UISceneConfiguration(
+            name: "CarPlay", sessionRole: connectingSceneSession.role
+        )
+        configuration.delegateClass = CarPlaySceneDelegate.self
+        return configuration
     }
 }

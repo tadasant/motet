@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     71 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     85 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/Motet.xcodeproj/     the app target
   bin/                     toolchain install + the CI entry point
@@ -75,12 +75,22 @@ ios/bin/ci-swift          # swift build && swift test
 bin/generate-ios-client   # regenerate the client from openapi.yaml
 ```
 
-**Verified:** `MotetKit` compiles under Swift 6's strict concurrency checking, and 71 tests
-pass — segment-boundary read state, the outbox's ordering/coalescing/backoff/durability, the
-download policy, position resume across a simulated relaunch, interruption handling, error
-mapping, timestamp decoding against the exact shape FastAPI emits, and an end-to-end
-"dog walk with no signal" journey that drives the real library, controller, outbox, and
-offline store together against fakes for the audio engine, the downloader, and the network.
+**Verified:** `MotetKit` compiles under Swift 6's strict concurrency checking, and 85 tests
+pass — segment-boundary read state, the difference between listening and skipping, the
+outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
+in flight), the download policy, position resume across a simulated relaunch, interruption
+handling, error mapping, timestamp decoding against the exact shape FastAPI emits, and an
+end-to-end "dog walk with no signal" journey that drives the real library, controller,
+outbox, and offline store together against fakes for the audio engine, the downloader, and
+the network.
+
+**Read state is computed from what was played, not from how far the playhead got.**
+`ListenedCoverage` accumulates the intervals the audio actually played, and a news item is
+read only once every segment it occupies is covered. That distinction is load-bearing:
+`AVPlayer` reports a position immediately after a seek, so a high-water mark would treat
+three taps of *next story* as having heard three stories — and quietly empty the backlog,
+which is the product's memory. The coverage is persisted beside the position, so a story
+skipped on Monday is still unread on Tuesday.
 
 ## What is **not** verified — the list to work through once enrolment lands
 

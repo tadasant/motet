@@ -54,8 +54,11 @@ public actor Outbox {
     private var entries: [OutboxEntry] = []
     private var loaded = false
     private var draining = false
+    private var loadFailure: Error?
 
     private static let key = "outbox.pending"
+    /// Where an undecodable queue is put aside rather than thrown away.
+    private static let quarantineKey = "outbox.unreadable"
     /// Retry backoff, in seconds, by attempt count. Capped rather than unbounded: the app
     /// is usually offline for the length of a walk, not a week.
     static let backoffSeconds: [TimeInterval] = [0, 2, 10, 30, 120, 300]
@@ -67,8 +70,28 @@ public actor Outbox {
 
     private func loadIfNeeded() throws {
         guard !loaded else { return }
-        entries = (try? store.value([OutboxEntry].self, forKey: Self.key)) as? [OutboxEntry] ?? []
-        loaded = true
+        defer { loaded = true }
+        guard let data = try store.data(forKey: Self.key) else {
+            entries = []
+            return
+        }
+        do {
+            entries = try MotetDate.makeDecoder().decode([OutboxEntry].self, from: data)
+        } catch {
+            // Starting empty would be a silent data loss: the next `enqueue` would persist
+            // an empty array over writes the user believes are on their way. Keep the bytes
+            // under a second key so the queue can be recovered by hand, and say so.
+            try? store.set(data, forKey: Self.quarantineKey)
+            entries = []
+            loadFailure = error
+        }
+    }
+
+    /// Non-nil when a stored queue could not be read on load. The bytes are still on disk
+    /// under `outbox.unreadable`.
+    public func loadFailureDescription() throws -> String? {
+        try loadIfNeeded()
+        return loadFailure.map { String(describing: $0) }
     }
 
     private func persist() throws {
@@ -128,25 +151,48 @@ public actor Outbox {
             }
             do {
                 try await send(entry, using: api)
-                entries.removeFirst()
+                // By id, never by position. `send` is a suspension point, and this is an
+                // actor: a tap on the backlog can coalesce this very entry away and append
+                // a newer one while the request is in flight. `removeFirst()` would then
+                // delete the *newer* fact and the user's last word would be lost.
+                remove(id: entry.id)
                 try persist()
                 sent += 1
-            } catch let error as MotetError where error.isRetryable {
-                var retried = entries.removeFirst()
-                retried.attempts += 1
-                let index = min(retried.attempts, Self.backoffSeconds.count - 1)
-                retried.notBefore = clock.now.addingTimeInterval(Self.backoffSeconds[index])
-                entries.insert(retried, at: 0)
+            } catch {
+                guard Self.shouldRetry(error) else {
+                    // The server will never accept this request. Drop it rather than block
+                    // every later write behind it forever.
+                    remove(id: entry.id)
+                    try persist()
+                    continue
+                }
+                if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+                    entries[index].attempts += 1
+                    let step = min(entries[index].attempts, Self.backoffSeconds.count - 1)
+                    entries[index].notBefore = clock.now.addingTimeInterval(Self.backoffSeconds[step])
+                }
                 try persist()
                 return sent > 0 ? .drained(count: sent) : .deferred(remaining: entries.count)
-            } catch {
-                // Permanent: the server will never accept this request. Drop it rather than
-                // block every later write behind it.
-                entries.removeFirst()
-                try persist()
             }
         }
         return sent > 0 ? .drained(count: sent) : .idle
+    }
+
+    private func remove(id: UUID) {
+        entries.removeAll { $0.id == id }
+    }
+
+    /// Whether a failure is worth waiting out.
+    ///
+    /// Anything that is not one of our own errors is assumed transient: `send` is generic
+    /// over `any MotetAPI`, and a client that throws a raw `URLError` must not have its
+    /// writes dropped during exactly the offline stretch the queue exists for. A *decoding*
+    /// failure is retryable too — the write may well have landed, both requests here are
+    /// idempotent, and the usual cause is a captive portal's HTML rather than a bad request.
+    static func shouldRetry(_ error: Error) -> Bool {
+        guard let motet = error as? MotetError else { return true }
+        if case .decoding = motet { return true }
+        return motet.isRetryable
     }
 
     private func send(_ entry: OutboxEntry, using api: any MotetAPI) async throws {

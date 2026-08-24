@@ -6,6 +6,8 @@ import SwiftUI
 struct PlayerView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var isScrubbing = false
+    @State private var scrubPositionMs: Double = 0
 
     private var episode: EpisodeResponse? {
         model.episodes.first { $0.id == model.playback.episodeId }
@@ -49,19 +51,31 @@ struct PlayerView: View {
         }
     }
 
+    /// The scrubber seeks when the thumb is *released*, not on every frame of the drag.
+    ///
+    /// Seeking continuously would issue an `AVPlayer` seek and an atomic position write per
+    /// frame, and the thumb would fight the user: the binding's `get` reads the position the
+    /// player last reported, which lags the finger.
     private var scrubber: some View {
         VStack(spacing: 4) {
             Slider(
                 value: Binding(
-                    get: { Double(model.playback.positionMs) },
-                    set: { newValue in
-                        Task { await model.perform(.seek(toMs: Int(newValue))) }
-                    }
+                    get: { isScrubbing ? scrubPositionMs : Double(model.playback.positionMs) },
+                    set: { scrubPositionMs = $0 }
                 ),
-                in: 0...Double(max(model.playback.durationMs, 1))
+                in: 0...Double(max(model.playback.durationMs, 1)),
+                onEditingChanged: { editing in
+                    if editing {
+                        scrubPositionMs = Double(model.playback.positionMs)
+                        isScrubbing = true
+                    } else {
+                        isScrubbing = false
+                        Task { await model.perform(.seek(toMs: Int(scrubPositionMs))) }
+                    }
+                }
             )
             HStack {
-                Text(Format.time(model.playback.positionMs))
+                Text(Format.time(isScrubbing ? Int(scrubPositionMs) : model.playback.positionMs))
                 Spacer()
                 Text("−" + Format.time(max(0, model.playback.durationMs - model.playback.positionMs)))
             }

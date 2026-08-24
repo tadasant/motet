@@ -67,7 +67,17 @@ public final class BackgroundEpisodeDownloader: NSObject, EpisodeDownloader, @un
 
     private func finish(taskIdentifier: Int, with result: Result<URL, Error>) {
         let continuation = lock.withLock { continuations.removeValue(forKey: taskIdentifier) }
-        continuation?.resume(with: result)
+        guard let continuation else {
+            // iOS woke a *fresh* process for a transfer that finished while the app was
+            // dead, so nobody is waiting: the awaiting call died with the old process.
+            // Throw the staged bytes away rather than leaking them into the temp directory
+            // — the offline sync will simply fetch the episode again.
+            if case .success(let staged) = result {
+                try? FileManager.default.removeItem(at: staged)
+            }
+            return
+        }
+        continuation.resume(with: result)
     }
 }
 

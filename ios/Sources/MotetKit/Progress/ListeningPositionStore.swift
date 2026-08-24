@@ -22,6 +22,10 @@ public struct ListeningPosition: Codable, Hashable, Sendable {
     public var updatedAt: Date
     /// Whether the episode ran to its end at least once.
     public var isFinished: Bool
+    /// The parts of the audio that were actually played, which is what read state is
+    /// computed from. Decoded leniently: a position stored before this field existed is
+    /// still readable, and falls back to "everything up to `furthestSpokenMs`".
+    public var heardRanges: [Range<Int>]
 
     public init(
         episodeId: String,
@@ -29,7 +33,8 @@ public struct ListeningPosition: Codable, Hashable, Sendable {
         furthestSpokenMs: Int,
         durationMs: Int,
         updatedAt: Date,
-        isFinished: Bool = false
+        isFinished: Bool = false,
+        heardRanges: [Range<Int>] = []
     ) {
         self.episodeId = episodeId
         self.spokenThroughMs = spokenThroughMs
@@ -37,6 +42,25 @@ public struct ListeningPosition: Codable, Hashable, Sendable {
         self.durationMs = durationMs
         self.updatedAt = updatedAt
         self.isFinished = isFinished
+        self.heardRanges = heardRanges
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        episodeId = try container.decode(String.self, forKey: .episodeId)
+        spokenThroughMs = try container.decode(Int.self, forKey: .spokenThroughMs)
+        furthestSpokenMs = try container.decode(Int.self, forKey: .furthestSpokenMs)
+        durationMs = try container.decode(Int.self, forKey: .durationMs)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        isFinished = try container.decodeIfPresent(Bool.self, forKey: .isFinished) ?? false
+        heardRanges = try container.decodeIfPresent([Range<Int>].self, forKey: .heardRanges) ?? []
+    }
+
+    /// What was heard, with the pre-coverage fallback applied.
+    public var coverage: ListenedCoverage {
+        heardRanges.isEmpty
+            ? ListenedCoverage(ranges: furthestSpokenMs > 0 ? [0..<furthestSpokenMs] : [])
+            : ListenedCoverage(ranges: heardRanges)
     }
 
     /// 0...1, for a progress bar.
@@ -89,7 +113,8 @@ public actor ListeningPositionStore {
         episodeId: String,
         spokenThroughMs: Int,
         durationMs: Int,
-        finished: Bool = false
+        finished: Bool = false,
+        coverage: ListenedCoverage? = nil
     ) throws -> ListeningPosition {
         try loadIfNeeded()
         let clamped = max(0, durationMs > 0 ? min(spokenThroughMs, durationMs) : spokenThroughMs)
@@ -100,7 +125,8 @@ public actor ListeningPositionStore {
             furthestSpokenMs: max(clamped, existing?.furthestSpokenMs ?? 0),
             durationMs: durationMs,
             updatedAt: clock.now,
-            isFinished: finished || (existing?.isFinished ?? false)
+            isFinished: finished || (existing?.isFinished ?? false),
+            heardRanges: coverage?.ranges ?? existing?.heardRanges ?? []
         )
         cache[episodeId] = position
         try store.setValue(position, forKey: Self.prefix + episodeId)

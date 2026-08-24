@@ -30,11 +30,8 @@ final class AppModel: ObservableObject {
     var isConfigured: Bool { environment.credentials.configuration().isConfigured }
 
     func start() async {
-        await controller.activate()
+        await environment.activate()
         settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
-        await controller.update(settings: settings)
-        environment.nowPlaying.attach(to: controller, settings: settings)
-        try? environment.audioSession.configure()
         observeSnapshots()
         await refresh()
     }
@@ -107,13 +104,15 @@ final class AppModel: ObservableObject {
 
     func perform(_ command: PlaybackCommand) async {
         await controller.perform(command)
-        if case .setRate(let rate) = command {
-            settings.rate = rate
-            try? await library.update(settings: settings)
-        }
-        if case .cycleRate = command {
+        switch command {
+        case .setRate, .cycleRate:
+            // Read the rate back rather than echoing what was asked for: the controller
+            // clamps to what the player reproduces without artefacts, and a UI that
+            // disagrees with the player is a UI that lies.
             settings = await controller.currentSettings()
             try? await library.update(settings: settings)
+        default:
+            break
         }
     }
 
@@ -179,7 +178,10 @@ final class AppModel: ObservableObject {
 
     func saveCredentials(baseURL: String, apiToken: String) async {
         environment.credentials.save(baseURL: baseURL, apiToken: apiToken)
-        environment.reconfigure()
+        // Rebuilds the controller *and* re-activates it, so the engine's single event
+        // handler points at the new one.
+        await environment.reconfigure()
+        settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
         observeSnapshots()
         await refresh()
     }

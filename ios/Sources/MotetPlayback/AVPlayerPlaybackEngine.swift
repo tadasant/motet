@@ -95,8 +95,11 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
 
     private func emit(_ event: PlaybackEngineEvent) {
         // AVFoundation's callbacks are synchronous and arrive on a dispatch queue, so the
-        // hop into the controller's actor is unavoidable here. Events are emitted in order
-        // from a single queue, and `Task` preserves that order for the same actor.
+        // hop into the controller's actor is unavoidable here — and unstructured `Task`s
+        // carry NO ordering guarantee, so the controller must not assume events arrive in
+        // the order they were emitted. It does not: a position report that arrives after
+        // the seek it preceded reads as a backwards jump, which `PlaybackController`
+        // refuses to count as listening rather than trusting.
         guard let handler = lock.withLock({ self.handler }) else { return }
         Task { await handler(event) }
     }

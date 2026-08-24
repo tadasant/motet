@@ -9,23 +9,26 @@ import XCTest
 /// are doubles. The assertion is a **trace**: the whole walk as a readable transcript, so a
 /// change in behaviour shows up as a diff of what happened rather than as a failed boolean.
 final class OfflineWalkJourneyTests: XCTestCase {
-    /// What a walk looks like when everything works.
+    /// A walk, as it actually goes: two stories heard, one skipped past and then gone back
+    /// for. The skip is the interesting part — read state follows what was *played*, not
+    /// where the playhead has been, so skipping over "Charlie" must not mark it read.
     static let expectedTrace = """
     online  | episodes: ep-3, ep-2, ep-1
     online  | backlog unread: news-a, news-b, news-c
     online  | downloaded for the walk: ep-2, ep-3
     offline | signal lost
     offline | playing ep-3 from the device
-    offline | 01:30 heard "Alpha" -> read state queued
+    offline | played to 01:30, heard "Alpha" -> read queued
     offline | interrupted by a call at 01:30
     offline | resumed at 01:30, still ours
-    offline | 03:00 heard "Bravo" -> read state queued
-    offline | skip forward 30s -> 03:30
-    offline | 05:00 heard "Charlie" -> read state queued
-    offline | episode finished -> listened queued
-    offline | queued writes: 4
-    online  | signal back, flushed 4 writes
-    server  | news-a read, news-b read, news-c read, ep-3 listened
+    offline | played to 03:00, heard "Bravo" -> read queued
+    offline | skip forward 30s -> 03:30, nothing heard by skipping
+    offline | played to 05:00, "Charlie" still unread: 00:30 of it was never played
+    offline | episode ended -> NOT marked listened, because a story was skipped
+    offline | queued writes: 2
+    offline | went back for the skipped 00:30, heard "Charlie" -> read queued
+    online  | signal back, flushed 3 writes
+    server  | news-a read, news-b read, news-c read
     """
 
     func testADogWalkWithNoSignal() async throws {
@@ -89,8 +92,8 @@ final class OfflineWalkJourneyTests: XCTestCase {
         try await controller.load(episode: episode, source: source, autoplay: true)
         trace.append("offline | playing \(episode.id) from the device")
 
-        await engine.advance(toMs: 90_000)
-        trace.append("offline | \(stamp(90_000)) heard \"Alpha\" -> read state queued")
+        await engine.listen(toMs: 90_000, stepMs: 5_000)
+        trace.append("offline | played to \(stamp(90_000)), heard \"Alpha\" -> read queued")
 
         // A phone call. The position is ours, so it survives (invariant 4).
         await engine.interrupt(resumable: true)
@@ -101,18 +104,31 @@ final class OfflineWalkJourneyTests: XCTestCase {
         XCTAssertTrue(resumed.isPlaying)
         trace.append("offline | resumed at \(stamp(resumed.positionMs)), still ours")
 
-        await engine.advance(toMs: 180_000)
-        trace.append("offline | \(stamp(180_000)) heard \"Bravo\" -> read state queued")
+        await engine.listen(toMs: 180_000, stepMs: 5_000)
+        trace.append("offline | played to \(stamp(180_000)), heard \"Bravo\" -> read queued")
 
+        // The skip. "Charlie" runs 03:00–05:00, so jumping to 03:30 leaves 30 seconds of it
+        // that no audio ever played — and read state follows the audio, not the playhead.
         await controller.perform(.skipForward)
         let skipped = await controller.snapshot()
-        trace.append("offline | skip forward 30s -> \(stamp(skipped.positionMs))")
+        trace.append(
+            "offline | skip forward 30s -> \(stamp(skipped.positionMs)), nothing heard by skipping"
+        )
 
-        await engine.advance(toMs: 300_000)
-        trace.append("offline | \(stamp(300_000)) heard \"Charlie\" -> read state queued")
+        await engine.listen(toMs: 300_000, stepMs: 5_000)
+        trace.append(
+            "offline | played to \(stamp(300_000)), \"Charlie\" still unread: "
+                + "\(stamp(30_000)) of it was never played"
+        )
 
         await engine.finish()
-        trace.append("offline | episode finished -> listened queued")
+        // `POST /listened` marks *every* item in the episode read, so it is only honest when
+        // every item really was heard. One was skipped, so it does not fire.
+        trace.append("offline | episode ended -> NOT marked listened, because a story was skipped")
+
+        let atEnd = try await positions.position(for: "ep-3")
+        XCTAssertEqual(atEnd?.isFinished, true, "the file did run out")
+        XCTAssertEqual(atEnd?.spokenThroughMs, 300_000)
 
         let queued = try await outbox.pending()
         trace.append("offline | queued writes: \(queued.count)")
@@ -120,6 +136,16 @@ final class OfflineWalkJourneyTests: XCTestCase {
             $0.name == "setNewsItemRead" || $0.name == "markEpisodeListened"
         }
         XCTAssertTrue(duringWalk.isEmpty, "no write reached the server during the walk")
+
+        // Still on the walk: go back for the 30 seconds the skip jumped over. That is all
+        // it takes for "Charlie" to count as heard, and it is why the skip rule is safe —
+        // it withholds read state rather than losing it.
+        await controller.perform(.seek(toMs: 180_000))
+        await controller.perform(.play)
+        await engine.listen(toMs: 210_000, stepMs: 5_000)
+        trace.append(
+            "offline | went back for the skipped \(stamp(30_000)), heard \"Charlie\" -> read queued"
+        )
 
         // --- Home again -------------------------------------------------------------
         await api.setFailure(nil)
@@ -130,26 +156,26 @@ final class OfflineWalkJourneyTests: XCTestCase {
         }
         trace.append("online  | signal back, flushed \(count) writes")
 
-        // Reads are not interesting here; the walk is about the writes it owed.
-        let sent = await api.successfulCalls().filter {
-            $0.name == "setNewsItemRead" || $0.name == "markEpisodeListened"
-        }
-        trace.append("server  | " + sent.map { call in
-            switch call.name {
-            case "setNewsItemRead": return call.detail.replacingOccurrences(of: ":true", with: " read")
-            case "markEpisodeListened": return "\(call.detail) listened"
-            default: return call.name
-            }
-        }.joined(separator: ", "))
+        trace.append("server  | " + describe(await api.successfulCalls()))
 
         XCTAssertEqual(trace.joined(separator: "\n"), Self.expectedTrace)
 
-        // And the position we own says the episode is done.
-        let position = try await positions.position(for: "ep-3")
-        XCTAssertEqual(position?.isFinished, true)
-        XCTAssertEqual(position?.spokenThroughMs, 300_000)
+        // Every story ended up read exactly once, and the queue is empty.
+        let reads = await api.successfulCalls().filter { $0.name == "setNewsItemRead" }
+        XCTAssertEqual(reads.map(\.detail), ["news-a:true", "news-b:true", "news-c:true"])
         let drained = try await outbox.pending()
         XCTAssertTrue(drained.isEmpty)
+    }
+
+    /// Reads are not interesting here; the walk is about the writes it owed.
+    private func describe(_ calls: [FakeAPI.Call]) -> String {
+        calls.compactMap { call in
+            switch call.name {
+            case "setNewsItemRead": return call.detail.replacingOccurrences(of: ":true", with: " read")
+            case "markEpisodeListened": return "\(call.detail) listened"
+            default: return nil
+            }
+        }.joined(separator: ", ")
     }
 
     private func stamp(_ ms: Int) -> String {

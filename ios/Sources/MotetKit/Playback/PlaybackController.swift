@@ -35,6 +35,9 @@ public actor PlaybackController {
     private var timeline = SegmentTimeline(entries: [], episodeDurationMs: 0)
     private var positionMs = 0
     private var furthestMs = 0
+    /// What was actually played, as opposed to where the playhead has been. Read state is
+    /// computed from this — see `ListenedCoverage`.
+    private var coverage = ListenedCoverage()
     private var isPlaying = false
     private var isLoading = false
     private var isLocal = false
@@ -49,6 +52,15 @@ public actor PlaybackController {
     /// How often a position is written to flash while playing. Every tick would be a write
     /// per second for the length of a walk; a lost 3 seconds is not worth that.
     static let persistIntervalSeconds: TimeInterval = 3
+
+    /// The largest forward jump between two position reports that still counts as *listening*.
+    ///
+    /// This is what separates "the audio played" from "the listener moved the playhead", and
+    /// read state depends on the distinction: a skip that landed past the end of a story must
+    /// not mark that story read (invariant 5 — the backlog is the product's memory). The
+    /// engine reports about once a second, so even at 3× the real step is ~3s; anything
+    /// larger is a seek, a resume from a stall, or a jump the app itself asked for.
+    static let maxListeningStepMs = 5_000
 
     public init(
         engine: any PlaybackEngine,
@@ -146,6 +158,7 @@ public actor PlaybackController {
         publish()
 
         let stored = try? await positions.position(for: newEpisode.id)
+        coverage = stored?.coverage ?? ListenedCoverage()
         // Resuming at the very end would immediately re-fire "ended"; a finished episode
         // starts again from the top, which is what a listener expects from one they
         // already heard.
@@ -156,7 +169,7 @@ public actor PlaybackController {
         positionMs = resumeAt
         furthestMs = max(resumeAt, stored?.furthestSpokenMs ?? 0)
         // Anything already heard in a previous session must not be re-marked.
-        markedHeard = Set(timeline.newsItemsCompleted(through: furthestMs))
+        markedHeard = Set(timeline.newsItemsCompleted(coverage: coverage))
 
         do {
             try await engine.load(url: source.url, startingAtMs: resumeAt)
@@ -233,6 +246,9 @@ public actor PlaybackController {
     private func seek(to target: Int) async {
         let clamped = max(0, min(target, duration))
         positionMs = clamped
+        // Deliberately does NOT move `furthestMs`: jumping over a story is not hearing it.
+        // The engine echoes a `.position` for the seek, which `observed(positionMs:)` then
+        // sees as a discontinuity and refuses to count.
         await engine.seek(toMs: clamped)
         await persistPosition(force: true)
         publish()
@@ -282,37 +298,67 @@ public actor PlaybackController {
     }
 
     private func observed(positionMs ms: Int) async {
+        let previous = positionMs
         positionMs = max(0, ms)
-        furthestMs = max(furthestMs, positionMs)
+
+        // Only continuous forward progress while playing counts as having been *heard*.
+        // A seek's echo, a jump the remote asked for, or a stale report arriving out of
+        // order all fail this test and move the playhead without moving read state.
+        let step = positionMs - previous
+        if isPlaying, step > 0, step <= Self.maxListeningStepMs {
+            coverage.add(from: previous, to: positionMs)
+            furthestMs = max(furthestMs, positionMs)
+        }
+
         await markNewlyHeard()
         await persistPosition(force: false)
     }
 
-    /// Everything fully spoken by the furthest point reached is read (invariant 5).
+    /// Every story whose segments were actually played is read (invariant 5).
     private func markNewlyHeard() async {
-        let completed = timeline.newsItemsCompleted(through: furthestMs)
+        let completed = timeline.newsItemsCompleted(coverage: coverage)
         let fresh = completed.filter { !markedHeard.contains($0) }
         guard !fresh.isEmpty else { return }
         markedHeard.formUnion(fresh)
         try? await readState.markHeard(newsItemIds: fresh)
+        // Write the coverage that justified this immediately: if the app dies before the
+        // next throttled write, the next launch would recompute "not heard yet" and report
+        // the same items again.
+        await persistPosition(force: true)
     }
 
     private func finish() async {
         guard let episode, !didMarkListened else { return }
         didMarkListened = true
+        // The file ran out, so whatever *was* playing was heard to its end — but only from
+        // wherever the listener last landed. Scrubbing to the last ten seconds of a
+        // half-hour episode and letting it run out is not hearing the episode.
+        if isPlaying, duration - furthestMs <= Self.maxListeningStepMs {
+            coverage.add(from: furthestMs, to: duration)
+            furthestMs = duration
+        }
         positionMs = duration
-        furthestMs = duration
         isPlaying = false
-        markedHeard.formUnion(episode.newsItemIds)
+        await markNewlyHeard()
+
         try? await positions.record(
             episodeId: episode.id,
             spokenThroughMs: duration,
             durationMs: duration,
-            finished: true
+            finished: true,
+            coverage: coverage
         )
-        try? await readState.markEpisodeListened(
-            episodeId: episode.id, newsItemIds: episode.newsItemIds
-        )
+
+        // `POST /v1/episodes/{id}/listened` marks *every* item in the episode read in one
+        // server-side write, so it is only honest when every item really was heard. It
+        // still earns its place: it closes any item whose boundary no position tick landed
+        // inside, which the per-item writes above cannot.
+        let heardEverything = episode.newsItemIds.allSatisfy { markedHeard.contains($0) }
+        if heardEverything {
+            try? await readState.markEpisodeListened(
+                episodeId: episode.id, newsItemIds: episode.newsItemIds
+            )
+        }
     }
 
     private func persistPosition(force: Bool) async {
@@ -329,7 +375,8 @@ public actor PlaybackController {
             episodeId: episode.id,
             spokenThroughMs: positionMs,
             durationMs: duration,
-            finished: false
+            finished: false,
+            coverage: coverage
         )
     }
 }

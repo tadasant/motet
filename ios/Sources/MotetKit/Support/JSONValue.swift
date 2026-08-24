@@ -52,7 +52,12 @@ public enum JSONValue: Codable, Hashable, Sendable {
         case .null: return "null"
         case .bool(let value): return String(value)
         case .number(let value):
-            return value == value.rounded() ? String(Int(value)) : String(value)
+            // `Int(_:)` traps outside `Int`'s range, and this renders a *server error
+            // detail* — a crash here would turn a 422 into a crash report.
+            guard value == value.rounded(), let whole = Int(exactly: value.rounded()) else {
+                return String(value)
+            }
+            return String(whole)
         case .string(let value): return value
         case .array(let values): return values.map(\.displayText).joined(separator: ", ")
         case .object(let values):

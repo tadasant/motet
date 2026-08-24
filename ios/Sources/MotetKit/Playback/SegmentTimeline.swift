@@ -64,6 +64,28 @@ public struct SegmentTimeline: Hashable, Sendable {
         }
     }
 
+    /// The news items whose every segment was actually listened to.
+    ///
+    /// This is the one the player uses. `newsItemsCompleted(through:)` below is the
+    /// weaker, position-only form, kept for the case where all that survives is a resume
+    /// point — a first launch after an upgrade, before any coverage was recorded.
+    public func newsItemsCompleted(coverage: ListenedCoverage) -> [String] {
+        var completed: [String] = []
+        var seen = Set<String>()
+        for entry in entries where !seen.contains(entry.newsItemId) {
+            seen.insert(entry.newsItemId)
+            let heard = entries
+                .filter { $0.newsItemId == entry.newsItemId }
+                .allSatisfy {
+                    coverage.covers(
+                        $0.startMs..<$0.endMs, tolerance: Self.completionToleranceMs
+                    )
+                }
+            if heard { completed.append(entry.newsItemId) }
+        }
+        return completed
+    }
+
     /// The news items fully spoken by `positionMs`.
     ///
     /// A news item can be narrated by more than one segment; it counts as heard only when

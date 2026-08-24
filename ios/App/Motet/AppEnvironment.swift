@@ -23,6 +23,10 @@ final class AppEnvironment {
     private(set) var library: MotetLibrary
     private(set) var controller: PlaybackController
 
+    /// Whether the current `controller` has been wired to the engine and the command centre.
+    /// Reset by `reconfigure()`, because a rebuilt controller is a *different* controller.
+    private var isActivated = false
+
     /// One engine for the life of the process. `reconfigure()` rebuilds the API-facing half
     /// when the server changes, but replacing the engine would drop whatever is playing.
     private let engine = AVPlayerPlaybackEngine()
@@ -37,16 +41,38 @@ final class AppEnvironment {
         self.controller = wired.controller
     }
 
+    /// Wire the current controller to the audio engine, the audio session, and the remote
+    /// command centre. Idempotent, and safe to call from whichever scene happens to start
+    /// first — the window scene through `AppModel.start()`, or CarPlay, which iOS can launch
+    /// into with no window scene at all.
+    ///
+    /// A controller that is never activated is the quiet failure this exists to prevent: the
+    /// engine holds one event handler, so an unactivated controller sees no position
+    /// updates, marks nothing read, and never notices the episode end.
+    func activate() async {
+        guard !isActivated else { return }
+        isActivated = true
+        await controller.activate()
+        let settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
+        await controller.update(settings: settings)
+        nowPlaying.attach(to: controller, settings: settings)
+        try? audioSession.configure()
+    }
+
     /// Rebuild the API-facing half after the server URL or token changes in Settings.
     ///
-    /// The caller must re-subscribe to `controller.snapshots()` afterwards — `AppModel`
-    /// does, in `saveCredentials`.
-    func reconfigure() {
+    /// Both halves have to be re-established afterwards: `activate()` re-points the engine
+    /// and the command centre at the *new* controller, and the caller re-subscribes to
+    /// `controller.snapshots()`. `AppModel.saveCredentials` does both.
+    func reconfigure() async {
+        await controller.unload()
         let wired = Self.wire(
             configuration: credentials.configuration(), downloader: downloader, engine: engine
         )
         library = wired.library
         controller = wired.controller
+        isActivated = false
+        await activate()
     }
 
     private static func wire(

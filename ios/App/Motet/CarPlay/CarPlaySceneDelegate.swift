@@ -80,12 +80,13 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                 : Format.duration(episode.durationMs)
             let item = CPListItem(text: episode.title, detailText: detail)
             item.handler = { [weak self] _, completion in
-                Task { @MainActor in
-                    await self?.play(episode: episode)
-                    // CarPlay wants to know the tap has been dealt with; not calling this
-                    // leaves the row spinning forever.
-                    completion()
-                }
+                // Tell CarPlay the tap is dealt with *before* starting playback, rather
+                // than from inside the task: `completion` is a plain escaping closure, and
+                // carrying it across a concurrency boundary is a Sendable violation under
+                // Swift 6. The row should stop spinning the moment the tap is accepted
+                // anyway — loading audio can take a second on a bad connection.
+                completion()
+                Task { @MainActor in await self?.play(episode: episode) }
             }
             return item
         }
@@ -103,6 +104,12 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private func play(episode: EpisodeResponse) async {
         let environment = AppEnvironment.shared
         do {
+            // iOS can launch this app straight into the CarPlay scene, with no window scene
+            // and therefore no `AppModel.start()`. Without this the engine would have no
+            // event handler: the position would never advance, nothing would be marked
+            // read, and the Now Playing screen pushed below would render an empty
+            // `MPNowPlayingInfoCenter`.
+            await environment.activate()
             try environment.audioSession.activate()
             let source = try await environment.library.source(forEpisode: episode)
             try await environment.controller.load(

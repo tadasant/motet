@@ -180,6 +180,9 @@ actor ScriptedEngine: PlaybackEngine {
     func seek(toMs ms: Int) async {
         seeks.append(ms)
         positionMs = ms
+        // `AVPlayerPlaybackEngine.seek` emits this, so the fake does too — a double that
+        // is quieter than the real thing hides bugs in exactly the code it is testing.
+        await emit(.position(ms: ms))
     }
 
     func setRate(_ rate: Double) async {
@@ -193,6 +196,18 @@ actor ScriptedEngine: PlaybackEngine {
     }
 
     // Test-side drivers.
+
+    /// Play through to `ms` the way the real engine reports it: about once a second.
+    ///
+    /// Distinct from `advance(toMs:)`, which is a *jump* — the difference is the whole
+    /// point of `ListenedCoverage`, so the doubles keep it visible.
+    func listen(toMs ms: Int, stepMs: Int = 1_000) async {
+        var next = positionMs
+        while next < ms {
+            next = min(ms, next + stepMs)
+            await advance(toMs: next)
+        }
+    }
 
     func advance(toMs ms: Int) async {
         positionMs = ms
