@@ -109,6 +109,25 @@ reappear silently in some other guise.
 
 ---
 
+## Grounding, on the path that speaks
+
+Invariant 3 — every reported claim carries a source span, validated before TTS — is enforced
+on the **narration** path as a pipeline gate. The conversational reply path in this directory
+**does not have that gate**, and saying so is the point of this section.
+
+A reply is generated inside a spoken turn and the grounding validator is a max-effort model
+call, so it cannot sit there as written. What the path has instead is containment: the model
+is given context the caller assembled from *already-grounded* narration, and is told to answer
+only from that or from a tool result, to decline rather than fill gaps, and to quote or fetch
+numbers rather than recall them. `get_item_detail` returns spans, so grounded material is
+reachable. That narrows the failure to paraphrase over grounded text; it does not remove it.
+
+**Two consequences.** Do not read the containment as a guarantee. And do not give this path a
+new source of material — research results once Exa lands, a second corpus, memory across
+sessions — without answering the grounding question first, because that is the point at which
+paraphrase stops being the whole of the risk. The design work is
+[#10](https://github.com/tadasant/motet/issues/10), and its crux is a latency budget.
+
 ## Two invariants this directory exists to keep
 
 **It never touches the news DB.** No database credential, no schema knowledge, no `motet-db`
@@ -157,6 +176,7 @@ Every variable is optional; the service starts with none of them set.
 | `MOTET_VOICE_SESSION_TTL_SECONDS` | Token lifetime, default 3600 |
 | `MOTET_VOICE_API_BASE_URL` | Where the platform tools call Motet's API |
 | `MOTET_VOICE_API_TOKEN` | Bearer token for that API |
+| `MOTET_VOICE_START_SESSION_TOKEN` | Bearer required to mint a session. **Unset means open**, and an open `StartSession` is a confused deputy: a session's tools carry the credential above. `/healthz` reports which it is |
 | `MOTET_VOICE_LLM_MODEL` | Conversation model override; falls back to `MOTET_LLM_MODEL` |
 | `MOTET_VOICE_OPENAI_REALTIME_MODEL` | Realtime model slug |
 | `OPENAI_API_KEY` | Not provisioned. Wakes the realtime arm |

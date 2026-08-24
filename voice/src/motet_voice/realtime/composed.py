@@ -3,6 +3,10 @@
 **This is the arm that can actually run tonight**, which is why it is the default. Of its
 four legs, two are already provisioned and wired to real vendors through seams that exist:
 
+**Grounding does not run on this arm's reply path**, and that is a stated gap rather than a
+design — see :func:`_system_prompt` for what stands in for it and why, and
+https://github.com/tadasant/motet/issues/10 for the half that is not here.
+
 | Leg | Implementation | Provisioned? |
 |---|---|---|
 | VAD / turn detection | :mod:`motet_voice.vad` — ours, local, deterministic | n/a — no vendor |
@@ -161,6 +165,26 @@ def _system_prompt(request: TurnRequest) -> str:
     Every fact the model may use arrives in :attr:`TurnRequest.context_notes`, placed there
     by the caller that owns the database. Invariant 2 is not a rule this prompt obeys; it
     is the reason the prompt is built this way.
+
+    **Grounding — read this before extending the reply path.** Invariant 3 says every
+    reported claim carries a source span validated *before* TTS, and the narration path
+    enforces it as a pipeline gate. This path does not, and the gap is stated here rather
+    than left for a reader to notice: a conversational reply is generated inside a spoken
+    turn, and the grounding validator is a max-effort model call that cannot live there.
+
+    What this path has instead is containment, and containment is a mitigation rather than
+    a guarantee. The material is context the caller assembled from narration that was
+    *already* grounded; the prompt below tells the model to answer from it and to reach for
+    ``get_item_detail`` — which returns spans — instead of recalling. That narrows the
+    failure to paraphrase and inference over grounded text. It does not eliminate it, and
+    a spoken answer here can still assert something no span supports.
+
+    **So do not treat this as settled, and do not widen the path on the strength of it.**
+    Closing it properly is a design question with a latency budget at its centre, filed as
+    https://github.com/tadasant/motet/issues/10. Anything that gives this path a *new* source
+    of material — a research result, a second corpus, a longer memory — has to answer the
+    grounding question first, because that is when paraphrase-over-grounded-text stops
+    being the whole of the risk.
     """
     parts = [request.persona_instructions.strip()]
     if request.context_notes.strip():
@@ -168,6 +192,12 @@ def _system_prompt(request: TurnRequest) -> str:
     if request.tools:
         names = ", ".join(str(tool.get("name", "?")) for tool in request.tools)
         parts.append(f"Tools available to you: {names}.")
+    parts.append(
+        "Answer only from what you have been given above, or from what a tool returns. If "
+        "you are asked something it does not cover, say you do not have it and offer to look "
+        "it up — do not fill the gap from memory. Numbers, names and dates especially: quote "
+        "them from the material or fetch them, never recall them."
+    )
     parts.append("Answer in one or two spoken sentences. You are being listened to, not read.")
     return "\n\n".join(parts)
 

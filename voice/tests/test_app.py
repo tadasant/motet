@@ -55,6 +55,46 @@ def test_healthz_reports_what_is_dormant(client: Any) -> None:
     assert "start_research" in dormant
 
 
+def test_start_session_can_require_a_bearer(settings: VoiceSettings) -> None:
+    """A session is a capability: its tools carry *this service's* credential for the API.
+
+    So an open ``StartSession`` is a confused deputy with a read path into the corpus, not
+    merely a way to spend inference budget.
+    """
+    guarded = VoiceSettings.from_env(
+        {
+            "MOTET_INFERENCE_MODE": "fake",
+            "MOTET_VOICE_SESSION_SECRET": "test-secret-not-a-real-one",
+            "MOTET_VOICE_START_SESSION_TOKEN": "a-token-for-a-unit-test",
+        }
+    )
+    app = create_app(guarded, arm=build_composed_arm(guarded), transport=RecordingToolTransport())
+    with TestClient(app) as guarded_client:
+        assert guarded_client.get("/healthz").json()["start_session_authenticated"] is True
+
+        body = {"persona": PERSONA}
+        assert guarded_client.post("/v1/voice/sessions", json=body).status_code == 401
+        assert (
+            guarded_client.post(
+                "/v1/voice/sessions", json=body, headers={"Authorization": "Bearer wrong"}
+            ).status_code
+            == 401
+        )
+        assert (
+            guarded_client.post(
+                "/v1/voice/sessions",
+                json=body,
+                headers={"Authorization": "Bearer a-token-for-a-unit-test"},
+            ).status_code
+            == 201
+        )
+
+
+def test_an_unset_start_session_token_is_reported_as_open(client: Any) -> None:
+    """Open is a legitimate local default, and an undetectable one is the problem."""
+    assert client.get("/healthz").json()["start_session_authenticated"] is False
+
+
 def test_start_session_returns_a_token_and_a_socket_path(client: Any) -> None:
     started = _start(client)["response"]
     assert started["session_token"].startswith("v1.")

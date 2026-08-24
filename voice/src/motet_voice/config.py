@@ -29,6 +29,7 @@ SESSION_SECRET_ENV: Final = "MOTET_VOICE_SESSION_SECRET"
 SESSION_TTL_ENV: Final = "MOTET_VOICE_SESSION_TTL_SECONDS"
 API_BASE_URL_ENV: Final = "MOTET_VOICE_API_BASE_URL"
 API_TOKEN_ENV: Final = "MOTET_VOICE_API_TOKEN"
+START_SESSION_TOKEN_ENV: Final = "MOTET_VOICE_START_SESSION_TOKEN"
 OPENAI_KEY_ENV: Final = "OPENAI_API_KEY"
 OPENAI_REALTIME_MODEL_ENV: Final = "MOTET_VOICE_OPENAI_REALTIME_MODEL"
 EXA_KEY_ENV: Final = "EXA_API_KEY"
@@ -66,6 +67,10 @@ class VoiceSettings:
     session_ttl_seconds: int
     api_base_url: str | None
     api_token: str | None
+    #: Bearer required to mint a session. Unset means anyone who can reach this service can
+    #: open one — and a session's tools carry *our* ``/v1`` credential, so an open
+    #: ``StartSession`` is a confused-deputy path into the corpus, not merely a cost risk.
+    start_session_token: str | None
     openai_api_key_present: bool
     openai_realtime_model: str
     exa_api_key_present: bool
@@ -98,6 +103,7 @@ class VoiceSettings:
             ),
             api_base_url=_clean(environ.get(API_BASE_URL_ENV)),
             api_token=_clean(environ.get(API_TOKEN_ENV)),
+            start_session_token=_clean(environ.get(START_SESSION_TOKEN_ENV)),
             openai_api_key_present=bool(_clean(environ.get(OPENAI_KEY_ENV))),
             openai_realtime_model=environ.get(
                 OPENAI_REALTIME_MODEL_ENV, DEFAULT_OPENAI_REALTIME_MODEL
@@ -116,6 +122,7 @@ class VoiceSettings:
             f"arm={self.arm} mode={self.inference_mode} "
             f"session_secret={'set' if self.session_secret_provided else 'EPHEMERAL'} "
             f"api={'set' if self.api_base_url else 'unset'} "
+            f"start_session_auth={'set' if self.start_session_token else 'OPEN'} "
             f"openai_key={'present' if self.openai_api_key_present else 'absent'} "
             f"exa_key={'present' if self.exa_api_key_present else 'absent'}"
         )
@@ -140,6 +147,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> VoiceSettings:
             "parameters — which is an emulation, not a measurement of the vendor.",
             OPENAI_KEY_ENV,
             OPENAI_REALTIME_ARM,
+        )
+    if settings.start_session_token is None:
+        logger.warning(
+            "%s is unset: anyone who can reach this service can mint a voice session, and a "
+            "session's tools carry this service's own API credential. Fine on a laptop; on a "
+            "deployed environment it is a path into the corpus.",
+            START_SESSION_TOKEN_ENV,
         )
     if not settings.session_secret_provided:
         logger.warning(

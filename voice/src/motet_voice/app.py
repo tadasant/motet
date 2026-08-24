@@ -28,16 +28,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, ValidationError
 
 from . import obs, tokens
-from .config import VoiceSettings, load_settings
+from .config import START_SESSION_TOKEN_ENV, VoiceSettings, load_settings
 from .contract import (
     PLATFORM_TOOLS,
     ErrorEvent,
@@ -69,6 +70,10 @@ class HealthResponse(BaseModel):
     arm_conversational: bool
     arm_dormant_reason: str
     session_secret_configured: bool
+    #: ``False`` means anyone who can reach this service can mint a session. Reported for
+    #: the same reason the API reports its own: an open deployment is indistinguishable
+    #: from a working one until something goes wrong.
+    start_session_authenticated: bool
     tools: list[dict[str, Any]]
 
 
@@ -177,6 +182,7 @@ def create_app(
             arm_conversational=capabilities.conversational,
             arm_dormant_reason=capabilities.dormant_reason,
             session_secret_configured=state.settings.session_secret_provided,
+            start_session_authenticated=state.settings.start_session_token is not None,
             tools=registry.describe(),
         )
 
@@ -186,8 +192,12 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         tags=["session"],
     )
-    def start_session(request: StartSessionRequest) -> StartSessionResponse:
+    def start_session(
+        request: StartSessionRequest,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> StartSessionResponse:
         """``StartSession(persona, tools, mcp_servers, context, turn_policy) -> token``."""
+        _authorize_start_session(state.settings, authorization)
         unknown = [binding.name for binding in request.tools if binding.name not in PLATFORM_TOOLS]
         if unknown:
             # Rejected here rather than at call time: a persona told it can do something it
@@ -235,6 +245,36 @@ def create_app(
             await session.aclose()
 
     return app
+
+
+def _authorize_start_session(settings: VoiceSettings, authorization: str | None) -> None:
+    """Guard the one route that mints sessions.
+
+    **A session is a capability, not a document.** Its tools call Motet's API carrying *this
+    service's* bearer, so an open ``StartSession`` is not merely a way to spend inference
+    budget — it is a confused deputy with a read path into the corpus, reachable by anyone
+    who can route to the service.
+
+    Unset means open, exactly as ``MOTET_API_TOKEN`` does on the API, and for the same
+    reason: a laptop should need no setup. It warns on every request rather than only at
+    boot, because a warning nobody sees after the first minute of uptime is not a warning.
+    """
+    if settings.start_session_token is None:
+        logger.warning(
+            "minting a voice session for an unauthenticated caller: %s is unset",
+            START_SESSION_TOKEN_ENV,
+        )
+        return
+
+    presented = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        presented = authorization[7:].strip()
+    if not presented or not secrets.compare_digest(presented, settings.start_session_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid bearer token is required to start a voice session.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 async def _authenticate(
