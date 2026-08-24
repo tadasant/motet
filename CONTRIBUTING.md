@@ -74,6 +74,24 @@ bin/generate-openapi    # app  -> openapi.yaml
 bin/generate-client     # yaml -> web/src/api/schema.gen.ts
 ```
 
+## Models
+
+The LLM provider seam lives in `inference/src/motet_inference/llm/`. Which model each
+stage uses is environment configuration (`MOTET_LLM_MODEL`, plus a per-stage override) and
+is validated at startup against a committed catalogue of slugs.
+
+```bash
+bin/check-openrouter-models          # catalogue vs OpenRouter's live model list
+bin/check-openrouter-models sonnet   # also list live slugs matching a substring
+```
+
+It is **not** part of `bin/ci`, because CI is offline by design. Run it when adding a model
+or when a slug looks stale, and update `KNOWN_MODELS` from what it reports.
+
+**No test here calls a vendor**, not even behind an opt-in flag — invariant 7 is
+absolute. The adapter is covered end to end against a stub transport instead. To confirm
+a slug or a reasoning config against the live API, do it by hand outside the suite.
+
 ## Migrations
 
 Plain numbered SQL in `db/migrations/`, named `NNNN_lower_snake_case.sql`, applied in order

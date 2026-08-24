@@ -43,6 +43,11 @@ extend-exclude = ["web"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logger (AGENTS.md)
 
+[tool.ruff.lint.per-file-ignores]
+# The one place print() is right: a hand-run CLI whose entire product is its stdout
+# report. Stated here rather than dodged by leaving the file out of the linter's reach.
+"inference/src/motet_inference/llm/check_models.py" = ["T201"]
+
 [tool.mypy]
 python_version = "3.13"
 strict = true

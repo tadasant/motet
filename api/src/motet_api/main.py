@@ -12,9 +12,12 @@ has to stay stable.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Path, Response, status
+from motet_inference.llm import load_config as load_llm_config
 
 from . import obs
 from .schemas import (
@@ -28,7 +31,30 @@ from .schemas import (
 
 NOT_BUILT_YET = "Not implemented: Phase 1 scaffold. See AGENTS.md."
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Refuse to serve at all rather than serve a request we cannot fulfil.
+
+    An unknown model slug or a nonsense effort stops the process here, where Cloud Run
+    reports a failed revision and never shifts traffic to it. Discovering the same fact on
+    the first inference request means a 500 an hour after the deploy, with nothing tying it
+    to the change that caused it.
+
+    **Config only — deliberately not the credential.** ``validate_startup`` also resolves
+    the API key, and the worker entry point calls it for exactly that reason. Requiring it
+    here would mean mounting the one vendor secret in the system into the *internet-facing*
+    service, which in Phase 1 never calls a model at all: inference runs in workers. The
+    day the API calls a model directly, this becomes ``validate_startup`` and the key
+    becomes its business.
+    """
+    config = load_llm_config()
+    obs.logger.info("llm: %s", config.describe())
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Motet API",
     version="0.1.0",
     description=(

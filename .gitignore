@@ -6,6 +6,11 @@
 # MCP configuration (may contain API keys)
 .mcp.json
 
+# Tooling that writes into the checkout rather than outside it: some environments point
+# `NPM_CONFIG_CACHE` here, and some runners drop a stderr log. Never source.
+.npm-cache/
+*_stderr.log
+
 # Python
 __pycache__/
 *.py[cod]

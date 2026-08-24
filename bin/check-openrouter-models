@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# Verify the committed model catalogue against OpenRouter's live model list.
+# See motet_inference.llm.check_models for what it checks and why it is NOT in bin/ci.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+exec uv run python -m motet_inference.llm.check_models "$@"

@@ -8,9 +8,6 @@ fails toward the safe side rather than the expensive one.
 
 from __future__ import annotations
 
-import os
-from typing import Final, Literal
-
 from .adapters import (
     CartesiaSpeechSynthesizer,
     ClaudeGroundingValidator,
@@ -24,16 +21,9 @@ from .fakes import (
     FakeSpeechSynthesizer,
 )
 from .interfaces import Stages
+from .mode import MODE_ENV_VAR, Mode, current_mode
 
-MODE_ENV_VAR: Final = "MOTET_INFERENCE_MODE"
-Mode = Literal["fake", "real"]
-
-
-def current_mode() -> Mode:
-    raw = os.environ.get(MODE_ENV_VAR, "fake").strip().lower()
-    if raw not in ("fake", "real"):
-        raise ValueError(f"{MODE_ENV_VAR} must be 'fake' or 'real', got {raw!r}")
-    return raw  # type: ignore[return-value]
+__all__ = ["MODE_ENV_VAR", "Mode", "current_mode", "fake_stages", "get_stages", "real_stages"]
 
 
 def fake_stages() -> Stages:

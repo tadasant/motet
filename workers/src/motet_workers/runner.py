@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import logging
 
+from motet_inference.llm import validate_startup as validate_llm_startup
+
 from .queues import Queue
 
 logger = logging.getLogger("motet.worker")
@@ -35,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("queue", choices=[q.value for q in Queue])
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
+    # Before claiming any job. A Cloud Run job that cannot reach a model should fail
+    # immediately and visibly, rather than claim work it will then fail to finish.
+    logger.info("llm: %s", validate_llm_startup().describe())
     raise NotImplementedError(f"{NOT_BUILT_YET} (queue={args.queue})")
 
 
