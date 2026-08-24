@@ -90,6 +90,28 @@ jobs:
       - name: Run the one CI command
         run: bin/ci
 
+  # The container images Cloud Run runs. A separate job because it needs a Docker daemon
+  # and nothing else in bin/ci does — a laptop without Docker must still be able to run
+  # the full check suite, so this lives in bin/build-images rather than in bin/ci.
+  #
+  # It BUILDS AND SMOKE-TESTS, and deliberately does not push. This repo is public and
+  # holds no cloud credential of any kind; publishing belongs to the private
+  # infrastructure repo. Nothing here authenticates to anything.
+  images:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: self-hosted
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and smoke-test the container images
+        # Tags itself per run and removes its own containers and images on the way out,
+        # including on the failure path. Deliberately no `docker image prune` step here:
+        # this pool is shared, and a blanket prune would delete a co-tenant job's layers
+        # out from under it.
+        run: bin/build-images
+
   # Single aggregate gate. Set THIS job — `all-checks-pass` — as the one required status
   # check, rather than enumerating every job above.
   #
@@ -110,6 +132,7 @@ jobs:
     runs-on: self-hosted
     needs:
       - ci
+      - images
     steps:
       - name: Verify no required check failed or was cancelled
         run: |

@@ -1,0 +1,53 @@
+# Both image builds use the REPO ROOT as their context (uv.lock describes the whole
+# workspace), so without this every build uploads the git history and both dependency
+# trees to the daemon.
+#
+# Two entries here are correctness rather than speed, and both only bite on a developer's
+# machine — CI checks out clean, so a green CI run does not prove their absence is safe:
+#
+#   node_modules  — `web/Dockerfile` runs `npm ci` and then copies `web/`, so a host
+#                   node_modules would overwrite the container's freshly-installed linux
+#                   tree with the host's platform-specific binaries. The build then either
+#                   fails confusingly or succeeds against a dependency set that is not the
+#                   lockfile, quietly voiding the guarantee `npm ci` exists to give.
+#   .env*         — Vite reads `.env` and `.env.local` at build time, so a developer with
+#                   `VITE_API_BASE_URL` set locally would bake an API origin into the
+#                   bundle. That is precisely what the runtime `config.js` exists to
+#                   prevent, and the smoke test cannot see it, because the runtime value
+#                   wins at call time and masks the compiled-in one.
+
+.git
+.github
+.gitignore
+
+# Python
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/*.egg-info
+
+# Node / web
+**/node_modules
+web/dist
+**/*.tsbuildinfo
+
+# Environment — never let a local value reach a build.
+.env
+.env.*
+!.env.example
+
+# Zimmer runtime state, never source.
+.claude
+.mcp.json
+.npm-cache
+**/*_stderr.log
+
+# Docs and editor noise: nothing in either image reads them.
+*.md
+.idea
+.vscode
+.DS_Store
