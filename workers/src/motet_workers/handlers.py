@@ -53,9 +53,9 @@ _EXTENSIONS = {MPEG_MEDIA_TYPE: "mp3", WAV_MEDIA_TYPE: "wav"}
 #:
 #: Assembly has to apply the duration cap before a script exists, so it estimates from
 #: each story's one-or-two-sentence summary. The script then writes two to four narrated
-#: claims for that story — several times longer. Estimating from the summary alone made
-#: assembly pick far more stories than could fit, and the script-stage trim then threw
-#: most of them away after they had already been written.
+#: claims for that story — several times longer. Estimating 1:1 made assembly pick far
+#: more stories than could fit, and the script-stage trim then threw most of them away
+#: after they had already been written.
 #:
 #: A blunt multiplier rather than anything cleverer: the honest answer is that nobody
 #: knows the length until the script exists, and this only has to be close enough that

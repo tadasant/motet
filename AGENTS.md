@@ -158,6 +158,23 @@ and CI need no obs stack at all.
 > instead — `motet_api.obs.status()` reports which exporters are actually configured, and
 > it is exposed on the API's health surface.
 
+Two of those names have a second spelling, and it is not cosmetic. Secret Manager holds one
+value per secret and the CI identity that applies the infrastructure **cannot read a secret
+back** — so a service definition can inject a secret under its own name and nothing more.
+It cannot read `OTEL_INGEST_TOKEN` in order to compose the `Authorization=Bearer <token>`
+string that `OTEL_EXPORTER_OTLP_HEADERS` wants. Composing it is therefore the *process's*
+job, and `GLITCHTIP_DSN` is the same story without the formatting:
+
+| The app accepts | …as well as | Because |
+|---|---|---|
+| `OTEL_INGEST_TOKEN` (raw bearer) | `OTEL_EXPORTER_OTLP_HEADERS` | Terraform cannot build the header string |
+| `GLITCHTIP_DSN` | `SENTRY_DSN_BACKEND` | it is the name the secret was placed under |
+
+**An endpoint without a credential is not "configured."** obs rejects an unauthenticated
+export, so that combination buys a 401 per export rather than data — which reads as an obs
+fault. `/healthz` reports `telemetry_configured: false` for it deliberately, and startup
+logs a warning saying so.
+
 ---
 
 ## Tripwires
@@ -198,6 +215,15 @@ ranking, iOS, voice interactivity, signup, brand.
 grounding validation, TTS, object storage, the private feed, and the three SPA screens. The
 stages run as Cloud Run jobs draining Postgres queues (`workers/`), and every one of them
 is retried independently.
+
+**Built is not deployed, and as of 2026-08-24 none of it is running anywhere.** Every
+Cloud Run service in both environments serves Google's `hello` sample: the infrastructure
+was stood up in `bootstrap` mode, and no Motet image had ever been built, because until
+this repo grew a `Dockerfile` there was nothing to build. **No real vendor call has ever
+been made** — not one OpenRouter completion, not one second of Cartesia audio — so
+everything downstream of the fakes is unproven. See the container images section above;
+the remaining half (who pushes the image, and the runtime environment the services get)
+is tracked in the private infrastructure repo.
 
 **Phase 1's real deliverable is the factory, not the feature.** The question it answers is
 *"does the factory work?"* — not *"is the briefing good?"*. That is what the scaffolding in
@@ -288,7 +314,7 @@ the voice/interaction path, and the iOS app.
 | Credential vault | library | `vault/` |
 | Schema + migrations | library | `db/` |
 | Object storage | library | `storage/` |
-| Web SPA | Vite + React, static behind Cloudflare | `web/` |
+| Web SPA | Vite + React, static files on Cloud Run | `web/` |
 | Voice service | Pipecat, Cloud Run — **Phase 2** | `voice/` |
 | iOS app | Swift — **Phase 2** | `ios/` |
 | Golden set | CI harness | `goldens/` |
@@ -321,11 +347,45 @@ bin/ci
 ```
 
 It runs migrations, tests, and typecheck for both the Python and TypeScript halves, plus
-the contract and golden-set gates. The GitHub Actions workflow calls `bin/ci` and nothing
-else. **If you add a check, add it to `bin/ci`** — a check that only exists in the workflow
-is a check that cannot be run locally, and it will rot.
+the contract and golden-set gates. **If you add a check, add it to `bin/ci`** — a check
+that only exists in the workflow is a check that cannot be run locally, and it will rot.
 
 `bin/ci` needs a Postgres to run migrations against; see `CONTRIBUTING.md`.
+
+There is one other script, and exactly one reason it is separate:
+
+```bash
+bin/build-images
+```
+
+It builds and smoke-tests the three container images, and it is its own script because it
+needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop without Docker must
+still be able to run every check in it. It is still a script rather than YAML, for the
+same reason `bin/ci` is. CI runs it as a second job.
+
+### The container images
+
+Cloud Run runs three: `motet-api`, `motet-worker`, `motet-web`. The first two are the same
+tree — one root `Dockerfile` with two targets, because a second Dockerfile would be a
+second copy of one dependency graph. The SPA is `web/Dockerfile`.
+
+```bash
+bin/build-images              # all three, then smoke-test each
+bin/build-images api web      # a subset
+```
+
+**Both build contexts are the repo root**: `uv.lock` describes the whole workspace, so a
+context rooted at `api/` could not resolve it.
+
+**This repo builds images and never pushes them.** It is public and holds no cloud
+credential of any kind — no GCP identity, no registry login, nothing to leak. Publishing
+and deploying belong to the private infrastructure repo. A PR that adds a push step here
+is a PR that adds a cloud credential to a public repo; the answer is the other repo.
+
+**The API origin is not in the SPA bundle.** Vite inlines `import.meta.env` at build time,
+so a compiled-in hostname would mean one image per environment. `web/` ships a `config.js`
+that the container entrypoint rewrites from `MOTET_API_BASE_URL` at start-up, and the
+client reads it at call time. One image, configured where it runs.
 
 ### Runner policy
 

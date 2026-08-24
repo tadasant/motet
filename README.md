@@ -34,7 +34,7 @@ adapters behind every vendor seam, and a twenty-case golden set.
 | Inference adapters | library | [`inference/`](inference) |
 | Schema + migrations | library | [`db/`](db) |
 | Object storage | library | [`storage/`](storage) |
-| Web SPA | Vite + React, static behind Cloudflare | [`web/`](web) |
+| Web SPA | Vite + React, static files on Cloud Run | [`web/`](web) |
 | Voice service | Pipecat, Cloud Run — *Phase 2* | [`voice/`](voice) |
 | iOS app | Swift — *Phase 2* | [`ios/`](ios) |
 | Golden set | CI harness | [`goldens/`](goldens) |

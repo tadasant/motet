@@ -18,7 +18,13 @@ import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.deps import reset_store
-from motet_api.obs import ERROR_DSN_ENV, OTLP_ENDPOINT_ENV
+from motet_api.obs import (
+    ERROR_DSN_ENV,
+    GLITCHTIP_DSN_ENV,
+    OTLP_ENDPOINT_ENV,
+    OTLP_HEADERS_ENV,
+    OTLP_TOKEN_ENV,
+)
 from motet_inference.llm import LlmConfigError
 from motet_workers import Queue, drain
 
@@ -71,18 +77,57 @@ class TestHealth:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Guards the "no data is not no errors" trap in obs.py."""
-        monkeypatch.delenv(OTLP_ENDPOINT_ENV, raising=False)
+        for name in (OTLP_ENDPOINT_ENV, OTLP_HEADERS_ENV, OTLP_TOKEN_ENV):
+            monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(ERROR_DSN_ENV, raising=False)
+        monkeypatch.delenv(GLITCHTIP_DSN_ENV, raising=False)
         body = client.get("/healthz").json()
         assert body["telemetry_configured"] is False
         assert body["errors_configured"] is False
 
     def test_reports_configured_telemetry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
+        monkeypatch.setenv(OTLP_HEADERS_ENV, "Authorization=Bearer not-a-real-token")
         monkeypatch.setenv(ERROR_DSN_ENV, "https://public@glitchtip.example.invalid/1")
         body = client.get("/healthz").json()
         assert body["telemetry_configured"] is True
         assert body["errors_configured"] is True
+
+    def test_an_endpoint_without_a_credential_is_not_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The most expensive way to be wrong about telemetry.
+
+        obs rejects an unauthenticated export, so an endpoint on its own buys a 401 per
+        export rather than data — and a health check that called that "configured" would
+        confirm the belief that made it happen.
+        """
+        monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
+        monkeypatch.delenv(OTLP_HEADERS_ENV, raising=False)
+        monkeypatch.delenv(OTLP_TOKEN_ENV, raising=False)
+        assert client.get("/healthz").json()["telemetry_configured"] is False
+
+    def test_the_raw_ingest_token_configures_telemetry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secret Manager can only inject the secret under its own name.
+
+        The CI identity that applies the infrastructure cannot read a secret value back,
+        so it cannot compose the `Authorization=Bearer <token>` string itself. Accepting
+        the raw token is what makes the deployed wiring work at all.
+        """
+        monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
+        monkeypatch.delenv(OTLP_HEADERS_ENV, raising=False)
+        monkeypatch.setenv(OTLP_TOKEN_ENV, "not-a-real-token")
+        assert client.get("/healthz").json()["telemetry_configured"] is True
+
+    def test_the_glitchtip_dsn_name_configures_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`GLITCHTIP_DSN` is the name the secret was actually placed under."""
+        monkeypatch.delenv(ERROR_DSN_ENV, raising=False)
+        monkeypatch.setenv(GLITCHTIP_DSN_ENV, "https://public@glitchtip.example.invalid/1")
+        assert client.get("/healthz").json()["errors_configured"] is True
 
     def test_reports_whether_the_deployment_is_authenticated(
         self, monkeypatch: pytest.MonkeyPatch
