@@ -90,7 +90,7 @@ class VoiceSettings:
             # fails safely on Cloud Run: a second instance mints a different secret, so a
             # token from instance A is rejected by instance B and the misconfiguration
             # announces itself as "my socket keeps getting refused" rather than as a
-            # silently unauthenticated service. /healthz reports which of the two it is.
+            # silently unauthenticated service. /internal/health reports which of the two it is.
             secret = secrets.token_urlsafe(32)
 
         return cls(

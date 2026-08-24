@@ -192,14 +192,44 @@ def configure_cors(target: FastAPI, config: Settings) -> None:
 configure_cors(app, Settings.from_env())
 
 
-@app.get("/healthz", response_model=HealthResponse, tags=["ops"])
-def healthz(config: Config) -> HealthResponse:
+#: Where health is served, and it is deliberately **not** ``/healthz``.
+#:
+#: Google's Cloud Run frontend answers ``/healthz`` itself, with its own HTML 404, before
+#: the request reaches the container — on the ``run.app`` URL and on a custom domain, over
+#: HTTP/1.1 and HTTP/2 alike. The route existed and was declared in this document the
+#: whole time; nothing outside the container could read it, which is the exact failure a
+#: health endpoint exists to prevent. See motet#16.
+#:
+#: The replacement is namespaced under a segment this application owns rather than one the
+#: platform might claim. ``/livez`` and ``/readyz`` were rejected because they are the same
+#: Kubernetes-style family as the path that was intercepted, and a leading-underscore path
+#: was rejected because ``/_ah/`` is reserved territory on Google's own infrastructure.
+HEALTH_PATH = "/internal/health"
+
+#: Paths that must never be used for anything this application needs to answer.
+#:
+#: A prefix match, because the reservation is a namespace rather than one URL. This exists
+#: so the collision above cannot come back silently: ``api/tests/test_reserved_paths.py``
+#: walks every declared route against it.
+#:
+#: Copied — not shared — in ``motet_voice.app`` and in ``bin/build-images``, which runs the
+#: same claim against a real container. Keep all three in step.
+PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
+
+
+@app.get(HEALTH_PATH, response_model=HealthResponse, tags=["ops"])
+def health(config: Config) -> HealthResponse:
     """Liveness, plus whether telemetry and authentication are actually wired.
 
     The flags are not decoration. Exporters no-op silently when unconfigured, so without
     this an unmonitored process is indistinguishable from a quiet one — and an
     unauthenticated deployment is indistinguishable from a working one until the bill
     arrives.
+
+    **"internal" in the path names an owned namespace, not a network boundary.** This
+    route is unauthenticated and reachable by anyone who can reach the service — which is
+    the point, since the whole reason motet#16 mattered is that health has to be askable
+    from outside. Nothing secret goes in the response; a new field here is public.
     """
     current = obs.status()
     return HealthResponse(

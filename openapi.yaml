@@ -707,13 +707,16 @@ paths:
       summary: Rss Feed
       tags:
       - feed
-  /healthz:
+  /internal/health:
     get:
       description: "Liveness, plus whether telemetry and authentication are actually wired.\n\nThe flags\
         \ are not decoration. Exporters no-op silently when unconfigured, so without\nthis an unmonitored\
         \ process is indistinguishable from a quiet one \u2014 and an\nunauthenticated deployment is indistinguishable\
-        \ from a working one until the bill\narrives."
-      operationId: healthz_healthz_get
+        \ from a working one until the bill\narrives.\n\n**\"internal\" in the path names an owned namespace,\
+        \ not a network boundary.** This\nroute is unauthenticated and reachable by anyone who can reach\
+        \ the service \u2014 which is\nthe point, since the whole reason motet#16 mattered is that health\
+        \ has to be askable\nfrom outside. Nothing secret goes in the response; a new field here is public."
+      operationId: health_internal_health_get
       responses:
         '200':
           content:
@@ -721,7 +724,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
           description: Successful Response
-      summary: Healthz
+      summary: Health
       tags:
       - ops
   /v1/episodes:

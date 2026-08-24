@@ -25,7 +25,7 @@ def test_render_is_deterministic() -> None:
 def test_every_route_is_in_the_document() -> None:
     paths = document()["paths"]
     for expected in (
-        "/healthz",
+        "/internal/health",
         "/v1/sources/paste",
         "/v1/news-items",
         "/v1/episodes",

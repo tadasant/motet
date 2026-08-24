@@ -28,7 +28,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/healthz": {
+    "/internal/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -36,15 +36,20 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Healthz
+         * Health
          * @description Liveness, plus whether telemetry and authentication are actually wired.
          *
          *     The flags are not decoration. Exporters no-op silently when unconfigured, so without
          *     this an unmonitored process is indistinguishable from a quiet one — and an
          *     unauthenticated deployment is indistinguishable from a working one until the bill
          *     arrives.
+         *
+         *     **"internal" in the path names an owned namespace, not a network boundary.** This
+         *     route is unauthenticated and reachable by anyone who can reach the service — which is
+         *     the point, since the whole reason motet#16 mattered is that health has to be askable
+         *     from outside. Nothing secret goes in the response; a new field here is public.
          */
-        get: operations["healthz_healthz_get"];
+        get: operations["health_internal_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1045,7 +1050,7 @@ export interface operations {
             };
         };
     };
-    healthz_healthz_get: {
+    health_internal_health_get: {
         parameters: {
             query?: never;
             header?: never;

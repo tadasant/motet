@@ -68,7 +68,7 @@ class Settings:
         """Whether ``/v1`` requires a bearer token.
 
         False is legitimate on a laptop and a mistake anywhere else, which is why
-        ``/healthz`` reports it rather than leaving it to be discovered: an unauthenticated
+        ``/internal/health`` reports it rather than leaving it to be discovered: an unauthenticated
         deployment is one paste away from spending real money on someone else's text, and
         it looks exactly like a working one.
         """

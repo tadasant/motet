@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from motet_voice.app import create_app
+from motet_voice.app import HEALTH_PATH, PLATFORM_RESERVED_PATHS, create_app
 from motet_voice.config import VoiceSettings
 from motet_voice.harness import synthesize_walk
 from motet_voice.realtime import build_composed_arm
@@ -39,8 +39,29 @@ def _start(client: Any, **overrides: Any) -> dict[str, Any]:
     return {"body": body, "response": response.json()}
 
 
-def test_healthz_reports_what_is_dormant(client: Any) -> None:
-    payload = client.get("/healthz").json()
+def test_health_is_not_on_a_path_the_platform_reserves(client: Any) -> None:
+    """The same collision the API hit — motet#16 — on the same platform.
+
+    Cloud Run's frontend answers ``/healthz`` with its own 404 before the request reaches
+    the container, so a health endpoint served there is unreadable from everywhere health
+    is actually checked. This service is not deployed yet, which is exactly why the guard
+    belongs here now: the mistake is cheapest to not make.
+
+    A container-local check cannot observe the frontend — there isn't one here. What it can
+    do is fail the moment the path is reintroduced.
+    """
+    assert HEALTH_PATH == "/internal/health"
+    for reserved in PLATFORM_RESERVED_PATHS:
+        assert not any(
+            route.path == reserved or route.path.startswith(reserved + "/")
+            for route in client.app.routes
+            if hasattr(route, "path")
+        )
+    assert client.get("/healthz").status_code == 404
+
+
+def test_health_reports_what_is_dormant(client: Any) -> None:
+    payload = client.get(HEALTH_PATH).json()
     assert payload["status"] == "ok"
     assert payload["service"] == "motet-voice"
     assert payload["arm"] == "composed"
@@ -70,7 +91,7 @@ def test_start_session_can_require_a_bearer(settings: VoiceSettings) -> None:
     )
     app = create_app(guarded, arm=build_composed_arm(guarded), transport=RecordingToolTransport())
     with TestClient(app) as guarded_client:
-        assert guarded_client.get("/healthz").json()["start_session_authenticated"] is True
+        assert guarded_client.get(HEALTH_PATH).json()["start_session_authenticated"] is True
 
         body = {"persona": PERSONA}
         assert guarded_client.post("/v1/voice/sessions", json=body).status_code == 401
@@ -92,7 +113,7 @@ def test_start_session_can_require_a_bearer(settings: VoiceSettings) -> None:
 
 def test_an_unset_start_session_token_is_reported_as_open(client: Any) -> None:
     """Open is a legitimate local default, and an undetectable one is the problem."""
-    assert client.get("/healthz").json()["start_session_authenticated"] is False
+    assert client.get(HEALTH_PATH).json()["start_session_authenticated"] is False
 
 
 def test_start_session_returns_a_token_and_a_socket_path(client: Any) -> None:
@@ -324,8 +345,8 @@ def test_one_bad_frame_does_not_end_the_session(client: Any) -> None:
         assert json.loads(socket.receive_text())["state"] == "closed"
 
 
-def test_an_ephemeral_session_secret_is_reported_on_healthz() -> None:
+def test_an_ephemeral_session_secret_is_reported_on_health() -> None:
     settings = VoiceSettings.from_env({"MOTET_INFERENCE_MODE": "fake"})
     app = create_app(settings, arm=build_composed_arm(settings), transport=RecordingToolTransport())
     with TestClient(app) as client:
-        assert client.get("/healthz").json()["session_secret_configured"] is False
+        assert client.get(HEALTH_PATH).json()["session_secret_configured"] is False

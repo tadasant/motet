@@ -9,7 +9,7 @@ can debug from.
 Every exporter here **no-ops when its variable is unset**, so tests and laptops need no obs
 stack. That creates the trap :func:`status` exists to close: a silent no-op looks exactly
 like a healthy, quiet service. Never infer "no errors" from "no data" — ask
-:func:`status` instead, which the API exposes at ``/healthz``.
+:func:`status` instead, which the API exposes at ``/internal/health``.
 
 Endpoint values and tokens live in the private infrastructure repo. This module only ever
 reads variable *names*.
@@ -116,7 +116,7 @@ def configure() -> ObsStatus:
     ``motet_api`` depends on ``motet_workers``, so the worker cannot import back without
     a cycle; giving it telemetry means moving this module somewhere both can reach. The
     gap matters because the worker is the process that makes every vendor call and has no
-    ``/healthz`` to ask, so "ask the app instead" currently has no answer for it. Tracked
+    ``/internal/health`` to ask, so "ask the app instead" currently has no answer for it. Tracked
     rather than half-fixed here.
 
     Scaffold: the OTLP and GlitchTip exporters themselves are not installed yet, so this

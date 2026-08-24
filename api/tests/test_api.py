@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.deps import reset_store
+from motet_api.main import HEALTH_PATH
 from motet_api.obs import (
     ERROR_DSN_ENV,
     GLITCHTIP_DSN_ENV,
@@ -69,7 +70,7 @@ class TestHealth:
     def test_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(OTLP_ENDPOINT_ENV, raising=False)
         monkeypatch.delenv(ERROR_DSN_ENV, raising=False)
-        response = client.get("/healthz")
+        response = client.get(HEALTH_PATH)
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
@@ -81,7 +82,7 @@ class TestHealth:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(ERROR_DSN_ENV, raising=False)
         monkeypatch.delenv(GLITCHTIP_DSN_ENV, raising=False)
-        body = client.get("/healthz").json()
+        body = client.get(HEALTH_PATH).json()
         assert body["telemetry_configured"] is False
         assert body["errors_configured"] is False
 
@@ -89,7 +90,7 @@ class TestHealth:
         monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
         monkeypatch.setenv(OTLP_HEADERS_ENV, "Authorization=Bearer not-a-real-token")
         monkeypatch.setenv(ERROR_DSN_ENV, "https://public@glitchtip.example.invalid/1")
-        body = client.get("/healthz").json()
+        body = client.get(HEALTH_PATH).json()
         assert body["telemetry_configured"] is True
         assert body["errors_configured"] is True
 
@@ -105,7 +106,7 @@ class TestHealth:
         monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
         monkeypatch.delenv(OTLP_HEADERS_ENV, raising=False)
         monkeypatch.delenv(OTLP_TOKEN_ENV, raising=False)
-        assert client.get("/healthz").json()["telemetry_configured"] is False
+        assert client.get(HEALTH_PATH).json()["telemetry_configured"] is False
 
     def test_the_raw_ingest_token_configures_telemetry(
         self, monkeypatch: pytest.MonkeyPatch
@@ -119,7 +120,7 @@ class TestHealth:
         monkeypatch.setenv(OTLP_ENDPOINT_ENV, "https://obs.example.invalid/otel/v1")
         monkeypatch.delenv(OTLP_HEADERS_ENV, raising=False)
         monkeypatch.setenv(OTLP_TOKEN_ENV, "not-a-real-token")
-        assert client.get("/healthz").json()["telemetry_configured"] is True
+        assert client.get(HEALTH_PATH).json()["telemetry_configured"] is True
 
     def test_the_glitchtip_dsn_name_configures_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -127,7 +128,7 @@ class TestHealth:
         """`GLITCHTIP_DSN` is the name the secret was actually placed under."""
         monkeypatch.delenv(ERROR_DSN_ENV, raising=False)
         monkeypatch.setenv(GLITCHTIP_DSN_ENV, "https://public@glitchtip.example.invalid/1")
-        assert client.get("/healthz").json()["errors_configured"] is True
+        assert client.get(HEALTH_PATH).json()["errors_configured"] is True
 
     def test_reports_whether_the_deployment_is_authenticated(
         self, monkeypatch: pytest.MonkeyPatch
@@ -138,9 +139,9 @@ class TestHealth:
         to be asked about.
         """
         monkeypatch.delenv("MOTET_API_TOKEN", raising=False)
-        assert client.get("/healthz").json()["authenticated"] is False
+        assert client.get(HEALTH_PATH).json()["authenticated"] is False
         monkeypatch.setenv("MOTET_API_TOKEN", TOKEN)
-        assert client.get("/healthz").json()["authenticated"] is True
+        assert client.get(HEALTH_PATH).json()["authenticated"] is True
 
     def test_an_empty_token_variable_counts_as_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unset and empty are the same thing in a Cloud Run service definition.
@@ -149,7 +150,7 @@ class TestHealth:
         header authenticated successfully.
         """
         monkeypatch.setenv("MOTET_API_TOKEN", "   ")
-        assert client.get("/healthz").json()["authenticated"] is False
+        assert client.get(HEALTH_PATH).json()["authenticated"] is False
 
 
 class TestAuthentication:
@@ -348,7 +349,7 @@ class TestStartup:
         monkeypatch.delenv("MOTET_INFERENCE_MODE", raising=False)
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         with TestClient(app) as started:
-            assert started.get("/healthz").status_code == 200
+            assert started.get(HEALTH_PATH).status_code == 200
 
     def test_the_app_does_not_require_the_vendor_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The public service validates LLM config but never holds the key.
@@ -360,7 +361,7 @@ class TestStartup:
         monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         with TestClient(app) as started:
-            assert started.get("/healthz").status_code == 200
+            assert started.get(HEALTH_PATH).status_code == 200
 
     def test_the_app_refuses_to_start_with_an_unknown_model(
         self, monkeypatch: pytest.MonkeyPatch
