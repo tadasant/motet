@@ -35,6 +35,21 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 )
 """
 
+#: The advisory lock one migration run holds against another on the same database.
+#:
+#: Two runs applying a *pending* migration at the same moment both execute the same
+#: ``CREATE TABLE`` — one wins and the other fails with "relation already exists", which
+#: is a confusing way to be told something entirely ordinary happened. It is reachable
+#: whenever two things migrate one database at once: two ``bin/ci`` runs on a machine
+#: sharing the default ``DATABASE_URL``, or a deploy job retried while the first attempt
+#: is still going. An advisory lock rather than a table, because it is released when the
+#: connection dies — a process killed mid-migration must not leave the next one blocked.
+#:
+#: An arbitrary constant, and it only has to be distinct from other advisory locks taken
+#: against the same database. The queue's keys (``motet_workers.jobs.lock_key``) are
+#: SHA-256 derived, so a collision would take a deliberate search.
+_MIGRATION_LOCK_KEY = 0x6D6F7465_74646201  # "mote" "tdb" 01
+
 
 @dataclass(frozen=True)
 class Migration:
@@ -81,11 +96,22 @@ def applied_versions(conn: psycopg.Connection) -> set[str]:
 
 
 def migrate(database_url: str, directory: Path = MIGRATIONS_DIR) -> list[str]:
-    """Apply every pending migration. Returns the versions applied, in order."""
+    """Apply every pending migration. Returns the versions applied, in order.
+
+    One run at a time per database: whoever gets the advisory lock applies, and anyone
+    else waits and then finds there is nothing left to do. Without it, two runs racing on
+    a fresh database both execute the first pending migration and one of them fails on a
+    table the other had just created.
+    """
     migrations = discover(directory)
     newly_applied: list[str] = []
 
     with psycopg.connect(database_url) as conn:
+        # Session-level, so it is held across the per-migration commits below and released
+        # when this connection closes — including when the process is killed.
+        conn.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_LOCK_KEY,))
+        conn.commit()
+
         already = applied_versions(conn)
         conn.commit()
 
