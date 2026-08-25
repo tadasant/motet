@@ -26,6 +26,7 @@ and swapping the arm underneath changes none of them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import secrets
@@ -47,6 +48,7 @@ from .contract import (
     StartSessionRequest,
     StartSessionResponse,
 )
+from .grounding import ConversationGroundingChecker, build_grounding_checker
 from .realtime import RealtimeArm, build_arm
 from .session import VoiceSession
 from .tools import HttpToolTransport, ToolRegistry, ToolTransport, build_platform_tools
@@ -75,6 +77,11 @@ PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
 #: has just been handed a token sends it immediately.
 AUTHENTICATE_TIMEOUT_SECONDS = 10.0
 
+#: How long the socket waits, at close, for events already queued to go out. Bounded
+#: because a client that has walked out of signal will never drain, and unbounded patience
+#: there would hold a Cloud Run concurrency slot for nothing.
+FLUSH_TIMEOUT_SECONDS = 5.0
+
 
 class HealthResponse(BaseModel):
     status: str
@@ -90,6 +97,17 @@ class HealthResponse(BaseModel):
     #: the same reason the API reports its own: an open deployment is indistinguishable
     #: from a working one until something goes wrong.
     start_session_authenticated: bool
+    #: Whether this process installed an exporter, as opposed to merely having the
+    #: variables set. The two were different for months on the API, which is how a service
+    #: looks monitored and emits nothing — and the advisory grounding counters are only
+    #: worth anything if this is true.
+    telemetry_exporting: bool
+    #: Which advisory grounding checker is running on the conversational reply path, and
+    #: whether it gates audio. It never does — motet#10 — and the field says so out loud
+    #: rather than leaving a reader of ``/internal/health`` to assume invariant 3's hard
+    #: narration gate applies here too.
+    grounding_checker: str
+    grounding_advisory: bool
     tools: list[dict[str, Any]]
 
 
@@ -106,11 +124,15 @@ class VoiceApp:
         *,
         arm: RealtimeArm | None = None,
         transport: ToolTransport | None = None,
+        grounding: ConversationGroundingChecker | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.arm = arm or build_arm(self.settings)
         self._explicit_transport = transport is not None
         self.transport = transport or self._build_transport()
+        # Process-wide because it is stateless and free: unlike the VAD, which carries one
+        # stream's noise floor and must be per-session, the checker holds nothing.
+        self.grounding = grounding or build_grounding_checker()
 
     def _build_transport(self) -> ToolTransport | None:
         if not self.settings.api_base_url:
@@ -142,9 +164,10 @@ def create_app(
     *,
     arm: RealtimeArm | None = None,
     transport: ToolTransport | None = None,
+    grounding: ConversationGroundingChecker | None = None,
 ) -> FastAPI:
     """Build the ASGI app. Injectable so tests never touch a network or a vendor."""
-    state = VoiceApp(settings, arm=arm, transport=transport)
+    state = VoiceApp(settings, arm=arm, transport=transport, grounding=grounding)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -162,6 +185,8 @@ def create_app(
             logger.warning("arm %s is dormant: %s", capabilities.name, capabilities.dormant_reason)
         yield
         await state.aclose()
+        # After the arm, so a verdict recorded on the way down is in the batch that goes.
+        obs.shutdown()
 
     app = FastAPI(
         lifespan=lifespan,
@@ -172,6 +197,11 @@ def create_app(
             "the service holds no database credential and reaches Motet only through tools."
         ),
     )
+    # Request spans and HTTP server metrics. Here rather than in the lifespan because
+    # instrumenting adds middleware and Starlette refuses that once the stack is built —
+    # which it is by the time a lifespan event arrives. Safe before any provider exists:
+    # the middleware holds a proxy tracer that resolves when `obs.configure` runs.
+    obs.instrument(app)
     app.state.voice = state
 
     @app.get(HEALTH_PATH, response_model=HealthResponse, tags=["ops"])
@@ -193,6 +223,12 @@ def create_app(
             service=current.service_name,
             telemetry_configured=current.otlp_configured,
             errors_configured=current.errors_configured,
+            telemetry_exporting=current.exporting,
+            grounding_checker=state.grounding.name,
+            # Stated as a constant rather than read from anything, because there is nothing
+            # to read: the conversational path has no gate to switch on. Invariant 3's hard
+            # gate lives on the narration path, in the pipeline, and is not this service's.
+            grounding_advisory=True,
             inference_mode=state.settings.inference_mode,
             arm=capabilities.name,
             arm_conversational=capabilities.conversational,
@@ -341,7 +377,11 @@ async def _authenticate(
         return None
 
     session = VoiceSession.create(
-        session_id=session_id, config=config, arm=state.arm, tools=state.registry(config)
+        session_id=session_id,
+        config=config,
+        arm=state.arm,
+        tools=state.registry(config),
+        grounding=state.grounding,
     )
     await _send(websocket, session.ready())
     return session
@@ -353,53 +393,88 @@ async def _pump(websocket: WebSocket, session: VoiceSession) -> None:
     Binary frames are listener audio. Text frames are control messages. Anything
     unrecognized gets an ``error`` event rather than a closed socket — a client that sends
     one bad message should not lose a walk.
+
+    **Every outbound event goes through ``session.outbox`` and one sender task**, rather
+    than being written here. Grounding is advisory on this path (motet#10), so its verdict
+    is produced *after* the turn that caused it and has to reach the socket from a
+    background task — and two coroutines writing to one WebSocket is a protocol violation
+    waiting for a busy walk. One writer, FIFO, and the ordering falls out for free:
+    ``put_nowait`` on an unbounded queue never yields, so a turn's own events are queued
+    ahead of any verdict about them before the check has had a chance to run.
     """
+    sender = asyncio.create_task(_deliver(websocket, session))
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+
+            if (chunk := message.get("bytes")) is not None:
+                for event in session.observe_audio(chunk):
+                    session.outbox.put_nowait(event)
+                continue
+
+            text = message.get("text")
+            if text is None:
+                continue
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                session.outbox.put_nowait(_error(session, "bad_json", "control frame was not JSON"))
+                continue
+            if not isinstance(payload, dict):
+                session.outbox.put_nowait(
+                    _error(session, "bad_frame", "control frame must be an object")
+                )
+                continue
+
+            if await _handle_control(session, payload):
+                return
+    finally:
+        # Verdicts first, then the queue: an advisory check still running when the listener
+        # hangs up is the case most worth counting, and letting it drop would bias the
+        # ungrounded rate toward clean in exactly the wrong direction.
+        await session.drain_grounding_checks()
+        if not sender.done():
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(FLUSH_TIMEOUT_SECONDS):
+                    await session.outbox.join()
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+
+
+async def _deliver(websocket: WebSocket, session: VoiceSession) -> None:
+    """The one writer. Exits quietly when the socket has gone, rather than raising into it."""
     while True:
-        message = await websocket.receive()
-        if message.get("type") == "websocket.disconnect":
-            return
-
-        if (chunk := message.get("bytes")) is not None:
-            for event in session.observe_audio(chunk):
-                await _send(websocket, event)
-            continue
-
-        text = message.get("text")
-        if text is None:
-            continue
+        event = await session.outbox.get()
         try:
-            payload = json.loads(text)
-        except ValueError:
-            await _send(websocket, _error(session, "bad_json", "control frame was not JSON"))
-            continue
-        if not isinstance(payload, dict):
-            await _send(websocket, _error(session, "bad_frame", "control frame must be an object"))
-            continue
-
-        if await _handle_control(websocket, session, payload):
+            await _send(websocket, event)
+        except (WebSocketDisconnect, RuntimeError):
+            # The client left mid-flight. Nothing here is recoverable and nothing here is
+            # the record: a verdict has already been counted and logged by the time it
+            # reaches this queue, so what is lost is the client's copy and not the signal.
+            session.outbox.task_done()
             return
+        session.outbox.task_done()
 
 
-async def _handle_control(
-    websocket: WebSocket, session: VoiceSession, payload: dict[str, Any]
-) -> bool:
+async def _handle_control(session: VoiceSession, payload: dict[str, Any]) -> bool:
     """Handle one control frame. Returns ``True`` when the session should end."""
     kind = str(payload.get("type", ""))
 
     if kind == "close":
-        await _send(
-            websocket,
-            SessionStateEvent(at_ms=session.clock.spoken_through_ms, state="closed"),
+        session.outbox.put_nowait(
+            SessionStateEvent(at_ms=session.clock.spoken_through_ms, state="closed")
         )
         return True
 
     if kind == "text":
         for event in await session.respond_to_text(str(payload.get("text", ""))):
-            await _send(websocket, event)
+            session.outbox.put_nowait(event)
         return False
 
     if kind == "barge_in":
-        await _send(websocket, session.barge_in())
+        session.outbox.put_nowait(session.barge_in())
         return False
 
     if kind == "narration_delivered":
@@ -417,7 +492,7 @@ async def _handle_control(
         session.provider_reported_position(_as_int(payload.get("spoken_through_ms")))
         return False
 
-    await _send(websocket, _error(session, "unknown_frame", f"unknown control type {kind!r}"))
+    session.outbox.put_nowait(_error(session, "unknown_frame", f"unknown control type {kind!r}"))
     return False
 
 

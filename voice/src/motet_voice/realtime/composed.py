@@ -3,9 +3,9 @@
 **This is the arm that can actually run tonight**, which is why it is the default. Of its
 four legs, two are already provisioned and wired to real vendors through seams that exist:
 
-**Grounding does not run on this arm's reply path**, and that is a stated gap rather than a
-design — see :func:`_system_prompt` for what stands in for it and why, and
-https://github.com/tadasant/motet/issues/10 for the half that is not here.
+**Grounding runs on this arm's reply path, and does not gate it** — advisory, by decision
+(motet#10). See :func:`_system_prompt` for the containment the prompt provides and
+:mod:`motet_voice.grounding` for the check that runs behind every reply.
 
 | Leg | Implementation | Provisioned? |
 |---|---|---|
@@ -168,23 +168,24 @@ def _system_prompt(request: TurnRequest) -> str:
 
     **Grounding — read this before extending the reply path.** Invariant 3 says every
     reported claim carries a source span validated *before* TTS, and the narration path
-    enforces it as a pipeline gate. This path does not, and the gap is stated here rather
-    than left for a reader to notice: a conversational reply is generated inside a spoken
-    turn, and the grounding validator is a max-effort model call that cannot live there.
+    enforces it as a pipeline gate. This path does not gate: grounding here is **advisory**
+    (motet#10), because a conversational reply is generated inside a spoken turn and the
+    batch validator is a max-effort model call that cannot live there. The check still runs
+    — see :mod:`motet_voice.grounding` — behind the reply rather than in front of it, and
+    every verdict is counted on the obs stack.
 
-    What this path has instead is containment, and containment is a mitigation rather than
-    a guarantee. The material is context the caller assembled from narration that was
-    *already* grounded; the prompt below tells the model to answer from it and to reach for
+    This prompt is the other half, and it is containment rather than a guarantee. The
+    material is context the caller assembled from narration that was *already* grounded;
+    the prompt below tells the model to answer from it and to reach for
     ``get_item_detail`` — which returns spans — instead of recalling. That narrows the
     failure to paraphrase and inference over grounded text. It does not eliminate it, and
     a spoken answer here can still assert something no span supports.
 
-    **So do not treat this as settled, and do not widen the path on the strength of it.**
-    Closing it properly is a design question with a latency budget at its centre, filed as
-    https://github.com/tadasant/motet/issues/10. Anything that gives this path a *new* source
-    of material — a research result, a second corpus, a longer memory — has to answer the
-    grounding question first, because that is when paraphrase-over-grounded-text stops
-    being the whole of the risk.
+    **Do not widen the path on the strength of either half.** Anything that gives this path
+    a *new* source of material — a research result, a second corpus, a longer memory —
+    changes the risk from "paraphrase over grounded text" to "assertion from ungrounded
+    text", and the advisory check catches fabricated specifics rather than bad inference.
+    That is the point at which the gate question has to be reopened.
     """
     parts = [request.persona_instructions.strip()]
     if request.context_notes.strip():

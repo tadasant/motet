@@ -76,6 +76,21 @@ def test_health_reports_what_is_dormant(client: Any) -> None:
     assert "start_research" in dormant
 
 
+def test_health_names_the_grounding_checker_and_says_it_does_not_gate(client: Any) -> None:
+    """An operator has to be able to see, without reading code, which half of motet#10 runs.
+
+    ``grounding_advisory`` is stated rather than inferred: invariant 3's hard gate lives on
+    the narration path, and a reader of this route must not assume it applies here too.
+    """
+    payload = client.get(HEALTH_PATH).json()
+    assert payload["grounding_checker"] == "specifics"
+    assert payload["grounding_advisory"] is True
+    # Configured and exporting are different questions; with no OTLP endpoint set, the
+    # second is false and the counters go nowhere. Saying so is the point of the field.
+    assert payload["telemetry_configured"] is False
+    assert payload["telemetry_exporting"] is False
+
+
 def test_start_session_can_require_a_bearer(settings: VoiceSettings) -> None:
     """A session is a capability: its tools carry *this service's* credential for the API.
 
@@ -210,16 +225,30 @@ def _authenticated(client: Any, **overrides: Any) -> Iterator[Any]:
 
 
 def test_a_turn_produces_transcripts_and_audio(client: Any) -> None:
+    """...and the grounding verdict arrives *behind* the audio, which is what advisory means.
+
+    The order in this assertion is the decision in motet#10, expressed as a wire fact: the
+    listener has the answer in their ear before anything has judged it. On the narration
+    path the same check is a gate and the order is the other way round.
+    """
     with _authenticated(client, tools=[{"name": "mark_read", "defaults": {}}]) as socket:
         socket.send_text(json.dumps({"type": "text", "text": "what was that"}))
-        events = [json.loads(socket.receive_text()) for _ in range(3)]
+        events = [json.loads(socket.receive_text()) for _ in range(4)]
         socket.send_text(json.dumps({"type": "close"}))
         assert json.loads(socket.receive_text())["state"] == "closed"
 
-    assert [event["type"] for event in events] == ["transcript", "transcript", "audio_chunk"]
+    assert [event["type"] for event in events] == [
+        "transcript",
+        "transcript",
+        "audio_chunk",
+        "grounding",
+    ]
     assert events[0]["speaker"] == "user"
     assert events[1]["speaker"] == "assistant"
     assert events[2]["duration_ms"] > 0
+    assert events[3]["grounded"] is True
+    assert events[3]["checker"] == "specifics"
+    assert events[3]["reply"] == events[1]["text"]
 
 
 def test_an_assistant_reply_does_not_advance_the_narration_clock(client: Any) -> None:
@@ -231,7 +260,7 @@ def test_an_assistant_reply_does_not_advance_the_narration_clock(client: Any) ->
     """
     with _authenticated(client, context={"spoken_through_ms": 30_000}) as socket:
         socket.send_text(json.dumps({"type": "text", "text": "go on"}))
-        for _ in range(3):
+        for _ in range(4):  # transcript, transcript, audio_chunk, grounding
             socket.receive_text()
         socket.send_text(json.dumps({"type": "barge_in"}))
         assert json.loads(socket.receive_text())["offset_ms"] == 30_000

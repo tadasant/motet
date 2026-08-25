@@ -209,6 +209,31 @@ class InterruptedAtEvent(SessionEvent):
     decision: dict[str, Any] = Field(default_factory=dict)
 
 
+class GroundingAdvisoryEvent(SessionEvent):
+    """The advisory grounding verdict on a conversational reply — **after** the audio.
+
+    Invariant 3 is a hard gate on the narration path and advisory on this one, which means
+    the verdict arrives *behind* the reply it judges rather than in front of it. A client
+    that ignores this event is a correct client; one that wants to mark an answer
+    "unverified" in a transcript has what it needs.
+
+    ``reply`` is echoed back so the event stands alone in a log or a capture: matching a
+    verdict to a turn by timestamp is exactly the reconstruction nobody manages at three in
+    the morning.
+    """
+
+    type: Literal["grounding"] = "grounding"
+    #: Advisory. ``False`` did not stop anything being spoken, by design — motet#10.
+    grounded: bool
+    checker: str
+    #: How many numbers, names and quotations were examined. ``0`` means the reply
+    #: asserted nothing checkable, which is what a refusal looks like.
+    checked: int = 0
+    #: The specifics the material does not support, each with its kind.
+    unsupported: list[dict[str, str]] = Field(default_factory=list)
+    reply: str = ""
+
+
 class SessionStateEvent(SessionEvent):
     type: Literal["session_state"] = "session_state"
     state: Literal["ready", "listening", "speaking", "closed"]
