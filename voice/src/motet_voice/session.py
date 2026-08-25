@@ -53,10 +53,16 @@ from .tools import ToolRegistry
 
 logger = logging.getLogger("motet.voice.session")
 
-#: How long :meth:`VoiceSession.aclose` waits for the advisory checks still in flight.
-#: They take microseconds; the bound exists so a checker that one day blocks cannot hold a
-#: socket's teardown open, and it is generous enough that the recording — which is the
-#: entire point of the check — is not the thing that gets dropped.
+#: How long a close waits for the advisory checks still in flight. They take microseconds;
+#: the bound exists so a checker that one day blocks cannot hold a socket's teardown open,
+#: and it is generous enough that the recording — which is the entire point of the check —
+#: is not the thing that gets dropped.
+#:
+#: **It bounds the coroutine, not the work.** Cancelling an ``asyncio.to_thread`` does not
+#: stop the thread, so a checker that genuinely blocks would leak threads from the shared
+#: default executor rather than being killed here. That is fine for a checker that is pure
+#: Python and microseconds long; a model-backed one needs its own bounded executor, and
+#: this is the note that says so before somebody drops one in.
 GROUNDING_DRAIN_TIMEOUT_SECONDS: Final = 5.0
 
 
@@ -333,6 +339,9 @@ class VoiceSession:
         self.verdicts.append(verdict)
         obs.record_conversational_reply(verdict, arm=self.arm.name)
         if not verdict.grounded:
+            # The reply goes in verbatim, and that is a deliberate trade: without it an
+            # operator sees that *something* could not be sourced and never what. It is
+            # conversation content in the log, on the ungrounded path only.
             logger.warning(
                 "ungrounded conversational reply (advisory, motet#10): session=%s arm=%s %s "
                 "reply=%r",
@@ -398,6 +407,8 @@ class VoiceSession:
         It *does* wait for the advisory grounding checks, briefly. A listener who hangs up
         the instant an answer lands is the case most worth counting, and dropping the
         verdict there would bias the number toward clean in exactly the wrong direction.
+        The socket drains them earlier too (:mod:`motet_voice.app`); this is the backstop
+        for every caller that is not a socket, and a no-op when nothing is in flight.
         """
         await self.drain_grounding_checks()
         logger.info("voice session closed: %s", self.summary())

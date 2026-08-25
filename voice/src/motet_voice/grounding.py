@@ -64,13 +64,29 @@ _NUMBER: Final = re.compile(r"\d[\d,.]*")
 
 #: A quotation the reply attributes to the material. Both straight and curly pairs; short
 #: enough to be a stylistic aside is not worth checking, hence the length floor.
-_QUOTE: Final = re.compile(r"[\"“]([^\"”\n]{8,240})[\"”]")
+#:
+#: **Deliberately unbounded above.** A ceiling here does not skip a long quotation, it
+#: restarts the engine on the quotation's own closing mark — so the long quote goes
+#: unchecked and the unquoted prose after it gets reported as a fabricated one. The class
+#: is negated, so there is no backtracking cost to leaving it open.
+_QUOTE: Final = re.compile(r"[\"“]([^\"”\n]{8,})[\"”]")
 
-_WORD: Final = re.compile(r"[A-Za-z][A-Za-z'’\-]*")
+#: A word: one letter, then letters, apostrophes or hyphens. ``[^\W\d_]`` rather than
+#: ``[A-Za-z]`` because a name is not always Latin-1 — with the ASCII class, "Zoë" simply
+#: was not a word, so a fabricated non-ASCII name was never checked and the verdict read
+#: ``checked=0``, which is what a reply that asserted nothing looks like.
+_WORD: Final = re.compile(r"[^\W\d_](?:[^\W\d_]|['’\-])*")
 
-#: Sentence boundaries. Only used to make the stoplist below do its job in the position
-#: where it matters most — the first word of a sentence is capitalized whatever it is.
-_SENTENCE: Final = re.compile(r"(?<=[.!?])\s+")
+#: Trailing clitics: the possessive, and the contracted auxiliaries.
+#:
+#: Stripped before a word is looked up, in the reply *and* in the material, and this is
+#: not tidying. Without it ``It's`` and ``Let's`` are capitalized words no material
+#: contains — so almost every reply that opens a sentence with a contraction reports
+#: ungrounded — and ``Sequoia's`` fails to match the ``Sequoia`` sitting in the material.
+#: Both are false positives on the one number this whole change exists to make meaningful.
+_CLITICS: Final = (
+    "'s", "’s", "'t", "’t", "'re", "’re", "'ve", "’ve", "'ll", "’ll", "'d", "’d", "'m", "’m",
+)  # fmt: skip
 
 #: Capitalized words that are not names, in any position.
 #:
@@ -202,7 +218,7 @@ class SpecificsGroundingChecker:
 
     def check(self, reply: str, material: str) -> GroundingVerdict:
         numbers = set(_numbers(material))
-        words = {word.lower() for word in _WORD.findall(material)}
+        words = {_stem(word).lower() for word in _WORD.findall(material)}
         haystack = _flatten(material)
 
         unsupported: list[Unsupported] = []
@@ -272,17 +288,26 @@ def _numbers(text: str) -> Iterator[str]:
 def _names(text: str) -> Iterator[str]:
     """Capitalized words that are capitalized because they name something.
 
-    The sentence split is not used to *skip* the first word — see :data:`_NOT_A_NAME` for
-    why that would be the wrong trade — it is here so that the stoplist is what decides,
-    and so a later rule that does care about position has the boundary to hand.
+    Position in the sentence is deliberately not consulted — see :data:`_NOT_A_NAME` for
+    why skipping the first word would be the wrong trade. The *stem* is yielded rather
+    than the word as written, because the stem is what was actually looked up.
     """
-    for sentence in _SENTENCE.split(text):
-        for word in _WORD.findall(sentence):
-            if len(word) < _MIN_NAME_LENGTH or not word[0].isupper():
-                continue
-            if word.lower() in _NOT_A_NAME:
-                continue
-            yield word
+    for word in _WORD.findall(text):
+        stem = _stem(word)
+        if len(stem) < _MIN_NAME_LENGTH or not stem[0].isupper():
+            continue
+        if stem.lower() in _NOT_A_NAME:
+            continue
+        yield stem
+
+
+def _stem(word: str) -> str:
+    """Drop a trailing clitic, so ``Sequoia's`` and ``Sequoia`` are one word."""
+    lowered = word.lower()
+    for clitic in _CLITICS:
+        if len(word) > len(clitic) and lowered.endswith(clitic):
+            return word[: -len(clitic)]
+    return word
 
 
 def _flatten(text: str) -> str:

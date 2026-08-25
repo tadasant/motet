@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -27,6 +28,7 @@ from motet_inference.fakes import FakeSpeechSynthesizer
 from motet_voice import obs
 from motet_voice.contract import StartSessionRequest
 from motet_voice.grounding import (
+    GroundingVerdict,
     SpecificsGroundingChecker,
     build_grounding_checker,
     material_for,
@@ -100,6 +102,33 @@ def test_a_fabricated_name_is_caught_even_as_the_first_word_of_a_sentence() -> N
 def test_a_repeated_fabrication_counts_once() -> None:
     verdict = CHECKER.check("Sequoia led it. Sequoia also led the last one.", MATERIAL)
     assert len(verdict.unsupported) == 1
+
+
+def test_a_contraction_is_not_a_name_nobody_mentioned() -> None:
+    """Without clitic stripping, almost every reply opening with one reads as ungrounded."""
+    verdict = CHECKER.check("It's a big round. That's what Sequoia did.", MATERIAL)
+    assert [(item.kind, item.text) for item in verdict.unsupported] == [("name", "Sequoia")]
+    assert CHECKER.check("Let's see. Here's the thing: 425 million.", MATERIAL).grounded
+
+
+def test_a_possessive_matches_the_name_in_the_material() -> None:
+    """A false positive on a *correctly sourced* name is worse than the tolerated ones."""
+    assert CHECKER.check("SoftBank's stake grew.", MATERIAL).grounded
+
+
+def test_a_name_outside_latin_1_is_checked_rather_than_skipped() -> None:
+    """An ASCII-only word pattern reports ``checked=0``, which reads as "nothing asserted"."""
+    verdict = CHECKER.check("Zoë Müller led it.", MATERIAL)
+    assert [item.text for item in verdict.unsupported] == ["Zoë", "Müller"]
+
+
+def test_a_long_quotation_is_checked_and_does_not_manufacture_a_second_one() -> None:
+    """A ceiling on the quote pattern restarts the engine on the closing mark."""
+    long_quote = "the reactor is already running " * 12
+    verdict = CHECKER.check(f'He said "{long_quote}" and then "a short one here".', MATERIAL)
+    assert [item.kind for item in verdict.unsupported] == ["quote", "quote"]
+    assert verdict.unsupported[0].text.startswith("the reactor")
+    assert "and then" not in [item.text for item in verdict.unsupported]
 
 
 def test_a_comma_is_not_a_different_number() -> None:
@@ -228,10 +257,13 @@ def test_the_verdict_reaches_the_client_as_its_own_event() -> None:
 def test_the_check_runs_behind_the_turn_rather_than_inside_it() -> None:
     """Advisory means the listener has the answer before anything has judged it.
 
-    A checker that never finishes must not stop the turn returning. If this ever hangs,
-    somebody has moved the check onto the critical path.
+    The checker here genuinely blocks — on a ``threading.Event`` the test only sets once
+    the turn has already returned. If somebody moves the check onto the critical path,
+    this deadlocks and the ``wait_for`` fails it. That is the whole point of the test, so
+    the checker must block rather than raise.
     """
-    started = asyncio.Event()
+    entered = threading.Event()
+    release = threading.Event()
 
     @dataclass
     class BlockingChecker:
@@ -239,22 +271,46 @@ def test_the_check_runs_behind_the_turn_rather_than_inside_it() -> None:
         def name(self) -> str:
             return "blocking"
 
-        def check(self, reply: str, material: str) -> Any:
-            started.set()
-            raise AssertionError("this checker never returns a verdict")
+        def check(self, reply: str, material: str) -> GroundingVerdict:
+            entered.set()
+            release.wait(timeout=10)
+            return GroundingVerdict(checker="blocking", checked=1)
 
     session = _session("Sequoia led it.")
     session.grounding = BlockingChecker()
 
     async def scenario() -> list[Any]:
         events = await asyncio.wait_for(session.respond_to_text("who led it"), timeout=5)
+        # In a thread: a blocking wait here would hold the event loop and stop the very
+        # task it is waiting for from ever starting.
+        assert await asyncio.to_thread(entered.wait, 5.0), "the check was scheduled"
+        assert session.verdicts == [], "...and had not finished when the turn returned"
+        release.set()
         await session.drain_grounding_checks()
         return events
 
     events = asyncio.run(scenario())
     assert [event.type for event in events] == ["transcript", "transcript", "audio_chunk"]
-    assert started.is_set(), "the check was scheduled, just not awaited"
-    assert session.verdicts == [], "a checker that raised recorded nothing, and did not throw"
+    assert [verdict.checker for verdict in session.verdicts] == ["blocking"]
+
+
+def test_a_checker_that_raises_records_nothing_and_does_not_end_the_conversation() -> None:
+    @dataclass
+    class BrokenChecker:
+        @property
+        def name(self) -> str:
+            return "broken"
+
+        def check(self, reply: str, material: str) -> GroundingVerdict:
+            raise RuntimeError("the checker fell over")
+
+    session = _session("Sequoia led it.")
+    session.grounding = BrokenChecker()
+    events = asyncio.run(_one_turn(session, "who led it"))
+
+    assert [event.type for event in events] == ["transcript", "transcript", "audio_chunk"]
+    assert session.verdicts == []
+    assert session.outbox.empty()
 
 
 def test_a_dormant_arm_is_not_a_reason_to_stop_checking() -> None:

@@ -183,10 +183,15 @@ def create_app(
         capabilities = state.arm.capabilities()
         if capabilities.dormant_reason:
             logger.warning("arm %s is dormant: %s", capabilities.name, capabilities.dormant_reason)
-        yield
-        await state.aclose()
-        # After the arm, so a verdict recorded on the way down is in the batch that goes.
-        obs.shutdown()
+        try:
+            yield
+        finally:
+            # In a `finally` because the flush is the half that matters: an instance that
+            # goes down badly is exactly the one whose last batch of verdicts nobody would
+            # think to go looking for. `obs.shutdown` after the arm, so anything recorded
+            # on the way down is in the batch that goes.
+            await state.aclose()
+            obs.shutdown()
 
     app = FastAPI(
         lifespan=lifespan,
@@ -439,12 +444,25 @@ async def _pump(websocket: WebSocket, session: VoiceSession) -> None:
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(FLUSH_TIMEOUT_SECONDS):
                     await session.outbox.join()
+        if sender.done() and not sender.cancelled() and sender.exception() is not None:
+            logger.error(
+                "voice socket writer for session %s had already died: %r",
+                session.session_id,
+                sender.exception(),
+            )
         sender.cancel()
         await asyncio.gather(sender, return_exceptions=True)
 
 
 async def _deliver(websocket: WebSocket, session: VoiceSession) -> None:
-    """The one writer. Exits quietly when the socket has gone, rather than raising into it."""
+    """The one writer. Exits quietly when the socket has gone, rather than raising into it.
+
+    **Anything that stops this task mutes the session**, because ``_pump`` goes on reading
+    frames and queueing replies nobody sends. A disconnect is the expected way for that to
+    happen and is not worth a stack trace; anything else is a bug and gets logged, because
+    the alternative is a walk where every answer and every advisory verdict is silently
+    dropped and nothing anywhere says so.
+    """
     while True:
         event = await session.outbox.get()
         try:
@@ -454,8 +472,29 @@ async def _deliver(websocket: WebSocket, session: VoiceSession) -> None:
             # the record: a verdict has already been counted and logged by the time it
             # reaches this queue, so what is lost is the client's copy and not the signal.
             session.outbox.task_done()
+            _abandon(session.outbox)
+            return
+        except Exception:  # noqa: BLE001 — see the docstring: silence here is the failure
+            logger.exception("voice socket writer failed; session %s is mute", session.session_id)
+            session.outbox.task_done()
+            _abandon(session.outbox)
             return
         session.outbox.task_done()
+
+
+def _abandon(outbox: asyncio.Queue[SessionEvent]) -> None:
+    """Mark whatever is still queued as done, because nothing will ever send it.
+
+    Without this, ``join()`` in :func:`_pump` waits out its whole timeout on every
+    disconnect that happened to have a backlog — five seconds of a Cloud Run concurrency
+    slot spent waiting for a writer that has already given up.
+    """
+    while True:
+        try:
+            outbox.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        outbox.task_done()
 
 
 async def _handle_control(session: VoiceSession, payload: dict[str, Any]) -> bool:
@@ -463,6 +502,11 @@ async def _handle_control(session: VoiceSession, payload: dict[str, Any]) -> boo
     kind = str(payload.get("type", ""))
 
     if kind == "close":
+        # Verdicts first: `closed` is the frame a well-behaved client tears down on, and
+        # queueing it ahead of the advisory checks still in flight would drop from the wire
+        # exactly the verdicts this path exists to deliver. `_pump`'s own drain stays as
+        # the backstop for every other way a session ends.
+        await session.drain_grounding_checks()
         session.outbox.put_nowait(
             SessionStateEvent(at_ms=session.clock.spoken_through_ms, state="closed")
         )

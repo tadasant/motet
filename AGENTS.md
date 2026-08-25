@@ -56,7 +56,7 @@ almost every design question that comes up is already answered by one of them.
 
    | | **Narration** — the briefing | **Conversation** — answering a question |
    |---|---|---|
-   | Where | `workers/` script → grounding → Cartesia | `voice/` `ComposedArm.respond` |
+   | Where | `workers/` script → grounding → Cartesia | `voice/` `VoiceSession.respond_to_text` |
    | Grounding | **hard gate.** A claim that fails validation is not synthesized. | **advisory.** The reply is spoken, then checked. |
    | Checked by | `GroundingValidator`, a max-effort model call | `motet_voice.grounding`, ours, local, deterministic |
    | If it fails | nothing gets spoken | it was already spoken; a counter, a warning and a `grounding` event record it |

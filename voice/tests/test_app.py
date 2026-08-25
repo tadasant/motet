@@ -2,20 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from motet_voice.app import HEALTH_PATH, PLATFORM_RESERVED_PATHS, create_app
+from motet_voice.app import HEALTH_PATH, PLATFORM_RESERVED_PATHS, _abandon, create_app
 from motet_voice.config import VoiceSettings
 from motet_voice.harness import synthesize_walk
 from motet_voice.realtime import build_composed_arm
 from motet_voice.tools import RecordingToolTransport, ToolResponse
 
 PERSONA = {"name": "Briefing", "instructions": "Be brief.", "voice": "narrator"}
+
+
+@dataclass
+class _ScriptedModel:
+    """A conversation leg that says exactly what a test wants said."""
+
+    text: str
+
+    @property
+    def name(self) -> str:
+        return "scripted"
+
+    def reply(self, request: Any, user_text: str) -> str:
+        return self.text
+
+
+def _scripted_arm(settings: VoiceSettings, reply: str) -> Any:
+    arm = build_composed_arm(settings)
+    return replace(arm, model=_ScriptedModel(reply))
 
 
 @pytest.fixture
@@ -89,6 +110,57 @@ def test_health_names_the_grounding_checker_and_says_it_does_not_gate(client: An
     # second is false and the counters go nowhere. Saying so is the point of the field.
     assert payload["telemetry_configured"] is False
     assert payload["telemetry_exporting"] is False
+
+
+def test_an_ungrounded_reply_reaches_the_client_over_the_wire(settings: VoiceSettings) -> None:
+    """End to end on the socket: the audio goes out, and the verdict follows it.
+
+    The advisory half of motet#10 as a client sees it — not as a unit test of the checker.
+    """
+    app = create_app(settings, arm=_scripted_arm(settings, "Sequoia led the 900 million round."))
+    with TestClient(app) as client:
+        with _authenticated(client, context={"notes": "Helion raised 425 million."}) as socket:
+            socket.send_text(json.dumps({"type": "text", "text": "who led it"}))
+            events = [json.loads(socket.receive_text()) for _ in range(4)]
+
+    assert events[2]["type"] == "audio_chunk", "it was spoken; the check did not gate it"
+    verdict = events[3]
+    assert verdict["type"] == "grounding"
+    assert verdict["grounded"] is False
+    assert verdict["checker"] == "specifics"
+    assert {item["kind"] for item in verdict["unsupported"]} == {"name", "number"}
+    assert verdict["reply"] == "Sequoia led the 900 million round."
+
+
+def test_the_closed_frame_is_the_last_one_a_client_sees(settings: VoiceSettings) -> None:
+    """A client tears down on ``closed``, so a verdict queued after it is a verdict lost."""
+    app = create_app(settings, arm=_scripted_arm(settings, "Sequoia led the 900 million round."))
+    with TestClient(app) as client:
+        with _authenticated(client) as socket:
+            socket.send_text(json.dumps({"type": "text", "text": "who led it"}))
+            for _ in range(3):
+                socket.receive_text()
+            socket.send_text(json.dumps({"type": "close"}))
+            tail = [json.loads(socket.receive_text()) for _ in range(2)]
+
+    assert [event["type"] for event in tail] == ["grounding", "session_state"]
+    assert tail[1]["state"] == "closed"
+
+
+def test_abandoning_the_outbox_releases_join_rather_than_waiting_out_the_flush() -> None:
+    """Without this, every disconnect with a backlog costs the full flush timeout."""
+
+    async def scenario() -> None:
+        outbox: asyncio.Queue[Any] = asyncio.Queue()
+        for _ in range(3):
+            outbox.put_nowait(object())
+        _abandon(outbox)
+        assert outbox.empty()
+        # `join()` returning at all is the assertion: it blocks until every queued item
+        # has been marked done, which is precisely what `_abandon` is for.
+        await asyncio.wait_for(outbox.join(), timeout=1)
+
+    asyncio.run(scenario())
 
 
 def test_start_session_can_require_a_bearer(settings: VoiceSettings) -> None:

@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import motet_obs
-from motet_obs import ObsStatus, logger
+from motet_obs import ObsStatus
 from opentelemetry import metrics
 
 from .grounding import GroundingVerdict
@@ -44,7 +44,6 @@ __all__ = [
     "ObsStatus",
     "configure",
     "instrument",
-    "logger",
     "record_conversational_reply",
     "shutdown",
     "status",
