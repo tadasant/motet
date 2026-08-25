@@ -33,8 +33,12 @@ from motet_inference import (
     ScriptSegment,
     SourceItem,
     Stages,
+    classify_grounding_reason,
+    collect_usage,
     estimate_duration_ms,
     join_audio,
+    record_grounding,
+    record_tts_characters,
 )
 from motet_storage import ObjectStore, episode_audio_key
 
@@ -111,9 +115,20 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
         return
 
     window = repo.news_item_window(context.conn, stored.user_id)
-    result = context.stages.integrator.integrate(
-        _as_source_item(stored), [_as_news_item(item) for item in window]
-    )
+    # Dedup is the volume stage — one completion per source item, with the whole window
+    # in the prompt — so it is where per-item cost is worth attributing and where a
+    # `cache_read=0` says the largest cost lever in the system is not engaging.
+    with collect_usage() as spend:
+        result = context.stages.integrator.integrate(
+            _as_source_item(stored), [_as_news_item(item) for item in window]
+        )
+    if spend.requests:
+        logger.info(
+            "source item %s cost %d completion(s): %s",
+            stored.id,
+            spend.requests,
+            spend.summary(),
+        )
 
     if result.merged:
         repo.merge_source_into_news_item(
@@ -262,18 +277,24 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
     stage_items = [_as_news_item(item) for item in ordered]
     stage_sources = {sid: _as_source_item(item) for sid, item in sources.items()}
 
-    script = context.stages.script_generator.generate(stage_items, stage_sources)
-    report = context.stages.grounding_validator.validate(script, stage_sources)
+    # Both stages inside one block: the question an operator asks is "what did this
+    # episode cost", and scripting and grounding it are two halves of one answer. The
+    # per-stage split is still on the metric, which is where a split belongs.
+    with collect_usage() as spend:
+        script = context.stages.script_generator.generate(stage_items, stage_sources)
+        report = context.stages.grounding_validator.validate(script, stage_sources)
+    if spend.requests:
+        # The episode id is the whole point of this line. It is what a metric must not
+        # carry and what "what did that episode cost" cannot be answered without.
+        logger.info(
+            "episode %s scripting cost %d completion(s): %s",
+            episode_id,
+            spend.requests,
+            spend.summary(),
+        )
 
     grounded = _drop_ungrounded(script, report)
-    dropped = _claim_count(script) - _claim_count(grounded)
-    if dropped:
-        logger.warning(
-            "grounding validation rejected %d of %d claims in episode %s",
-            dropped,
-            _claim_count(script),
-            episode_id,
-        )
+    _record_grounding_outcome(episode_id, script, grounded, report)
     if not grounded.segments:
         raise PermanentFailure(
             "no claim in this episode survived grounding validation: "
@@ -310,6 +331,50 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
         len(specs),
         sum(len(spec.claims) for spec in specs),
     )
+
+
+def _record_grounding_outcome(
+    episode_id: str, script: Script, grounded: Script, report: GroundingReport
+) -> None:
+    """Say what the gate rejected, and why, one claim at a time.
+
+    **The count was never the interesting half (motet#24).** "9 of 34 claims were rejected"
+    tells you a rate and nothing about the nine, and there is no recovering them afterwards:
+    the pre-grounding script is not stored, a dropped claim leaves no row anywhere, and
+    re-running the stage produces a different script. So the only moment the detail exists
+    is this one, and it used to be spent on a single aggregate line.
+
+    The per-claim reason went to waste in exactly the case worth understanding, too. It was
+    rendered only on the *total* failure branch below — so the detail survived precisely
+    when the episode was dead, and was discarded on the normal partial-drop path.
+
+    A log line per failure rather than a metric label per failure: the model's reason is a
+    sentence, and a sentence as a label mints a time series per claim. The *kind* goes on
+    the counter; the sentence and the claim text go here, next to the episode id that makes
+    them attributable.
+    """
+    total = _claim_count(script)
+    kept = _claim_count(grounded)
+    kinds = [classify_grounding_reason(failure.reason) for failure in report.failures]
+    record_grounding(kept=kept, dropped=kinds)
+    if not report.failures:
+        logger.info("episode %s: all %d claims passed grounding validation", episode_id, total)
+        return
+    logger.warning(
+        "grounding validation rejected %d of %d claims in episode %s",
+        total - kept,
+        total,
+        episode_id,
+    )
+    for failure, kind in zip(report.failures, kinds, strict=True):
+        logger.warning(
+            "episode %s: grounding rejected a claim on news item %s (%s): %s — claim was %r",
+            episode_id,
+            failure.news_item_id,
+            kind,
+            failure.reason,
+            failure.claim_text[:280],
+        )
 
 
 def _drop_ungrounded(script: Script, report: GroundingReport) -> Script:
@@ -397,10 +462,16 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
         raise PermanentFailure("episode has no segments to synthesize")
 
     rendered: list[Audio] = []
+    # Cartesia bills per character and the adapter sends the string it is handed
+    # unchanged, so counting here counts what is billed. Without it an episode's audio
+    # cost was recoverable only from a vendor dashboard, by timestamp.
+    characters = 0
     for segment in episode.segments:
         if not segment.text.strip():
             raise PermanentFailure(f"segment {segment.id} has no text to speak")
+        characters += len(segment.text)
         rendered.append(context.stages.speech_synthesizer.synthesize(segment.text))
+    record_tts_characters(characters)
 
     audio = join_audio(rendered)
     extension = _EXTENSIONS.get(audio.media_type)
@@ -432,11 +503,12 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
         duration_ms=total_ms,
     )
     logger.info(
-        "episode %s published: %d segments, %d ms, %d bytes at %s",
+        "episode %s published: %d segments, %d ms, %d bytes, %d characters synthesized at %s",
         episode_id,
         len(rendered),
         total_ms,
         len(audio.data),
+        characters,
         key,
     )
 

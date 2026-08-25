@@ -4,6 +4,14 @@ Import stages through :func:`get_stages` rather than constructing an implementat
 directly — that is what keeps invariant 7 true.
 """
 
+from .accounting import (
+    Ledger,
+    classify_grounding_reason,
+    collect_usage,
+    describe_usage,
+    record_grounding,
+    record_tts_characters,
+)
 from .audio import (
     MPEG_MEDIA_TYPE,
     WAV_MEDIA_TYPE,
@@ -44,6 +52,7 @@ __all__ = [
     "GroundingValidator",
     "IntegrationResult",
     "Integrator",
+    "Ledger",
     "MODE_ENV_VAR",
     "MPEG_MEDIA_TYPE",
     "NewsItem",
@@ -55,6 +64,11 @@ __all__ = [
     "SpeechSynthesizer",
     "Stages",
     "WAV_MEDIA_TYPE",
+    "classify_grounding_reason",
+    "collect_usage",
+    "describe_usage",
+    "record_grounding",
+    "record_tts_characters",
     "build_briefing",
     "current_mode",
     "estimate_duration_ms",

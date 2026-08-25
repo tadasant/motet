@@ -24,6 +24,7 @@ import secrets
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
+from .accounting import record_script_drop, record_usage
 from .cartesia import CartesiaSpeechSynthesizer
 from .interfaces import IntegrationResult
 from .llm import LlmClient, LlmStage, build_client, build_request
@@ -97,6 +98,9 @@ class ClaudeIntegrator:
                 response_format=INTEGRATE_SCHEMA,
             )
         )
+        # Dedup is the volume stage and the one that passes the whole window in-prompt, so
+        # it is where a missed cache breakpoint costs the most and shows up the soonest.
+        record_usage(self.stage, response)
         data = parse_json_object(response, what="dedup/integrate")
         decision = require_str(data, "decision", what="dedup/integrate")
         title = require_str(data, "title", what="dedup/integrate").strip()
@@ -164,6 +168,7 @@ class ClaudeScriptGenerator:
                 response_format=SCRIPT_SCHEMA,
             )
         )
+        record_usage(self.stage, response)
         data = parse_json_object(response, what="script generation")
         known = {item.id: item for item in news_items}
 
@@ -174,6 +179,7 @@ class ClaudeScriptGenerator:
             news_item = known.get(news_item_id)
             if news_item is None:
                 logger.warning("script names unknown news item %r; dropping segment", news_item_id)
+                record_script_drop("unknown_news_item")
                 continue
             if news_item_id in spoken_for:
                 # An episode holds at most one segment per news item — the database says so
@@ -184,6 +190,7 @@ class ClaudeScriptGenerator:
                     "script returned a second segment for %s; keeping only the first",
                     news_item_id,
                 )
+                record_script_drop("duplicate_segment")
                 continue
             claims = self._claims_for(raw_segment, news_item, sources)
             if not claims:
@@ -191,6 +198,7 @@ class ClaudeScriptGenerator:
                     "every claim in the segment for %s was unlocatable; dropping segment",
                     news_item_id,
                 )
+                record_script_drop("empty_segment")
                 continue
             spoken_for.add(news_item_id)
             segments.append(ScriptSegment(news_item_id=news_item_id, claims=claims))
@@ -213,10 +221,12 @@ class ClaudeScriptGenerator:
                     news_item.id,
                     source_item_id,
                 )
+                record_script_drop("foreign_source")
                 continue
             source = sources.get(source_item_id)
             if source is None:
                 logger.warning("claim cites unavailable source %r; dropping claim", source_item_id)
+                record_script_drop("unavailable_source")
                 continue
             span = locate_quote(source.text, quote)
             if span is None:
@@ -225,8 +235,10 @@ class ClaudeScriptGenerator:
                     news_item.id,
                     source_item_id,
                 )
+                record_script_drop("quote_not_found")
                 continue
             if not text:
+                record_script_drop("empty_text")
                 continue
             claims.append(
                 Claim(
@@ -288,6 +300,7 @@ class ClaudeGroundingValidator:
                 response_format=GROUNDING_SCHEMA,
             )
         )
+        record_usage(self.stage, response)
         data = parse_json_object(response, what="grounding validation")
         verdicts: dict[int, tuple[bool, str]] = {}
         for raw in _list_of_objects(data.get("verdicts"), what="grounding verdicts"):

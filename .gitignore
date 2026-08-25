@@ -28,6 +28,11 @@ node_modules/
 web/dist/
 *.tsbuildinfo
 
+# Where the local object-store backend writes audio when nothing else is configured
+# (`motet_storage.store.DEFAULT_LOCAL_DIR`). `MOTET_STORAGE_BACKEND` defaults to `local`,
+# so anyone who runs the API or a worker in this checkout produces one.
+.motet-storage/
+
 # Environment — never commit real values. `.env.example` is the documented shape.
 .env
 .env.*
