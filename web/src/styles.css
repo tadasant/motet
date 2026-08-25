@@ -46,3 +46,20 @@ label { font-weight: 600; font-size: .9rem; }
 .claims th { text-align: left; font-size: .8rem; color: var(--muted); text-transform: uppercase; }
 .claims th, .claims td { border-bottom: 1px solid var(--line); padding: .5rem; vertical-align: top; width: 50%; }
 .claims blockquote { margin: 0 0 .25rem; padding-left: .6rem; border-left: 3px solid var(--line); color: #333; }
+
+/* The processing list. Boxed and set apart from the backlog below it because it answers a
+   different question — "where did what I just pasted go" rather than "what is there to
+   listen to" — and because a queued item that reads as a backlog entry is exactly the
+   confusion this whole surface exists to remove. */
+.processing { border: 1px solid var(--line); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1.25rem; }
+.processing h3 { margin-top: 0; }
+.processing .items li:first-child { border-top: none; }
+.badge { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .5rem; white-space: nowrap; }
+.badge.failed { color: var(--bad); border-color: var(--bad); }
+.badge.integrated { color: var(--good); border-color: var(--good); }
+/* The reason, monospaced: it is a vendor error string, and it is read to be copied. */
+.reason { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; background: #f6f6f6; border-left: 3px solid var(--line); padding: .4rem .6rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
+.ingestion.failed .reason { border-left-color: var(--bad); }
+
+.tab-count { margin-left: .35rem; font-size: .75rem; border-radius: 999px; border: 1px solid var(--line); padding: 0 .35rem; }
+.tab-count.failed { color: var(--bad); border-color: var(--bad); }

@@ -70,6 +70,59 @@ class SourceItemResponse(BaseModel):
     )
 
 
+class IngestionItemResponse(BaseModel):
+    """One ingested item that has not settled into the backlog yet — and why not.
+
+    This exists because "pending" used to be a thing the system knew and never said. A
+    paste was accepted, queued, retried, and eventually abandoned entirely inside the
+    worker, and the only surface that could have shown any of it — the backlog — lists
+    news items, which is precisely what a failed item never becomes.
+
+    ``attempts`` and ``next_attempt_at`` are here so that *retrying* and *stuck* are
+    distinguishable. They are not the same thing to a person standing there waiting, and
+    a spinner that means both is a spinner that means neither.
+
+    **``last_error`` is the exception the stage raised, unedited, and that is the decision
+    rather than an oversight.** It is a new egress: an httpx error names the base URL it
+    dialled, a psycopg one names the database host. The caller is the deployment's single
+    owner behind ``require_caller`` — the same person who reads the obs stack, where the
+    identical string already goes — so there is no reader here who could not already see
+    it. Mapping unknown exceptions to a generic string would buy nothing from that reader
+    and would hand them back the "Failed", with no reason, that this whole surface exists
+    to replace. Revisit it when there is more than one account (Phase 3): at that point the
+    reader and the operator stop being the same person, and this becomes a real leak.
+    """
+
+    id: str
+    title: str
+    state: str = Field(
+        description=(
+            "'pending' while the queue still owns it, 'failed' once the retries ran out, "
+            "'integrated' for the few minutes after it succeeded."
+        )
+    )
+    attempts: int = Field(
+        description="Processing attempts spent so far. 0 means it has not been picked up yet."
+    )
+    max_attempts: int = Field(
+        description="Attempts before the pipeline gives up and the state becomes 'failed'."
+    )
+    next_attempt_at: datetime | None = Field(
+        description=(
+            "When the next attempt is due. Null means there is nothing scheduled: it is "
+            "either being processed right now, or it is finished — see 'state'."
+        )
+    )
+    last_error: str | None = Field(
+        description=(
+            "What the most recent attempt said, verbatim. Present while retrying as well "
+            "as after failing, because the reason is the thing that says whether to wait, "
+            "re-paste, or report it."
+        )
+    )
+    created_at: datetime
+
+
 class SourceSpanModel(BaseModel):
     """A half-open character range in a source item — what makes a claim checkable."""
 

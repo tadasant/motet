@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   ApiError,
   type Episode,
+  type IngestionItem,
   type NewsItem,
   type SessionInfo,
   api,
@@ -40,6 +41,11 @@ import { Sources } from './screens/Sources'
 
 type Tab = 'paste' | 'backlog' | 'episode' | 'sources'
 
+// How often the backlog re-asks while an item is still being processed. Short enough that
+// a paste which integrates in seconds is seen to integrate, and it only runs while
+// something is pending.
+const POLL_MS = 3_000
+
 const TABS: { id: Tab; label: string }[] = [
   { id: 'paste', label: 'Paste in' },
   { id: 'backlog', label: 'Backlog' },
@@ -50,6 +56,13 @@ const TABS: { id: Tab; label: string }[] = [
 export default function App() {
   const [tab, setTab] = useState<Tab>('paste')
   const [items, setItems] = useState<NewsItem[]>([])
+  // What has been pasted and is not a news item yet. Held here rather than in the backlog
+  // screen because the tab strip labels it too: the person who needs to see it is on the
+  // *paste* screen, having just pasted, and would otherwise have no reason to go looking.
+  const [ingestion, setIngestion] = useState<IngestionItem[]>([])
+  // Whether the last attempt to ask actually got an answer. Kept apart from an empty list
+  // because "nothing is being processed" and "I could not find out" are different claims.
+  const [ingestionUnavailable, setIngestionUnavailable] = useState(false)
   const [episode, setEpisode] = useState<Episode | null>(null)
   const [token, setTokenState] = useState(getToken())
   const [error, setError] = useState('')
@@ -75,10 +88,25 @@ export default function App() {
   }, [])
 
   const refresh = useCallback(() => {
-    api
-      .newsItems()
-      .then((next) => {
-        setItems(next)
+    // Both together: the backlog and the queue in front of it are two halves of one
+    // answer, and fetching them from two places is how they end up disagreeing about an
+    // item that integrated between the two requests.
+    //
+    // The ingestion half is best-effort, and the asymmetry is deliberate. It is the
+    // *secondary* list, and the API it comes from is a separate service that rolls on its
+    // own schedule — so an SPA that has this route while the API it is talking to does not
+    // would, without the catch, answer "where is my backlog" with a 404 about something
+    // else entirely.
+    //
+    // Failing softly is NOT the same as keeping what was on screen. A stale "Queued" that
+    // never resolves is the disappearance this panel exists to prevent, wearing a
+    // different hat — so a failure clears the list and says so, which also stops the poll
+    // below rather than hammering a broken route every three seconds.
+    Promise.all([api.newsItems(), api.ingestion().catch(() => null)])
+      .then(([nextItems, nextIngestion]) => {
+        setItems(nextItems)
+        setIngestion(nextIngestion ?? [])
+        setIngestionUnavailable(nextIngestion === null)
         setError('')
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
@@ -91,6 +119,22 @@ export default function App() {
   useEffect(() => {
     if (!callback && (token || unlocked)) refresh()
   }, [callback, refresh, token, unlocked])
+
+  // Poll while — and only while — something is actually in flight. Ingestion takes
+  // seconds, so an item that resolves has to resolve *on screen*: a status that is only
+  // correct until you look away is the same disappearance in slow motion. It stops on its
+  // own the moment nothing is pending, so an idle tab makes no requests.
+  const waiting = ingestion.some((item) => item.state === 'pending')
+  // A stuck item gets a louder count than a busy one. "3 in flight" and "3, one of which
+  // is never coming back" want different reactions. Settled items are not counted at all:
+  // a badge that stays at 3 for ten minutes after everything landed means nothing.
+  const anyFailed = ingestion.some((item) => item.state === 'failed')
+  const unsettled = ingestion.filter((item) => item.state !== 'integrated').length
+  useEffect(() => {
+    if (!waiting || callback || !(token || unlocked)) return
+    const timer = window.setInterval(refresh, POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [waiting, callback, refresh, token, unlocked])
 
   // Take the code out of the address bar as soon as it has been read into state. A reload
   // would otherwise re-POST a code the API has already consumed and report a flow that
@@ -164,6 +208,9 @@ export default function App() {
                 onClick={() => setTab(entry.id)}
               >
                 {entry.label}
+                {entry.id === 'backlog' && unsettled > 0 && (
+                  <span className={`tab-count${anyFailed ? ' failed' : ''}`}>{unsettled}</span>
+                )}
               </button>
             ))}
           </nav>
@@ -204,7 +251,13 @@ export default function App() {
         <>
           {tab === 'paste' && <PasteIn onIngested={refresh} />}
           {tab === 'backlog' && (
-            <Backlog items={items} onChanged={refresh} onOpenEpisode={openEpisode} />
+            <Backlog
+              items={items}
+              ingestion={ingestion}
+              ingestionUnavailable={ingestionUnavailable}
+              onChanged={refresh}
+              onOpenEpisode={openEpisode}
+            />
           )}
           {tab === 'episode' &&
             (episode ? (

@@ -25,6 +25,7 @@ from .ids import claim_id, episode_id, feed_token, news_item_id, segment_id, sou
 from .models import (
     EpisodeKind,
     EpisodeState,
+    IngestionStatus,
     SourceItemState,
     StoredClaim,
     StoredEpisode,
@@ -51,6 +52,21 @@ WINDOW_DAYS: Final = 3
 #: 4.5k tokens (which is why there is no vector store); this bounds the pathological case
 #: where a long silence is followed by a large paste.
 WINDOW_MAX_ITEMS: Final = 200
+
+#: How long an item that made it through stays on the ingestion list after it succeeded.
+#:
+#: It has a news item by then, so the backlog below already shows it and this row is
+#: redundant — but it is redundant in the one way that matters: a paste that vanishes from
+#: one list and appears in another, under a title dedup may well have rewritten, is not
+#: obviously the same paste. Leaving the "done" line up for a few minutes is what closes
+#: the loop for whoever is standing there watching it.
+INTEGRATED_GRACE = timedelta(minutes=10)
+
+#: A ceiling on the ingestion list, because the SPA polls it every few seconds while
+#: anything is pending and each row can carry two kilobytes of error text. One Gmail poll
+#: creates up to ``POLL_PAGE_SIZE`` source items at a time, so "however many are in flight"
+#: is not a number this route may be handed. Well above any hand-pasted backlog.
+INGESTION_MAX_ITEMS: Final = 200
 
 
 def connect(database_url: str) -> psycopg.Connection[Any]:
@@ -79,6 +95,78 @@ def insert_source_item(
         (source_item_id(), user_id, source_id, title, text),
     )
     return _source_item(row)
+
+
+def list_ingestion(
+    conn: psycopg.Connection[Any], user_id: str, *, now: datetime | None = None
+) -> list[IngestionStatus]:
+    """Everything this user has ingested that is not settled in the backlog yet.
+
+    Pending, failed, and — for :data:`INTEGRATED_GRACE` — just-succeeded items, newest
+    first. This is the query behind "did my paste land?", and the reason it exists at all
+    is that until it did the answer was no.
+
+    The join is a ``LEFT JOIN LATERAL`` onto the *newest* integrate job for each item
+    rather than an aggregate: a source item has one such job in every normal case, and
+    ``ORDER BY id DESC LIMIT 1`` is the honest answer if a re-enqueue ever gives it two.
+    Left, not inner, because an item whose job row is somehow missing is precisely the
+    case worth showing — it is the one that will never be processed at all.
+
+    ``next_attempt_at`` is gated on the *source item* being pending as well as on the job
+    being ready, so that the two rows disagreeing cannot produce "failed, and trying again
+    in 30 seconds". The queue leaves them consistent; a stray re-enqueue need not, and the
+    answer given to a caller has to be coherent either way.
+
+    Bounded by :data:`INGESTION_MAX_ITEMS`. A route the SPA polls every few seconds must
+    not be able to return an unbounded list of rows each carrying up to two kilobytes of
+    error text — one Gmail poll can create hundreds of source items at once. Newest first,
+    so what a bound drops is the oldest end.
+
+    ``now`` is a test seam. It is resolved *in* the statement rather than by asking the
+    database for its clock first, because the extra round trip bought nothing: the cutoff
+    is only ever compared against `integrated_at` values in this same query.
+    """
+    rows = _all(
+        conn,
+        """
+        SELECT si.id,
+               si.title,
+               si.state,
+               si.created_at,
+               COALESCE(si.last_error, job.last_error) AS last_error,
+               COALESCE(job.attempts, 0)              AS attempts,
+               CASE WHEN si.state = 'pending' AND job.state = 'ready'
+                    THEN job.run_at END AS next_attempt_at
+        FROM source_items si
+        LEFT JOIN LATERAL (
+            SELECT attempts, state, run_at, last_error
+            FROM jobs
+            WHERE queue = 'integrate' AND payload ->> 'source_item_id' = si.id
+            ORDER BY id DESC
+            LIMIT 1
+        ) job ON true
+        WHERE si.user_id = %s
+          AND (
+            si.state <> 'integrated'
+            OR si.integrated_at > COALESCE(%s, now()) - make_interval(secs => %s)
+          )
+        ORDER BY si.created_at DESC, si.id DESC
+        LIMIT %s
+        """,
+        (user_id, now, INTEGRATED_GRACE.total_seconds(), INGESTION_MAX_ITEMS),
+    )
+    return [
+        IngestionStatus(
+            id=row["id"],
+            title=row["title"],
+            state=SourceItemState(row["state"]),
+            attempts=row["attempts"],
+            next_attempt_at=row["next_attempt_at"],
+            last_error=row["last_error"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
 
 
 def get_source_item(conn: psycopg.Connection[Any], item_id: str) -> StoredSourceItem | None:

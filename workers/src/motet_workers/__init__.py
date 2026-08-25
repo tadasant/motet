@@ -20,11 +20,12 @@ from .handlers import (
     enqueue_smart_episode,
 )
 from .ingest import enqueue_source_poll, poll_key
-from .jobs import Job, enqueue, queue_depths
+from .jobs import DEFAULT_MAX_ATTEMPTS, Job, enqueue, queue_depths
 from .loop import drain
 from .queues import Queue
 
 __all__ = [
+    "DEFAULT_MAX_ATTEMPTS",
     "Context",
     "Job",
     "PermanentFailure",

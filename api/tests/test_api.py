@@ -27,7 +27,8 @@ from motet_api.obs import (
     OTLP_TOKEN_ENV,
 )
 from motet_inference.llm import LlmConfigError
-from motet_workers import Queue, drain
+from motet_workers import DEFAULT_MAX_ATTEMPTS, Queue, drain, jobs
+from motet_workers.handlers import source_item_failed
 
 TOKEN = "test-api-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -273,6 +274,68 @@ class TestEndToEnd:
         listened = api.post(f"/v1/episodes/{episode_id}/listened", headers=AUTH).json()
         assert listened["news_items_marked_read"] == len(episode["segments"])
         assert all(item["read"] for item in api.get("/v1/news-items", headers=AUTH).json())
+
+    def test_a_paste_is_visible_while_it_is_pending_and_after_it_lands(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        """The gap this route closes: between accepting a paste and showing a news item.
+
+        Before it, that gap was invisible from every surface the SPA has — the backlog
+        lists news items, and an item that fails ingestion never becomes one. So a paste
+        that failed was accepted, retried, abandoned, and then existed only as rows nobody
+        could see.
+        """
+        created = api.post(
+            "/v1/sources/paste",
+            json={"title": NEWSLETTER[0], "text": NEWSLETTER[1]},
+            headers=AUTH,
+        ).json()
+
+        (pending,) = api.get("/v1/ingestion", headers=AUTH).json()
+        assert pending["id"] == created["id"]
+        assert pending["state"] == "pending"
+        assert pending["attempts"] == 0
+        assert pending["last_error"] is None
+        # Reported rather than restated: "attempt 3 of 5" is only useful if the 5 is the
+        # number the queue is actually counting to.
+        assert pending["max_attempts"] == DEFAULT_MAX_ATTEMPTS
+
+        drain(Queue.INTEGRATE, _migrated)
+
+        (done,) = api.get("/v1/ingestion", headers=AUTH).json()
+        assert done["state"] == "integrated"
+        assert len(api.get("/v1/news-items", headers=AUTH).json()) == 1
+
+    def test_an_item_the_pipeline_gave_up_on_reports_why(
+        self, api: TestClient, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """A failure has to arrive with its reason attached.
+
+        "Failed" on its own sends the reader to an agent or to the person who built this;
+        the vendor's own words let them decide whether to wait, re-paste, or report it.
+        """
+        api.post(
+            "/v1/sources/paste",
+            json={"title": NEWSLETTER[0], "text": NEWSLETTER[1]},
+            headers=AUTH,
+        )
+        # The pair the runner writes when a stage stops being retried — the real path,
+        # not a shape invented for the test. See `motet_workers.loop._run_job`.
+        error = "ReasoningNotAppliedError: dedup returned no reasoning evidence"
+        job = jobs.claim(db, Queue.INTEGRATE)
+        assert job is not None
+        assert jobs.fail(db, job, error, max_attempts=0) is False
+        source_item_failed(db, job.payload, error)
+        db.commit()
+
+        (failed,) = api.get("/v1/ingestion", headers=AUTH).json()
+        assert failed["state"] == "failed"
+        assert "ReasoningNotAppliedError" in failed["last_error"]
+        assert failed["attempts"] == 1
+        assert failed["next_attempt_at"] is None
+        # And it is still nowhere in the backlog, which is the reason it needed somewhere
+        # else to be.
+        assert api.get("/v1/news-items", headers=AUTH).json() == []
 
     def test_read_state_round_trips(self, api: TestClient, _migrated: str) -> None:
         api.post(

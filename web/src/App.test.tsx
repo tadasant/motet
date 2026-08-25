@@ -3,7 +3,14 @@ import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
-import type { Episode, HealthResponse, NewsItem, SessionInfo, Source } from './api/client'
+import type {
+  Episode,
+  HealthResponse,
+  IngestionItem,
+  NewsItem,
+  SessionInfo,
+  Source,
+} from './api/client'
 // Imported directly for the connect tests: handing the browser to Google is the one line
 // of that flow jsdom cannot execute, and the screen takes it as a prop for that reason.
 import { SignIn } from './screens/SignIn'
@@ -15,6 +22,18 @@ const NEWS_ITEM: NewsItem = {
   summary: 'Acme announced the round on Tuesday.',
   source_item_ids: ['si_1', 'si_2'],
   read: false,
+  created_at: '2026-08-24T00:00:00Z',
+}
+
+/** A paste the queue has accepted and not yet picked up. */
+const QUEUED: IngestionItem = {
+  id: 'si_9',
+  title: 'Newsletter I just pasted',
+  state: 'pending',
+  attempts: 0,
+  max_attempts: 5,
+  next_attempt_at: '2026-08-24T00:00:05Z',
+  last_error: null,
   created_at: '2026-08-24T00:00:00Z',
 }
 
@@ -74,11 +93,17 @@ function mockApi(overrides: Record<string, unknown> = {}) {
   const calls: { url: string; method: string; body: unknown }[] = []
   const routes: Record<string, unknown> = {
     '/v1/news-items': [NEWS_ITEM],
+    '/v1/ingestion': [],
     '/v1/feed': { url: 'https://example.test/feed.xml?token=secret', token: 'secret' },
     '/v1/episodes': EPISODE,
     '/v1/sources': [GMAIL_SOURCE],
     '/v1/auth/session': SESSION,
     ...overrides,
+  }
+  // An override of `undefined` removes the route rather than serving undefined for it,
+  // which is how a test says "this API does not have that endpoint" and gets a real 404.
+  for (const [route, value] of Object.entries(routes)) {
+    if (value === undefined) delete routes[route]
   }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -166,6 +191,118 @@ describe('App', () => {
       const read = calls.find((call) => call.url.includes('/read'))
       expect(read?.body).toEqual({ read: true })
     })
+  })
+
+  it('shows a pasted item that is still queued, rather than losing it', async () => {
+    // The defect this replaces: the paste was accepted, the confirmation said "pending",
+    // and then there was nowhere at all it could be seen again.
+    mockApi({ '/v1/ingestion': [QUEUED] })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+
+    expect(await screen.findByRole('heading', { name: 'Processing' })).toBeDefined()
+    expect(screen.getByText('Newsletter I just pasted')).toBeDefined()
+    expect(screen.getByText('Queued')).toBeDefined()
+  })
+
+  it('tells a retrying item apart from a stuck one, and says why for both', async () => {
+    mockApi({
+      '/v1/ingestion': [
+        {
+          ...QUEUED,
+          id: 'si_retry',
+          title: 'Still going',
+          attempts: 3,
+          last_error: 'ReasoningNotAppliedError: no reasoning evidence in the response',
+        },
+        {
+          ...QUEUED,
+          id: 'si_dead',
+          title: 'Gave up',
+          state: 'failed',
+          attempts: 5,
+          next_attempt_at: null,
+          last_error: 'OpenRouter refused: 402 insufficient credits',
+        },
+      ],
+    })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+
+    await screen.findByRole('heading', { name: 'Processing' })
+    // An item on its fourth attempt and an item nobody will ever try again are not the
+    // same thing to someone standing there waiting, and one spinner for both says neither.
+    expect(screen.getByText('Retrying')).toBeDefined()
+    expect(screen.getByText('Failed')).toBeDefined()
+    expect(screen.getByText(/Attempt 3 of 5 failed/)).toBeDefined()
+    expect(screen.getByText(/Gave up after 5 attempts/)).toBeDefined()
+    // Counted as what each of them is, rather than rolled into one "in flight" number.
+    expect(screen.getByText('1 on the way in, 1 stuck.')).toBeDefined()
+    // And the reason, verbatim — enough to decide whether to wait, re-paste, or report it.
+    expect(screen.getByText(/ReasoningNotAppliedError/)).toBeDefined()
+    expect(screen.getByText(/402 insufficient credits/)).toBeDefined()
+  })
+
+  it('keeps the backlog when the ingestion route cannot answer, and says so', async () => {
+    // The two lists come from one API but the SPA and the API are separate services. A
+    // failure of the secondary panel must not take the primary list down with it — and
+    // must not be reported as "nothing is being processed", which is a different claim.
+    mockApi({ '/v1/ingestion': undefined })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+
+    expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
+    expect(screen.getByText(/Could not check what is still being processed/)).toBeDefined()
+  })
+
+  it('polls while something is pending, and stops once nothing is', async () => {
+    // The riskiest line in the change: a poll that never starts leaves the panel stale,
+    // and one that never stops hammers the API from an idle tab forever.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const calls = mockApi({ '/v1/ingestion': [QUEUED] })
+      render(<App />)
+      await screen.findByRole('heading', { name: 'Paste in' })
+      const before = calls.filter((call) => call.url.includes('/v1/ingestion')).length
+
+      await vi.advanceTimersByTimeAsync(7_000)
+      const polled = calls.filter((call) => call.url.includes('/v1/ingestion')).length
+      expect(polled).toBeGreaterThan(before)
+
+      // Nothing pending any more: the interval must tear itself down rather than run on.
+      calls.length = 0
+      vi.mocked(fetch).mockClear()
+      mockApi({ '/v1/ingestion': [{ ...QUEUED, state: 'integrated' }] })
+      await vi.advanceTimersByTimeAsync(4_000)
+      const settled = calls.filter((call) => call.url.includes('/v1/ingestion')).length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(calls.filter((call) => call.url.includes('/v1/ingestion')).length).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('counts only what is unsettled on the tab', async () => {
+    // A badge stuck at 3 for the ten minutes after everything landed means nothing.
+    mockApi({
+      '/v1/ingestion': [
+        { ...QUEUED, id: 'si_done', state: 'integrated' },
+        { ...QUEUED, id: 'si_open' },
+      ],
+    })
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
+  })
+
+  it('counts what is in flight on the tab, so it is visible from the paste screen', async () => {
+    mockApi({ '/v1/ingestion': [QUEUED] })
+    render(<App />)
+
+    // Still on Paste in: someone who has just pasted has no reason to go to the backlog
+    // unless something there tells them to.
+    await screen.findByRole('heading', { name: 'Paste in' })
+    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
   })
 
   it('creates an episode from the backlog and opens it', async () => {

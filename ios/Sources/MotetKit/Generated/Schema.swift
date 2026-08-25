@@ -298,6 +298,68 @@ public struct HighlightResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// One ingested item that has not settled into the backlog yet — and why not.
+///
+/// This exists because "pending" used to be a thing the system knew and never said. A
+/// paste was accepted, queued, retried, and eventually abandoned entirely inside the
+/// worker, and the only surface that could have shown any of it — the backlog — lists
+/// news items, which is precisely what a failed item never becomes.
+///
+/// ``attempts`` and ``next_attempt_at`` are here so that *retrying* and *stuck* are
+/// distinguishable. They are not the same thing to a person standing there waiting, and
+/// a spinner that means both is a spinner that means neither.
+///
+/// **``last_error`` is the exception the stage raised, unedited, and that is the decision
+/// rather than an oversight.** It is a new egress: an httpx error names the base URL it
+/// dialled, a psycopg one names the database host. The caller is the deployment's single
+/// owner behind ``require_caller`` — the same person who reads the obs stack, where the
+/// identical string already goes — so there is no reader here who could not already see
+/// it. Mapping unknown exceptions to a generic string would buy nothing from that reader
+/// and would hand them back the "Failed", with no reason, that this whole surface exists
+/// to replace. Revisit it when there is more than one account (Phase 3): at that point the
+/// reader and the operator stop being the same person, and this becomes a real leak.
+public struct IngestionItemResponse: Codable, Hashable, Sendable {
+    public var attempts: Int
+    public var createdAt: Date
+    public var id: String
+    public var lastError: String?
+    public var maxAttempts: Int
+    public var nextAttemptAt: Date?
+    public var state: String
+    public var title: String
+
+    public init(
+        attempts: Int,
+        createdAt: Date,
+        id: String,
+        lastError: String? = nil,
+        maxAttempts: Int,
+        nextAttemptAt: Date? = nil,
+        state: String,
+        title: String
+    ) {
+        self.attempts = attempts
+        self.createdAt = createdAt
+        self.id = id
+        self.lastError = lastError
+        self.maxAttempts = maxAttempts
+        self.nextAttemptAt = nextAttemptAt
+        self.state = state
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempts
+        case createdAt = "created_at"
+        case id
+        case lastError = "last_error"
+        case maxAttempts = "max_attempts"
+        case nextAttemptAt = "next_attempt_at"
+        case state
+        case title
+    }
+}
+
 /// How far into an episode the listener has got.
 ///
 /// Invariant 4: we own playback position, so this is a *report* from a client that we
@@ -830,6 +892,11 @@ public enum MotetEndpoints {
     /// `DELETE /v1/highlights/{highlight_id}` — Delete Highlight
     public static func deleteHighlight(highlightId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "DELETE", path: "/v1/highlights/\(MotetPathComponent(highlightId))")
+    }
+
+    /// `GET /v1/ingestion` — List Ingestion
+    public static var listIngestion: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/ingestion")
     }
 
     /// `GET /v1/news-items` — List News Items

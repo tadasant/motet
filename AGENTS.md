@@ -639,6 +639,38 @@ third backend from ever touching the route.
 document a client cached for six hours is a download that fails later for no visible
 reason.
 
+### Ingestion state is a join onto the job queue, not a column
+
+`GET /v1/ingestion` (`repo.list_ingestion`) is what stops a paste from silently
+disappearing. It reports source items that are not in the backlog yet — pending, failed,
+and for ten minutes after they succeed — each joined to its `integrate` job.
+
+**The reason a failure is happening lives on the job row, and that is why this is a join.**
+`source_items.last_error` is only written when the retries run out (`_record_failure` in
+the runner), so an item that is *still being retried* carries no error of its own. A view
+built from `source_items` alone therefore cannot tell "working on it" apart from "sitting
+there" — which is the one distinction someone waiting actually cares about. Postgres being
+the queue as well as the datastore is what makes that a join rather than a second system
+to ask, and migration 0005's partial expression index on `payload ->> 'source_item_id'` is
+what keeps it off a sequential scan of every job ever run.
+
+Three smaller things are decisions rather than implementation:
+
+- **`max_attempts` is reported, never restated.** It comes from
+  `motet_workers.jobs.DEFAULT_MAX_ATTEMPTS`, so "attempt 3 of 5" counts to the number the
+  queue is counting to. A second copy is wrong the moment one of them moves.
+- **A succeeded item lingers for `INTEGRATED_GRACE` rather than vanishing.** It has a news
+  item by then, so the row is redundant — but a paste that disappears from one list and
+  reappears in another under a title dedup rewrote is not obviously the same paste.
+- **`next_attempt_at` is gated on the source item being pending**, not only on the job
+  being ready, so two rows disagreeing cannot produce "failed, and trying again in 30
+  seconds".
+
+In the SPA it is a panel above the backlog and a count on the tab — visible from the
+*paste* screen, which is where somebody who has just pasted is. It polls only while
+something is pending, and the fetch is **best-effort**: the backlog is the primary list and
+must not go blank because the secondary one 404s.
+
 ### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
 
 `api/src/motet_api/feed.py`. RSS is Phase 1's listening surface *instead of* an in-app

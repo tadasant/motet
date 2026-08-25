@@ -64,7 +64,8 @@ export function PasteIn({ onIngested }: { onIngested: () => void }) {
       </form>
       {status.kind === 'done' && (
         <p className="ok" role="status">
-          Queued as {status.id}. It joins the backlog once the integrate worker runs.
+          Queued as {status.id}. Watch it under Backlog &rarr; Processing: it shows up
+          there while it is being worked on, and stays there with a reason if it fails.
         </p>
       )}
       {status.kind === 'error' && (

@@ -324,6 +324,74 @@ components:
       - created_at
       title: HighlightResponse
       type: object
+    IngestionItemResponse:
+      description: "One ingested item that has not settled into the backlog yet \u2014 and why not.\n\n\
+        This exists because \"pending\" used to be a thing the system knew and never said. A\npaste was\
+        \ accepted, queued, retried, and eventually abandoned entirely inside the\nworker, and the only\
+        \ surface that could have shown any of it \u2014 the backlog \u2014 lists\nnews items, which is\
+        \ precisely what a failed item never becomes.\n\n``attempts`` and ``next_attempt_at`` are here\
+        \ so that *retrying* and *stuck* are\ndistinguishable. They are not the same thing to a person\
+        \ standing there waiting, and\na spinner that means both is a spinner that means neither.\n\n\
+        **``last_error`` is the exception the stage raised, unedited, and that is the decision\nrather\
+        \ than an oversight.** It is a new egress: an httpx error names the base URL it\ndialled, a psycopg\
+        \ one names the database host. The caller is the deployment's single\nowner behind ``require_caller``\
+        \ \u2014 the same person who reads the obs stack, where the\nidentical string already goes \u2014\
+        \ so there is no reader here who could not already see\nit. Mapping unknown exceptions to a generic\
+        \ string would buy nothing from that reader\nand would hand them back the \"Failed\", with no\
+        \ reason, that this whole surface exists\nto replace. Revisit it when there is more than one account\
+        \ (Phase 3): at that point the\nreader and the operator stop being the same person, and this becomes\
+        \ a real leak."
+      properties:
+        attempts:
+          description: Processing attempts spent so far. 0 means it has not been picked up yet.
+          title: Attempts
+          type: integer
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        id:
+          title: Id
+          type: string
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: What the most recent attempt said, verbatim. Present while retrying as well as
+            after failing, because the reason is the thing that says whether to wait, re-paste, or report
+            it.
+          title: Last Error
+        max_attempts:
+          description: Attempts before the pipeline gives up and the state becomes 'failed'.
+          title: Max Attempts
+          type: integer
+        next_attempt_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: "When the next attempt is due. Null means there is nothing scheduled: it is either\
+            \ being processed right now, or it is finished \u2014 see 'state'."
+          title: Next Attempt At
+        state:
+          description: '''pending'' while the queue still owns it, ''failed'' once the retries ran out,
+            ''integrated'' for the few minutes after it succeeded.'
+          title: State
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - state
+      - attempts
+      - max_attempts
+      - next_attempt_at
+      - last_error
+      - created_at
+      title: IngestionItemResponse
+      type: object
     ListenProgressRequest:
       description: 'How far into an episode the listener has got.
 
@@ -1528,6 +1596,44 @@ paths:
       summary: Delete Highlight
       tags:
       - highlights
+  /v1/ingestion:
+    get:
+      description: "What has been ingested but is not in the backlog yet, and why.\n\nThe backlog answers\
+        \ \"what do I have to listen to\"; it cannot answer \"where did the\nthing I just pasted go\"\
+        , because an item that never integrates never becomes a news\nitem and so never appears there\
+        \ at all. That gap is the whole reason this route\nexists: content that fails is content that\
+        \ silently disappears.\n\nScoped to the ``integrate`` stage, because that is the stage a ``source_items``\
+        \ row\nexists for. A Gmail ``extract`` that fails has no row to report \u2014 the message was\n\
+        never turned into one \u2014 so it is invisible here and is tracked separately as motet#35."
+      operationId: list_ingestion_v1_ingestion_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/IngestionItemResponse'
+                title: Response List Ingestion V1 Ingestion Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Ingestion
+      tags:
+      - ingestion
   /v1/news-items:
     get:
       description: 'The backlog: deduped news items with their read state (invariant 5).'

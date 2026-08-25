@@ -27,6 +27,7 @@ export type PostResponse<P extends keyof paths> = paths[P] extends {
 
 export type HealthResponse = GetResponse<'/internal/health'>
 export type NewsItem = GetResponse<'/v1/news-items'>[number]
+export type IngestionItem = GetResponse<'/v1/ingestion'>[number]
 export type Episode = GetResponse<'/v1/episodes'>[number]
 export type EpisodeSegment = Episode['segments'][number]
 export type Claim = EpisodeSegment['claims'][number]
@@ -228,6 +229,9 @@ export const api = {
   // you are trying to revoke, so it cannot be the one on the device you no longer hold.
   logoutEverywhere: () => apiPost('/v1/auth/logout-all'),
   newsItems: () => apiGet('/v1/news-items'),
+  // What has been pasted but is not a news item yet. The backlog cannot answer that:
+  // an item that fails never becomes a news item, so it never appears there at all.
+  ingestion: () => apiGet('/v1/ingestion'),
   episodes: () => apiGet('/v1/episodes'),
   feed: () => apiGet('/v1/feed'),
   paste: (title: string, text: string) => apiPost('/v1/sources/paste', { title, text }),
