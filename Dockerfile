@@ -138,4 +138,11 @@ FROM runtime AS worker
 # which is exactly the shape a Cloud Run job's `args` takes. The runner validates the
 # name against the Queue enum and refuses anything else, so a typo is a failed job
 # rather than a silently idle one.
+#
+# `motet_workers.runner` holds the CLI and NOTHING the package imports — the drain loop
+# lives in `motet_workers.loop`. `python -m` executes this module, so a module the
+# package has already imported would be executed a second time under a second name, with
+# a second copy of its module-level state; runpy warns about exactly that, and it shipped
+# here (motet#21). `workers/tests/test_entrypoint.py` reads this line and runs it, so
+# changing the module below without moving the loop out of it fails CI.
 ENTRYPOINT ["python", "-m", "motet_workers.runner"]
