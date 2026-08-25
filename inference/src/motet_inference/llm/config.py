@@ -85,6 +85,37 @@ class ModelSpec:
     trivia: OpenRouter silently drops a ``reasoning`` field such a model cannot honour,
     so asking for effort on one is a misconfiguration that would otherwise never
     announce itself. :func:`load_config` rejects the pairing at startup instead.
+
+    ``adaptive_thinking`` records which side of a generational split the model sits on,
+    and it decides whether an unthought answer is a fault or an answer (motet#31):
+
+    * **Budget-based** (everything before Claude 4.6). ``reasoning.effort`` is converted
+      by OpenRouter into a ``thinking.budget_tokens`` figure, so the model thinks iff the
+      field survived — and a response with no reasoning in it means the field did not,
+      which is exactly what
+      :class:`~motet_inference.llm.types.ReasoningNotAppliedError` was written to catch.
+    * **Adaptive** (Claude 4.6 and later, this catalog's whole Anthropic half).
+      ``reasoning.effort`` sets Anthropic's ``output_config.effort`` and never a budget;
+      *Claude* decides per response whether the task is worth thinking about. Zero
+      reasoning tokens is then a thing the model is allowed to do, so it no longer
+      identifies a dropped field, and the guard can only produce false positives —
+      each of which costs a completion that was billed and then discarded.
+
+    ``reasoning_on_by_default`` is a **second, narrower** fact and the two are easy to
+    conflate, which is how the first draft of this got it wrong. It is not "Claude 4.6 and
+    later": ``GET /api/v1/models`` reports ``reasoning.default_enabled`` true for Sonnet 5
+    and Opus 5, false for Opus 4.8, and absent for Sonnet 4.6. Where it *is* true the
+    argument above gets strictly stronger — a dropped ``reasoning`` field would leave
+    thinking on at the default ``high`` rather than off, so an unthought answer cannot be
+    a dropped field even in principle. That is the pair the guard actually fired on. Where
+    it is false, an unthought answer is merely *ambiguous* between the two causes, which
+    is reason enough not to raise but not the same claim.
+
+    Both were read off ``GET https://openrouter.ai/api/v1/models`` on 2026-08-25 and cross
+    -checked against OpenRouter's Sonnet 5 / Claude 4.7 / Claude 4.6 migration guides.
+    ``reasoning_on_by_default`` is drift-checked by ``bin/check-openrouter-models``;
+    ``adaptive_thinking`` cannot be, because the live list says which efforts a slug takes
+    and never what an effort *does* to it.
     """
 
     slug: str
@@ -92,6 +123,8 @@ class ModelSpec:
     max_output_tokens: int
     efforts: tuple[Effort, ...] = ()
     supports_cache_ttl_1h: bool = False
+    adaptive_thinking: bool = False
+    reasoning_on_by_default: bool = False
 
 
 _FULL_EFFORTS: Final[tuple[Effort, ...]] = ("low", "medium", "high", "xhigh", "max")
@@ -100,23 +133,59 @@ _FULL_EFFORTS: Final[tuple[Effort, ...]] = ("low", "medium", "high", "xhigh", "m
 #: read off ``GET https://openrouter.ai/api/v1/models`` on 2026-08-23; re-verify with
 #: ``bin/check-openrouter-models`` rather than by hand.
 KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
-    DEFAULT_MODEL: ModelSpec(DEFAULT_MODEL, 1_000_000, 128_000, _FULL_EFFORTS, True),
-    "anthropic/claude-opus-5": ModelSpec(
-        "anthropic/claude-opus-5", 1_000_000, 128_000, _FULL_EFFORTS, True
+    DEFAULT_MODEL: ModelSpec(
+        DEFAULT_MODEL,
+        1_000_000,
+        128_000,
+        _FULL_EFFORTS,
+        supports_cache_ttl_1h=True,
+        adaptive_thinking=True,
+        reasoning_on_by_default=True,
     ),
+    "anthropic/claude-opus-5": ModelSpec(
+        "anthropic/claude-opus-5",
+        1_000_000,
+        128_000,
+        _FULL_EFFORTS,
+        supports_cache_ttl_1h=True,
+        adaptive_thinking=True,
+        reasoning_on_by_default=True,
+    ),
+    # Adaptive like its neighbours, but reasoning is *off* until asked for — the pair of
+    # facts is not one fact, and this row is the counterexample that says so.
     "anthropic/claude-opus-4.8": ModelSpec(
-        "anthropic/claude-opus-4.8", 1_000_000, 128_000, _FULL_EFFORTS, True
+        "anthropic/claude-opus-4.8",
+        1_000_000,
+        128_000,
+        _FULL_EFFORTS,
+        supports_cache_ttl_1h=True,
+        adaptive_thinking=True,
     ),
     "anthropic/claude-sonnet-4.6": ModelSpec(
-        "anthropic/claude-sonnet-4.6", 1_000_000, 128_000, ("low", "medium", "high", "max"), True
+        "anthropic/claude-sonnet-4.6",
+        1_000_000,
+        128_000,
+        ("low", "medium", "high", "max"),
+        supports_cache_ttl_1h=True,
+        adaptive_thinking=True,
     ),
     # No selectable effort. Kept in the catalog because it is the obvious candidate for
     # the dedup volume line — and because pairing it with an effort override is the
     # misconfiguration this catalog is here to catch.
     "anthropic/claude-haiku-4.5": ModelSpec(
-        "anthropic/claude-haiku-4.5", 200_000, 64_000, (), True
+        "anthropic/claude-haiku-4.5", 200_000, 64_000, supports_cache_ttl_1h=True
     ),
-    "openai/gpt-5.1": ModelSpec("openai/gpt-5.1", 400_000, 128_000, ("low", "medium", "high")),
+    # The one row in this catalog with selectable effort and no adaptive thinking, which
+    # is why the dropped-config guard in the OpenRouter adapter is still load-bearing
+    # rather than dead code: on a model like this, an answer with no reasoning in it can
+    # only mean the reasoning config never reached the upstream.
+    "openai/gpt-5.1": ModelSpec(
+        "openai/gpt-5.1",
+        400_000,
+        128_000,
+        ("low", "medium", "high"),
+        reasoning_on_by_default=True,
+    ),
 }
 
 #: Per-stage defaults. Grounding gets the deepest thinking because a wrong verdict there

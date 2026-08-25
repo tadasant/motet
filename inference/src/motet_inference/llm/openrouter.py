@@ -19,18 +19,35 @@ hits, so no routing is pinned here — but if ``cache_read_tokens`` is disappoin
 production, upstream bouncing is the first thing to look at, and an ``order`` preference
 on the request body is the lever. Adding one before there is evidence would be guessing.
 
-**2. Reasoning can be dropped silently, and that is dangerous.** Anthropic's own API
-rejects an incompatible thinking config with a 400. OpenRouter instead drops the field
-and runs the request, so a misconfiguration that fails loudly on the direct path fails
-*invisibly* here: a healthy-looking answer produced without thinking. Every response is
-therefore checked for evidence that reasoning actually happened, logged when it is
-missing, and — by default — raised on. See :func:`_reasoning_evidence` for what counts
-as evidence and why token count is the reliable signal rather than reasoning text.
+**2. Reasoning can be dropped silently, and that is dangerous — on the models where it
+can happen.** Anthropic's own API rejects an incompatible thinking config with a 400.
+OpenRouter instead drops the field and runs the request, so a misconfiguration that fails
+loudly on the direct path fails *invisibly* here: a healthy-looking answer produced
+without thinking. Every response is therefore checked for evidence that reasoning actually
+happened, logged when it is missing, and — by default — raised on. See
+:func:`_reasoning_evidence` for what counts as evidence and why token count is the
+reliable signal rather than reasoning text.
+
+That check is scoped to **budget-based** models, and the scope is motet#31. On a model
+with adaptive thinking — Claude 4.6 and later, which is every Anthropic slug in the
+catalog — ``reasoning.effort`` sets Anthropic's ``output_config.effort`` and never a
+thinking budget, Claude decides per response whether the task warrants thinking, and
+reasoning is on by *default*. So an answer with no reasoning in it is the model obeying
+``effort='low'``, and a dropped field would raise thinking rather than remove it. The
+guard fired 21 times in a row on the dedup stage against zero real faults and stopped
+every item entering the pipeline; :class:`~motet_inference.llm.types.Reasoning` carries
+which kind of model it is talking to so that it does not.
 
 **3. No sampling parameters, ever.** Sonnet 5 removed ``temperature``/``top_p``/``top_k``
 and ``budget_tokens``; :mod:`~motet_inference.llm.types` has no field for any of them, so
 this module has nothing to send. Effort travels in ``reasoning.effort``, which is
 OpenRouter's normalization of what Anthropic spells ``output_config.effort``.
+
+**4. "No reasoning field" is not how you turn reasoning off** on an adaptive Anthropic
+model, because reasoning is on by default there and an omitted field means adaptive
+thinking at effort ``high`` — the most expensive setting, reached by asking for nothing.
+:func:`build_payload` sends ``{"enabled": false}`` explicitly instead, so that the
+``off`` value in :mod:`~motet_inference.llm.config` means what it says.
 """
 
 from __future__ import annotations
@@ -105,6 +122,14 @@ def build_payload(request: LlmRequest) -> dict[str, Any]:
     }
     if request.reasoning is not None:
         payload["reasoning"] = {"enabled": True, "effort": request.reasoning.effort}
+    else:
+        # Off has to be said out loud. Reasoning is *on by default* on every adaptive
+        # Anthropic model — a request that simply omits the field runs adaptive thinking
+        # at effort `high`, so the obvious reading of "send nothing" turns the one lever
+        # for disabling reasoning into the most expensive setting there is. `off` in
+        # `motet_inference.llm.config` is what a stage sets when unthought output is
+        # wanted; this is what makes it mean that.
+        payload["reasoning"] = {"enabled": False}
     if request.response_format is not None:
         payload["response_format"] = _response_format(request.response_format)
     return payload
@@ -253,6 +278,44 @@ class OpenRouterClient:
         )
 
         if request.reasoning is not None and not applied:
+            if request.reasoning.thinking == "adaptive":
+                # Not a fault, and not tolerated-with-a-warning either: on an adaptive
+                # model this is Claude having decided the task was not worth thinking
+                # about, which at effort='low' is the whole point of asking for 'low'.
+                # Recorded rather than merely swallowed — `reasoning_applied` rides on
+                # every response, and this line carries what explains it — but at info,
+                # because a warning per dedup call would be noise that trains everyone to
+                # stop reading warnings.
+                #
+                # The served upstream is in there deliberately. OpenRouter routes a slug
+                # across several providers and does not pin one, and "this upstream does
+                # not surface reasoning-token accounting" is the one competing explanation
+                # for motet#31 that offline evidence cannot rule out. Logging which
+                # upstream answered is what lets a real run settle it.
+                logger.info(
+                    "model=%s provider=%s answered without thinking at effort=%s; "
+                    "adaptive thinking makes that the model's call, not a dropped "
+                    "reasoning config",
+                    response.model,
+                    data.get("provider"),
+                    request.reasoning.effort,
+                )
+                return response
+            if request.reasoning.thinking == "unknown":
+                # The escape hatch, where there is no catalogue row to reason from. Not
+                # raised on — a false positive stops a pipeline, and an unlisted model is
+                # by definition one whose thinking mode we have not established — but said
+                # out loud as the open question it is, rather than as the model's choice.
+                logger.warning(
+                    "model=%s provider=%s answered without thinking at effort=%s, and it "
+                    "is not in the catalogue in motet_inference.llm.config — so this is "
+                    "either a dropped reasoning config or a model that thinks adaptively, "
+                    "and nothing here can tell which. Add the slug to KNOWN_MODELS",
+                    response.model,
+                    data.get("provider"),
+                    request.reasoning.effort,
+                )
+                return response
             # Logged unconditionally, because even when the caller has chosen to tolerate
             # it this is the only trace that quality silently dropped.
             logger.warning(
@@ -266,9 +329,12 @@ class OpenRouterClient:
                 raise ReasoningNotAppliedError(
                     f"reasoning was requested at effort={request.reasoning.effort!r} on "
                     f"model={response.model!r}, but the response has no reasoning tokens, "
-                    "no reasoning_details, and no reasoning text. Check that the model "
-                    "supports selectable effort, or set Reasoning(require_evidence=False) "
-                    "if unthought output is acceptable for this stage."
+                    "no reasoning_details, and no reasoning text. This model is recorded "
+                    "in motet_inference.llm.config as one where effort becomes a thinking "
+                    "budget, so the config was probably dropped upstream — check that the "
+                    "slug still supports selectable effort. If it has moved to adaptive "
+                    "thinking, the fix is ModelSpec.adaptive_thinking on its catalogue "
+                    "row, not Reasoning(require_evidence=False)."
                 )
         return response
 

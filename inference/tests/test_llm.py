@@ -6,12 +6,16 @@ path without a network and without a key — invariant 7 says no test in this re
 a real vendor call, and that is meant absolutely. Confirming a slug or a reasoning config
 against the live vendor is a thing to do by hand, outside the suite.
 
-Three of these are the ones worth understanding, because each pins a specific way this
+Four of these are the ones worth understanding, because each pins a specific way this
 integration is known to fail quietly:
 
 * :func:`test_reasoning_silently_dropped_by_the_provider_raises` — OpenRouter drops an
   unsupported reasoning config instead of rejecting it, so a request that would 400 on
   Anthropic's own API returns a healthy-looking unthought answer here.
+* :func:`test_dedup_on_sonnet_5_survives_a_response_with_no_reasoning_in_it` — the guard
+  above, applied to a model that thinks *adaptively*, where an unthought answer is the
+  model obeying ``effort='low'`` rather than a symptom of anything. It read the one as the
+  other and stopped every pasted item entering the pipeline (motet#31).
 * :func:`test_payload_carries_no_sampling_parameters` — Sonnet 5 rejects
   ``temperature``/``top_p``/``top_k``/``budget_tokens``, and the seam's job is to make
   sending one impossible rather than merely discouraged.
@@ -30,6 +34,7 @@ import httpx
 import pytest
 from motet_inference.llm import (
     DEFAULT_MODEL,
+    KNOWN_MODELS,
     CacheControl,
     Credential,
     CredentialKind,
@@ -376,8 +381,28 @@ def test_effort_travels_in_the_reasoning_field() -> None:
     assert payload["reasoning"] == {"enabled": True, "effort": "xhigh"}
 
 
-def test_no_reasoning_field_when_none_was_asked_for() -> None:
-    assert "reasoning" not in build_payload(a_request())
+def test_reasoning_off_is_said_out_loud_rather_than_left_unsaid() -> None:
+    """Omitting the field is not "off" — on Sonnet 5 it is adaptive thinking at `high`.
+
+    Reasoning is on by default on Sonnet 5, so the intuitive encoding of "this stage does
+    not need to think" would silently buy the *most* expensive setting. `off` has to
+    travel as a value.
+    """
+    assert build_payload(a_request())["reasoning"] == {"enabled": False}
+
+
+def test_effort_off_reaches_the_wire_as_a_disable_through_real_config() -> None:
+    """The whole lever, end to end: the env var an operator sets to the bytes sent.
+
+    Built by hand the payload above proves the translation; this proves the route to it,
+    on the one catalogue row with no selectable effort at all.
+    """
+    config = load_config(
+        {"MOTET_LLM_MODEL_DEDUP": "anthropic/claude-haiku-4.5", "MOTET_LLM_EFFORT_DEDUP": "off"}
+    )
+    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=config)
+    assert request.reasoning is None
+    assert build_payload(request)["reasoning"] == {"enabled": False}
 
 
 def test_cache_breakpoint_lands_on_the_stable_prefix() -> None:
@@ -491,6 +516,114 @@ def test_a_dropped_reasoning_config_is_logged_even_when_tolerated(
         )
     assert not response.reasoning_applied
     assert "no evidence of it" in caplog.text
+
+
+def test_dedup_on_sonnet_5_survives_a_response_with_no_reasoning_in_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """motet#31, reproduced: the exact request and the exact response that broke ingestion.
+
+    Seven pasted items, three attempts each, twenty-one identical failures — dedup asks
+    for effort ``low`` on Sonnet 5, Sonnet 5 thinks adaptively, and on a mechanical
+    "is this the same story?" it answers without thinking. That is the model obeying
+    ``low``. The guard read it as OpenRouter having dropped the field, which on this model
+    could not have produced this response: a dropped field leaves reasoning on by default
+    at effort ``high``.
+    """
+    captured: list[dict[str, Any]] = []
+    client = a_client(
+        responder(completion(text='{"decision":"new"}', reasoning_tokens=0), captured=captured)
+    )
+    request = build_request(
+        LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=load_config({})
+    )
+
+    with caplog.at_level(logging.INFO, logger="motet.llm.openrouter"):
+        response = client.complete(request)
+
+    assert captured[0]["reasoning"] == {"enabled": True, "effort": "low"}
+    assert response.text == '{"decision":"new"}'
+    assert not response.reasoning_applied, "the fact still rides on the response"
+    assert "answered without thinking at effort=low" in caplog.text
+    assert "WARNING" not in caplog.text, "one line per source item must not read as a fault"
+
+
+def test_the_dropped_config_guard_still_fires_on_a_budget_based_model() -> None:
+    """The other half of the scoping: this is not the check being switched off.
+
+    ``openai/gpt-5.1`` has selectable effort and no adaptive thinking, so a response
+    carrying no reasoning can only mean the reasoning config never reached the upstream —
+    the failure the guard was written for, still loud.
+    """
+    config = load_config({"MOTET_LLM_MODEL_DEDUP": "openai/gpt-5.1"})
+    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=config)
+    assert request.reasoning is not None and request.reasoning.thinking == "budget"
+
+    client = a_client(responder(completion(reasoning_tokens=0)))
+    with pytest.raises(ReasoningNotAppliedError, match="no reasoning tokens"):
+        client.complete(request)
+
+
+def test_which_models_the_evidence_check_applies_to_comes_from_the_catalogue() -> None:
+    """A fact about the model, resolved once, so no stage has to know a generation."""
+    for stage in LlmStage:
+        request = build_request(stage, MESSAGES, max_output_tokens=512, config=load_config({}))
+        assert request.reasoning is not None
+        assert request.reasoning.thinking == "adaptive"
+
+    budget_based = build_request(
+        LlmStage.SCRIPT,
+        MESSAGES,
+        max_output_tokens=512,
+        config=load_config({"MOTET_LLM_MODEL_SCRIPT": "openai/gpt-5.1"}),
+    )
+    assert budget_based.reasoning is not None and budget_based.reasoning.thinking == "budget"
+
+
+def test_the_catalogue_records_two_reasoning_facts_and_they_are_not_one_fact() -> None:
+    """Every Anthropic slug here thinks adaptively; only some start with it on.
+
+    Conflating the two is the mistake the first draft of this fix made, and the second
+    column is what `bin/check-openrouter-models` can verify against `default_enabled`.
+    """
+    adaptive = {s for s, spec in KNOWN_MODELS.items() if spec.adaptive_thinking}
+    on_by_default = {s for s, spec in KNOWN_MODELS.items() if spec.reasoning_on_by_default}
+    assert adaptive == {
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-opus-4.8",
+        "anthropic/claude-sonnet-4.6",
+    }
+    assert on_by_default == {
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-5",
+        "openai/gpt-5.1",
+    }
+
+
+def test_an_unlisted_model_is_not_assumed_to_be_budget_based() -> None:
+    """The escape hatch's deal: no catalogue facts, so no catalogue-derived guard.
+
+    Claiming a dropped config on a model we know nothing about is how motet#31 stopped
+    ingestion — and every model shipped since Claude 4.6 thinks adaptively, so the
+    unknown-model default that fails safe is the permissive one.
+    """
+    config = load_config(
+        {"MOTET_LLM_MODEL": "anthropic/claude-sonnet-6", "MOTET_LLM_ALLOW_UNLISTED_MODEL": "true"}
+    )
+    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=512, config=config)
+    assert request.reasoning is not None and request.reasoning.thinking == "unknown"
+
+
+def test_an_unlisted_model_that_does_not_think_warns_instead_of_claiming_to_know_why(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Not raised on — a false positive stops a pipeline — but not passed off as a choice."""
+    client = a_client(responder(completion(reasoning_tokens=0)))
+    with caplog.at_level(logging.WARNING, logger="motet.llm.openrouter"):
+        response = client.complete(a_request(reasoning=Reasoning(effort="low", thinking="unknown")))
+    assert not response.reasoning_applied
+    assert "nothing here can tell which" in caplog.text
 
 
 def test_reasoning_text_counts_as_evidence_when_tokens_are_not_reported() -> None:
