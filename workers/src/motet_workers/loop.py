@@ -13,6 +13,13 @@ object, which is what ``runpy`` means by "may result in unpredictable behaviour"
 the loop here and the CLI there is what makes that impossible rather than merely absent.
 See motet#21, and ``workers/tests/test_entrypoint.py``, which fails if it comes back.
 
+``loop`` rather than ``drain``, so that ``motet_workers.drain`` means the function and
+only the function. Had the module been named after it, ``from .drain import drain`` in
+``__init__`` would leave the package attribute bound to the function while
+``sys.modules`` still held the module under that path — and
+``monkeypatch.setattr("motet_workers.drain.MAX_JOBS_PER_RUN", 1, raising=False)`` would
+then set an attribute on the *function object* and patch nothing, silently.
+
 **The transaction boundaries here are the interesting part**, and they are three, not one:
 
 1. *Claim*, committed immediately. The job is marked ``running`` before any work starts,

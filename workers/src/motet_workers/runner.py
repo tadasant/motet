@@ -2,24 +2,25 @@
 
     python -m motet_workers.runner integrate
 
-**Nothing in this package may import this module**, and that is the entire reason it is a
-module of its own rather than the bottom of :mod:`motet_workers.drain`, where it lived
-until motet#21. ``python -m motet_workers.runner`` imports the package ``motet_workers``
-first and only then executes ``runner.py`` as ``__main__``. If the package has already
-pulled ``runner`` into ``sys.modules`` on the way past — which ``from .runner import
-drain`` in ``__init__`` did — ``runpy`` executes the same file a *second* time under a
-second name, and says so:
+**Nothing in this package may import this module**, and that is the entire reason this
+file now holds the CLI and nothing else. Until motet#21 the queue-draining loop lived
+here too, at the top of this same file. ``python -m motet_workers.runner`` imports the
+package ``motet_workers`` first and only then executes ``runner.py`` as ``__main__``. If
+the package has already pulled ``runner`` into ``sys.modules`` on the way past — which
+``from .runner import drain`` in ``__init__`` did, to re-export that loop — ``runpy``
+executes the same file a *second* time under a second name, and says so:
 
     RuntimeWarning: 'motet_workers.runner' found in sys.modules after import of package
     'motet_workers', but prior to execution of 'motet_workers.runner'; this may result in
     unpredictable behaviour
 
-Two copies of one module do not share module-level state. Nothing here is stateful enough
-for that to have hurt yet, but the module-level metric instruments in
-:mod:`motet_workers.drain` were already duplicated, and a connection pool, a client, or a
-class used with ``isinstance`` would not have survived it. So the rule is structural
-rather than a thing to remember: the loop is importable and lives next door, this file is
-the executable, and ``workers/tests/test_entrypoint.py`` fails if the two ever merge back.
+Two copies of one module do not share module-level state. Nothing was stateful enough for
+that to have hurt, but the metric instruments that now live in :mod:`motet_workers.loop`
+were being built twice while they were still in this file, and a connection pool, a
+client, or a class used with ``isinstance`` would not have survived it. So the rule is
+structural rather than a thing to remember: the loop is importable and lives next door,
+this file is the executable, and ``workers/tests/test_entrypoint.py`` fails if the two
+ever merge back.
 
 The queue name is the container's argument, so the image's ``ENTRYPOINT`` is this module
 and a Cloud Run job supplies ``args``. The name is validated against the ``Queue`` enum,
@@ -36,7 +37,7 @@ import time
 import motet_obs
 from motet_inference.llm import validate_startup as validate_llm_startup
 
-from .drain import MAX_JOBS_PER_RUN, drain
+from .loop import MAX_JOBS_PER_RUN, drain
 from .queues import Queue
 
 logger = logging.getLogger("motet.worker")

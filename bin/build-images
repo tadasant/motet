@@ -142,9 +142,20 @@ smoke_worker() {
   # The runner refuses an unknown queue name and exits non-zero, which makes `--help` the
   # only invocation that proves the entrypoint is wired without needing a database. It
   # also proves the queue choices, so a renamed queue shows up here.
+  #
+  # `2>&1` is load-bearing, and its absence is how motet#21 shipped green. The entrypoint
+  # was double-executing — `__init__` imported the very module `python -m` runs, so runpy
+  # executed it twice and said so — but it said so on *stderr* and still exited 0, so a
+  # check that captured stdout alone could not see it. This is the only place the built
+  # artifact's own interpreter and install layout are on trial; the workspace equivalent
+  # is workers/tests/test_entrypoint.py.
   local usage
-  usage="$(docker run --rm "motet-worker:${TAG}" --help)"
+  usage="$(docker run --rm "motet-worker:${TAG}" --help 2>&1)"
   echo "$usage" | head -3 | sed 's/^/    /'
+  case "$usage" in
+    *"found in sys.modules"*)
+      echo "smoke: the worker entry point double-executes itself (motet#21)" >&2; return 1 ;;
+  esac
   case "$usage" in
     *integrate*assemble*script*tts*) ;;
     *) echo "smoke: worker --help did not list the Phase 1 queues" >&2; return 1 ;;

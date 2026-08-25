@@ -7,11 +7,10 @@ stages have different rate limits and failure modes.
 **Nothing here may import** :mod:`motet_workers.runner`. That module is the image's
 ``ENTRYPOINT``, so ``python -m`` executes it — and a module that this file has already
 imported gets executed a *second* time, under a second name, with a second copy of every
-module-level object. :func:`drain` therefore lives in :mod:`motet_workers.drain`, which is
+module-level object. :func:`drain` therefore lives in :mod:`motet_workers.loop`, which is
 importable, and ``runner`` holds only the CLI. See motet#21.
 """
 
-from .drain import drain
 from .handlers import (
     Context,
     PermanentFailure,
@@ -22,6 +21,7 @@ from .handlers import (
 )
 from .ingest import enqueue_source_poll, poll_key
 from .jobs import Job, enqueue, queue_depths
+from .loop import drain
 from .queues import Queue
 
 __all__ = [
