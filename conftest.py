@@ -93,6 +93,20 @@ _RUN_INFIX = "_run"
 #: killed between creating its database and dropping it.
 _STALE_AFTER_SECONDS = 6 * 60 * 60
 
+#: Postgres's identifier limit. Over it, a name is **truncated rather than refused**, and
+#: what is lost is the tail — the timestamp. See :func:`_stem`.
+_MAX_IDENTIFIER_BYTES = 63
+
+#: Below this, a trailing number is not a timestamp this code wrote (2001-09-09), so the
+#: name it came from is not swept. Guards the sweep against reading a truncated or
+#: differently-shaped name as ancient.
+_PLAUSIBLE_TIMESTAMP = 1_000_000_000
+
+#: How long to wait for the configured database before giving up and saying so. Short
+#: because this runs at configure time on every invocation, including ones that want no
+#: database at all.
+_CONNECT_TIMEOUT_SECONDS = 5
+
 #: Set this to keep the run's database for a post-mortem instead of dropping it. The name
 #: is reported in the header line, so ``psql`` on it is a copy and paste.
 KEEP_DATABASE_ENV = "MOTET_TEST_KEEP_DATABASE"
@@ -112,16 +126,39 @@ def _with_database(url: str, name: str) -> str:
     return urlunsplit(urlsplit(url)._replace(path=f"/{name}"))
 
 
-def _create_database(base_url: str) -> str:
-    """Create a database for one run of this suite, and return its URL.
+def _stem(base_url: str, suffix_length: int) -> str:
+    """The configured database's name, shortened to leave room for a run's suffix.
 
-    Created *from* the configured database, rather than from ``postgres``: the URL a
-    developer set is the one connection this code knows works, and a managed Postgres may
-    not offer a maintenance database at all.
+    **Postgres truncates an identifier over 63 bytes rather than refusing it**, and the
+    part that would be lost is the end — which is where the timestamp the sweep below
+    reads lives. A name too long by one character therefore reads as created in 1970, and
+    the next run drops it as stale while it is in use.
     """
-    stem = "".join(c for c in _database_name(base_url) if c.isalnum() or c == "_")[:40]
-    name = f"{stem}{_RUN_INFIX}{os.getpid()}_{secrets.token_hex(3)}_{int(time.time())}"
-    with psycopg.connect(base_url, autocommit=True) as admin:
+    sanitized = "".join(c for c in _database_name(base_url) if c.isalnum() or c == "_")
+    return sanitized[: _MAX_IDENTIFIER_BYTES - suffix_length]
+
+
+def _connect_admin(base_url: str) -> psycopg.Connection[Any]:
+    """Connect to the configured database to create or drop a run's database.
+
+    Connected *to* it, rather than to ``postgres``: the URL a developer set is the one
+    connection this code knows works, and a managed Postgres may not offer a maintenance
+    database at all.
+
+    The timeout matters because this runs at configure time, on **every** invocation —
+    including ``pytest storage/tests``, which needs no database at all. Somebody with
+    ``DATABASE_URL`` exported and Postgres stopped should wait a couple of seconds and get
+    the warning, not the operating system's TCP timeout.
+    """
+    return psycopg.connect(base_url, autocommit=True, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+
+
+def _create_database(base_url: str) -> str:
+    """Create a database for one run of this suite, and return its URL."""
+    suffix = f"{_RUN_INFIX}{os.getpid()}_{secrets.token_hex(3)}_{int(time.time())}"
+    stem = _stem(base_url, len(suffix))
+    name = f"{stem}{suffix}"
+    with _connect_admin(base_url) as admin:
         _drop_stale_databases(admin, stem)
         # Not parameterisable — CREATE DATABASE takes an identifier, not a value. Every
         # part of `name` is built above out of the configured name, digits and `_`.
@@ -136,6 +173,10 @@ def _drop_stale_databases(admin: psycopg.Connection[Any], stem: str) -> None:
     holds connections to its database, but "has connections" is not a safe test — there is
     a window between ``CREATE DATABASE`` and the first connection where a live database
     looks abandoned.
+
+    A name whose tail is not a plausible timestamp is left alone rather than assumed
+    ancient, so a database this code did not name — or one it named before some future
+    change to the format — is never dropped on a misreading.
     """
     cutoff = time.time() - _STALE_AFTER_SECONDS
     rows = admin.execute(
@@ -143,15 +184,15 @@ def _drop_stale_databases(admin: psycopg.Connection[Any], stem: str) -> None:
     ).fetchall()
     for (datname,) in rows:
         _, _, stamp = str(datname).rpartition("_")
-        if not stamp.isdigit() or int(stamp) > cutoff:
+        if not stamp.isdigit() or not _PLAUSIBLE_TIMESTAMP <= int(stamp) <= cutoff:
             continue
         # Another run sweeping the same leftover at the same moment is fine and expected.
         with contextlib.suppress(psycopg.Error):
-            admin.execute(f'DROP DATABASE "{datname}"')
+            admin.execute(f'DROP DATABASE "{datname}" WITH (FORCE)')
 
 
 def _drop_database(base_url: str, url: str) -> None:
-    with psycopg.connect(base_url, autocommit=True) as admin:
+    with _connect_admin(base_url) as admin:
         # FORCE rather than waiting: a connection this run leaked would otherwise turn
         # tidying up into a hang at the very end of a green suite.
         admin.execute(f'DROP DATABASE IF EXISTS "{_database_name(url)}" WITH (FORCE)')
@@ -174,6 +215,10 @@ def pytest_configure(config: pytest.Config) -> None:
 
     base_url = os.environ.get("DATABASE_URL")
     if not base_url:
+        return
+    # `--help` and `--collect-only` reach this hook and run no test, so creating a
+    # database for them would mean `pytest --help` needing a Postgres to be quick.
+    if getattr(config.option, "help", False) or getattr(config.option, "collectonly", False):
         return
     if not urlsplit(base_url).scheme.startswith("postgres"):
         config.issue_config_time_warning(
@@ -244,21 +289,11 @@ def base_database_url() -> str:
     exactly what this file stopped doing.
     """
     if _base_database_url is None:
-        pytest.skip("this run has no database of its own; nothing to compare against")
+        pytest.skip(
+            "this run shares the configured database — see the warning above; there is no "
+            "second database to compare against"
+        )
     return _base_database_url
-
-
-@pytest.fixture
-def another_run(base_database_url: str) -> Iterator[str]:
-    """A migrated database standing in for a second, concurrent run of this suite."""
-    from motet_db import migrate
-
-    url = _create_database(base_database_url)
-    migrate(url)
-    try:
-        yield url
-    finally:
-        _drop_database(base_database_url, url)
 
 
 @pytest.fixture(scope="session")

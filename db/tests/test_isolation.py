@@ -9,10 +9,11 @@ detects the cycle, kills one, and the survivor carries on against tables that we
 underneath it. Nothing in either run is at fault, which is why it read as a leaked
 connection: within one process the suite is serial and there is no second writer.
 
-So the tests below assert ownership rather than politeness. Both fail loudly if this suite
-ever goes back to sharing a database, and the second one reproduces the deadlock's exact
-precondition — an uncommitted ``INSERT INTO jobs`` in another run — deterministically,
-rather than waiting for the timing to line up.
+Two of the tests below are the guard and one is the explanation.
+:func:`test_the_run_has_a_database_of_its_own` is what goes red if the isolation is ever
+undone. :func:`test_a_second_writer_in_one_database_blocks_the_truncate` demonstrates,
+deterministically and inside this run's own database, *why* that would matter — it is the
+deadlock's precondition reproduced on demand rather than waited for.
 """
 
 from __future__ import annotations
@@ -22,14 +23,16 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import psycopg
+import pytest
 from motet_db import discover, migrate
 
-#: The other run's write, held open. Matches the statement named in motet#15's deadlock
-#: report, because that is the one that lost.
+#: The other writer's statement, held open. The one named in motet#15's deadlock report,
+#: because it is the one that lost.
 HOLD_JOBS_OPEN = "INSERT INTO jobs (queue) VALUES ('test_isolation') RETURNING id"
 
-#: Long enough that a slow machine truncating twelve empty tables is never the reason this
-#: fails, short enough that a regression is a failure in seconds rather than a hung suite.
+#: Long enough that a slow machine truncating twelve empty tables is never the reason a
+#: test fails, short enough that a blocked truncate is a failure in seconds rather than a
+#: hung suite.
 LOCK_TIMEOUT = "5s"
 
 
@@ -40,7 +43,7 @@ def database_name(url: str) -> str:
 def test_the_run_has_a_database_of_its_own(
     db: psycopg.Connection[Any], base_database_url: str
 ) -> None:
-    """The whole fix in one assertion."""
+    """The fix in one assertion, and the test that goes red if it is undone."""
     row = db.execute("SELECT current_database() AS name").fetchone()
     assert row is not None
     assert row["name"] != database_name(base_database_url), (
@@ -49,28 +52,34 @@ def test_the_run_has_a_database_of_its_own(
     )
 
 
-def test_another_runs_open_write_cannot_block_this_runs_truncate(
-    db: psycopg.Connection[Any], another_run: str, truncate_statement: str
+def test_a_second_writer_in_one_database_blocks_the_truncate(
+    db: psycopg.Connection[Any], database_url: str, truncate_statement: str
 ) -> None:
-    """motet#15's deadlock, reconstructed: the other half is a *second run*, not a leak.
+    """Why sharing a database is fatal, shown rather than asserted about.
 
-    ``another_run`` is a database exactly like the one this run got. Holding an uncommitted
-    INSERT there and truncating here is precisely the pair of statements Postgres reported
-    as a deadlock — and with a database each, neither can see the other's locks.
+    A second connection to *this run's own* database — standing in for the second run that
+    used to be there — holds an uncommitted ``INSERT INTO jobs``. The fixture's own
+    ``TRUNCATE`` then cannot proceed, because ``AccessExclusiveLock`` conflicts with the
+    ``RowExclusiveLock`` that INSERT is holding. In motet#15 both sides were waiting, so
+    Postgres called it a deadlock and killed one; here only one side waits, so it is a lock
+    timeout — the same conflict, made observable without racing anything.
+
+    Deliberately not run against a second *database*: databases do not share a lock table,
+    so that version of this test would pass however broken the isolation was.
     """
-    with psycopg.connect(another_run) as other:
-        other.execute(HOLD_JOBS_OPEN)  # deliberately not committed: the lock is the point
+    with psycopg.connect(database_url) as other:
+        other.execute(HOLD_JOBS_OPEN)  # not committed: holding the lock is the point
 
         db.execute(f"SET lock_timeout = '{LOCK_TIMEOUT}'")
-        db.execute(truncate_statement)
-        db.commit()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            db.execute(truncate_statement)
+        db.rollback()
 
-        # And the other run's rows are still there — the deadlock was the loud half of
-        # this bug, and rows vanishing from under a passing test was the quiet half.
-        row = other.execute("SELECT count(*) AS n FROM jobs").fetchone()
-        assert row is not None
-        assert row[0] == 1
         other.rollback()
+
+    # And once nobody else is writing, the very same statement is instant.
+    db.execute(truncate_statement)
+    db.commit()
 
 
 def test_two_migration_runs_on_one_database_do_not_collide(blank_database: str) -> None:
