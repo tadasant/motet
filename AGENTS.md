@@ -643,6 +643,46 @@ third backend from ever touching the route.
 document a client cached for six hours is a download that fails later for no visible
 reason.
 
+### A stage records what it spent and what it threw away
+
+`inference/src/motet_inference/accounting.py`. Two issues (motet#24, motet#25) with one
+shape: the work happened and the evidence was discarded. Usage was decoded off every
+OpenRouter response and read by nobody; grounding drops were counted and never
+characterised.
+
+**A metric answers "how is the fleet doing", a log line answers "what did *that* one
+cost", and the split is cardinality.** `motet.llm.tokens{stage,model,kind}` carries no
+episode id, because a time series per episode is a time series per episode forever.
+`collect_usage()` is the other half: a `ContextVar` ledger the worker handlers open around
+a stage, so the one caller that *has* an id can put a total beside it. A `ContextVar`
+rather than a parameter because a cost accumulator in the argument list would be a cost
+accumulator in the `Protocol`, which every fake would then implement for a number it does
+not have.
+
+**Recording lives in the stage adapters, not in the OpenRouter client**, because *stage* is
+what an operator splits cost by and `LlmRequest` deliberately does not carry one. The
+consequence to remember: a run on the deterministic **stage** fakes calls no model and
+therefore reports no cost, correctly — so a test that asserts cost has to run the real
+adapters over `FakeLlmClient`, which is what `workers/tests/test_accounting.py` does.
+
+**Every usage field is logged even at zero.** A field that vanishes when it is zero is a
+field a log query cannot aggregate, and `cache_read=0` is precisely the observation the
+prompt-caching warning above is about.
+
+On the grounding half, **the two drop layers are separate instruments on purpose**.
+`motet.script.claims_dropped{reason}` counts what the script parser could not use — a
+claim counted there never reached the gate — and `motet.grounding.claims{outcome}` plus
+`motet.grounding.claims_dropped{reason}` count what the gate refused. They mean opposite
+things: the first is a script-prompt problem, the second is invariant 3 working. Reasons
+are bucketed by `classify_grounding_reason` before they touch a label, because a model's
+reason is a sentence and a sentence as a label mints a series per claim; the sentence
+itself, the claim text and the episode id go in a warning line, which is the only moment
+that detail exists — the pre-grounding script is never stored and a dropped claim leaves
+no row anywhere.
+
+**A clean episode says so.** "No drops today" and "grounding never ran" must not be the
+same observation, which is the never-infer-"no errors"-from-"no data" trap one section up.
+
 ### Ingestion state is a join onto the job queue, not a column
 
 `GET /v1/ingestion` (`repo.list_ingestion`) is what stops a paste from silently
