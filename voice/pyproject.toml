@@ -15,6 +15,12 @@ dependencies = [
     "fastapi>=0.115",
     "httpx>=0.28",
     "motet-inference",
+    # Telemetry wiring, shared with the API and the worker. `motet-obs` depends on no
+    # `motet-*` package and reaches an OTLP endpoint rather than Postgres, so taking it
+    # does not weaken invariant 2 — and without it the advisory grounding counters would
+    # be built against a no-op meter, which is the "looks monitored, emits nothing" trap
+    # AGENTS.md names rather than a smaller version of it.
+    "motet-obs",
     "motet-storage",
     "pydantic>=2.10",
     "uvicorn>=0.34",

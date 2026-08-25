@@ -6,7 +6,8 @@ question with a number instead of an argument.
 ```
 POST /v1/voice/sessions                      StartSession(...) -> session_token
 WS   /v1/voice/sessions/{id}/stream          audio in; transcripts, tool calls,
-                                             audio chunks and interrupted_at out
+                                             audio chunks, interrupted_at and the
+                                             advisory grounding verdict out
 GET  /internal/health                        what is wired, and what is dormant
 ```
 
@@ -111,22 +112,46 @@ reappear silently in some other guise.
 
 ## Grounding, on the path that speaks
 
-Invariant 3 — every reported claim carries a source span, validated before TTS — is enforced
-on the **narration** path as a pipeline gate. The conversational reply path in this directory
-**does not have that gate**, and saying so is the point of this section.
+Invariant 3 — every reported claim carries a source span, validated before TTS — is a **hard
+gate** on the narration path and **advisory** on the conversational reply path in this
+directory. That asymmetry is a decision, made by Tadas on
+[#10](https://github.com/tadasant/motet/issues/10), not an implementation that has not caught
+up: a reply is generated inside a spoken turn with a listener waiting for it, and the batch
+validator is a max-effort model call that cannot live in that budget. A gate there is a
+silence.
 
-A reply is generated inside a spoken turn and the grounding validator is a max-effort model
-call, so it cannot sit there as written. What the path has instead is containment: the model
-is given context the caller assembled from *already-grounded* narration, and is told to answer
-only from that or from a tool result, to decline rather than fill gaps, and to quote or fetch
-numbers rather than recall them. `get_item_detail` returns spans, so grounded material is
-reachable. That narrows the failure to paraphrase over grounded text; it does not remove it.
+**Advisory is not absent.** `motet_voice.grounding` checks every reply — for fabricated
+*specifics*: a number, a name or a quotation the session's material does not contain — and
+runs *behind* the reply rather than in front of it, so nothing is delayed. The checker is
+ours: local, deterministic, free, no credential, no fake/real split, the same verdict in CI
+as in production.
 
-**Two consequences.** Do not read the containment as a guarantee. And do not give this path a
-new source of material — research results once Exa lands, a second corpus, memory across
-sessions — without answering the grounding question first, because that is the point at which
-paraphrase stops being the whole of the risk. The design work is
-[#10](https://github.com/tadasant/motet/issues/10), and its crux is a latency budget.
+Every verdict is recorded, four ways, and that recording *is* the invariant here:
+
+| Where | What |
+|---|---|
+| obs stack | `motet.voice.conversational_replies{grounded="false", checker, arm}`, plus `motet.voice.unsupported_specifics{kind}` |
+| log | a warning carrying the offending number, name or quotation |
+| wire | a `grounding` event, after the `audio_chunk` it judges |
+| session summary | `replies_checked`, `replies_ungrounded` |
+
+The Grafana question is `sum(rate(motet_voice_conversational_replies_total{grounded="false"}[1h]))`.
+`/internal/health` reports `grounding_checker`, `grounding_advisory` and `telemetry_exporting`,
+so "which check runs here, and is anything actually being exported" is answerable without
+reading code. **A change that removes the recording removes the invariant**, whatever it
+leaves behind.
+
+The prompt-level containment is still there and still matters — the model is given context the
+caller assembled from *already-grounded* narration, and told to answer only from that or from
+a tool result, to decline rather than fill gaps, and to quote or fetch numbers rather than
+recall them.
+
+**Two things the check does not do.** It does not judge paraphrase or entailment; it catches
+invented specifics, which is invariant 3's own named failure mode. And it does not license
+giving this path a new source of material — research results once Exa lands, a second corpus,
+memory across sessions — without reopening the question, because that is the point at which
+paraphrase over grounded text stops being the whole of the risk. A model-backed entailment
+check drops in behind `ConversationGroundingChecker` without touching a caller.
 
 ## Two invariants this directory exists to keep
 

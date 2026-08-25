@@ -49,10 +49,41 @@ almost every design question that comes up is already answered by one of them.
    credentials and no schema knowledge. This is what lets the voice service be reused —
    by Zimmer, among others — rather than being welded to Motet's data model.
 
-3. **Every reported claim carries a source span, validated before TTS.** A briefing that
-   invents a funding number is dead. Grounding validation runs *before* audio is
-   synthesized, never after, and a claim that fails validation does not get spoken.
-   See the tripwire below: this is not deferrable.
+3. **Every reported claim carries a source span, validated before TTS — a gate when Motet
+   reports, advisory when it converses.** A briefing that invents a funding number is dead.
+   The two halves are *not* symmetric, and the asymmetry is the decision (Tadas,
+   2026-08-24, motet#10) rather than an implementation that has not caught up:
+
+   | | **Narration** — the briefing | **Conversation** — answering a question |
+   |---|---|---|
+   | Where | `workers/` script → grounding → Cartesia | `voice/` `VoiceSession.respond_to_text` |
+   | Grounding | **hard gate.** A claim that fails validation is not synthesized. | **advisory.** The reply is spoken, then checked. |
+   | Checked by | `GroundingValidator`, a max-effort model call | `motet_voice.grounding`, ours, local, deterministic |
+   | If it fails | nothing gets spoken | it was already spoken; a counter, a warning and a `grounding` event record it |
+
+   **The narration half is not negotiable.** It is where a briefing is *made*, it is
+   asynchronous, and it has all the time in the world. Do not weaken it.
+
+   **The conversational half is advisory because a gate there is a silence.** The reply is
+   generated inside a spoken turn with a listener standing on a pavement waiting for it,
+   and the batch validator cannot live in that budget. So the check runs *behind* the
+   reply — off the critical path — and never blocks the audio.
+
+   **Advisory is not absent, and the difference is entirely what survives the turn.**
+   Every conversational reply is checked for fabricated specifics — a number, a name or a
+   quotation the session's material does not contain — and every verdict is recorded:
+   `motet.voice.conversational_replies{grounded="false"}` on the obs stack, a warning
+   carrying the offending text, a `grounding` event to the client, and a count in the
+   session summary. "How often does Motet say something it cannot source out loud?" has an
+   answer, in Grafana. A change that removes the recording removes the invariant, whatever
+   it leaves behind.
+
+   The conversational check does **not** judge paraphrase or entailment; it catches
+   invented specifics, which is invariant 3's own named failure mode. A model-backed
+   entailment check drops in behind `ConversationGroundingChecker` when the reply path
+   grows a *new* source of material — research results, a second corpus, memory across
+   sessions — because that is when the risk stops being paraphrase over already-grounded
+   text. See the tripwire below: none of this is deferrable.
 
 4. **`spoken_through_ms` is tracked by us, not the provider.** We own playback position.
    Never read it back out of a vendor SDK and never trust a provider's notion of where the
@@ -221,7 +252,10 @@ pushing through.
   scale problem this system does not have.
 - **Never defer grounding validation.** It shapes the script contract — the script format
   exists *so that* claims can carry source spans. Adding it later is not a feature, it is a
-  rewrite of everything downstream of the script.
+  rewrite of everything downstream of the script. On the conversational path it is advisory
+  rather than a gate (invariant 3), and *that* is deferrable in exactly one direction:
+  making it advisory was a decision, making it silent would not be. A conversational reply
+  that is spoken without being counted is the same defect wearing a different hat.
 
 ---
 
