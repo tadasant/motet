@@ -123,6 +123,13 @@ def create_session_for_digest(
     The row is otherwise identical to a signed-in browser's, which is the point — a minted
     session is resolved by the same :func:`session_for_token`, revoked by the same
     ``/v1/auth/logout``, and expires by the same predicate.
+
+    **This function does not check the allowlist, and no writer of this table may skip
+    it.** ``motet_api``'s sign-in route and :func:`motet_db.mint_session.check_email` each
+    ask :mod:`motet_db.allowlist` before calling in here. A third caller that forgot would
+    quietly create a session for an address Google sign-in refuses — which is the property
+    AGENTS.md claims, so add the check rather than relying on the per-request re-check in
+    ``require_caller`` to delete the row on first use.
     """
     if not DIGEST_RE.match(token_sha256):
         raise ValueError("token_sha256 must be a 64-character lowercase hex SHA-256 digest")

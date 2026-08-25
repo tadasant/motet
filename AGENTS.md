@@ -747,10 +747,11 @@ Three things about it are the decision rather than the implementation:
   *writer* of one table, not a second way to authenticate. A `POST /v1/auth/staging/session`
   route — the redeemable-token variant — was declined for exactly this: it would put a new
   authentication path into the deployed production API, guarded by a secret being unset.
-- **Production isolation is structural.** The Terraform `count` does not create the job
-  outside staging, the workflow holds only staging's workload identity, and the interlock is
-  a third lock on top. Two of the three are diffs a reviewer sees (invariant 10 is untouched
-  — production has no such job to run).
+- **Production isolation is structural.** The job is created in staging and nowhere else,
+  the workflow reaches staging and nothing else, and the interlock is a third lock on top.
+  Two of the three are diffs a reviewer sees — in the private repo, which is where the
+  mechanism belongs; this file states the property. Invariant 10 is untouched: production
+  has no such job to run.
 - **The allowlist is the sign-in path's own**, `motet_db.allowlist`, which is why it lives a
   package below the route that reads it: even CI cannot mint a session for an address Google
   sign-in would refuse. A second copy of that list is the thing to never write.

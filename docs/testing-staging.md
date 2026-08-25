@@ -48,15 +48,22 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out mint.key
 openssl pkey -in mint.key -pubout -out mint.pub
 
 # 2. Dispatch the mint. `email` is optional and defaults to staging's allowlisted address.
+#    Note the timestamp FIRST — step 3 depends on it.
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run motet-mint-staging-session.yml \
   --repo tadasant/tadasant-internal \
   -f recipient_public_key="$(base64 -w0 mint.pub)" \
   -f ttl_hours=8
 
-# 3. Wait for the run, then take its artifact.
+# 3. Find YOUR run — the one created after $SINCE. `gh workflow run` returns BEFORE the
+#    run exists, so a bare `--limit 1` routinely picks up the PREVIOUS run, whose artifact
+#    is very likely still there (retention is a day). That decrypts to garbage with your
+#    key and surfaces much later as a 401, so filter on the dispatch time instead. If this
+#    prints nothing the run has not appeared yet: run the same command again, rather than
+#    wrapping it in a sleep loop — Zimmer denies `sleep`.
 RUN=$(gh run list --repo tadasant/tadasant-internal \
-  --workflow motet-mint-staging-session.yml --limit 1 --json databaseId \
-  --jq '.[0].databaseId')
+  --workflow motet-mint-staging-session.yml --limit 20 --json databaseId,createdAt \
+  --jq "[.[] | select(.createdAt > \"$SINCE\")] | .[0].databaseId // empty")
 gh run watch "$RUN" --repo tadasant/tadasant-internal
 gh run download "$RUN" --repo tadasant/tadasant-internal -n staging-session-token
 
@@ -78,6 +85,15 @@ thing it replaces: no cleartext exists in Actions at all, not in a log, not in a
 not in the artifact, and a second reader cannot use the artifact even once. A public key
 is not a secret, so handing it over as a `workflow_dispatch` input leaks nothing.
 
+**The token's entropy is the workflow's to get right, and nothing downstream can check
+it.** The job validates that `--token-sha256` is a well-formed digest — a *shape* — and
+that is all it can do, because the plaintext is generated upstream and the digest is
+published in the job's execution record. A token drawn from a small space would therefore
+be brute-forceable offline by anyone who can list that history. At least 32 bytes from a
+CSPRNG, which is what the workflow's `openssl rand -base64 32` gives and what
+`motet_db.auth.new_session_token` gives the sign-in path. This is the one guarantee the
+digest split hands to the caller.
+
 **Only the digest is ever an argument.** The workflow generates the token as a shell local,
 passes `--token-sha256` to the job, and encrypts the plaintext to your key. A Cloud Run
 execution records its own arguments, and anyone who can list the project's job history can
@@ -97,11 +113,13 @@ origin).
 | Symptom | What it means |
 |---|---|
 | The job execution fails with `MOTET_STAGING_SESSION_MINT is not set to 1` | The job definition lost its interlock, or you dispatched against an environment that has no mint job. Staging only, by construction. |
-| The job execution fails with `not on MOTET_ALLOWED_EMAILS` | The `email` input is not staging's allowlisted address. The mint deliberately cannot admit anyone Google sign-in would refuse. |
+| The job execution fails with `it is not on MOTET_ALLOWED_EMAILS` | The `email` input is not staging's allowlisted address. The mint deliberately cannot admit anyone Google sign-in would refuse. |
+| The job execution fails with `MOTET_ALLOWED_EMAILS is empty or unset in this process` | A different fault with the same shape: the *job definition* never injected the variable. The mint job is a separate container from the API service, so it needs its own copy. Fix the job's environment, not the list. |
 | `--ttl-seconds must be at most 86400` | `ttl_hours` above 24. The cap is in the image, not only in the workflow. |
 | The job execution fails with `No module named motet_db.mint_session` | Staging is running an image that predates the mint. The pin lags this repo's `main` by however long the last bump was ago; bumping it is the private infrastructure repo's business. |
-| The artifact is missing | The run failed before the upload, or it is more than a day old — `retention-days: 1`. Dispatch another; nothing is reused. |
-| `401` on `/v1` with a freshly minted token | Decryption produced something other than the token — check for a trailing newline — or the TTL has passed. `GET /v1/auth/session` is the cheap discriminator. |
+| The job execution fails with `a session already exists for this digest` | A retried task, re-running with the same arguments. The *first* attempt committed a live session, so a token is out there that you do not hold: revoke it with `POST /v1/auth/logout-all` (it takes `MOTET_API_TOKEN`) and dispatch a fresh mint. |
+| The artifact is missing | The run failed before the upload, or it is more than a day old — `retention-days: 1`. Dispatch another; nothing is reused. If the *job* had already succeeded when the run failed, a live session exists that nobody can revoke by id — `/v1/auth/logout-all` is the lever. |
+| `401` on `/v1` with a freshly minted token | Decryption produced something other than the token — check for a trailing newline — or the TTL has passed, or you downloaded an artifact from a run that predates your dispatch (see step 3). `GET /v1/auth/session` is the cheap discriminator. |
 
 ## 2. Driving the API
 
@@ -202,9 +220,10 @@ ingestion → dedup → assemble → script → grounding → TTS → storage pi
 SPA's screens including the signed-in header, and the real vendors behind them in staging's
 `real` inference mode. It also exercises the session machinery itself against a real
 deployment — a row created, resolved on every request, re-checked against the allowlist,
-expiring, and revoked by `/v1/auth/logout`. That last part is new: it is what the mint
-bought over the shared bearer, and it is *creation by CI* rather than creation by the
-sign-in route.
+and revoked by `/v1/auth/logout`. Expiry is *configured* rather than exercised: an 8-hour
+session will not lapse during a session that holds it, so the TTL is a claim CI covers and
+staging does not. That aside, this is what the mint bought over the shared bearer, and it
+is *creation by CI* rather than creation by the sign-in route.
 
 **What it does not exercise, at all:**
 
@@ -258,14 +277,18 @@ approved by Tadas on 2026-08-25.
 **Three independent things would have to change for a session to be mintable against
 production**, and two of them are diffs a reviewer sees:
 
-1. **The job does not exist there.** `motet-mint-session` is created by Terraform under
-   `count = var.environment == "staging" ? 1 : 0`. In the production project there is
-   nothing to execute.
-2. **The workflow authenticates only to staging.** `motet-mint-staging-session.yml`
-   hardcodes the staging project and uses staging's workload-identity provider; production's
-   accepts a different identity and only from `refs/heads/main`.
+1. **The job does not exist there.** `motet-mint-session` is created in staging and
+   nowhere else. In the production project there is nothing to execute.
+2. **The workflow reaches staging and nothing else.** `motet-mint-staging-session.yml`
+   authenticates to one environment, and it is not production.
 3. **`MOTET_STAGING_SESSION_MINT=1`** must be set on the job's own definition, or
    `motet_db.mint_session` refuses and exits non-zero.
+
+The first two are enforced in the private infrastructure repo's `motet/` — the Terraform
+predicate and the workflow's deploy identity are recorded there, not here, because this
+repo is public and [AGENTS.md](../AGENTS.md#repo-split--read-this-before-you-put-a-file-anywhere)
+keeps deployment topology out of it. What is stated here is the *property*, which is what
+a reader of this runbook needs; the mechanism is one repo over.
 
 The third is the smallest of the three deliberately: it is an interlock on a door in a
 building that has not been built in that town. **This is isolation by structure rather than

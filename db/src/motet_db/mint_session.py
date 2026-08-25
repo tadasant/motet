@@ -18,19 +18,36 @@ digest is not a credential: it cannot be presented to ``/v1``, and it is one-way
 what makes it safe as a Cloud Run job argument, where it is recorded in the execution's
 override list and readable by anyone who can read the project's job history.
 
+**The one thing that trade gives away, and it has to be said out loud: token entropy is
+now the caller's to get right, and this job cannot check it.** :func:`check_digest`
+validates a *shape*. The plaintext is generated outside this repo, and the digest of it is
+published in an execution record — so a token drawn from a small space would be
+brute-forceable offline by anyone who can list that history, and nothing here would
+notice. The requirement is at least 32 bytes from a CSPRNG, which is what
+:func:`motet_db.auth.new_session_token` produces for the sign-in path and what the mint
+workflow's ``openssl rand -base64 32`` produces for this one. Weakening it is not a
+configuration change; it is the whole security of the credential.
+
 **A job entrypoint, and never anything else.** Nothing in ``motet_api`` imports this
 module and nothing should: there is no route behind it and no request path that reaches
 it. Reachability is not what keeps it out of production, though — three independent
-things would have to change for that:
+things would have to change for that, and only the third is in this repo:
 
-* the Terraform ``count`` that creates ``motet-mint-session`` only when
-  ``var.environment == "staging"``,
-* the mint workflow's hardcoded staging project and its staging-only WIF provider,
+* the job is created in staging and nowhere else,
+* the mint workflow reaches staging and nothing else,
 * and :data:`MINT_ENABLED_ENV`, below.
 
-The first two are diffs a reviewer sees. The third is this file's own interlock, and it is
-the *smallest* of the three deliberately — a lock on the door of a building that has not
-been built in that town.
+The first two are diffs a reviewer sees, and both live in the private infrastructure repo
+(this one is public — see AGENTS.md's repo split). The third is this file's own interlock,
+and it is the *smallest* of the three deliberately: a lock on the door of a building that
+has not been built in that town.
+
+**The record of a mint is the row, not a metric.** Nothing here is instrumented for the
+obs stack, and that is a choice rather than an omission: ``auth_sessions`` already answers
+"which sessions exist, for whom, minted when, expiring when" — queryably, and with a lever
+attached, because each row can be revoked. A counter would be a less precise copy of a
+fact already stored. The job's own log lines say what happened for the operator reading a
+failed execution; they are not the durable record.
 
 Everything else about this process is ``motet_db.migrate``: same image, same service
 account, ``DATABASE_URL`` and nothing more (invariant 8 — no KMS, no vendor key, no
@@ -43,6 +60,9 @@ import argparse
 import logging
 import os
 from collections.abc import Mapping
+from typing import Final
+
+import psycopg
 
 from .allowlist import ALLOWED_EMAILS_ENV, allowed_emails, is_allowed
 from .auth import DIGEST_RE, AuthSession, create_session_for_digest
@@ -54,7 +74,7 @@ logger = logging.getLogger(__name__)
 #:
 #: It is set on the staging mint job's definition and on nothing else, so a mint run
 #: against any other deployment refuses before it opens a connection.
-MINT_ENABLED_ENV = "MOTET_STAGING_SESSION_MINT"
+MINT_ENABLED_ENV: Final = "MOTET_STAGING_SESSION_MINT"
 
 #: The longest session this may create — a day, against
 #: :data:`motet_db.auth.DEFAULT_TTL_SECONDS`'s thirty.
@@ -64,7 +84,7 @@ MINT_ENABLED_ENV = "MOTET_STAGING_SESSION_MINT"
 #: an agent session does not outlive its afternoon. Capped in code as well as in the
 #: workflow because the workflow's cap is an input default and this one is not negotiable
 #: from outside the image.
-MAX_TTL_SECONDS = 24 * 60 * 60
+MAX_TTL_SECONDS: Final = 24 * 60 * 60
 
 
 class MintRefused(RuntimeError):
@@ -76,7 +96,9 @@ def check_enabled(env: Mapping[str, str]) -> None:
 
     Exactly ``1``, not "truthy": ``0``, ``false`` and ``no`` all mean no, and a deployment
     that set the variable to something well-meant but unparsed should refuse rather than
-    guess. Unset means no, for the same reason an unset allowlist denies everybody.
+    guess. Surrounding whitespace is stripped first, because a value that arrived through
+    a YAML block or a shell heredoc is the operator's ``1`` with a newline on it. Unset
+    means no, for the same reason an unset allowlist denies everybody.
     """
     if env.get(MINT_ENABLED_ENV, "").strip() != "1":
         raise MintRefused(
@@ -118,9 +140,22 @@ def check_email(email: str, env: Mapping[str, str]) -> str:
     :mod:`motet_db.allowlist` is the same module ``motet_api``'s sign-in route reads, and
     reusing it rather than re-reading the variable here is the point: a mint that admitted
     an address Google sign-in would refuse would be a second, quieter door into ``/v1``.
-    An unset allowlist denies everybody here too.
+
+    **An empty list and a non-matching address are the same refusal and different
+    diagnoses**, so they get different messages. This job is a *different container* from
+    the API service, which is where ``MOTET_ALLOWED_EMAILS`` is wired today — so "the job
+    definition never injected the variable" is the likeliest way this fails on the first
+    deploy, and reporting it as "that address is not on the list" would send an operator
+    to read a list rather than to fix an environment. The sign-in route draws the same
+    distinction, for the same reason.
     """
     allowed = allowed_emails(env)
+    if not allowed:
+        raise MintRefused(
+            f"refusing to mint a session: {ALLOWED_EMAILS_ENV} is empty or unset in this "
+            "process, so no address would be accepted. Check the job definition's "
+            "environment rather than the allowlist's contents."
+        )
     if not is_allowed(email, allowed):
         raise MintRefused(
             f"refusing to mint a session for {email!r}: it is not on {ALLOWED_EMAILS_ENV}, "
@@ -144,15 +179,28 @@ def mint(
     check_ttl(ttl_seconds)
     address = check_email(email, env)
 
-    with connect(database_url) as conn:
-        session = create_session_for_digest(
-            conn,
-            user_id=OWNER_USER_ID,
-            email=address,
-            token_sha256=token_sha256,
-            ttl_seconds=ttl_seconds,
-        )
-        conn.commit()
+    try:
+        with connect(database_url) as conn:
+            session = create_session_for_digest(
+                conn,
+                user_id=OWNER_USER_ID,
+                email=address,
+                token_sha256=token_sha256,
+                ttl_seconds=ttl_seconds,
+            )
+            conn.commit()
+    except psycopg.errors.UniqueViolation as clash:
+        # `auth_sessions.token_sha256` is UNIQUE, and a Cloud Run job retries a failed
+        # task with the *same* arguments — so the realistic way to arrive here is a retry
+        # of an execution that already committed a row and then failed on something after
+        # it. Refusing loudly is the safe answer: minting a second row would be pointless
+        # (the first one already works), and a raw UniqueViolation traceback would read as
+        # a broken mint rather than as "this digest has already been used".
+        raise MintRefused(
+            "refusing to mint: a session already exists for this digest. If this is a "
+            "retry, the first attempt succeeded and that token is live — revoke it with "
+            "/v1/auth/logout-all and dispatch a fresh mint rather than reusing a token."
+        ) from clash
     return session
 
 
@@ -180,7 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--database-url",
         default=os.environ.get("DATABASE_URL"),
-        help="Postgres connection URL (default: $DATABASE_URL)",
+        help=(
+            "Postgres connection URL. The job must take this from $DATABASE_URL, like "
+            "motet_db.migrate does: this URL carries a password, and an argument is "
+            "recorded in the execution's override list where the digest is deliberately "
+            "the only thing anyone can read. The flag exists for a local run."
+        ),
     )
     return parser
 
@@ -201,8 +254,10 @@ def main(argv: list[str] | None = None) -> int:
             ttl_seconds=args.ttl_seconds,
         )
     except MintRefused as refusal:
+        # 3 rather than 2: argparse exits 2 for a usage error, and "this deployment may
+        # not mint" is a different answer from "you typed the arguments wrong".
         logger.error("%s", refusal)
-        return 2
+        return 3
 
     # Session id, address and expiry — the three things an operator needs in order to
     # revoke this row or explain it later. Nothing here is a credential.

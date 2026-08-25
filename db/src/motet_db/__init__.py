@@ -9,11 +9,6 @@ slightly differently, and a slight difference in the definition of "unread" is h
 invariant 5 stops being true.
 """
 
-# `mint_session` is deliberately NOT imported here, and that is structural rather than
-# an oversight: it is executed as `python -m motet_db.mint_session`, so a module the
-# package has already pulled into `sys.modules` would be executed a second time under a
-# second name, with a second copy of its module-level state. That shipped once already in
-# `motet_workers.runner` (motet#21); `db/tests/test_mint_session.py` fails if it recurs.
 from . import allowlist, auth, phase2, repo
 from .auth import AuthSession
 from .migrate import MIGRATIONS_DIR, Migration, MigrationError, discover, migrate
@@ -34,6 +29,12 @@ from .models import (
 from .repo import OWNER_USER_ID, PASTE_SOURCE_ID, connect
 from .rules import DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, Ranking, RuleError, SmartRule
 
+# `mint_session` is missing from the imports above deliberately, and that absence is
+# structural rather than an oversight: it is executed as `python -m motet_db.mint_session`,
+# so a module the package has already pulled into `sys.modules` would be executed a second
+# time under a second name, with a second copy of its module-level state. That shipped once
+# already in `motet_workers.runner` (motet#21); `db/tests/test_mint_session.py` fails if it
+# recurs.
 __all__ = [
     "DEFAULT_WINDOW_DAYS",
     "MAX_WINDOW_DAYS",

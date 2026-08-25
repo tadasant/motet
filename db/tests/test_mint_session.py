@@ -12,8 +12,8 @@ the ordinary session path"*, and only the ordinary lookup can support it.
 
 from __future__ import annotations
 
+import ast
 import os
-import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -109,7 +109,7 @@ class TestTheAllowlist:
     """The same list the sign-in route reads, asked the same question."""
 
     def test_an_address_not_on_the_list_is_refused(self, enabled: None) -> None:
-        with pytest.raises(MintRefused, match=ALLOWED_EMAILS_ENV):
+        with pytest.raises(MintRefused, match="is not on"):
             mint_session.mint(
                 UNREACHABLE_DB,
                 token_sha256=DIGEST,
@@ -117,13 +117,43 @@ class TestTheAllowlist:
                 ttl_seconds=3600,
             )
 
+    @pytest.mark.parametrize("value", [None, "", "   ", ",", " , "])
     def test_an_unset_allowlist_denies_rather_than_allows(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, value: str | None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(MINT_ENABLED_ENV, "1")
-        monkeypatch.delenv(ALLOWED_EMAILS_ENV, raising=False)
-        with pytest.raises(MintRefused, match=ALLOWED_EMAILS_ENV):
+        if value is None:
+            monkeypatch.delenv(ALLOWED_EMAILS_ENV, raising=False)
+        else:
+            monkeypatch.setenv(ALLOWED_EMAILS_ENV, value)
+        with pytest.raises(MintRefused, match="empty or unset"):
             mint_session.mint(UNREACHABLE_DB, token_sha256=DIGEST, email=ALLOWED, ttl_seconds=3600)
+
+    def test_the_two_allowlist_refusals_say_different_things(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same refusal, different diagnosis — and this job is where they diverge.
+
+        The mint job is a different container from the API service, so "the job definition
+        never injected `MOTET_ALLOWED_EMAILS`" is the likeliest first-deploy failure. If it
+        reported as "that address is not on the list", an operator would go and read a list
+        that is not the problem.
+        """
+        monkeypatch.setenv(MINT_ENABLED_ENV, "1")
+
+        monkeypatch.delenv(ALLOWED_EMAILS_ENV, raising=False)
+        with pytest.raises(MintRefused) as unset:
+            mint_session.mint(UNREACHABLE_DB, token_sha256=DIGEST, email=ALLOWED, ttl_seconds=60)
+
+        monkeypatch.setenv(ALLOWED_EMAILS_ENV, ALLOWED)
+        with pytest.raises(MintRefused) as wrong:
+            mint_session.mint(
+                UNREACHABLE_DB, token_sha256=DIGEST, email="nope@example.invalid", ttl_seconds=60
+            )
+
+        assert "job definition" in str(unset.value)
+        assert "job definition" not in str(wrong.value)
+        assert "nope@example.invalid" in str(wrong.value)
 
 
 class TestTheArguments:
@@ -183,23 +213,53 @@ class TestTheArguments:
 class TestThePlaintextNeverGetsHere:
     """The property the whole split exists for, asserted rather than assumed."""
 
-    def test_the_only_token_argument_is_the_digest(self) -> None:
-        flags = set(re.findall(r"--token[a-z0-9-]*", mint_session.build_parser().format_help()))
-        assert flags == {"--token-sha256"}
+    def test_the_cli_surface_is_exactly_these_four_arguments(self) -> None:
+        """The whole option set, not just the ones starting with `--token`.
+
+        Asserted as an equality so that *any* new argument fails this test and has to be
+        justified here — `--secret`, `--password` or a bare positional would all sail past
+        a pattern that only looked for token-shaped names.
+        """
+        flags = {
+            option
+            for action in mint_session.build_parser()._actions
+            for option in action.option_strings
+        }
+        assert flags == {
+            "-h",
+            "--help",
+            "--token-sha256",
+            "--email",
+            "--ttl-seconds",
+            "--database-url",
+        }
 
     def test_the_module_cannot_derive_a_token_or_hash_one(self) -> None:
-        """It imports neither the generator nor the hasher, so it has nothing to leak.
+        """It imports neither the generator nor a hasher, so it has nothing to leak.
 
-        A source-level assertion because that is the level the claim lives at: were this
-        module to call `token_digest`, it would be taking plaintext from *somewhere*, and
-        the somewhere would be a Cloud Run job argument — recorded on the execution and
-        readable by anyone who can list the project's job history.
+        Walked as an AST rather than grepped, so that a docstring *mentioning*
+        `token_digest` does not fail and an inline `hashlib.sha256(...)` does not pass. The
+        claim lives at this level: were this module to hash anything, it would be taking a
+        plaintext from *somewhere* — and the somewhere would be a Cloud Run job argument,
+        recorded on the execution and readable by anyone who can list the project's job
+        history.
         """
-        source = Path(mint_session.__file__).read_text()
-        code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
-        assert "new_session_token" not in code
-        assert "token_digest" not in code
-        assert "create_session(" not in code
+        tree = ast.parse(Path(mint_session.__file__).read_text())
+        imported = {
+            alias.name.split(".")[0] if isinstance(node, ast.Import) else alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import | ast.ImportFrom)
+            for alias in node.names
+        }
+        assert "hashlib" not in imported
+        assert not imported & {"new_session_token", "token_digest", "create_session"}
+
+        called = {
+            node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name | ast.Attribute)
+        }
+        assert not called & {"new_session_token", "token_digest", "create_session", "sha256"}
 
 
 class TestTheEntryPointRunsOnce:
@@ -277,7 +337,7 @@ class TestTheEntryPointRunsOnce:
 @needs_postgres
 class TestTheRowItWrites:
     def test_a_minted_session_resolves_on_the_ordinary_lookup(
-        self, db: psycopg.Connection[Any], enabled: None, monkeypatch: pytest.MonkeyPatch
+        self, db: psycopg.Connection[Any], enabled: None
     ) -> None:
         """End to end: a workflow's shell hashes a token, this mints, the token works.
 
@@ -322,7 +382,7 @@ class TestTheRowItWrites:
         )
         assert session.email == ALLOWED
 
-    def test_main_mints_and_logs_no_credential(
+    def test_main_mints_from_a_command_line_and_logs_nothing_secret(
         self,
         db: psycopg.Connection[Any],
         enabled: None,
@@ -344,4 +404,25 @@ class TestTheRowItWrites:
 
         assert code == 0
         assert auth.session_for_token(db, token) is not None
+        # Cheap insurance rather than a load-bearing assertion: `main` is never handed the
+        # plaintext, so this cannot fail today. It fails the day somebody adds an argument
+        # that carries one — which is exactly when a log line would start leaking it.
         assert token not in caplog.text
+
+    def test_minting_the_same_digest_twice_is_a_refusal_not_a_traceback(
+        self, db: psycopg.Connection[Any], enabled: None
+    ) -> None:
+        """`auth_sessions.token_sha256` is UNIQUE, and a failed Cloud Run task is retried.
+
+        A retry arrives with the *same* arguments, so the second insert must produce a
+        message an operator can act on rather than a `UniqueViolation` traceback that reads
+        as a broken mint — when in fact the first attempt committed a live session.
+        """
+        assert DATABASE_URL is not None
+        mint_session.mint(DATABASE_URL, token_sha256=DIGEST, email=ALLOWED, ttl_seconds=3600)
+
+        with pytest.raises(MintRefused, match="already exists for this digest"):
+            mint_session.mint(DATABASE_URL, token_sha256=DIGEST, email=ALLOWED, ttl_seconds=3600)
+
+        counted = db.execute("SELECT count(*) AS n FROM auth_sessions").fetchone()
+        assert counted is not None and counted["n"] == 1
