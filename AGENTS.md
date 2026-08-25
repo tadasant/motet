@@ -427,6 +427,19 @@ that only exists in the workflow is a check that cannot be run locally, and it w
 
 `bin/ci` needs a Postgres to run migrations against; see `CONTRIBUTING.md`.
 
+**Every pytest run creates and drops its own database**, and that is load-bearing rather
+than tidiness. The `db` fixture truncates every table before each test, which is only a
+private act if the run owns the database — and `DATABASE_URL` names *one*, so two runs on
+a machine (two agent sessions, two terminals, a local run beside a CI job) used to truncate
+each other's tables mid-test. Postgres reported it as a deadlock and killed one run; the
+survivor then failed somewhere unrelated, on a row that had been written and was gone. That
+is motet#15, and the reason it looked like a leaked connection is that within one process
+the suite is serial and there is no second writer. `conftest.py` rewrites `DATABASE_URL` in
+`pytest_configure` — before collection, because test modules read it at import — so
+subprocesses and anything reading the environment get the same isolated database. Making
+the truncate gentler (retry it, `DELETE` instead) would have left both runs deleting each
+other's rows, quietly.
+
 There is one other script, and exactly one reason it is separate:
 
 ```bash

@@ -39,6 +39,15 @@ further configuration.
 > `uv run pytest` works with no database. CI always has one, so that path is always covered
 > there — but a green local run with Postgres missing has not exercised it.
 
+**Each pytest run creates its own database** — `motet_test_run<pid>_<n>_<timestamp>`, from
+the server `DATABASE_URL` points at — and drops it at the end. `DATABASE_URL` names one
+database, so without this two runs on one machine truncate each other's tables mid-test
+(motet#15): the loud half is a deadlock, the quiet half is a row that was written and is
+not there. Two runs at once is now fine, and so is `bin/ci` while another one is going.
+
+Set `MOTET_TEST_KEEP_DATABASE=1` to keep the database after a failing run — the name is in
+pytest's header line, so `psql` on it is a copy and paste.
+
 ## One CI command
 
 ```bash
