@@ -251,13 +251,17 @@ class UnhandledErrorMiddleware:
     caller, and ``fetch`` rejects with ``TypeError: Failed to fetch``: no status, no body,
     no clue. The SPA showed the user that string, and it was the only evidence there was.
 
-    Installed *inside* CORS and *outside* the OpenTelemetry middleware, which is the only
-    ordering that keeps everything:
+    Installed *inside* CORS and *outside* the OpenTelemetry middleware:
 
     * CORS wraps this, so the 500 it returns is a response the CORS layer decorates.
     * OTel is wrapped by this, so the exception still propagates through the span and is
       recorded there before being converted.
-    * Sentry captures at the route handler, further in still, so GlitchTip is untouched.
+
+    **``logger.exception`` is load-bearing, not decoration.** Converting the exception
+    here stops it reaching the outermost ASGI layer, which is where the Sentry SDK
+    otherwise captures it — so without that call the error would silently stop arriving in
+    GlitchTip. It still arrives, through the SDK's logging integration and carrying the
+    same exception; measured both ways, guarded and not, before this shipped.
 
     The body says nothing about the exception on purpose — a stack trace or a vendor
     message can name a KMS key path or a connection string, and this response crosses an

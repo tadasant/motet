@@ -9,6 +9,7 @@ None of it needs a database.
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from pathlib import Path
 
@@ -332,6 +333,23 @@ class TestUnhandledErrorsReachTheBrowser:
         # crosses an origin, and a vendor message can quote a KMS key path.
         assert "detail" in response.json()
         assert "vendor exception" not in response.text
+
+    def test_the_exception_is_logged_with_its_traceback(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The log line is what keeps GlitchTip getting the error, not a nicety.
+
+        Converting the exception into a response stops it reaching the outermost ASGI
+        layer, which is where the Sentry SDK otherwise captures it. The SDK's logging
+        integration turns this `logger.exception` into the same event, carrying the same
+        exception — so deleting the call would silently stop errors arriving.
+        """
+        with caplog.at_level(logging.ERROR, logger="motet.api"):
+            self._client(guarded=True).get("/v1/boom", headers={"Origin": APP_ORIGIN})
+        recorded = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert recorded, "an unhandled error must be logged"
+        assert recorded[-1].exc_info is not None, "without exc_info there is no traceback"
+        assert "/v1/boom" in recorded[-1].getMessage()
 
     def test_without_the_guard_the_browser_would_see_nothing(self) -> None:
         """The bug, pinned. Delete the middleware and this is what comes back."""

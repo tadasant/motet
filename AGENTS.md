@@ -884,9 +884,12 @@ Three things about how that failure presented are worth more than the fix:
   `Access-Control-Allow-Origin`, a browser refuses to hand it to the caller, and `fetch`
   rejects with a bare `TypeError: Failed to fetch`: no status, no body, no clue. That
   string was the entire bug report. `main.UnhandledErrorMiddleware` now sits *inside* CORS
-  and *outside* the OTel middleware — the only ordering that keeps the span, the GlitchTip
-  capture, and a readable 500 — and `client.ts`'s `send()` turns a rejected `fetch` into a
-  sentence naming the URL. **Keep both, and keep that order.**
+  and *outside* the OTel middleware, so the span still records the exception and the
+  response still gets the header; and `client.ts`'s `send()` turns a rejected `fetch` into
+  a sentence naming the URL. **Keep both, and keep that order.** Its `logger.exception` is
+  load-bearing too: converting the exception stops it reaching the outermost ASGI layer,
+  where the Sentry SDK would otherwise capture it, and the log line is what keeps GlitchTip
+  getting the error at all.
 - **A key manager raises `VaultError`, and the kms backend used not to.**
   `PermissionDenied`, `NotFound`, `DefaultCredentialsError` and a missing SDK all escaped
   as themselves, straight past the callback's `except VaultError` and its 503. They are
