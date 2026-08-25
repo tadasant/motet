@@ -84,9 +84,13 @@ files = [
     "goldens",
 ]
 
-# The Google Cloud SDK ships no py.typed marker, so every symbol from it is untyped as
-# far as strict mode is concerned. Scoped to the one package rather than relaxed globally:
-# our own code stays strict, including the thin GCS wrapper around it.
+# Most of the Google Cloud SDK ships no py.typed marker, so every symbol from it is
+# untyped as far as strict mode is concerned. Scoped to the one package rather than
+# relaxed globally: our own code stays strict, including the thin wrappers around it.
+#
+# `google-cloud-kms` is the exception and it *does* ship one, which makes `google.cloud` a
+# partially typed namespace — see the import comment in `motet_storage.store` for the one
+# place that distinction is visible.
 [[tool.mypy.overrides]]
 module = ["google.cloud.*"]
 ignore_missing_imports = true

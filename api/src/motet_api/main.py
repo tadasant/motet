@@ -47,7 +47,7 @@ from motet_sources import (
     new_pkce_pair,
 )
 from motet_storage import ObjectStore, StorageError
-from motet_vault import DekWrapper, VaultError
+from motet_vault import DekWrapper, VaultError, vault_status
 from motet_workers import (
     DEFAULT_MAX_ATTEMPTS,
     enqueue_episode,
@@ -168,6 +168,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             "Fine on a laptop; on a deployed environment it means anyone can ingest text "
             "and spend inference budget."
         )
+    # Said at startup, not only on the health route, because the vault is exercised
+    # exactly once per mailbox — by a human, at the end of a consent flow — and a
+    # deployment that cannot seal has no other occasion to mention it. Not fatal: the
+    # rest of the API works, and refusing to boot over a dormant Phase 2 path would
+    # take the whole product down for a feature nobody was using.
+    vault = vault_status()
+    if vault.ready:
+        obs.logger.info("vault: backend=%s ready=true", vault.backend)
+    else:
+        obs.logger.error(
+            "vault: backend=%s ready=false — connecting a mailbox will fail after the "
+            "provider has already issued a token: %s",
+            vault.backend,
+            vault.detail,
+        )
     try:
         yield
     finally:
@@ -224,6 +239,65 @@ def configure_cors(target: FastAPI, config: Settings) -> None:
     )
 
 
+class UnhandledErrorMiddleware:
+    """Turn an exception nobody caught into a 500 the *browser* is allowed to read.
+
+    **This is the middleware that makes a bug diagnosable from a laptop**, and it exists
+    because of how the Gmail-connect failure presented. Starlette's own
+    ``ServerErrorMiddleware`` sits outside every middleware added here, including
+    ``CORSMiddleware`` — so an exception that escapes a route is answered by a 500 that
+    never passes through the CORS layer and therefore carries no
+    ``Access-Control-Allow-Origin``. A browser refuses to hand that response to the
+    caller, and ``fetch`` rejects with ``TypeError: Failed to fetch``: no status, no body,
+    no clue. The SPA showed the user that string, and it was the only evidence there was.
+
+    Installed *inside* CORS and *outside* the OpenTelemetry middleware, which is the only
+    ordering that keeps everything:
+
+    * CORS wraps this, so the 500 it returns is a response the CORS layer decorates.
+    * OTel is wrapped by this, so the exception still propagates through the span and is
+      recorded there before being converted.
+    * Sentry captures at the route handler, further in still, so GlitchTip is untouched.
+
+    The body says nothing about the exception on purpose — a stack trace or a vendor
+    message can name a KMS key path or a connection string, and this response crosses an
+    origin. The detail belongs in the log line, which goes to the obs stack.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def watched_send(message: Any) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, watched_send)
+        except Exception:
+            logger.exception(
+                "unhandled error serving %s %s", scope.get("method"), scope.get("path")
+            )
+            if started:
+                # The response is already on the wire and cannot be replaced. Re-raising
+                # hands it back to ServerErrorMiddleware, which is what closes the
+                # connection — the browser sees a truncated response either way.
+                raise
+            await Response(
+                content='{"detail":"Something failed on our side. The error was recorded."}',
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                media_type="application/json",
+            )(scope, receive, send)
+
+
 # At import, deliberately. Instrumenting adds ASGI middleware, and Starlette refuses that
 # once the middleware stack is built — which it is by the time the lifespan runs, so doing
 # this next to `obs.configure()` would raise. No provider exists yet and that is fine: the
@@ -231,6 +305,10 @@ def configure_cors(target: FastAPI, config: Settings) -> None:
 # installs the real one. Before `configure_cors` so that CORS ends up the outer
 # middleware, where a rejected preflight is not a traced request.
 obs.instrument(app)
+
+# Between the two, and the order is the whole point — see the class docstring.
+# `add_middleware` prepends, so the stack ends up CORS → unhandled-error → OTel → routes.
+app.add_middleware(UnhandledErrorMiddleware)
 
 # Read once at import rather than per request: an origin policy that could change under a
 # running process would be a policy nobody could reason about, and Cloud Run gives a new
@@ -278,6 +356,10 @@ def health(config: Config) -> HealthResponse:
     from outside. Nothing secret goes in the response; a new field here is public.
     """
     current = obs.status()
+    # `detail` is deliberately not returned: a KMS refusal quotes the key resource path,
+    # and this route is public. The backend name and the flag are enough to tell a
+    # deployment that cannot seal from one nobody has asked to.
+    vault = vault_status()
     return HealthResponse(
         status="ok",
         service=current.service_name,
@@ -286,6 +368,8 @@ def health(config: Config) -> HealthResponse:
         errors_configured=current.errors_configured,
         authenticated=config.authenticated,
         login_configured=config.login_configured,
+        vault_backend=vault.backend,
+        vault_ready=vault.ready,
         inference_mode=config.inference_mode,
     )
 

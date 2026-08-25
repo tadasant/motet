@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import sys
 
 import pytest
 from motet_vault import (
@@ -32,8 +33,10 @@ from motet_vault import (
     aad,
     build_dek_wrapper,
     build_key_manager,
+    kms_sdk_installed,
     open_sealed,
     seal,
+    vault_status,
 )
 
 SECRET = "1//0gRefreshTokenLookingThing-abcdef123456"
@@ -243,3 +246,100 @@ def test_the_wrapper_half_satisfies_only_the_encrypt_contract() -> None:
     # is what mypy is checking on every CI run.
     assert "unwrap" not in DekWrapper.__protocol_attrs__  # type: ignore[attr-defined]
     assert "unwrap" in KeyManager.__protocol_attrs__  # type: ignore[attr-defined]
+
+
+# --- what the kms backend does when Cloud KMS says no --------------------------------
+#
+# The contract this package advertises is that a key manager fails with `VaultError`, and
+# until these existed the kms backend broke it in the worst possible place. Sealing a
+# Gmail refresh token happens inside the OAuth callback, after the provider has already
+# issued the token; the route catches `VaultError` and answers 503. A `PermissionDenied`,
+# a `NotFound`, or a missing SDK sailed straight past that into an unhandled 500 — the one
+# response Starlette sends without going through the CORS middleware, which is why the
+# browser reported `TypeError: Failed to fetch` and named nothing at all.
+
+
+class _RefusingKms:
+    """Stands in for the Cloud KMS client refusing a call, without the SDK or a network."""
+
+    def encrypt(self, request: dict[str, object]) -> object:
+        raise PermissionError("caller does not have cloudkms.cryptoKeyVersions.useToEncrypt")
+
+    def decrypt(self, request: dict[str, object]) -> object:
+        raise PermissionError("caller does not have cloudkms.cryptoKeyVersions.useToDecrypt")
+
+
+def _kms_manager(client: object | None = None) -> CloudKmsKeyManager:
+    key = CloudKmsKeyManager("projects/x/locations/y/keyRings/z/cryptoKeys/k")
+    if client is not None:
+        key._client = client  # noqa: SLF001 — the SDK seam, and there is no other way in
+    return key
+
+
+def test_a_refused_wrap_is_a_vault_error() -> None:
+    with pytest.raises(VaultError, match="wrap a DEK"):
+        _kms_manager(_RefusingKms()).wrap(b"x" * 32, b"u:s:gmail")
+
+
+def test_a_refused_unwrap_is_a_vault_error() -> None:
+    """Invariant 8's expected outcome in the API, and it must not be a 500."""
+    with pytest.raises(VaultError, match="unwrap a DEK"):
+        _kms_manager(_RefusingKms()).unwrap(b"wrapped", b"u:s:gmail")
+
+
+def test_a_missing_sdk_is_a_config_error_not_an_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact failure that broke Gmail connect on production.
+
+    `google-cloud-kms` is an optional extra of this package and nothing depended on it, so
+    every image built with `uv sync --no-dev` shipped without it — and the first line of
+    code to notice was the lazy import, inside a request, after Google had already issued
+    a refresh token. A `ModuleNotFoundError` is not a `VaultError`, so it escaped the
+    route's handler entirely.
+
+    The import is broken by hiding the parent package rather than by uninstalling
+    anything, so this says the same thing whether or not the SDK is present in the
+    environment running it.
+    """
+    monkeypatch.setitem(sys.modules, "google.cloud", None)
+    with pytest.raises(VaultConfigError, match="google-cloud-kms"):
+        _kms_manager().wrap(b"x" * 32, b"u:s:gmail")
+
+
+# --- is this process able to seal at all? --------------------------------------------
+
+
+def test_the_sdk_is_installed_here() -> None:
+    """`motet-api` and `motet-workers` depend on `motet-vault[kms]`, so it resolves."""
+    assert kms_sdk_installed()
+
+
+def test_status_reports_the_local_backend_as_ready_off_cloud() -> None:
+    reported = vault_status({})
+    assert (reported.backend, reported.ready) == ("local", True)
+
+
+def test_status_refuses_the_local_backend_in_real_mode() -> None:
+    """The same refusal `build_key_manager` makes, answerable without making a request."""
+    reported = vault_status({"MOTET_INFERENCE_MODE": "real"})
+    assert reported.ready is False
+    assert BACKEND_ENV in reported.detail
+
+
+def test_status_reports_kms_without_a_key_as_not_ready() -> None:
+    reported = vault_status({BACKEND_ENV: "kms", "MOTET_INFERENCE_MODE": "real"})
+    assert (reported.backend, reported.ready) == ("kms", False)
+    assert KMS_KEY_ENV in reported.detail
+
+
+def test_status_reports_kms_with_a_key_as_ready() -> None:
+    """Configuration only — it must not call Cloud KMS from an unauthenticated route."""
+    reported = vault_status(
+        {
+            BACKEND_ENV: "kms",
+            KMS_KEY_ENV: "projects/x/locations/y/keyRings/z/cryptoKeys/k",
+            "MOTET_INFERENCE_MODE": "real",
+        }
+    )
+    assert (reported.backend, reported.ready) == ("kms", True)

@@ -33,7 +33,7 @@ from fastapi import Depends, Header, HTTPException, Query, status
 from motet_db import auth as auth_repo
 from motet_db import repo
 from motet_storage import ObjectStore, build_store
-from motet_vault import DekWrapper, build_dek_wrapper
+from motet_vault import DekWrapper, VaultConfigError, build_dek_wrapper
 
 from .auth import ALLOWED_EMAILS_ENV, is_allowed
 from .config import Settings
@@ -76,8 +76,22 @@ def dek_wrapper() -> DekWrapper:
 
     Built per request rather than cached: it holds no connection, and the KMS client
     underneath it is created lazily on first use.
+
+    **A misconfigured vault is a 503, not a 500**, and it is translated here rather than
+    in the route because a dependency is resolved *before* the route body — so the
+    ``except VaultError`` around the seal cannot see this one. Same shape as
+    ``connection`` refusing without a ``DATABASE_URL``: nothing is wrong with the request,
+    the capability is not configured. The message is the vault's own, which names the
+    variable to set.
     """
-    return build_dek_wrapper()
+    try:
+        return build_dek_wrapper()
+    except VaultConfigError as exc:
+        logger.error("the credential vault is not usable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"The credential vault is not configured, so nothing can be stored: {exc}",
+        ) from exc
 
 
 def connection(

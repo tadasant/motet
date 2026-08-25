@@ -213,6 +213,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var status: String
     public var telemetryConfigured: Bool
     public var telemetryExporting: Bool
+    public var vaultBackend: String
+    public var vaultReady: Bool
 
     public init(
         authenticated: Bool,
@@ -222,7 +224,9 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         service: String,
         status: String,
         telemetryConfigured: Bool,
-        telemetryExporting: Bool
+        telemetryExporting: Bool,
+        vaultBackend: String,
+        vaultReady: Bool
     ) {
         self.authenticated = authenticated
         self.errorsConfigured = errorsConfigured
@@ -232,6 +236,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.status = status
         self.telemetryConfigured = telemetryConfigured
         self.telemetryExporting = telemetryExporting
+        self.vaultBackend = vaultBackend
+        self.vaultReady = vaultReady
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -243,6 +249,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case status
         case telemetryConfigured = "telemetry_configured"
         case telemetryExporting = "telemetry_exporting"
+        case vaultBackend = "vault_backend"
+        case vaultReady = "vault_ready"
     }
 }
 

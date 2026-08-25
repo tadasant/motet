@@ -18,7 +18,16 @@ dependencies = [
     # half of the vault (`build_dek_wrapper`) and never the decrypt half: invariant 8.
     "motet-sources",
     "motet-storage",
-    "motet-vault",
+    # `[kms]`, not bare, and this is the whole of the Gmail-connect fix. Sealing a token
+    # in a deployed environment goes through Cloud KMS, the SDK is imported lazily inside
+    # `CloudKmsKeyManager`, and the extra that carries it was on nobody's dependency
+    # edge — so every image built with `uv sync --no-dev` (default extras only, see the
+    # note on httpx above) shipped without it. The failure landed as far from its cause as
+    # it is possible to land: inside the OAuth callback, after Google had already returned
+    # a refresh token, as an unhandled 500 the browser could only report as
+    # `TypeError: Failed to fetch`. The lazy import keeps a laptop off the cloud SDK; it
+    # was never a reason for the *image* to be missing it.
+    "motet-vault[kms]",
     "motet-workers",
     "pydantic>=2.10",
     # Google Sign-In verifies an ID token's RS256 signature against Google's published

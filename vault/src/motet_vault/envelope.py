@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol, runtime_checkable
 
@@ -244,19 +246,35 @@ class CloudKmsKeyManager:
         if self._client is None:
             # Imported here so a local-backend process — every test, every laptop — never
             # pulls in the cloud SDK. Same shape as the GCS backend in `motet_storage`.
-            from google.cloud import kms  # noqa: PLC0415
+            #
+            # A lazy import is not a reason for the SDK to be optional at the *image*
+            # level, and treating it as one is how Gmail connect shipped broken: the
+            # extra existed, nothing asked for it, and the first line of code to notice
+            # was this one — inside a request, three network round-trips into a consent
+            # flow. `motet-api` and `motet-workers` therefore depend on
+            # `motet-vault[kms]`, and `kms_sdk_installed()` is what makes the absence
+            # answerable from `/internal/health` instead of from a stack trace.
+            try:
+                from google.cloud import kms  # noqa: PLC0415
+            except ImportError as exc:
+                raise VaultConfigError(
+                    "the kms backend needs the google-cloud-kms SDK, which is not "
+                    "installed in this process. Depend on motet-vault[kms] — an image "
+                    "built with default extras only reaches this line and no further."
+                ) from exc
 
             self._client = kms.KeyManagementServiceClient()
         return self._client
 
     def wrap(self, dek: bytes, associated_data: bytes) -> bytes:
-        response = self._kms().encrypt(
-            request={
-                "name": self._key_name,
-                "plaintext": dek,
-                "additional_authenticated_data": associated_data,
-            }
-        )
+        with _kms_errors("wrap a DEK"):
+            response = self._kms().encrypt(
+                request={
+                    "name": self._key_name,
+                    "plaintext": dek,
+                    "additional_authenticated_data": associated_data,
+                }
+            )
         wrapped = response.ciphertext
         assert isinstance(wrapped, bytes)
         return wrapped
@@ -265,16 +283,43 @@ class CloudKmsKeyManager:
         # Reaching this in the API is the failure invariant 8 exists to prevent, and IAM
         # is what stops it: the runtime service account there holds `useToEncrypt` and
         # not `useToDecrypt`, so this call returns PermissionDenied rather than a key.
-        response = self._kms().decrypt(
-            request={
-                "name": self._key_name,
-                "ciphertext": wrapped,
-                "additional_authenticated_data": associated_data,
-            }
-        )
+        with _kms_errors("unwrap a DEK"):
+            response = self._kms().decrypt(
+                request={
+                    "name": self._key_name,
+                    "ciphertext": wrapped,
+                    "additional_authenticated_data": associated_data,
+                }
+            )
         dek = response.plaintext
         assert isinstance(dek, bytes)
         return dek
+
+
+@contextmanager
+def _kms_errors(action: str) -> Iterator[None]:
+    """Everything Cloud KMS can refuse with, said in this package's own error type.
+
+    **The contract is that a key manager raises :class:`VaultError`**, and until this
+    existed the kms backend broke it: ``PermissionDenied``, ``NotFound``,
+    ``DefaultCredentialsError`` and a missing SDK all escaped as themselves. The one
+    caller that matters — the API's OAuth callback — catches ``VaultError`` and answers
+    503, so a vendor exception sailed past it into an unhandled 500. A 500 raised *out of*
+    the app is the one response Starlette sends without going through the CORS
+    middleware, which is why the browser reported ``TypeError: Failed to fetch`` and named
+    nothing at all. Translating here is what makes that failure legible at every layer
+    above.
+
+    Broad on purpose. The point is not to enumerate google-api-core's exception tree — it
+    cannot even be imported when the SDK is the thing that is missing — it is that
+    *nothing* leaves this class except a ``VaultError``.
+    """
+    try:
+        yield
+    except VaultError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — see the docstring: that is the contract
+        raise VaultError(f"Cloud KMS could not {action}: {exc}") from exc
 
 
 def build_key_manager(env: Mapping[str, str] | None = None) -> KeyManager:
@@ -305,6 +350,70 @@ def build_key_manager(env: Mapping[str, str] | None = None) -> KeyManager:
             )
         return LocalKeyManager(kek=_local_kek(environ))
     raise VaultConfigError(f"{BACKEND_ENV}={backend!r} is not one of: local, kms")
+
+
+#: The module the kms backend imports on its first call, and the whole of what an image
+#: built with default extras is missing.
+KMS_SDK_MODULE: Final = "google.cloud.kms"
+
+
+def kms_sdk_installed() -> bool:
+    """Whether the Cloud KMS SDK is importable in this process.
+
+    Asked rather than imported: the answer is wanted on a health route, where importing a
+    cloud SDK to find out would be a side effect nobody asked for.
+    """
+    try:
+        return importlib.util.find_spec(KMS_SDK_MODULE) is not None
+    except (ImportError, ValueError):
+        # `find_spec` imports the parent package to look inside it, so a `google.cloud`
+        # namespace that does not exist raises rather than returning None.
+        return False
+
+
+@dataclass(frozen=True)
+class VaultStatus:
+    """Whether this process could seal a credential if one arrived, and under what.
+
+    The same shape of question ``/internal/health`` already asks about telemetry, and for
+    the same reason: the vault is only ever exercised by a human completing a consent
+    flow, so "it cannot work" and "nobody has tried" look identical from outside until
+    somebody tries. That is exactly how Gmail connect stayed broken on production —
+    ``MOTET_VAULT_BACKEND=kms`` was set, the key existed, IAM was granted, and the SDK
+    that reaches all three was not in the image.
+
+    ``detail`` names the missing piece and is for the startup log, not for the health
+    document: a KMS refusal quotes the key resource path, which is infrastructure
+    topology and belongs in neither a public response nor this repo.
+    """
+
+    backend: str
+    ready: bool
+    detail: str = ""
+
+
+def vault_status(env: Mapping[str, str] | None = None) -> VaultStatus:
+    """Resolve the vault the way a request would, without holding a credential.
+
+    Deliberately does **not** call Cloud KMS. The health route is unauthenticated, so a
+    check that made a billed vendor call per request would be a free way to spend
+    somebody else's money. What it does cover is every failure that is a property of this
+    process rather than of the network: an unusable backend name, real mode on the local
+    backend, an unset key path, and a missing SDK.
+    """
+    environ = dict(os.environ) if env is None else dict(env)
+    backend = environ.get(BACKEND_ENV, LOCAL_BACKEND).strip().lower()
+    try:
+        build_key_manager(environ)
+    except VaultConfigError as exc:
+        return VaultStatus(backend=backend, ready=False, detail=str(exc))
+    if backend == KMS_BACKEND and not kms_sdk_installed():
+        return VaultStatus(
+            backend=backend,
+            ready=False,
+            detail=f"{KMS_SDK_MODULE} is not installed; depend on motet-vault[kms]",
+        )
+    return VaultStatus(backend=backend, ready=True)
 
 
 def build_dek_wrapper(env: Mapping[str, str] | None = None) -> DekWrapper:

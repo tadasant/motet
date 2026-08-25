@@ -27,6 +27,7 @@ from motet_api.obs import (
     OTLP_TOKEN_ENV,
 )
 from motet_inference.llm import LlmConfigError
+from motet_vault import BACKEND_ENV, KMS_KEY_ENV
 from motet_workers import DEFAULT_MAX_ATTEMPTS, Queue, drain, jobs
 from motet_workers.handlers import source_item_failed
 
@@ -157,6 +158,47 @@ class TestHealth:
         """
         monkeypatch.setenv("MOTET_API_TOKEN", "   ")
         assert client.get(HEALTH_PATH).json()["authenticated"] is False
+
+    def test_reports_whether_a_mailbox_credential_could_be_sealed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flag that would have made the Gmail-connect bug a five-minute diagnosis.
+
+        The vault is exercised exactly once per mailbox — by a human, at the end of a
+        consent flow — so a deployment that cannot seal and one nobody has asked to seal
+        for look identical from outside. Same reasoning as `authenticated` and
+        `login_configured`.
+        """
+        monkeypatch.delenv(BACKEND_ENV, raising=False)
+        body = client.get(HEALTH_PATH).json()
+        assert (body["vault_backend"], body["vault_ready"]) == ("local", True)
+
+    def test_the_local_vault_is_not_ready_in_real_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deployed environment holding the KEK in its own memory satisfies none of
+        invariant 8, so the vault refuses — and health has to say so rather than leaving
+        it to be discovered by the one person who clicks Connect."""
+        monkeypatch.delenv(BACKEND_ENV, raising=False)
+        monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
+        body = client.get(HEALTH_PATH).json()
+        assert (body["vault_backend"], body["vault_ready"]) == ("local", False)
+
+    def test_the_kms_vault_needs_a_key_to_be_ready(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(BACKEND_ENV, "kms")
+        monkeypatch.setenv("MOTET_INFERENCE_MODE", "real")
+        monkeypatch.delenv(KMS_KEY_ENV, raising=False)
+        assert client.get(HEALTH_PATH).json()["vault_ready"] is False
+        monkeypatch.setenv(KMS_KEY_ENV, "projects/x/locations/y/keyRings/z/cryptoKeys/k")
+        body = client.get(HEALTH_PATH).json()
+        assert (body["vault_backend"], body["vault_ready"]) == ("kms", True)
+
+    def test_the_key_path_is_never_in_the_response(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """This route is unauthenticated and this repo is public: a KMS key path is
+        infrastructure topology and must not leak through either."""
+        monkeypatch.setenv(BACKEND_ENV, "kms")
+        monkeypatch.setenv(KMS_KEY_ENV, "projects/secret-proj/locations/y/keyRings/z/cryptoKeys/k")
+        assert "secret-proj" not in client.get(HEALTH_PATH).text
 
 
 class TestAuthentication:

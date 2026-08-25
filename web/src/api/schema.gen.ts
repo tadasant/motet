@@ -914,6 +914,16 @@ export interface components {
              * @description Whether this process actually installed an exporter, which is a different question from whether the variables were set. False with telemetry_configured true means the wiring is right and the SDK did not start — check the startup log.
              */
             telemetry_exporting: boolean;
+            /**
+             * Vault Backend
+             * @description Which credential vault this process resolved: 'kms' or 'local'. 'local' in a deployed environment is a misconfiguration the process refuses to serve under — see vault_ready.
+             */
+            vault_backend: string;
+            /**
+             * Vault Ready
+             * @description Whether a Gmail refresh token could be sealed if one arrived. False means connecting a mailbox will fail at the last step of the consent flow, after the provider has already issued a token. Reported for the same reason as 'login_configured': the vault is only ever exercised by a human finishing a consent flow, so a broken one and an untried one look identical from outside. It does not call Cloud KMS — this route is unauthenticated, and a billed vendor call per request would be a free way to spend money.
+             */
+            vault_ready: boolean;
         };
         /**
          * HighlightResponse

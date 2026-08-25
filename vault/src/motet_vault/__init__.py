@@ -11,6 +11,7 @@ from .envelope import (
     DEK_BYTES,
     KMS_BACKEND,
     KMS_KEY_ENV,
+    KMS_SDK_MODULE,
     LOCAL_BACKEND,
     LOCAL_KEK_ENV,
     NONCE_BYTES,
@@ -22,11 +23,14 @@ from .envelope import (
     SealedSecret,
     VaultConfigError,
     VaultError,
+    VaultStatus,
     aad,
     build_dek_wrapper,
     build_key_manager,
+    kms_sdk_installed,
     open_sealed,
     seal,
+    vault_status,
 )
 
 __all__ = [
@@ -34,6 +38,7 @@ __all__ = [
     "DEK_BYTES",
     "KMS_BACKEND",
     "KMS_KEY_ENV",
+    "KMS_SDK_MODULE",
     "LOCAL_BACKEND",
     "LOCAL_KEK_ENV",
     "NONCE_BYTES",
@@ -45,9 +50,12 @@ __all__ = [
     "SealedSecret",
     "VaultConfigError",
     "VaultError",
+    "VaultStatus",
     "aad",
     "build_dek_wrapper",
     "build_key_manager",
+    "kms_sdk_installed",
     "open_sealed",
     "seal",
+    "vault_status",
 ]

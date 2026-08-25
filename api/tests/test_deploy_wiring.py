@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from motet_api.config import APP_BASE_URL_ENV, ConfigError, Settings
-from motet_api.main import configure_cors
+from motet_api.main import UnhandledErrorMiddleware, configure_cors
 from motet_api.obs import (
     ERROR_DSN_ENV,
     GLITCHTIP_DSN_ENV,
@@ -27,6 +27,7 @@ from motet_api.obs import (
     resolve_otlp_headers,
     status,
 )
+from motet_vault import kms_sdk_installed
 
 APP_ORIGIN = "https://app.example.invalid"
 
@@ -290,3 +291,83 @@ class TestDockerfileCoversTheWorkspace:
             "Dockerfile is missing `COPY <member> <member>` for these workspace members, "
             f"so `uv sync --frozen` cannot install them: {sorted(members - sources)}"
         )
+
+
+class TestUnhandledErrorsReachTheBrowser:
+    """A 500 the SPA can read, instead of `TypeError: Failed to fetch`.
+
+    This is the class that would have made the Gmail-connect bug a five-minute diagnosis.
+    Starlette answers an escaped exception from `ServerErrorMiddleware`, which sits
+    *outside* everything `add_middleware` installs — so the 500 never passes the CORS
+    layer, carries no `Access-Control-Allow-Origin`, and a browser refuses to hand it to
+    the caller at all. `fetch` rejects with a `TypeError` naming no status and no body,
+    which is exactly what the user saw and reported.
+
+    Both cases below are run through the real `configure_cors` and the real
+    `UnhandledErrorMiddleware`, in the real order, for the same reason the class above
+    does: a test that rebuilt the stack by hand would stay green after somebody changed
+    it.
+    """
+
+    @staticmethod
+    def _client(*, guarded: bool) -> TestClient:
+        app = FastAPI()
+
+        @app.get("/v1/boom")
+        def _boom() -> None:
+            raise RuntimeError("a vendor exception nobody caught")
+
+        # Same order as `main`: the guard is added first and CORS second, so
+        # `add_middleware`'s prepending leaves CORS on the outside.
+        if guarded:
+            app.add_middleware(UnhandledErrorMiddleware)
+        configure_cors(app, _settings(APP_ORIGIN))
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_the_five_hundred_carries_the_allow_origin_header(self) -> None:
+        response = self._client(guarded=True).get("/v1/boom", headers={"Origin": APP_ORIGIN})
+        assert response.status_code == 500
+        assert response.headers["access-control-allow-origin"] == APP_ORIGIN
+        # Readable by the SPA, and saying nothing about the exception: this response
+        # crosses an origin, and a vendor message can quote a KMS key path.
+        assert "detail" in response.json()
+        assert "vendor exception" not in response.text
+
+    def test_without_the_guard_the_browser_would_see_nothing(self) -> None:
+        """The bug, pinned. Delete the middleware and this is what comes back."""
+        response = self._client(guarded=False).get("/v1/boom", headers={"Origin": APP_ORIGIN})
+        assert response.status_code == 500
+        assert "access-control-allow-origin" not in response.headers
+
+
+class TestTheKmsSdkShipsInTheImage:
+    """`motet-vault[kms]`, not `motet-vault` — the whole of the Gmail-connect fix.
+
+    The SDK is imported lazily inside `CloudKmsKeyManager` so that a laptop and CI never
+    pull in a cloud dependency they cannot use. That is right, and it is *not* a reason
+    for the extra to be absent from the images: `uv sync --no-dev` installs default
+    extras only, so nothing asked for `[kms]` and nothing had it. The first line of code
+    to notice was the import, inside a request, after Google had already issued a refresh
+    token — an unhandled 500 with no CORS headers on it.
+
+    Two claims, and the second is the one that catches a regression in the lock file
+    rather than in the manifests.
+    """
+
+    @staticmethod
+    def _requires_kms(member: str) -> bool:
+        root = TestDockerfileCoversTheWorkspace._repo_root()
+        manifest = tomllib.loads((root / member / "pyproject.toml").read_text())
+        return "motet-vault[kms]" in manifest["project"]["dependencies"]
+
+    @pytest.mark.parametrize("member", ["api", "workers"])
+    def test_both_deployables_ask_for_the_extra(self, member: str) -> None:
+        assert self._requires_kms(member), (
+            f"{member}/pyproject.toml depends on bare `motet-vault`, so the image it "
+            "builds has no google-cloud-kms and sealing a credential fails at the last "
+            "step of the consent flow."
+        )
+
+    def test_the_sdk_is_importable_here(self) -> None:
+        """Resolved, not just declared — and no call is made, so CI stays offline."""
+        assert kms_sdk_installed()

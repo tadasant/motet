@@ -134,7 +134,18 @@ class GcsObjectStore:
     def _bucket(self) -> Any:
         if self._client is None:
             # Imported here so that a local-backend process never pulls in the cloud SDK.
-            from google.cloud import storage  # noqa: PLC0415
+            #
+            # `import google.cloud.storage`, not `from google.cloud import storage`, and
+            # the difference is mypy rather than taste. `google.cloud` is a namespace
+            # package shared by every Google SDK, and `google-cloud-kms` — which the
+            # credential vault needs in both images — ships a `py.typed` marker while
+            # `google-cloud-storage` does not. That makes the namespace *partially*
+            # typed, so the `from ... import` form resolves the parent, fails to find a
+            # typed child, and reports `Module "google.cloud" has no attribute "storage"`
+            # — an error `ignore_missing_imports` cannot silence, because nothing is
+            # missing. This form asks for the module directly, which is the case that
+            # override does cover.
+            import google.cloud.storage as storage  # noqa: PLC0415
 
             self._client = storage.Client()
         return self._client.bucket(self._bucket_name)

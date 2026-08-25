@@ -313,7 +313,7 @@ executed against a vendor, because the vendor does not exist yet:
 | Dormant path | Waiting on | Turning it on |
 |---|---|---|
 | Gmail ingestion | a Google OAuth client (a **one-time human-owned** step, invariant 9) | `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET`, and `MOTET_INFERENCE_MODE=real` |
-| KMS-backed credentials | a Cloud KMS keyring | `MOTET_VAULT_BACKEND=kms` + `MOTET_VAULT_KMS_KEY` |
+| KMS-backed credentials | nothing — the keyring is **provisioned**, and the deployed API resolves the kms backend | `MOTET_VAULT_BACKEND=kms` + `MOTET_VAULT_KMS_KEY`, both set by the service definition |
 
 Both are **configuration changes, not refactors** — that is the property the seams exist to
 buy, and the thing to preserve.
@@ -863,6 +863,45 @@ implements the contract honestly with a local KEK, so the whole path runs in CI.
 **refused when `MOTET_INFERENCE_MODE=real`**, because it is also the *default* — a deployed
 environment quietly encrypting real tokens under a key in its own memory would satisfy
 every test and none of invariant 8.
+
+**`motet-api` and `motet-workers` depend on `motet-vault[kms]`, not on bare
+`motet-vault`** — and that one bracket is what broke Gmail connect on production.
+The SDK is imported lazily inside `CloudKmsKeyManager` so a laptop and CI
+never pull in a cloud dependency they cannot use, which is right, and it is **not** a
+reason for the *image* to be missing it: `uv sync --no-dev` installs default extras only,
+nothing asked for `[kms]`, and so nothing had it. The lesson generalises past this one
+package — **a lazy import is a statement about when, never about whether.**
+
+Three things about how that failure presented are worth more than the fix:
+
+- **It surfaced as far from its cause as it is possible to get.** The SDK went missing at
+  build time; the first line of code to notice was an import, inside a request, in the
+  OAuth callback, *after* Google had already issued a refresh token. Everything before it
+  worked, including a clean `/internal/health`.
+- **An unhandled exception is the one response that skips CORS**, so the browser could
+  report nothing at all. Starlette's `ServerErrorMiddleware` sits outside every middleware
+  `add_middleware` installs, `CORSMiddleware` included — so its 500 carries no
+  `Access-Control-Allow-Origin`, a browser refuses to hand it to the caller, and `fetch`
+  rejects with a bare `TypeError: Failed to fetch`: no status, no body, no clue. That
+  string was the entire bug report. `main.UnhandledErrorMiddleware` now sits *inside* CORS
+  and *outside* the OTel middleware — the only ordering that keeps the span, the GlitchTip
+  capture, and a readable 500 — and `client.ts`'s `send()` turns a rejected `fetch` into a
+  sentence naming the URL. **Keep both, and keep that order.**
+- **A key manager raises `VaultError`, and the kms backend used not to.**
+  `PermissionDenied`, `NotFound`, `DefaultCredentialsError` and a missing SDK all escaped
+  as themselves, straight past the callback's `except VaultError` and its 503. They are
+  translated at the boundary now. `dek_wrapper` does the same for a vault that will not
+  *build*, because a dependency resolves before the route body and the route's own handler
+  cannot see that one.
+
+**`/internal/health` reports `vault_backend` and `vault_ready`**, for exactly the reason it
+reports `login_configured`: the vault is exercised once per mailbox, by a human, at the end
+of a consent flow, so a deployment that cannot seal and one nobody has asked to seal for
+look identical from outside. It resolves configuration and **does not call Cloud KMS** — the
+route is unauthenticated, and a billed vendor call per request would be a free way to spend
+money. The key path is never in the response; it is topology. `bin/build-images` asserts the
+flag against the real container, because whether the SDK is in the *image* is the one claim
+the workspace's own venv cannot make on the image's behalf.
 
 ### Podcast clients read show notes, chapters and transcripts in more places than one
 
