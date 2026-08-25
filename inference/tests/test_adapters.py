@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 from motet_inference.adapters import (
     ClaudeGroundingValidator,
     ClaudeIntegrator,
     ClaudeScriptGenerator,
 )
-from motet_inference.llm import FakeLlmClient, LlmRequest
+from motet_inference.llm import Credential, CredentialKind, FakeLlmClient, LlmRequest
+from motet_inference.llm.openrouter import OpenRouterClient
 from motet_inference.prompts import PromptResponseError, locate_quote
 from motet_inference.types import (
     Claim,
@@ -130,6 +132,61 @@ class TestIntegrator:
     def test_a_response_that_is_not_json_is_an_error_rather_than_a_guess(self) -> None:
         with pytest.raises(PromptResponseError):
             ClaudeIntegrator(FakeLlmClient()).integrate(EVENING, [STORY])
+
+    def test_the_whole_stage_survives_a_sonnet_5_answer_with_no_thinking_in_it(self) -> None:
+        """motet#31 end to end: the real adapter, the real OpenRouter client, one item.
+
+        Everything below the transport is production code — ``ClaudeIntegrator`` building
+        the dedup request through ``build_request`` at the configured effort, and
+        ``OpenRouterClient`` parsing a body shaped exactly like the twenty-one that failed
+        on staging: a well-formed dedup answer with ``reasoning_tokens: 0``, no
+        ``reasoning_details`` and no reasoning text. Only the network is stubbed, because
+        invariant 7 says no test here reaches a vendor.
+
+        Before the fix this raised ``ReasoningNotAppliedError`` and the job was retried
+        until its attempts ran out, so nothing could enter the pipeline at all.
+        """
+        body = {
+            "id": "gen-1",
+            "model": "anthropic/claude-sonnet-5",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "decision": "merge",
+                                "news_item_id": "ni_1",
+                                "title": "Acme raises $20M Series A",
+                                "summary": "Two newsletters, one round.",
+                            }
+                        ),
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 1227,
+                "completion_tokens": 96,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        sent: list[dict[str, object]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json=body)
+
+        client = OpenRouterClient(
+            Credential(kind=CredentialKind.API_KEY, secret="sk-or-test"),
+            transport=httpx.MockTransport(handle),
+        )
+        result = ClaudeIntegrator(client).integrate(EVENING, [STORY])
+
+        assert sent[0]["reasoning"] == {"enabled": True, "effort": "low"}
+        assert result.merged
+        assert result.news_item.source_item_ids == ("si_1", "si_2")
 
 
 class TestScriptGenerator:

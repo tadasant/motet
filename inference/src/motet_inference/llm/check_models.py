@@ -78,6 +78,18 @@ def main(argv: list[str]) -> int:
         else:
             print(f"ok       {slug}  ({entry.get('canonical_slug', slug)})")
 
+    # `adaptive_thinking` is deliberately absent from the loop above: OpenRouter's model
+    # list says which efforts a slug accepts, never what an effort *does* to it, and the
+    # difference between "effort sets a thinking budget" and "effort sets
+    # output_config.effort while Claude decides whether to think" is exactly what
+    # motet#31 turned on. Nothing here can check it, so it is said out loud instead of
+    # quietly passing.
+    print(
+        "\nNot checked here: adaptive_thinking. OpenRouter's model list does not carry it. "
+        "Read the slug's migration guide (Claude 4.6 and later think adaptively) and set "
+        "it by hand when adding a model."
+    )
+
     for needle in argv[1:]:
         print(f"\nlive slugs matching {needle!r}:")
         for slug in sorted(s for s in live if needle in s):

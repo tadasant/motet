@@ -547,11 +547,34 @@ Four things about this are settled, and each exists because of a specific failur
   checked against a committed catalogue; `bin/check-openrouter-models` verifies that
   catalogue against OpenRouter's live list. That script is deliberately **not** in `bin/ci`,
   because CI is offline (invariant 7) — run it by hand when adding a model.
-- **Reasoning can be dropped silently.** Anthropic's own API rejects an incompatible
-  thinking config with a 400; OpenRouter drops the field and answers anyway. A response
-  with no evidence of reasoning is logged and, by default, raised on. Never "fix" a
-  `ReasoningNotAppliedError` by switching the check off — it is reporting that a stage ran
-  without thinking.
+- **Reasoning can be dropped silently — on the models where effort is a budget.**
+  Anthropic's own API rejects an incompatible thinking config with a 400; OpenRouter drops
+  the field and answers anyway. A response with no evidence of reasoning is logged and, by
+  default, raised on. Never "fix" a `ReasoningNotAppliedError` by switching the check off —
+  it is reporting that a stage ran without thinking.
+
+  **The exception is adaptive thinking, and it is a fact about the model rather than a
+  preference (motet#31).** From Claude 4.6 onward — which is every Anthropic slug in the
+  catalogue — `reasoning.effort` sets Anthropic's `output_config.effort` and never a
+  thinking budget, Claude decides per response whether the task is worth thinking about,
+  and reasoning is **on by default**. Both halves of the inference above fail there: no
+  reasoning in a response is the model obeying `effort='low'`, and a dropped field would
+  raise thinking to `high` rather than remove it, so there is no response on such a model
+  the error could correctly describe. `ModelSpec.adaptive_thinking` records which side of
+  that split a slug is on and `build_request` reads it, so the guard stays loud on a
+  budget-based model (`openai/gpt-5.1` is the one such row) and does not run on an adaptive
+  one. It fired 21 times against zero real faults on the first real staging run and stopped
+  every pasted item entering the pipeline. **This is a scoping, not an off switch:**
+  `Reasoning(require_evidence=False)` is still not the way to make one go away, and
+  `reasoning_applied` still rides on every response.
+
+  Two consequences worth not rediscovering. **Raising dedup's effort would not have fixed
+  it** — thinking is adaptive at every level, so a higher effort makes an unthought answer
+  less likely rather than impossible, which trades a deterministic failure for a flaky one
+  and pays the retry ladder for it. And **omitting the `reasoning` field is not how you
+  turn reasoning off**: on a model where it is on by default, sending nothing buys adaptive
+  thinking at `high`, the most expensive setting there is. `MOTET_LLM_EFFORT_<STAGE>=off`
+  therefore travels as an explicit `{"enabled": false}`.
 - **Prompt caching is the largest LLM cost lever**, because dedup passes the whole news-item
   window in-prompt once per source item. Put the breakpoint on the last *stable* part and
   check `usage.cache_read_tokens`. Never assume a hit.

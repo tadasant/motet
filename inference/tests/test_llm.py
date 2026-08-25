@@ -6,12 +6,16 @@ path without a network and without a key — invariant 7 says no test in this re
 a real vendor call, and that is meant absolutely. Confirming a slug or a reasoning config
 against the live vendor is a thing to do by hand, outside the suite.
 
-Three of these are the ones worth understanding, because each pins a specific way this
+Four of these are the ones worth understanding, because each pins a specific way this
 integration is known to fail quietly:
 
 * :func:`test_reasoning_silently_dropped_by_the_provider_raises` — OpenRouter drops an
   unsupported reasoning config instead of rejecting it, so a request that would 400 on
   Anthropic's own API returns a healthy-looking unthought answer here.
+* :func:`test_dedup_on_sonnet_5_survives_a_response_with_no_reasoning_in_it` — the guard
+  above, applied to a model that thinks *adaptively*, where an unthought answer is the
+  model obeying ``effort='low'`` rather than a symptom of anything. It read the one as the
+  other and stopped every pasted item entering the pipeline (motet#31).
 * :func:`test_payload_carries_no_sampling_parameters` — Sonnet 5 rejects
   ``temperature``/``top_p``/``top_k``/``budget_tokens``, and the seam's job is to make
   sending one impossible rather than merely discouraged.
@@ -376,8 +380,14 @@ def test_effort_travels_in_the_reasoning_field() -> None:
     assert payload["reasoning"] == {"enabled": True, "effort": "xhigh"}
 
 
-def test_no_reasoning_field_when_none_was_asked_for() -> None:
-    assert "reasoning" not in build_payload(a_request())
+def test_reasoning_off_is_said_out_loud_rather_than_left_unsaid() -> None:
+    """Omitting the field is not "off" — on Sonnet 5 it is adaptive thinking at `high`.
+
+    Reasoning is on by default on every adaptive Anthropic model, so the intuitive
+    encoding of "this stage does not need to think" would silently buy the *most*
+    expensive setting. `off` has to travel as a value.
+    """
+    assert build_payload(a_request())["reasoning"] == {"enabled": False}
 
 
 def test_cache_breakpoint_lands_on_the_stable_prefix() -> None:
@@ -491,6 +501,82 @@ def test_a_dropped_reasoning_config_is_logged_even_when_tolerated(
         )
     assert not response.reasoning_applied
     assert "no evidence of it" in caplog.text
+
+
+def test_dedup_on_sonnet_5_survives_a_response_with_no_reasoning_in_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """motet#31, reproduced: the exact request and the exact response that broke ingestion.
+
+    Seven pasted items, three attempts each, twenty-one identical failures — dedup asks
+    for effort ``low`` on Sonnet 5, Sonnet 5 thinks adaptively, and on a mechanical
+    "is this the same story?" it answers without thinking. That is the model obeying
+    ``low``. The guard read it as OpenRouter having dropped the field, which on this model
+    could not have produced this response: a dropped field leaves reasoning on by default
+    at effort ``high``.
+    """
+    captured: list[dict[str, Any]] = []
+    client = a_client(
+        responder(completion(text='{"decision":"new"}', reasoning_tokens=0), captured=captured)
+    )
+    request = build_request(
+        LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=load_config({})
+    )
+
+    with caplog.at_level(logging.INFO, logger="motet.llm.openrouter"):
+        response = client.complete(request)
+
+    assert captured[0]["reasoning"] == {"enabled": True, "effort": "low"}
+    assert response.text == '{"decision":"new"}'
+    assert not response.reasoning_applied, "the fact still rides on the response"
+    assert "answered without thinking at effort=low" in caplog.text
+    assert "WARNING" not in caplog.text, "one line per source item must not read as a fault"
+
+
+def test_the_dropped_config_guard_still_fires_on_a_budget_based_model() -> None:
+    """The other half of the scoping: this is not the check being switched off.
+
+    ``openai/gpt-5.1`` has selectable effort and no adaptive thinking, so a response
+    carrying no reasoning can only mean the reasoning config never reached the upstream —
+    the failure the guard was written for, still loud.
+    """
+    config = load_config({"MOTET_LLM_MODEL_DEDUP": "openai/gpt-5.1"})
+    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=config)
+    assert request.reasoning is not None and not request.reasoning.adaptive
+
+    client = a_client(responder(completion(reasoning_tokens=0)))
+    with pytest.raises(ReasoningNotAppliedError, match="no reasoning tokens"):
+        client.complete(request)
+
+
+def test_which_models_the_evidence_check_applies_to_comes_from_the_catalogue() -> None:
+    """A fact about the model, resolved once, so no stage has to know a generation."""
+    for stage in LlmStage:
+        reasoning = build_request(stage, MESSAGES, max_output_tokens=512, config=load_config({}))
+        assert reasoning.reasoning is not None
+        assert reasoning.reasoning.adaptive, "every Anthropic slug in the catalogue is 4.6+"
+
+    budget_based = build_request(
+        LlmStage.SCRIPT,
+        MESSAGES,
+        max_output_tokens=512,
+        config=load_config({"MOTET_LLM_MODEL_SCRIPT": "openai/gpt-5.1"}),
+    )
+    assert budget_based.reasoning is not None and not budget_based.reasoning.adaptive
+
+
+def test_an_unlisted_model_is_not_assumed_to_be_budget_based() -> None:
+    """The escape hatch's deal: no catalogue facts, so no catalogue-derived guard.
+
+    Claiming a dropped config on a model we know nothing about is how motet#31 stopped
+    ingestion — and every model shipped since Claude 4.6 thinks adaptively, so the
+    unknown-model default that fails safe is the permissive one.
+    """
+    config = load_config(
+        {"MOTET_LLM_MODEL": "anthropic/claude-sonnet-6", "MOTET_LLM_ALLOW_UNLISTED_MODEL": "true"}
+    )
+    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=512, config=config)
+    assert request.reasoning is not None and request.reasoning.adaptive
 
 
 def test_reasoning_text_counts_as_evidence_when_tokens_are_not_reported() -> None:

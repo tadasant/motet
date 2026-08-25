@@ -59,6 +59,17 @@ class ReasoningNotAppliedError(LlmError):
     the only symptom is that the answer was produced without thinking. For grounding
     validation that is a quality regression with no error anywhere, which is far worse
     than a loud failure — so this is loud.
+
+    **It applies only to budget-based models, and that scope is the whole of motet#31.**
+    The inference above — *no reasoning in the response, therefore the field was dropped*
+    — holds when ``reasoning.effort`` is converted into a thinking budget and reasoning is
+    off until asked for. On a model with adaptive thinking (Claude 4.6 and later) both
+    halves fail: effort sets Anthropic's ``output_config.effort`` and never a budget, so
+    Claude decides per response whether to think, and reasoning is on by *default*, so a
+    dropped field would raise thinking to ``high`` rather than removing it. There is no
+    response on such a model that this error could correctly describe, which is why
+    :class:`Reasoning.adaptive` skips the check outright instead of merely tolerating it.
+    ``LlmResponse.reasoning_applied`` still carries the fact either way.
     """
 
 
@@ -112,10 +123,19 @@ class Reasoning:
     floor: the default raises :class:`ReasoningNotAppliedError` rather than returning an
     answer that only looks fine. Set it false for a stage where unthought output is
     merely worse rather than wrong.
+
+    ``adaptive`` is a fact about the *model*, not a preference — it says the model decides
+    for itself whether a task is worth thinking about, so a response carrying no reasoning
+    is an answer rather than a symptom. It is resolved from the catalog by
+    :func:`~motet_inference.llm.registry.build_request`, which is why nothing else in this
+    package constructs a :class:`Reasoning` by hand. When it is true the evidence check
+    does not run at all: see :class:`ReasoningNotAppliedError` for why the check has
+    nothing left to detect there.
     """
 
     effort: Effort = "high"
     require_evidence: bool = True
+    adaptive: bool = False
 
 
 @dataclass(frozen=True)
