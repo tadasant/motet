@@ -11,11 +11,12 @@ by the adapters and a test of the helper alone would pass while the call site wa
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 
 import pytest
-from motet_inference import classify_grounding_reason, collect_usage
+from motet_inference import classify_grounding_reason, collect_usage, record_grounding
 from motet_inference.accounting import Ledger, StageUsage, describe_usage
 from motet_inference.adapters import (
     ClaudeGroundingValidator,
@@ -151,6 +152,27 @@ class TestDescribeUsage:
         assert ledger.total() == Usage(input_tokens=7, cache_read_tokens=8)
         assert "input=7" in ledger.summary()
         assert "cache_read=8" in ledger.summary()
+
+
+class TestGroundingCounts:
+    def test_the_drop_count_is_not_inferred_from_the_number_of_reasons(self) -> None:
+        """One verdict can take two claims with it, and the rate has to say so.
+
+        `_drop_ungrounded` matches a failure on `(news_item_id, claim_text)` rather than on
+        identity — a `GroundingFailure` is a report, not a reference — so a story that
+        repeats a sentence loses both copies on one verdict. Deriving the count from the
+        reasons would understate the drop rate in exactly that case, and the rate is the
+        headline number the question was about.
+
+        Asserted on the signature rather than on the counter because the two arguments
+        being separate *is* the property: a single sequence could only say one of them.
+        """
+        signature = inspect.signature(record_grounding)
+
+        assert set(signature.parameters) == {"kept", "dropped", "reasons"}
+        assert signature.parameters["dropped"].annotation == "int"
+        # And it accepts a drop count larger than the number of reasons without complaint.
+        record_grounding(kept=1, dropped=2, reasons=["unsupported"])
 
 
 class TestGroundingReasonKinds:

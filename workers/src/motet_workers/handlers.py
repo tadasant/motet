@@ -356,7 +356,10 @@ def _record_grounding_outcome(
     total = _claim_count(script)
     kept = _claim_count(grounded)
     kinds = [classify_grounding_reason(failure.reason) for failure in report.failures]
-    record_grounding(kept=kept, dropped=kinds)
+    # The count comes from the scripts, not from `len(kinds)`: one verdict can take two
+    # claims with it when a story repeats a sentence, and the rate has to reflect what was
+    # actually not spoken.
+    record_grounding(kept=kept, dropped=total - kept, reasons=kinds)
     if not report.failures:
         logger.info("episode %s: all %d claims passed grounding validation", episode_id, total)
         return

@@ -221,18 +221,25 @@ def record_script_drop(reason: str) -> None:
     _script_drops.add(1, {"reason": reason})
 
 
-def record_grounding(*, kept: int, dropped: Sequence[str]) -> None:
+def record_grounding(*, kept: int, dropped: int, reasons: Sequence[str]) -> None:
     """Count one episode's grounding verdicts, with the drops bucketed by kind.
 
-    ``dropped`` is the classified reason of each rejected claim — see
-    :func:`classify_grounding_reason`. Both halves are recorded because a drop count with
-    no denominator is not a drop *rate*, and the rate is the number the question was about.
+    Both halves are recorded because a drop count with no denominator is not a drop
+    *rate*, and the rate is the number the question was about.
+
+    **``dropped`` is counted, not inferred from ``reasons``, and the two can legitimately
+    differ.** ``_drop_ungrounded`` matches a failure on ``(news_item_id, claim_text)``
+    rather than on identity — a report is not a reference — so two identical claim texts
+    under one story are dropped together on one verdict. Deriving the count from the number
+    of reasons would therefore understate the drop rate in exactly that case, and the rate
+    is the headline number. The reason breakdown is per *verdict* and stays that way: a
+    claim co-dropped with its twin has no reason of its own to attribute.
     """
     if kept:
         _grounding_claims.add(kept, {"outcome": "kept"})
     if dropped:
-        _grounding_claims.add(len(dropped), {"outcome": "dropped"})
-    for kind in dropped:
+        _grounding_claims.add(dropped, {"outcome": "dropped"})
+    for kind in reasons:
         _grounding_drops.add(1, {"reason": kind})
 
 
