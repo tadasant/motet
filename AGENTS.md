@@ -246,14 +246,19 @@ grounding validation, TTS, object storage, the private feed, and the three SPA s
 stages run as Cloud Run jobs draining Postgres queues (`workers/`), and every one of them
 is retried independently.
 
-**Built is not deployed, and as of 2026-08-24 none of it is running anywhere.** Every
-Cloud Run service in both environments serves Google's `hello` sample: the infrastructure
-was stood up in `bootstrap` mode, and no Motet image had ever been built, because until
-this repo grew a `Dockerfile` there was nothing to build. **No real vendor call has ever
-been made** — not one OpenRouter completion, not one second of Cartesia audio — so
-everything downstream of the fakes is unproven. See the container images section above;
-the remaining half (who pushes the image, and the runtime environment the services get)
-is tracked in the private infrastructure repo.
+**Deployed as of 2026-08-25, and still unproven — those are different claims.** Both
+environments now serve the real image: `/internal/health` answers `motet-api` with
+`inference_mode: real`, `authenticated: true`, and telemetry exporting, and the served
+OpenAPI document lists the Motet routes. Until 2026-08-24 that was not so — every Cloud Run
+service returned Google's `hello` sample, because the infrastructure was stood up in
+`bootstrap` mode and no Motet image had ever been built.
+
+**What has not happened is a real vendor call** — not one OpenRouter completion, not one
+second of Cartesia audio — so everything downstream of the fakes is still unproven, and
+being deployed does not change that. The image pin lags this repo's `main` by however long
+the last bump was ago: a route merged here is not a route serving there, and
+`/internal/health` plus the served OpenAPI document are how you tell. Pushing the image and
+the runtime environment the services get are tracked in the private infrastructure repo.
 
 **Phase 1's real deliverable is the factory, not the feature.** The question it answers is
 *"does the factory work?"* — not *"is the briefing good?"*. That is what the scaffolding in

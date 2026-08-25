@@ -64,11 +64,18 @@ sign-in, and `open` for a deployment with no `MOTET_API_TOKEN` set at all. That 
 cheapest way to confirm what you are actually authenticating as, and `open` on a deployed
 environment is a finding, not a convenience.
 
+**Nothing happens on the request thread.** `/v1` writes a row and enqueues; every stage —
+integrate, assemble, script, TTS — is a separate Cloud Run job draining a Postgres queue
+(`workers/`). So a paste that returns `201` has not been processed yet, and an episode sits
+in its queue until a job runs. Triggering those jobs in staging is a workflow dispatch in
+the private infrastructure repo, which an agent can do; the workflow's name is recorded
+there. Budget for the round trip rather than treating a `201` as "done".
+
 ## 3. Driving the SPA
 
-The SPA accepts the same bearer. Its Settings screen takes an API token, and it stores it in
-`localStorage` under the same key a Google session would occupy — so a browser-driving agent
-seeds it directly rather than typing into the form:
+The SPA accepts the same bearer. Its "API token" disclosure in the header — not a Settings
+screen; there isn't one — writes to `localStorage` under the same key a Google session
+occupies, so a browser-driving agent seeds it directly rather than typing into the field:
 
 ```javascript
 await page.goto(`${MOTET_APP}/`);
@@ -79,8 +86,9 @@ await page.reload();
 > Check the key name against [`web/src/api/client.ts`](../web/src/api/client.ts) rather than
 > trusting the line above — it is the one detail here that lives in code and can move.
 
-This exercises every screen the way a human sees it, with one exception: the app renders
-"using an API token" rather than "signed in as …", because that is what the server reports.
+This exercises every screen the way a human sees it, with one cosmetic exception: the header
+shows no address and no "Sign out" button, because `/v1/auth/session` returns an `email` only
+for a real session. The bearer is not a session and has nobody's name on it.
 
 ## 4. Why you cannot sign in with Google instead
 
@@ -104,14 +112,14 @@ to a phone. No MCP server answers a phone prompt. Storing a human's Google passw
 an agent can read it would also be a far larger blast radius than the entire staging
 environment it was meant to test.
 
-**The account an agent has Gmail access to is not on staging's allowlist anyway.** They are two
-different Google identities: `MOTET_ALLOWED_EMAILS` for staging names one, and the read-only
-Gmail MCP server is scoped to the other. A sign-in as the latter would verify at Google and
-then be refused with a 403 by
-[`motet_api.auth.allowlist`](../api/src/motet_api/auth/allowlist.py), which is working exactly
-as designed — and because the mailbox an agent can read is not the allowlisted one, it is not
-a route to an emailed verification code either. The allowlist's contents are personal data and
-live in the private infrastructure repo; check there before assuming this has changed.
+**The account an agent has Gmail access to is not on staging's allowlist anyway.** They are
+two different Google identities: `MOTET_ALLOWED_EMAILS` for staging names one, and the
+read-only Gmail MCP server is scoped to the other. A sign-in as the latter would verify at
+Google and then be refused with a 403 by the sign-in route, on
+[`motet_api.auth.allowlist`](../api/src/motet_api/auth/allowlist.py)'s answer — working
+exactly as designed. And because the mailbox an agent can read is not the allowlisted one, it
+is not a route to an emailed verification code either. The allowlist's contents are personal
+data and live in the private infrastructure repo; check there before assuming this changed.
 
 **Do not spend session time re-testing this.** If you think it has changed, the cheap check is
 the first blocker alone: drive a browser to Google's sign-in page and see whether it still
@@ -121,9 +129,9 @@ lands on `/signin/rejected`.
 
 Be precise about this when you report a green run, because the gap is not small.
 
-**What the bearer token does exercise:** every `/v1` route, the whole ingestion → dedup →
-assemble → script → grounding → TTS → storage pipeline, the RSS feed, the SPA's screens, and
-the real vendors behind them in staging's `real` inference mode.
+**What the bearer token does exercise:** every `/v1` route that does product work, the whole
+ingestion → dedup → assemble → script → grounding → TTS → storage pipeline, the RSS feed, the
+SPA's screens, and the real vendors behind them in staging's `real` inference mode.
 
 **What it does not exercise, at all:**
 
@@ -139,10 +147,13 @@ the real vendors behind them in staging's `real` inference mode.
   30-day expiry, the per-request re-check that deletes a session whose address has left the
   list, and `/v1/auth/logout-all`.
 
-CI covers the second and third of those against
-[`FakeIdentityProvider`](../api/src/motet_api/auth/fakes.py) in
-[`api/tests/test_auth.py`](../api/tests/test_auth.py), which is real coverage of our logic —
-but a fake cannot tell you that *Google's* side of the arrangement is configured correctly.
+CI covers more of that than you might expect, and it is worth knowing which parts.
+[`api/tests/test_auth.py`](../api/tests/test_auth.py) exercises the third bullet against
+[`FakeIdentityProvider`](../api/src/motet_api/auth/fakes.py), and the **second directly
+against the real `GoogleIdentityProvider`** — a locally generated RSA key injected as its
+signing key, and a stub transport for the token endpoint. So the verifier's own logic is
+genuinely covered. What no test can reach is Google: the live JWKS fetch is stubbed, the
+consent screen is never rendered, and the redirect-URI registration is not ours to read.
 
 > **So: a green agent run does not prove a human can sign in.** After any change to
 > `api/src/motet_api/auth/`, to `web/src/oauth.ts`, or to the OAuth client's registered
@@ -154,9 +165,10 @@ but a fake cannot tell you that *Google's* side of the arrangement is configured
 
 | Symptom | What it means |
 |---|---|
-| `401` on `/v1/*` | Wrong or missing bearer. The two environments have different tokens and neither is interchangeable. Confirm with `/internal/health` that `authenticated` is `true`. |
+| `401` on `/v1/*` | Wrong or missing bearer. The two environments have different tokens and neither is interchangeable. `GET /v1/auth/session` is the one that tells you what you actually authenticated as. |
 | `/internal/health` returns `login_configured: false` | Either `MOTET_ALLOWED_EMAILS` is unset or, in `real` mode, the Google OAuth client is not configured. Sign-in is off; the bearer still works. |
 | `/v1/auth/*` returns `404` | The running image predates Google Sign-In. Check the deployed image pin — this is not something to fix from here. |
+| A paste or episode never leaves its queue | Nothing drained it. `/v1` only enqueues; the stage jobs are what do the work. Dispatch them, then check the obs stack. |
 | `/internal/health` fine, every `/v1` call times out | Check the obs stack before assuming the API is down; a worker queue backing up looks like this from the outside. |
 | `404` on `/healthz` | Expected. Health is at `/internal/health`; Cloud Run's frontend answers `/healthz` itself. |
 | Anything needing a shell on the box | There isn't one, and building one is not the fix. Invariant 10. |
@@ -168,12 +180,12 @@ should not be built without Tadas's explicit go-ahead — it is a new authentica
 
 The shape: a `POST /v1/auth/staging/session` route that mints an ordinary session row for a
 caller presenting a staging-only secret, so that agents could exercise the session-shaped half
-of §5 rather than only the bearer-shaped half. It would be gated on all three of — the secret
-being configured at all (unset ⇒ the route 404s, so production would not advertise it), a
-constant-time match against the presented value, and the requested address being on
-`MOTET_ALLOWED_EMAILS`, so the mint could never admit anyone the Google flow would refuse.
-Sessions would be minted with a short TTL rather than the 30-day default, and every mint
-logged.
+of §5 rather than only the bearer-shaped half. Three gates, all required: the secret must be
+configured at all (unset ⇒ the route 404s, so production would not advertise its existence);
+the presented value must match it under a constant-time comparison; and the requested address
+must be on `MOTET_ALLOWED_EMAILS`, so the mint could never admit anyone the Google flow would
+refuse. Sessions would be minted with a short TTL rather than the 30-day default, and every
+mint logged.
 
 **Its isolation from production is configuration, not structure**, and that should be stated
 plainly rather than glossed: the secret exists only in staging, and production's service
