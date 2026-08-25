@@ -176,6 +176,19 @@ smoke_worker() {
     *integrate*assemble*script*tts*) ;;
     *) echo "smoke: worker --help did not list the Phase 1 queues" >&2; return 1 ;;
   esac
+
+  # The same claim `smoke_api` makes through /internal/health, made the only way a job
+  # container can make it: this image is the *decrypt* side of the vault, so a missing
+  # google-cloud-kms here means every mailbox poll fails on every run rather than one
+  # consent flow failing once. Two images, one tree, two targets — and the extra could go
+  # missing from either independently.
+  if ! docker run --rm --entrypoint python "motet-worker:${TAG}" -c \
+    'import sys; from motet_vault import kms_sdk_installed; sys.exit(0 if kms_sdk_installed() else 1)'
+  then
+    echo "smoke: the worker image cannot open a credential — google-cloud-kms is missing" >&2
+    return 1
+  fi
+  echo "    google-cloud-kms is in the image (the vault's decrypt side)"
 }
 
 # --- web -------------------------------------------------------------------

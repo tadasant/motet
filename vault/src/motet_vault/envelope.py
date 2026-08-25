@@ -32,6 +32,7 @@ is one environment variable.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import importlib.util
 import logging
@@ -357,11 +358,14 @@ def build_key_manager(env: Mapping[str, str] | None = None) -> KeyManager:
 KMS_SDK_MODULE: Final = "google.cloud.kms"
 
 
+@functools.cache
 def kms_sdk_installed() -> bool:
     """Whether the Cloud KMS SDK is importable in this process.
 
     Asked rather than imported: the answer is wanted on a health route, where importing a
-    cloud SDK to find out would be a side effect nobody asked for.
+    cloud SDK to find out would be a side effect nobody asked for. Cached because an
+    installed package cannot appear or vanish mid-process, and this sits on the path
+    Cloud Run's startup and liveness probes take.
     """
     try:
         return importlib.util.find_spec(KMS_SDK_MODULE) is not None
@@ -405,7 +409,13 @@ def vault_status(env: Mapping[str, str] | None = None) -> VaultStatus:
     backend = environ.get(BACKEND_ENV, LOCAL_BACKEND).strip().lower()
     try:
         build_key_manager(environ)
-    except VaultConfigError as exc:
+    except (VaultConfigError, ValueError) as exc:
+        # `ValueError` as well, and it is not defensive padding: `build_key_manager` asks
+        # `current_mode`, which raises on an unrecognised `MOTET_INFERENCE_MODE`. This
+        # runs in the lifespan and on an unauthenticated health route, so letting that
+        # escape would turn one typo in one variable into a Cloud Run startup probe that
+        # 500s and a revision that never becomes ready. `Settings.login_configured` fails
+        # closed around the same call for the same reason.
         return VaultStatus(backend=backend, ready=False, detail=str(exc))
     if backend == KMS_BACKEND and not kms_sdk_installed():
         return VaultStatus(

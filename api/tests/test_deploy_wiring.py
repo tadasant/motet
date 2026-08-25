@@ -9,12 +9,16 @@ None of it needs a database.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from motet_api.config import APP_BASE_URL_ENV, ConfigError, Settings
 from motet_api.main import UnhandledErrorMiddleware, configure_cors
@@ -28,9 +32,31 @@ from motet_api.obs import (
     resolve_otlp_headers,
     status,
 )
-from motet_vault import kms_sdk_installed
+from starlette.requests import ClientDisconnect
 
 APP_ORIGIN = "https://app.example.invalid"
+
+
+@contextmanager
+def caplog_at_error() -> Iterator[list[logging.LogRecord]]:
+    """Collect ERROR-and-above records from the API logger, without pytest's fixture.
+
+    A fixture would have to be threaded through as an argument; these cases want the
+    records for one statement, not for the test.
+    """
+    records: list[logging.LogRecord] = []
+
+    class Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = Collector(level=logging.ERROR)
+    api_logger = logging.getLogger("motet.api")
+    api_logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        api_logger.removeHandler(handler)
 
 
 def _settings(app_base_url: str | None) -> Settings:
@@ -304,10 +330,11 @@ class TestUnhandledErrorsReachTheBrowser:
     the caller at all. `fetch` rejects with a `TypeError` naming no status and no body,
     which is exactly what the user saw and reported.
 
-    Both cases below are run through the real `configure_cors` and the real
-    `UnhandledErrorMiddleware`, in the real order, for the same reason the class above
-    does: a test that rebuilt the stack by hand would stay green after somebody changed
-    it.
+    The behavioural cases below build a throwaway app, because the real one configures its
+    origin at import. `TestTheRealMiddlewareStack` is the other half and the important
+    one: it walks the app `main` actually serves, which is what a hand-built stack cannot
+    speak for — and not having it is exactly how this shipped with the ordering described
+    backwards.
     """
 
     @staticmethod
@@ -351,6 +378,76 @@ class TestUnhandledErrorsReachTheBrowser:
         assert recorded[-1].exc_info is not None, "without exc_info there is no traceback"
         assert "/v1/boom" in recorded[-1].getMessage()
 
+    def test_the_exception_still_lands_on_the_request_span(self) -> None:
+        """The signal converting the exception would otherwise delete.
+
+        OpenTelemetry is *outermost*, so its own exception handler never sees an exception
+        this middleware answers — the span would keep its ERROR status, derived from the
+        500, and lose the type, the message and the stacktrace. `obs.record_exception` is
+        what puts them back, and invariant 11 makes the trace the only view of production
+        an agent has.
+        """
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        tracer = provider.get_tracer("test")
+
+        with tracer.start_as_current_span("request"):
+            self._client(guarded=True).get("/v1/boom", headers={"Origin": APP_ORIGIN})
+        provider.force_flush()
+
+        spans = exporter.get_finished_spans()
+        assert spans, "the enclosing span should have been exported"
+        events = [event for span in spans for event in span.events]
+        assert [event.name for event in events] == ["exception"], events
+        recorded = events[0].attributes or {}
+        assert recorded.get("exception.type") == "RuntimeError"
+        assert "vendor exception" in str(recorded.get("exception.message"))
+
+    def test_a_failure_after_the_response_started_is_re_raised(self) -> None:
+        """A streaming body cannot be replaced once its headers are on the wire.
+
+        The audio route streams, so this is not hypothetical. Sending a second
+        `http.response.start` would be an ASGI protocol violation; re-raising lets
+        Starlette close the connection, and the client sees a truncated response.
+        """
+        app = FastAPI()
+
+        def chunks() -> Iterator[bytes]:
+            yield b"partial"
+            raise RuntimeError("failed midway through the body")
+
+        @app.get("/v1/audio")
+        def _audio() -> StreamingResponse:
+            return StreamingResponse(chunks(), media_type="application/octet-stream")
+
+        app.add_middleware(UnhandledErrorMiddleware)
+        configure_cors(app, _settings(APP_ORIGIN))
+        with pytest.raises(RuntimeError, match="midway"):
+            TestClient(app).get("/v1/audio")
+
+    def test_a_client_disconnect_is_not_an_error(self) -> None:
+        """Somebody closed the tab. Reported as an error it would be one GlitchTip event
+        per abandoned episode download, which is how an error channel stops being read."""
+        app = FastAPI()
+
+        @app.get("/v1/gone")
+        def _gone() -> None:
+            raise ClientDisconnect()
+
+        app.add_middleware(UnhandledErrorMiddleware)
+        configure_cors(app, _settings(APP_ORIGIN))
+        client = TestClient(app, raise_server_exceptions=False)
+        with caplog_at_error() as records:
+            client.get("/v1/gone", headers={"Origin": APP_ORIGIN})
+        assert not records, records
+
     def test_without_the_guard_the_browser_would_see_nothing(self) -> None:
         """The bug, pinned. Delete the middleware and this is what comes back."""
         response = self._client(guarded=False).get("/v1/boom", headers={"Origin": APP_ORIGIN})
@@ -386,6 +483,59 @@ class TestTheKmsSdkShipsInTheImage:
             "step of the consent flow."
         )
 
-    def test_the_sdk_is_importable_here(self) -> None:
-        """Resolved, not just declared — and no call is made, so CI stays offline."""
-        assert kms_sdk_installed()
+
+class TestTheRealMiddlewareStack:
+    """The order of `motet_api.main.app`'s middleware, walked rather than assumed.
+
+    Every claim in `UnhandledErrorMiddleware`'s docstring is a claim about *this* stack,
+    and the first version of it was wrong in a way no behavioural test could see:
+    `FastAPIInstrumentor` does not call `add_middleware`, it patches
+    `build_middleware_stack`, so OpenTelemetry ends up **outermost** rather than innermost.
+    The consequence was silent — the span kept its ERROR status and lost the exception —
+    which is precisely the class of failure this PR exists to stop.
+
+    So this asserts positions, not behaviour, against the app `main` builds.
+    """
+
+    @staticmethod
+    def _names(app_base_url: str) -> list[str]:
+        # A fresh import with the origin set, because `main` reads it once at import and
+        # the app under test in the rest of the suite has no CORS layer at all.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv(APP_BASE_URL_ENV, app_base_url)
+            module = importlib.reload(importlib.import_module("motet_api.main"))
+            try:
+                names, node = [], module.app.build_middleware_stack()
+                while node is not None and len(names) < 20:
+                    names.append(type(node).__name__)
+                    node = getattr(node, "app", None)
+                return names
+            finally:
+                # Restore the module every other test imported, or the shared `app` this
+                # file's siblings hold would be a different object than the one routed to.
+                importlib.reload(module)
+
+    def test_cors_wraps_the_error_guard(self) -> None:
+        """What puts `Access-Control-Allow-Origin` on the 500 rather than nothing."""
+        names = self._names(APP_ORIGIN)
+        assert "CORSMiddleware" in names, names
+        assert names.index("CORSMiddleware") < names.index("UnhandledErrorMiddleware"), names
+
+    def test_opentelemetry_wraps_them_both(self) -> None:
+        """The fact the docstring got backwards, and the reason it matters.
+
+        OTel's own exception handler is outside the guard, so it never sees an exception
+        the guard converts — which is why `UnhandledErrorMiddleware` calls
+        `obs.record_exception` itself. If this ever inverts, that call is redundant and
+        the comment explaining it is wrong; either way somebody has to look.
+        """
+        names = self._names(APP_ORIGIN)
+        assert names.index("OpenTelemetryMiddleware") < names.index("UnhandledErrorMiddleware")
+        assert names.index("OpenTelemetryMiddleware") < names.index("CORSMiddleware")
+
+    def test_the_guard_is_the_innermost_of_the_three(self) -> None:
+        """Nothing may sit between it and the router, or an exception would be converted
+        before whatever that is could see it."""
+        names = self._names(APP_ORIGIN)
+        after = names[names.index("UnhandledErrorMiddleware") + 1 :]
+        assert "CORSMiddleware" not in after and "OpenTelemetryMiddleware" not in after, names

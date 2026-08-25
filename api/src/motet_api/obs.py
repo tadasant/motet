@@ -23,6 +23,7 @@ from motet_obs import (
     OTLP_TOKEN_ENV,
     ObsStatus,
     logger,
+    record_exception,
     resolve_error_dsn,
     resolve_otlp_headers,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "configure",
     "instrument",
     "logger",
+    "record_exception",
     "resolve_error_dsn",
     "resolve_otlp_headers",
     "shutdown",

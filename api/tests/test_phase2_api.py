@@ -232,6 +232,14 @@ def test_a_vault_that_will_not_build_answers_503_before_the_exchange(
     assert refused.status_code == 503, refused.text
     assert KMS_KEY_ENV in refused.text, "the message has to name the variable to set"
 
+    # And that message is for the owner, not the internet. It is only ever reached behind
+    # authentication because `user_id` precedes `wrapper` in the route signature and
+    # FastAPI resolves dependencies in declaration order — which is worth an assertion,
+    # since reordering two parameters is not a change anybody would read as security.
+    anonymous = api.post("/v1/sources/callback", json={"state": "st_anything", "code": "c"})
+    assert anonymous.status_code == 401, anonymous.text
+    assert KMS_KEY_ENV not in anonymous.text
+
 
 def test_a_replayed_callback_is_refused(api: TestClient) -> None:
     """The state is single-use, so an intercepted redirect cannot be redeemed twice."""

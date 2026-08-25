@@ -293,6 +293,31 @@ def instrument_fastapi(app: Any) -> None:
         logger.exception("obs: FastAPI instrumentation failed; requests will not be traced")
 
 
+def record_exception(exc: BaseException) -> None:
+    """Put an exception on the current span, the way OTel's own handler would.
+
+    **Needed by anything that catches an exception the tracing middleware would otherwise
+    have seen.** `opentelemetry-instrumentation-fastapi` does not install itself with
+    `add_middleware`; it patches `build_middleware_stack`, which puts it *outermost* —
+    outside CORS and outside anything an application adds. So a middleware that converts
+    an escaped exception into a response is converting it before OTel's exception handler
+    ever runs, and the span keeps its ERROR status (derived from the 500) while losing the
+    type, the message and the stacktrace. Under invariant 11 the obs stack is the only way
+    production is visible at all, so that is exactly the evidence worth not dropping.
+
+    A no-op when nothing is instrumented: with no provider the current span is OTel's
+    non-recording one, which discards both calls.
+    """
+    try:
+        from opentelemetry import trace
+
+        span = trace.get_current_span()
+        span.record_exception(exc)
+        span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+    except Exception:  # noqa: BLE001 — telemetry never breaks the request it describes
+        logger.exception("obs: could not record an exception on the current span")
+
+
 def shutdown() -> None:
     """Flush and stop every provider this process installed.
 

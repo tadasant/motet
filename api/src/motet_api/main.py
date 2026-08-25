@@ -22,7 +22,7 @@ from typing import Annotated, Any
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from motet_db import (
     CredentialPurpose,
     Highlight,
@@ -55,6 +55,7 @@ from motet_workers import (
     enqueue_smart_episode,
     enqueue_source_poll,
 )
+from starlette.requests import ClientDisconnect
 
 from . import obs
 from .auth import (
@@ -251,17 +252,27 @@ class UnhandledErrorMiddleware:
     caller, and ``fetch`` rejects with ``TypeError: Failed to fetch``: no status, no body,
     no clue. The SPA showed the user that string, and it was the only evidence there was.
 
-    Installed *inside* CORS and *outside* the OpenTelemetry middleware:
+    **It must be the innermost middleware, and the two lines it needs are why.** The
+    real stack — walked, not assumed, and pinned by ``test_deploy_wiring.py`` — is::
 
-    * CORS wraps this, so the 500 it returns is a response the CORS layer decorates.
-    * OTel is wrapped by this, so the exception still propagates through the span and is
-      recorded there before being converted.
+        ServerError → OpenTelemetry → ServerError → OTelExceptionHandler
+                    → CORS → UnhandledError → ExceptionMiddleware → routes
 
-    **``logger.exception`` is load-bearing, not decoration.** Converting the exception
-    here stops it reaching the outermost ASGI layer, which is where the Sentry SDK
-    otherwise captures it — so without that call the error would silently stop arriving in
-    GlitchTip. It still arrives, through the SDK's logging integration and carrying the
-    same exception; measured both ways, guarded and not, before this shipped.
+    OpenTelemetry is **outermost**, not innermost: ``FastAPIInstrumentor`` patches
+    ``build_middleware_stack`` rather than calling ``add_middleware``, so it wraps
+    everything an application adds. Catching an exception here therefore stops it reaching
+    two things that were quietly relying on seeing it, and each is replaced deliberately:
+
+    * **OTel's own exception handler**, which records the type, message and stacktrace on
+      the request span. ``obs.record_exception`` does that here instead. Without it the
+      span keeps its ERROR status — derived from the 500 — and loses everything that says
+      *what* failed, which under invariant 11 is the only view of production there is.
+    * **The Sentry SDK's outermost capture**, which is what puts the error in GlitchTip.
+      ``logger.exception`` is what replaces it, through the SDK's logging integration and
+      carrying the same exception. Measured both ways, guarded and not, before shipping.
+
+    Neither call is decoration; deleting either one deletes a signal silently, which is
+    the failure mode this whole middleware exists to end.
 
     The body says nothing about the exception on purpose — a stack trace or a vendor
     message can name a KMS key path or a connection string, and this response crosses an
@@ -286,7 +297,13 @@ class UnhandledErrorMiddleware:
 
         try:
             await self.app(scope, receive, watched_send)
-        except Exception:
+        except ClientDisconnect:
+            # Not a fault: somebody closed the tab, or a podcast client stopped pulling an
+            # episode. Reported as an error it would be one GlitchTip event per abandoned
+            # download, which is how an error channel becomes something nobody reads.
+            raise
+        except Exception as exc:
+            obs.record_exception(exc)
             logger.exception(
                 "unhandled error serving %s %s", scope.get("method"), scope.get("path")
             )
@@ -295,10 +312,9 @@ class UnhandledErrorMiddleware:
                 # hands it back to ServerErrorMiddleware, which is what closes the
                 # connection — the browser sees a truncated response either way.
                 raise
-            await Response(
-                content='{"detail":"Something failed on our side. The error was recorded."}',
+            await JSONResponse(
+                {"detail": "Something failed on our side. The error was recorded."},
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                media_type="application/json",
             )(scope, receive, send)
 
 
@@ -306,12 +322,12 @@ class UnhandledErrorMiddleware:
 # once the middleware stack is built — which it is by the time the lifespan runs, so doing
 # this next to `obs.configure()` would raise. No provider exists yet and that is fine: the
 # middleware holds OpenTelemetry's proxy tracer, which resolves the moment the lifespan
-# installs the real one. Before `configure_cors` so that CORS ends up the outer
-# middleware, where a rejected preflight is not a traced request.
+# installs the real one.
 obs.instrument(app)
 
-# Between the two, and the order is the whole point — see the class docstring.
-# `add_middleware` prepends, so the stack ends up CORS → unhandled-error → OTel → routes.
+# Added before `configure_cors`, because `add_middleware` prepends: CORS ends up outside
+# this, which is what puts `Access-Control-Allow-Origin` on the 500 it returns. Both end
+# up *inside* OpenTelemetry regardless of the order here — see the class docstring.
 app.add_middleware(UnhandledErrorMiddleware)
 
 # Read once at import rather than per request: an origin policy that could change under a
@@ -1060,7 +1076,11 @@ def oauth_callback(
         # The vault refused — in a deployed environment that means KMS is not reachable or
         # not permitted. Never fall back to storing the token unsealed: invariant 8 has no
         # degraded mode.
-        logger.error("could not seal the credential for source %s: %s", source.id, exc)
+        # `exception`, not `error`: the vault translates *everything* Cloud KMS can refuse
+        # with into `VaultError`, so this line is the only place a genuine bug in that
+        # path and a real KMS refusal can be told apart — and without a traceback they
+        # arrive in GlitchTip looking identical.
+        logger.exception("could not seal the credential for source %s: %s", source.id, exc)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "This credential could not be stored securely, so it was not stored at all.",
