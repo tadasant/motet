@@ -41,9 +41,9 @@ import { Sources } from './screens/Sources'
 
 type Tab = 'paste' | 'backlog' | 'episode' | 'sources'
 
-//: How often the backlog re-asks while an item is still being processed. Short enough
-//: that a paste which integrates in seconds is seen to integrate, and it only runs while
-//: something is pending.
+// How often the backlog re-asks while an item is still being processed. Short enough that
+// a paste which integrates in seconds is seen to integrate, and it only runs while
+// something is pending.
 const POLL_MS = 3_000
 
 const TABS: { id: Tab; label: string }[] = [
@@ -88,10 +88,17 @@ export default function App() {
     // Both together: the backlog and the queue in front of it are two halves of one
     // answer, and fetching them from two places is how they end up disagreeing about an
     // item that integrated between the two requests.
-    Promise.all([api.newsItems(), api.ingestion()])
+    //
+    // The ingestion half is best-effort, and the asymmetry is deliberate. It is the
+    // *secondary* list, and the API it comes from is a separate service that rolls on its
+    // own schedule — so an SPA that has this route while the API it is talking to does not
+    // would, without the catch, answer "where is my backlog" with a 404 about something
+    // else entirely. Failing softly leaves whatever was last known on screen; failing
+    // loudly would take the backlog down with it.
+    Promise.all([api.newsItems(), api.ingestion().catch(() => null)])
       .then(([nextItems, nextIngestion]) => {
         setItems(nextItems)
-        setIngestion(nextIngestion)
+        if (nextIngestion) setIngestion(nextIngestion)
         setError('')
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))

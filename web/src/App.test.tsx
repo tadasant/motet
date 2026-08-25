@@ -100,6 +100,11 @@ function mockApi(overrides: Record<string, unknown> = {}) {
     '/v1/auth/session': SESSION,
     ...overrides,
   }
+  // An override of `undefined` removes the route rather than serving undefined for it,
+  // which is how a test says "this API does not have that endpoint" and gets a real 404.
+  for (const [route, value] of Object.entries(routes)) {
+    if (value === undefined) delete routes[route]
+  }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     calls.push({
@@ -234,6 +239,17 @@ describe('App', () => {
     // And the reason, verbatim — enough to decide whether to wait, re-paste, or report it.
     expect(screen.getByText(/ReasoningNotAppliedError/)).toBeDefined()
     expect(screen.getByText(/402 insufficient credits/)).toBeDefined()
+  })
+
+  it('keeps the backlog when the ingestion route cannot answer', async () => {
+    // The two lists come from one API but the SPA and the API are separate services. A
+    // failure of the secondary panel must not take the primary list down with it.
+    mockApi({ '/v1/ingestion': undefined })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+
+    expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
+    expect(screen.queryByRole('heading', { name: 'Processing' })).toBeNull()
   })
 
   it('counts what is in flight on the tab, so it is visible from the paste screen', async () => {
