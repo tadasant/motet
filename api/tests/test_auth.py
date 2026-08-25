@@ -36,7 +36,8 @@ from motet_api.auth import (
 from motet_api.config import CALLBACK_PATH
 from motet_api.deps import reset_store
 from motet_db import auth as auth_repo
-from motet_db import repo
+from motet_db import mint_session, repo
+from motet_db.mint_session import MINT_ENABLED_ENV
 
 TOKEN = "test-api-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -717,3 +718,65 @@ class TestSessionsAreOneAccount:
         sign_in(api)
         owners = db.execute("SELECT DISTINCT user_id FROM auth_sessions").fetchall()
         assert [row["user_id"] for row in owners] == [repo.OWNER_USER_ID]
+
+
+class TestAMintedStagingSession:
+    """The staging deploy's mint, from the other side: is the row it writes a credential?
+
+    :mod:`motet_db.mint_session` is a job entry point and no route reaches it — so its own
+    tests can only prove that a row landed. The claim that matters is the one only the API
+    can make: a token whose *digest* was minted by CI authenticates ``/v1`` through
+    :func:`motet_api.deps.require_caller` exactly as a signed-in browser's does, and is
+    revoked and re-checked by exactly the same machinery. That is what makes the mint a
+    replacement for handing an agent a long-lived ``MOTET_API_TOKEN`` rather than a second
+    authentication path — there is no second path; there is one more writer of one table.
+
+    Nothing here is production behaviour: the job that calls `mint` exists only in the
+    staging project, and this test sets the interlock the way that job's definition does.
+    """
+
+    def test_a_minted_session_is_an_ordinary_session_everywhere_it_is_used(
+        self, api: TestClient, _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MINT_ENABLED_ENV, "1")
+        # The plaintext is the mint workflow's shell local; only the digest is an argument.
+        token = auth_repo.new_session_token()
+        mint_session.mint(
+            _migrated,
+            token_sha256=auth_repo.token_digest(token),
+            email=FAKE_EMAIL,
+            ttl_seconds=8 * 3600,
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert api.get("/v1/news-items", headers=headers).status_code == 200
+        session = api.get("/v1/auth/session", headers=headers).json()
+        assert session["how"] == "session"
+        assert session["email"] == FAKE_EMAIL
+
+        # Inertness is the existing logout, not a new concept — which is the answer to
+        # "how does an agent hand the credential back when it is done".
+        assert api.post("/v1/auth/logout", headers=headers).status_code == 204
+        assert api.get("/v1/news-items", headers=headers).status_code == 401
+
+    def test_a_minted_session_is_re_checked_against_the_allowlist_like_any_other(
+        self, api: TestClient, _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Minting does not buy an exemption from the per-request check.
+
+        It is the same row in the same table read by the same dependency, so taking the
+        address off the list deletes a minted session as readily as a signed-in one.
+        """
+        monkeypatch.setenv(MINT_ENABLED_ENV, "1")
+        token = auth_repo.new_session_token()
+        mint_session.mint(
+            _migrated,
+            token_sha256=auth_repo.token_digest(token),
+            email=FAKE_EMAIL,
+            ttl_seconds=8 * 3600,
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        assert api.get("/v1/news-items", headers=headers).status_code == 200
+
+        monkeypatch.setenv(ALLOWED_EMAILS_ENV, "somebody-else@example.invalid")
+        assert api.get("/v1/news-items", headers=headers).status_code == 401

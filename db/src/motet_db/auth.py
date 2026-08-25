@@ -23,6 +23,7 @@ probe on a full-length hash leaks nothing a timing measurement can use.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
@@ -62,6 +63,15 @@ def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+#: What :func:`token_digest` emits, and therefore the only thing ``token_sha256`` may hold.
+#:
+#: A pattern rather than a docstring because one caller — :mod:`motet_db.mint_session` —
+#: takes the digest from the outside world instead of computing it, and a digest with a
+#: stray newline or an uppercase nibble would insert a row that simply never matches a
+#: lookup. That failure has no symptom at mint time and looks like a broken token later.
+DIGEST_RE: re.Pattern[str] = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
 def new_session_token() -> str:
     """A bearer secret handed to a browser, so it is sized as one.
 
@@ -85,6 +95,44 @@ def create_session(
     is the only thing that ever holds the plaintext — it returns it to the browser and
     forgets it, and this module never had a copy to log.
     """
+    return create_session_for_digest(
+        conn,
+        user_id=user_id,
+        email=email,
+        token_sha256=token_digest(token),
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def create_session_for_digest(
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str,
+    email: str,
+    token_sha256: str,
+    ttl_seconds: int = DEFAULT_TTL_SECONDS,
+) -> AuthSession:
+    """Record a session from its digest alone, for a caller that never held the plaintext.
+
+    :func:`create_session` is this function plus one ``sha256``. The split exists for the
+    staging session mint (:mod:`motet_db.mint_session`), where the plaintext is generated
+    in the deploy workflow's shell, encrypted to the requesting agent, and never crosses a
+    process boundary: the job that writes this row is handed the digest as an argument and
+    has nothing to leak, log, or accidentally record in an execution's override list.
+
+    The row is otherwise identical to a signed-in browser's, which is the point — a minted
+    session is resolved by the same :func:`session_for_token`, revoked by the same
+    ``/v1/auth/logout``, and expires by the same predicate.
+
+    **This function does not check the allowlist, and no writer of this table may skip
+    it.** ``motet_api``'s sign-in route and :func:`motet_db.mint_session.check_email` each
+    ask :mod:`motet_db.allowlist` before calling in here. A third caller that forgot would
+    quietly create a session for an address Google sign-in refuses — which is the property
+    AGENTS.md claims, so add the check rather than relying on the per-request re-check in
+    ``require_caller`` to delete the row on first use.
+    """
+    if not DIGEST_RE.match(token_sha256):
+        raise ValueError("token_sha256 must be a 64-character lowercase hex SHA-256 digest")
     row = _one(
         conn,
         """
@@ -92,7 +140,7 @@ def create_session(
         VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s))
         RETURNING id, user_id, email, created_at, last_seen_at, expires_at
         """,
-        (new_id("sess"), user_id, token_digest(token), email, ttl_seconds),
+        (new_id("sess"), user_id, token_sha256, email, ttl_seconds),
     )
     return _session(row)
 

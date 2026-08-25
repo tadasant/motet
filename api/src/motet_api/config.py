@@ -58,7 +58,7 @@ class Settings:
     feed_title: str
     feed_description: str
     feed_author: str
-    #: Who may sign in with Google. Empty means nobody — see `motet_api.auth.allowlist`.
+    #: Who may sign in with Google. Empty means nobody — see `motet_db.allowlist`.
     #:
     #: Defaulted, unlike every field above it, and the default is the *closed* one. These
     #: two decide who gets in, so a `Settings` built for some other purpose — a test that
