@@ -129,6 +129,13 @@ reports `how: "open"`, and the SPA skips the sign-in screen and just works. Reac
 at `localhost` rather than `127.0.0.1` if you are testing either OAuth flow — Google
 matches a redirect URI as an exact string, and only one of those two is registered.
 
+## Testing against staging
+
+Deployed environments are a different problem, and it has one answer:
+[`docs/testing-staging.md`](docs/testing-staging.md). Short version — use the
+`MOTET_API_TOKEN` bearer, because Google refuses to sign an automated browser in, and a
+green run there still does not prove a human's sign-in works.
+
 ## Migrations
 
 Plain numbered SQL in `db/migrations/`, named `NNNN_lower_snake_case.sql`, applied in order

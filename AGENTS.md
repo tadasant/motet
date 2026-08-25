@@ -677,6 +677,18 @@ identity is its own seam (`motet_api.auth`) rather than another caller of
 `motet_sources`' `OAuthClient`: one class serving two sets of parameters is how the two
 quietly become one wrong set.
 
+**An agent cannot sign in, and that is settled rather than untried.** Google refuses an
+automated browser at the *identifier* step — before a password is ever requested — with
+"this browser or app may not be secure", both headless and with the usual fingerprint
+masking. So an agent exercising staging uses the `MOTET_API_TOKEN` bearer, which is exactly
+why that token kept working when the button arrived. The consequence worth writing down is
+the one that is easy to forget when a test run goes green: **an agent's green run says
+nothing about whether a human can sign in**, because it exercises no part of the consent
+screen, the redirect-URI registration, or the ID-token verification. A human clicks the real
+button once per environment after any change to `motet_api.auth` or `web/src/oauth.ts`.
+[`docs/testing-staging.md`](docs/testing-staging.md) is the runbook, the evidence, and the
+list of what it does not cover.
+
 ### The vault is the seam to a credential that is not ours
 
 `vault/` holds the envelope-encryption path: a per-record DEK, a KEK in Cloud KMS, and an
