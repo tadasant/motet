@@ -236,20 +236,63 @@ describe('App', () => {
     expect(screen.getByText('Failed')).toBeDefined()
     expect(screen.getByText(/Attempt 3 of 5 failed/)).toBeDefined()
     expect(screen.getByText(/Gave up after 5 attempts/)).toBeDefined()
+    // Counted as what each of them is, rather than rolled into one "in flight" number.
+    expect(screen.getByText('1 on the way in, 1 stuck.')).toBeDefined()
     // And the reason, verbatim — enough to decide whether to wait, re-paste, or report it.
     expect(screen.getByText(/ReasoningNotAppliedError/)).toBeDefined()
     expect(screen.getByText(/402 insufficient credits/)).toBeDefined()
   })
 
-  it('keeps the backlog when the ingestion route cannot answer', async () => {
+  it('keeps the backlog when the ingestion route cannot answer, and says so', async () => {
     // The two lists come from one API but the SPA and the API are separate services. A
-    // failure of the secondary panel must not take the primary list down with it.
+    // failure of the secondary panel must not take the primary list down with it — and
+    // must not be reported as "nothing is being processed", which is a different claim.
     mockApi({ '/v1/ingestion': undefined })
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
 
     expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
-    expect(screen.queryByRole('heading', { name: 'Processing' })).toBeNull()
+    expect(screen.getByText(/Could not check what is still being processed/)).toBeDefined()
+  })
+
+  it('polls while something is pending, and stops once nothing is', async () => {
+    // The riskiest line in the change: a poll that never starts leaves the panel stale,
+    // and one that never stops hammers the API from an idle tab forever.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const calls = mockApi({ '/v1/ingestion': [QUEUED] })
+      render(<App />)
+      await screen.findByRole('heading', { name: 'Paste in' })
+      const before = calls.filter((call) => call.url.includes('/v1/ingestion')).length
+
+      await vi.advanceTimersByTimeAsync(7_000)
+      const polled = calls.filter((call) => call.url.includes('/v1/ingestion')).length
+      expect(polled).toBeGreaterThan(before)
+
+      // Nothing pending any more: the interval must tear itself down rather than run on.
+      calls.length = 0
+      vi.mocked(fetch).mockClear()
+      mockApi({ '/v1/ingestion': [{ ...QUEUED, state: 'integrated' }] })
+      await vi.advanceTimersByTimeAsync(4_000)
+      const settled = calls.filter((call) => call.url.includes('/v1/ingestion')).length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(calls.filter((call) => call.url.includes('/v1/ingestion')).length).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('counts only what is unsettled on the tab', async () => {
+    // A badge stuck at 3 for the ten minutes after everything landed means nothing.
+    mockApi({
+      '/v1/ingestion': [
+        { ...QUEUED, id: 'si_done', state: 'integrated' },
+        { ...QUEUED, id: 'si_open' },
+      ],
+    })
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
   })
 
   it('counts what is in flight on the tab, so it is visible from the paste screen', async () => {

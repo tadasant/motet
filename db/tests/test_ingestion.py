@@ -121,6 +121,31 @@ class TestListIngestion:
         assert status.last_error == "boom (source item)"
         assert status.next_attempt_at is None
 
+    def test_a_failed_item_never_advertises_a_retry_its_job_row_still_claims(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The two rows disagreeing must not produce "failed, and trying again in 30s".
+
+        Set up deliberately inconsistent — the source item has given up, the job row has
+        not — because that is the only way to exercise the ``si.state = 'pending'`` half
+        of the gate on its own. The queue never leaves them like this; a stray re-enqueue
+        or a hand-written UPDATE could, and the answer has to stay coherent either way.
+        """
+        item_id = paste(db)
+        enqueue_integrate(db, item_id, attempts=5, state="ready", due_in_seconds=30)
+        repo.mark_source_item(db, item_id, SourceItemState.FAILED, error="gave up")
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.state is SourceItemState.FAILED
+        assert status.next_attempt_at is None
+
+    def test_the_list_is_bounded(self, db: psycopg.Connection[Any]) -> None:
+        """One poll can create hundreds of source items; the SPA polls this every 3s."""
+        for index in range(repo.INGESTION_MAX_ITEMS + 5):
+            paste(db, title=f"Item {index}")
+
+        assert len(repo.list_ingestion(db, USER)) == repo.INGESTION_MAX_ITEMS
+
     def test_a_succeeded_item_lingers_briefly_and_then_drops_off(
         self, db: psycopg.Connection[Any]
     ) -> None:

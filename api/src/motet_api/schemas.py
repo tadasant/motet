@@ -81,6 +81,16 @@ class IngestionItemResponse(BaseModel):
     ``attempts`` and ``next_attempt_at`` are here so that *retrying* and *stuck* are
     distinguishable. They are not the same thing to a person standing there waiting, and
     a spinner that means both is a spinner that means neither.
+
+    **``last_error`` is the exception the stage raised, unedited, and that is the decision
+    rather than an oversight.** It is a new egress: an httpx error names the base URL it
+    dialled, a psycopg one names the database host. The caller is the deployment's single
+    owner behind ``require_caller`` — the same person who reads the obs stack, where the
+    identical string already goes — so there is no reader here who could not already see
+    it. Mapping unknown exceptions to a generic string would buy nothing from that reader
+    and would hand them back the "Failed", with no reason, that this whole surface exists
+    to replace. Revisit it when there is more than one account (Phase 3): at that point the
+    reader and the operator stop being the same person, and this becomes a real leak.
     """
 
     id: str
@@ -105,8 +115,9 @@ class IngestionItemResponse(BaseModel):
     )
     last_error: str | None = Field(
         description=(
-            "What the most recent attempt said. Present while retrying as well as after "
-            "failing, because the reason is the thing that says whether to wait or re-paste."
+            "What the most recent attempt said, verbatim. Present while retrying as well "
+            "as after failing, because the reason is the thing that says whether to wait, "
+            "re-paste, or report it."
         )
     )
     created_at: datetime

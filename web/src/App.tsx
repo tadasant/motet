@@ -60,6 +60,9 @@ export default function App() {
   // screen because the tab strip labels it too: the person who needs to see it is on the
   // *paste* screen, having just pasted, and would otherwise have no reason to go looking.
   const [ingestion, setIngestion] = useState<IngestionItem[]>([])
+  // Whether the last attempt to ask actually got an answer. Kept apart from an empty list
+  // because "nothing is being processed" and "I could not find out" are different claims.
+  const [ingestionUnavailable, setIngestionUnavailable] = useState(false)
   const [episode, setEpisode] = useState<Episode | null>(null)
   const [token, setTokenState] = useState(getToken())
   const [error, setError] = useState('')
@@ -93,12 +96,17 @@ export default function App() {
     // *secondary* list, and the API it comes from is a separate service that rolls on its
     // own schedule — so an SPA that has this route while the API it is talking to does not
     // would, without the catch, answer "where is my backlog" with a 404 about something
-    // else entirely. Failing softly leaves whatever was last known on screen; failing
-    // loudly would take the backlog down with it.
+    // else entirely.
+    //
+    // Failing softly is NOT the same as keeping what was on screen. A stale "Queued" that
+    // never resolves is the disappearance this panel exists to prevent, wearing a
+    // different hat — so a failure clears the list and says so, which also stops the poll
+    // below rather than hammering a broken route every three seconds.
     Promise.all([api.newsItems(), api.ingestion().catch(() => null)])
       .then(([nextItems, nextIngestion]) => {
         setItems(nextItems)
-        if (nextIngestion) setIngestion(nextIngestion)
+        setIngestion(nextIngestion ?? [])
+        setIngestionUnavailable(nextIngestion === null)
         setError('')
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
@@ -118,8 +126,10 @@ export default function App() {
   // own the moment nothing is pending, so an idle tab makes no requests.
   const waiting = ingestion.some((item) => item.state === 'pending')
   // A stuck item gets a louder count than a busy one. "3 in flight" and "3, one of which
-  // is never coming back" want different reactions.
+  // is never coming back" want different reactions. Settled items are not counted at all:
+  // a badge that stays at 3 for ten minutes after everything landed means nothing.
   const anyFailed = ingestion.some((item) => item.state === 'failed')
+  const unsettled = ingestion.filter((item) => item.state !== 'integrated').length
   useEffect(() => {
     if (!waiting || callback || !(token || unlocked)) return
     const timer = window.setInterval(refresh, POLL_MS)
@@ -198,10 +208,8 @@ export default function App() {
                 onClick={() => setTab(entry.id)}
               >
                 {entry.label}
-                {entry.id === 'backlog' && ingestion.length > 0 && (
-                  <span className={`tab-count${anyFailed ? ' failed' : ''}`}>
-                    {ingestion.length}
-                  </span>
+                {entry.id === 'backlog' && unsettled > 0 && (
+                  <span className={`tab-count${anyFailed ? ' failed' : ''}`}>{unsettled}</span>
                 )}
               </button>
             ))}
@@ -246,6 +254,7 @@ export default function App() {
             <Backlog
               items={items}
               ingestion={ingestion}
+              ingestionUnavailable={ingestionUnavailable}
               onChanged={refresh}
               onOpenEpisode={openEpisode}
             />

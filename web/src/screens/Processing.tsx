@@ -13,17 +13,33 @@
 
 import type { IngestionItem } from '../api/client'
 
-export function Processing({ items }: { items: IngestionItem[] }) {
+export function Processing({
+  items,
+  unavailable = false,
+}: {
+  items: IngestionItem[]
+  unavailable?: boolean
+}) {
+  // Said out loud rather than rendered as an empty panel. "Nothing is being processed"
+  // and "I could not find out what is being processed" are different claims, and showing
+  // the first when the second is true is the same lie in a smaller font.
+  if (unavailable) {
+    return (
+      <section className="processing" aria-labelledby="processing-heading">
+        <h3 id="processing-heading">Processing</h3>
+        <p className="hint">
+          Could not check what is still being processed. The backlog below is current;
+          anything mid-ingestion is not shown.
+        </p>
+      </section>
+    )
+  }
   if (items.length === 0) return null
-  const stuck = items.filter((item) => item.state === 'failed').length
 
   return (
     <section className="processing" aria-labelledby="processing-heading">
       <h3 id="processing-heading">Processing</h3>
-      <p className="hint">
-        {items.length} item{items.length === 1 ? '' : 's'} on the way in
-        {stuck > 0 ? `, ${stuck} of them stuck` : ''}.
-      </p>
+      <p className="hint">{summarise(items)}</p>
       <ul className="items">
         {items.map((item) => (
           <li key={item.id} className={`ingestion ${item.state}`}>
@@ -46,11 +62,34 @@ export function Processing({ items }: { items: IngestionItem[] }) {
   )
 }
 
+/**
+ * The headline, counting each state as the thing it actually is.
+ *
+ * A settled item is not "on the way in": a just-added item is finished, and a failed one
+ * is never arriving. Rolling all three into one number would put "3 items on the way in"
+ * over a list where nothing is moving.
+ */
+function summarise(items: IngestionItem[]): string {
+  const counts = {
+    pending: items.filter((item) => item.state === 'pending').length,
+    failed: items.filter((item) => item.state === 'failed').length,
+    integrated: items.filter((item) => item.state === 'integrated').length,
+  }
+  const parts: string[] = []
+  if (counts.pending) parts.push(`${counts.pending} on the way in`)
+  if (counts.failed) parts.push(`${counts.failed} stuck`)
+  if (counts.integrated) parts.push(`${counts.integrated} just added`)
+  return `${parts.join(', ')}.`
+}
+
 /** The one-word state. `last_error` on a pending item means an attempt has already lost. */
 function badge(item: IngestionItem): string {
   if (item.state === 'integrated') return 'Added'
   if (item.state === 'failed') return 'Failed'
-  return item.last_error ? 'Retrying' : 'Queued'
+  if (item.last_error) return 'Retrying'
+  // Attempts spent with nothing to show for them means a worker holds it right now.
+  // Calling that "Queued" would contradict the line directly underneath it.
+  return item.attempts > 0 ? 'Working' : 'Queued'
 }
 
 function explain(item: IngestionItem): string {

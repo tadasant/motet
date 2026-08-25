@@ -14,11 +14,13 @@ const DEFAULT_MAX_MINUTES = 20
 export function Backlog({
   items,
   ingestion,
+  ingestionUnavailable,
   onChanged,
   onOpenEpisode,
 }: {
   items: NewsItem[]
   ingestion: IngestionItem[]
+  ingestionUnavailable: boolean
   onChanged: () => void
   onOpenEpisode: (episode: Episode) => void
 }) {
@@ -62,7 +64,7 @@ export function Backlog({
           pasted go" is asked immediately after pasting, and an answer under a long list of
           older stories is an answer nobody scrolls to. It renders nothing when there is
           nothing in flight. */}
-      <Processing items={ingestion} />
+      <Processing items={ingestion} unavailable={ingestionUnavailable} />
 
       <p className="hint">
         {unread.length} unread of {items.length}. An episode takes everything unread, oldest
@@ -92,7 +94,10 @@ export function Backlog({
       {items.length === 0 ? (
         // Only when nothing is in flight either — "nothing here yet" over the top of an
         // item that is visibly being retried is the same lie in a smaller font.
-        ingestion.length === 0 && <p className="hint">Nothing here yet. Paste a newsletter in.</p>
+        ingestion.length === 0 &&
+        !ingestionUnavailable && (
+          <p className="hint">Nothing here yet. Paste a newsletter in.</p>
+        )
       ) : (
         <ul className="items">
           {items.map((item) => (

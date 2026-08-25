@@ -62,6 +62,12 @@ WINDOW_MAX_ITEMS: Final = 200
 #: the loop for whoever is standing there watching it.
 INTEGRATED_GRACE = timedelta(minutes=10)
 
+#: A ceiling on the ingestion list, because the SPA polls it every few seconds while
+#: anything is pending and each row can carry two kilobytes of error text. One Gmail poll
+#: creates up to ``POLL_PAGE_SIZE`` source items at a time, so "however many are in flight"
+#: is not a number this route may be handed. Well above any hand-pasted backlog.
+INGESTION_MAX_ITEMS: Final = 200
+
 
 def connect(database_url: str) -> psycopg.Connection[Any]:
     """Open a connection with the row factory the rest of this module assumes."""
@@ -110,8 +116,16 @@ def list_ingestion(
     being ready, so that the two rows disagreeing cannot produce "failed, and trying again
     in 30 seconds". The queue leaves them consistent; a stray re-enqueue need not, and the
     answer given to a caller has to be coherent either way.
+
+    Bounded by :data:`INGESTION_MAX_ITEMS`. A route the SPA polls every few seconds must
+    not be able to return an unbounded list of rows each carrying up to two kilobytes of
+    error text — one Gmail poll can create hundreds of source items at once. Newest first,
+    so what a bound drops is the oldest end.
+
+    ``now`` is a test seam. It is resolved *in* the statement rather than by asking the
+    database for its clock first, because the extra round trip bought nothing: the cutoff
+    is only ever compared against `integrated_at` values in this same query.
     """
-    moment = now or _now(conn)
     rows = _all(
         conn,
         """
@@ -132,10 +146,14 @@ def list_ingestion(
             LIMIT 1
         ) job ON true
         WHERE si.user_id = %s
-          AND (si.state <> 'integrated' OR si.integrated_at > %s)
+          AND (
+            si.state <> 'integrated'
+            OR si.integrated_at > COALESCE(%s, now()) - make_interval(secs => %s)
+          )
         ORDER BY si.created_at DESC, si.id DESC
+        LIMIT %s
         """,
-        (user_id, moment - INTEGRATED_GRACE),
+        (user_id, now, INTEGRATED_GRACE.total_seconds(), INGESTION_MAX_ITEMS),
     )
     return [
         IngestionStatus(

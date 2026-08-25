@@ -511,12 +511,16 @@ def paste_source(body: PasteRequest, conn: Conn, user_id: User) -> SourceItemRes
 
 @app.get("/v1/ingestion", response_model=list[IngestionItemResponse], tags=["ingestion"])
 def list_ingestion(conn: Conn, user_id: User) -> list[IngestionItemResponse]:
-    """What has been pasted or polled but is not in the backlog yet, and why.
+    """What has been ingested but is not in the backlog yet, and why.
 
     The backlog answers "what do I have to listen to"; it cannot answer "where did the
     thing I just pasted go", because an item that never integrates never becomes a news
     item and so never appears there at all. That gap is the whole reason this route
     exists: content that fails is content that silently disappears.
+
+    Scoped to the ``integrate`` stage, because that is the stage a ``source_items`` row
+    exists for. A Gmail ``extract`` that fails has no row to report — the message was
+    never turned into one — so it is invisible here and is tracked separately as motet#35.
     """
     return [_ingestion_item(item) for item in repo.list_ingestion(conn, user_id)]
 
