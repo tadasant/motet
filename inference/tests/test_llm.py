@@ -34,6 +34,7 @@ import httpx
 import pytest
 from motet_inference.llm import (
     DEFAULT_MODEL,
+    KNOWN_MODELS,
     CacheControl,
     Credential,
     CredentialKind,
@@ -383,11 +384,25 @@ def test_effort_travels_in_the_reasoning_field() -> None:
 def test_reasoning_off_is_said_out_loud_rather_than_left_unsaid() -> None:
     """Omitting the field is not "off" — on Sonnet 5 it is adaptive thinking at `high`.
 
-    Reasoning is on by default on every adaptive Anthropic model, so the intuitive
-    encoding of "this stage does not need to think" would silently buy the *most*
-    expensive setting. `off` has to travel as a value.
+    Reasoning is on by default on Sonnet 5, so the intuitive encoding of "this stage does
+    not need to think" would silently buy the *most* expensive setting. `off` has to
+    travel as a value.
     """
     assert build_payload(a_request())["reasoning"] == {"enabled": False}
+
+
+def test_effort_off_reaches_the_wire_as_a_disable_through_real_config() -> None:
+    """The whole lever, end to end: the env var an operator sets to the bytes sent.
+
+    Built by hand the payload above proves the translation; this proves the route to it,
+    on the one catalogue row with no selectable effort at all.
+    """
+    config = load_config(
+        {"MOTET_LLM_MODEL_DEDUP": "anthropic/claude-haiku-4.5", "MOTET_LLM_EFFORT_DEDUP": "off"}
+    )
+    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=config)
+    assert request.reasoning is None
+    assert build_payload(request)["reasoning"] == {"enabled": False}
 
 
 def test_cache_breakpoint_lands_on_the_stable_prefix() -> None:
@@ -542,7 +557,7 @@ def test_the_dropped_config_guard_still_fires_on_a_budget_based_model() -> None:
     """
     config = load_config({"MOTET_LLM_MODEL_DEDUP": "openai/gpt-5.1"})
     request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=config)
-    assert request.reasoning is not None and not request.reasoning.adaptive
+    assert request.reasoning is not None and request.reasoning.thinking == "budget"
 
     client = a_client(responder(completion(reasoning_tokens=0)))
     with pytest.raises(ReasoningNotAppliedError, match="no reasoning tokens"):
@@ -552,9 +567,9 @@ def test_the_dropped_config_guard_still_fires_on_a_budget_based_model() -> None:
 def test_which_models_the_evidence_check_applies_to_comes_from_the_catalogue() -> None:
     """A fact about the model, resolved once, so no stage has to know a generation."""
     for stage in LlmStage:
-        reasoning = build_request(stage, MESSAGES, max_output_tokens=512, config=load_config({}))
-        assert reasoning.reasoning is not None
-        assert reasoning.reasoning.adaptive, "every Anthropic slug in the catalogue is 4.6+"
+        request = build_request(stage, MESSAGES, max_output_tokens=512, config=load_config({}))
+        assert request.reasoning is not None
+        assert request.reasoning.thinking == "adaptive"
 
     budget_based = build_request(
         LlmStage.SCRIPT,
@@ -562,7 +577,28 @@ def test_which_models_the_evidence_check_applies_to_comes_from_the_catalogue() -
         max_output_tokens=512,
         config=load_config({"MOTET_LLM_MODEL_SCRIPT": "openai/gpt-5.1"}),
     )
-    assert budget_based.reasoning is not None and not budget_based.reasoning.adaptive
+    assert budget_based.reasoning is not None and budget_based.reasoning.thinking == "budget"
+
+
+def test_the_catalogue_records_two_reasoning_facts_and_they_are_not_one_fact() -> None:
+    """Every Anthropic slug here thinks adaptively; only some start with it on.
+
+    Conflating the two is the mistake the first draft of this fix made, and the second
+    column is what `bin/check-openrouter-models` can verify against `default_enabled`.
+    """
+    adaptive = {s for s, spec in KNOWN_MODELS.items() if spec.adaptive_thinking}
+    on_by_default = {s for s, spec in KNOWN_MODELS.items() if spec.reasoning_on_by_default}
+    assert adaptive == {
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-opus-4.8",
+        "anthropic/claude-sonnet-4.6",
+    }
+    assert on_by_default == {
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-5",
+        "openai/gpt-5.1",
+    }
 
 
 def test_an_unlisted_model_is_not_assumed_to_be_budget_based() -> None:
@@ -576,7 +612,18 @@ def test_an_unlisted_model_is_not_assumed_to_be_budget_based() -> None:
         {"MOTET_LLM_MODEL": "anthropic/claude-sonnet-6", "MOTET_LLM_ALLOW_UNLISTED_MODEL": "true"}
     )
     request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=512, config=config)
-    assert request.reasoning is not None and request.reasoning.adaptive
+    assert request.reasoning is not None and request.reasoning.thinking == "unknown"
+
+
+def test_an_unlisted_model_that_does_not_think_warns_instead_of_claiming_to_know_why(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Not raised on — a false positive stops a pipeline — but not passed off as a choice."""
+    client = a_client(responder(completion(reasoning_tokens=0)))
+    with caplog.at_level(logging.WARNING, logger="motet.llm.openrouter"):
+        response = client.complete(a_request(reasoning=Reasoning(effort="low", thinking="unknown")))
+    assert not response.reasoning_applied
+    assert "nothing here can tell which" in caplog.text
 
 
 def test_reasoning_text_counts_as_evidence_when_tokens_are_not_reported() -> None:

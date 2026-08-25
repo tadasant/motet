@@ -278,18 +278,41 @@ class OpenRouterClient:
         )
 
         if request.reasoning is not None and not applied:
-            if request.reasoning.adaptive:
+            if request.reasoning.thinking == "adaptive":
                 # Not a fault, and not tolerated-with-a-warning either: on an adaptive
                 # model this is Claude having decided the task was not worth thinking
                 # about, which at effort='low' is the whole point of asking for 'low'.
                 # Recorded rather than merely swallowed — `reasoning_applied` rides on
-                # every response, and this line carries the pair that explains it — but at
-                # info, because a warning per dedup call would be noise that trains
-                # everyone to stop reading warnings.
+                # every response, and this line carries what explains it — but at info,
+                # because a warning per dedup call would be noise that trains everyone to
+                # stop reading warnings.
+                #
+                # The served upstream is in there deliberately. OpenRouter routes a slug
+                # across several providers and does not pin one, and "this upstream does
+                # not surface reasoning-token accounting" is the one competing explanation
+                # for motet#31 that offline evidence cannot rule out. Logging which
+                # upstream answered is what lets a real run settle it.
                 logger.info(
-                    "model=%s answered without thinking at effort=%s; adaptive thinking "
-                    "makes that the model's call, not a dropped reasoning config",
+                    "model=%s provider=%s answered without thinking at effort=%s; "
+                    "adaptive thinking makes that the model's call, not a dropped "
+                    "reasoning config",
                     response.model,
+                    data.get("provider"),
+                    request.reasoning.effort,
+                )
+                return response
+            if request.reasoning.thinking == "unknown":
+                # The escape hatch, where there is no catalogue row to reason from. Not
+                # raised on — a false positive stops a pipeline, and an unlisted model is
+                # by definition one whose thinking mode we have not established — but said
+                # out loud as the open question it is, rather than as the model's choice.
+                logger.warning(
+                    "model=%s provider=%s answered without thinking at effort=%s, and it "
+                    "is not in the catalogue in motet_inference.llm.config — so this is "
+                    "either a dropped reasoning config or a model that thinks adaptively, "
+                    "and nothing here can tell which. Add the slug to KNOWN_MODELS",
+                    response.model,
+                    data.get("provider"),
                     request.reasoning.effort,
                 )
                 return response
@@ -306,9 +329,12 @@ class OpenRouterClient:
                 raise ReasoningNotAppliedError(
                     f"reasoning was requested at effort={request.reasoning.effort!r} on "
                     f"model={response.model!r}, but the response has no reasoning tokens, "
-                    "no reasoning_details, and no reasoning text. Check that the model "
-                    "supports selectable effort, or set Reasoning(require_evidence=False) "
-                    "if unthought output is acceptable for this stage."
+                    "no reasoning_details, and no reasoning text. This model is recorded "
+                    "in motet_inference.llm.config as one where effort becomes a thinking "
+                    "budget, so the config was probably dropped upstream — check that the "
+                    "slug still supports selectable effort. If it has moved to adaptive "
+                    "thinking, the fix is ModelSpec.adaptive_thinking on its catalogue "
+                    "row, not Reasoning(require_evidence=False)."
                 )
         return response
 

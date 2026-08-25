@@ -556,17 +556,30 @@ Four things about this are settled, and each exists because of a specific failur
   **The exception is adaptive thinking, and it is a fact about the model rather than a
   preference (motet#31).** From Claude 4.6 onward — which is every Anthropic slug in the
   catalogue — `reasoning.effort` sets Anthropic's `output_config.effort` and never a
-  thinking budget, Claude decides per response whether the task is worth thinking about,
-  and reasoning is **on by default**. Both halves of the inference above fail there: no
-  reasoning in a response is the model obeying `effort='low'`, and a dropped field would
-  raise thinking to `high` rather than remove it, so there is no response on such a model
-  the error could correctly describe. `ModelSpec.adaptive_thinking` records which side of
-  that split a slug is on and `build_request` reads it, so the guard stays loud on a
-  budget-based model (`openai/gpt-5.1` is the one such row) and does not run on an adaptive
-  one. It fired 21 times against zero real faults on the first real staging run and stopped
-  every pasted item entering the pipeline. **This is a scoping, not an off switch:**
-  `Reasoning(require_evidence=False)` is still not the way to make one go away, and
-  `reasoning_applied` still rides on every response.
+  thinking budget, and Claude decides per response whether the task is worth thinking
+  about. So no reasoning in a response is the model obeying `effort='low'` and identifies
+  nothing, while the guard's false positives each cost a completion that was billed and
+  then discarded. `ModelSpec.adaptive_thinking` records which side of that split a slug is
+  on and `build_request` reads it, so the guard stays loud on a budget-based model
+  (`openai/gpt-5.1` is the one such row) and does not run on an adaptive one. It fired 21
+  times on the first real staging run against no fault it could have distinguished, and
+  stopped every pasted item entering the pipeline. **This is a scoping, not an off
+  switch:** `Reasoning(require_evidence=False)` is still not the way to make one go away,
+  `reasoning_applied` still rides on every response, and an unlisted model is `"unknown"`
+  rather than either answer — not raised on, but logged as the open question it is.
+
+  **"Reasoning is on by default" is a second, narrower fact, and conflating the two is the
+  mistake to avoid** — the first draft of this fix made it. `reasoning.default_enabled` is
+  true for Sonnet 5 and Opus 5, **false for Opus 4.8 and absent for Sonnet 4.6**, all four
+  of which think adaptively. Where it is true the argument gets stronger rather than
+  merely holding: a dropped field would leave thinking on at `high` rather than off, so an
+  unthought answer cannot be a dropped config even in principle — and that is the pair the
+  guard actually fired on. Where it is false, an unthought answer is *ambiguous* between
+  the two causes, which is reason enough not to raise but is not the same claim.
+  `ModelSpec.reasoning_on_by_default` keeps them apart and
+  `bin/check-openrouter-models` drift-checks it; `adaptive_thinking` is the one catalogue
+  fact nothing can verify, because the live list says which efforts a slug takes and never
+  what an effort *does* to it.
 
   Two consequences worth not rediscovering. **Raising dedup's effort would not have fixed
   it** — thinking is adaptive at every level, so a higher effort makes an unthought answer
@@ -575,6 +588,16 @@ Four things about this are settled, and each exists because of a specific failur
   turn reasoning off**: on a model where it is on by default, sending nothing buys adaptive
   thinking at `high`, the most expensive setting there is. `MOTET_LLM_EFFORT_<STAGE>=off`
   therefore travels as an explicit `{"enabled": false}`.
+
+  **One competing explanation is not excluded and should not be written down as closed.**
+  Sonnet 5 returns no raw chain of thought, so `usage.reasoning_tokens` is the only signal
+  the check has — and OpenRouter routes a slug across several upstreams without pinning
+  one. "Dedup's worker process stuck to an upstream that does not surface reasoning-token
+  accounting, while script and grounding stuck to ones that do" fits every observation
+  just as well, and would mean a thought answer whose accounting was lost. It does not
+  change the fix, because the check cannot tell the two apart either way. The adapter
+  therefore logs the **served upstream** alongside the model whenever a response arrives
+  unthought, so a real run can settle it.
 - **Prompt caching is the largest LLM cost lever**, because dedup passes the whole news-item
   window in-prompt once per source item. Put the breakpoint on the last *stable* part and
   check `usage.cache_read_tokens`. Never assume a hit.

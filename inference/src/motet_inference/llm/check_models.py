@@ -67,6 +67,16 @@ def main(argv: list[str]) -> int:
         if set(live_efforts) != set(spec.efforts):
             notes.append(f"efforts {sorted(spec.efforts)} -> {sorted(live_efforts)}")
 
+        # Absent means off, which is how Sonnet 4.6 reports it. This one *is* published,
+        # and checking it is the point: the catalogue's first draft asserted "on by
+        # default from Claude 4.6 onward" and was wrong for two rows, which nothing would
+        # have caught. See ModelSpec for why the two reasoning facts are not one fact.
+        live_default_enabled = bool(reasoning.get("default_enabled"))
+        if live_default_enabled != spec.reasoning_on_by_default:
+            notes.append(
+                f"reasoning on by default {spec.reasoning_on_by_default} -> {live_default_enabled}"
+            )
+
         pricing = entry.get("pricing") or {}
         live_ttl_1h = "input_cache_write_1h" in pricing
         if live_ttl_1h != spec.supports_cache_ttl_1h:
@@ -78,12 +88,11 @@ def main(argv: list[str]) -> int:
         else:
             print(f"ok       {slug}  ({entry.get('canonical_slug', slug)})")
 
-    # `adaptive_thinking` is deliberately absent from the loop above: OpenRouter's model
-    # list says which efforts a slug accepts, never what an effort *does* to it, and the
-    # difference between "effort sets a thinking budget" and "effort sets
-    # output_config.effort while Claude decides whether to think" is exactly what
-    # motet#31 turned on. Nothing here can check it, so it is said out loud instead of
-    # quietly passing.
+    # `adaptive_thinking` is the one catalogue fact this cannot check: OpenRouter's model
+    # list says which efforts a slug accepts and whether reasoning starts on, never what
+    # an effort *does* to it — and the difference between "effort sets a thinking budget"
+    # and "effort sets output_config.effort while Claude decides whether to think" is
+    # exactly what motet#31 turned on. Said out loud rather than quietly passing.
     print(
         "\nNot checked here: adaptive_thinking. OpenRouter's model list does not carry it. "
         "Read the slug's migration guide (Claude 4.6 and later think adaptively) and set "

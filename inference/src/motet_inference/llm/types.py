@@ -28,6 +28,10 @@ Role = Literal["system", "user", "assistant"]
 CacheTtl = Literal["5m", "1h"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
+#: Which mechanism ``reasoning.effort`` drives on a given model, and therefore what a
+#: response with no reasoning in it is evidence of. See :class:`Reasoning`.
+ThinkingMode = Literal["budget", "adaptive", "unknown"]
+
 #: Anthropic accepts at most four cache breakpoints per request, and OpenRouter passes
 #: them straight through. Exceeding it is a 400 from the vendor — caught here instead.
 MAX_CACHE_BREAKPOINTS = 4
@@ -63,13 +67,15 @@ class ReasoningNotAppliedError(LlmError):
     **It applies only to budget-based models, and that scope is the whole of motet#31.**
     The inference above — *no reasoning in the response, therefore the field was dropped*
     — holds when ``reasoning.effort`` is converted into a thinking budget and reasoning is
-    off until asked for. On a model with adaptive thinking (Claude 4.6 and later) both
-    halves fail: effort sets Anthropic's ``output_config.effort`` and never a budget, so
-    Claude decides per response whether to think, and reasoning is on by *default*, so a
-    dropped field would raise thinking to ``high`` rather than removing it. There is no
-    response on such a model that this error could correctly describe, which is why
-    :class:`Reasoning.adaptive` skips the check outright instead of merely tolerating it.
-    ``LlmResponse.reasoning_applied`` still carries the fact either way.
+    off until asked for. On a model with adaptive thinking (Claude 4.6 and later) effort
+    sets Anthropic's ``output_config.effort`` and never a budget, so Claude decides per
+    response whether to think and an unthought answer identifies nothing. On Sonnet 5 and
+    Opus 5 it is stronger still: reasoning is on by *default* there, so a dropped field
+    would raise thinking to ``high`` rather than remove it, and there is no response this
+    error could correctly describe. That is the pair it fired on, which is why
+    :class:`Reasoning.thinking` scopes the check to ``"budget"`` models instead of merely
+    tolerating a failure everywhere. ``LlmResponse.reasoning_applied`` still carries the
+    fact either way.
     """
 
 
@@ -124,18 +130,26 @@ class Reasoning:
     answer that only looks fine. Set it false for a stage where unthought output is
     merely worse rather than wrong.
 
-    ``adaptive`` is a fact about the *model*, not a preference — it says the model decides
-    for itself whether a task is worth thinking about, so a response carrying no reasoning
-    is an answer rather than a symptom. It is resolved from the catalog by
-    :func:`~motet_inference.llm.registry.build_request`, which is why nothing else in this
-    package constructs a :class:`Reasoning` by hand. When it is true the evidence check
-    does not run at all: see :class:`ReasoningNotAppliedError` for why the check has
-    nothing left to detect there.
+    ``thinking`` is a fact about the *model*, not a preference, and it decides whether a
+    response carrying no reasoning is a symptom or an answer. It is resolved from the
+    catalog by :func:`~motet_inference.llm.registry.build_request`, which is why nothing
+    else in this package constructs a :class:`Reasoning` by hand:
+
+    * ``"budget"`` — effort becomes a thinking budget, so no reasoning means the field was
+      dropped. :class:`ReasoningNotAppliedError`'s home ground, and ``require_evidence``
+      decides whether it raises.
+    * ``"adaptive"`` — the model decides for itself whether the task is worth thinking
+      about, so no reasoning identifies nothing. The check does not run.
+    * ``"unknown"`` — an unlisted model, reached through
+      ``MOTET_LLM_ALLOW_UNLISTED_MODEL``. We cannot tell the two apart, so this does not
+      raise either — a false positive here stops a pipeline, and the escape hatch's whole
+      deal is that catalogue-derived checks are off — but it is logged as the open
+      question it is rather than as the model's decision.
     """
 
     effort: Effort = "high"
     require_evidence: bool = True
-    adaptive: bool = False
+    thinking: ThinkingMode = "budget"
 
 
 @dataclass(frozen=True)

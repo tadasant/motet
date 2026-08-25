@@ -25,6 +25,7 @@ from .types import (
     LlmRequest,
     Message,
     Reasoning,
+    ThinkingMode,
 )
 
 
@@ -80,18 +81,22 @@ def build_request(
     chooses per response whether to think, so there is no evidence to require — see
     :class:`~motet_inference.llm.types.ReasoningNotAppliedError`.
 
-    An **unlisted** model counts as adaptive, which is the same deal the escape hatch
-    already makes with :func:`_check_against_catalogue`: the guard is sound only on
-    positive knowledge that a model is budget-based, and asserting a dropped config
-    without that knowledge is precisely how motet#31 stopped ingestion for a day.
+    An **unlisted** model is ``"unknown"`` rather than either answer, which is the same
+    deal the escape hatch already makes with :func:`_check_against_catalogue`: the guard
+    is sound only on positive knowledge that a model is budget-based, and asserting a
+    dropped config without that knowledge is precisely how motet#31 stopped ingestion for
+    a day. It does not raise, and it says so in the log rather than claiming to know why.
     """
     stage_config = (config or load_config(env)).for_stage(stage)
     spec = KNOWN_MODELS.get(stage_config.model)
+    thinking: ThinkingMode = (
+        "unknown" if spec is None else "adaptive" if spec.adaptive_thinking else "budget"
+    )
     reasoning = (
         Reasoning(
             effort=stage_config.effort,
             require_evidence=require_reasoning_evidence,
-            adaptive=spec is None or spec.adaptive_thinking,
+            thinking=thinking,
         )
         if stage_config.effort is not None
         else None
