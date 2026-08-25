@@ -53,6 +53,30 @@ class StoredSourceItem:
 
 
 @dataclass(frozen=True)
+class IngestionStatus:
+    """A pasted or polled item on its way to becoming a news item — and why it is not one.
+
+    Assembled from two rows, because the answer genuinely lives in two places. The *source
+    item* knows whether the pipeline gave up on it; the *job* knows how many attempts have
+    been spent, when the next one is due, and what the last one said. A source item that is
+    still being retried has no error of its own — ``last_error`` is only written when the
+    retries run out — so a view built from ``source_items`` alone cannot tell "working on
+    it" apart from "sitting there", which is exactly the thing a user cannot see.
+
+    ``attempts`` is zero and ``next_attempt_at`` is ``None`` when there is no job row at
+    all: nothing to report rather than nothing happening.
+    """
+
+    id: str
+    title: str
+    state: SourceItemState
+    attempts: int
+    next_attempt_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredNewsItem:
     """A deduped story, with the read state invariant 5 puts here and nowhere else."""
 

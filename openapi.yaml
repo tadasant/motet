@@ -324,6 +324,64 @@ components:
       - created_at
       title: HighlightResponse
       type: object
+    IngestionItemResponse:
+      description: "One ingested item that has not settled into the backlog yet \u2014 and why not.\n\n\
+        This exists because \"pending\" used to be a thing the system knew and never said. A\npaste was\
+        \ accepted, queued, retried, and eventually abandoned entirely inside the\nworker, and the only\
+        \ surface that could have shown any of it \u2014 the backlog \u2014 lists\nnews items, which is\
+        \ precisely what a failed item never becomes.\n\n``attempts`` and ``next_attempt_at`` are here\
+        \ so that *retrying* and *stuck* are\ndistinguishable. They are not the same thing to a person\
+        \ standing there waiting, and\na spinner that means both is a spinner that means neither."
+      properties:
+        attempts:
+          description: Processing attempts spent so far. 0 means it has not been picked up yet.
+          title: Attempts
+          type: integer
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        id:
+          title: Id
+          type: string
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: What the most recent attempt said. Present while retrying as well as after failing,
+            because the reason is the thing that says whether to wait or re-paste.
+          title: Last Error
+        max_attempts:
+          description: Attempts before the pipeline gives up and the state becomes 'failed'.
+          title: Max Attempts
+          type: integer
+        next_attempt_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: "When the next attempt is due. Null means there is nothing scheduled: it is either\
+            \ being processed right now, or it is finished \u2014 see 'state'."
+          title: Next Attempt At
+        state:
+          description: '''pending'' while the queue still owns it, ''failed'' once the retries ran out,
+            ''integrated'' for the few minutes after it succeeded.'
+          title: State
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - state
+      - attempts
+      - max_attempts
+      - next_attempt_at
+      - last_error
+      - created_at
+      title: IngestionItemResponse
+      type: object
     ListenProgressRequest:
       description: 'How far into an episode the listener has got.
 
@@ -1528,6 +1586,47 @@ paths:
       summary: Delete Highlight
       tags:
       - highlights
+  /v1/ingestion:
+    get:
+      description: 'What has been pasted or polled but is not in the backlog yet, and why.
+
+
+        The backlog answers "what do I have to listen to"; it cannot answer "where did the
+
+        thing I just pasted go", because an item that never integrates never becomes a news
+
+        item and so never appears there at all. That gap is the whole reason this route
+
+        exists: content that fails is content that silently disappears.'
+      operationId: list_ingestion_v1_ingestion_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/IngestionItemResponse'
+                title: Response List Ingestion V1 Ingestion Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Ingestion
+      tags:
+      - ingestion
   /v1/news-items:
     get:
       description: 'The backlog: deduped news items with their read state (invariant 5).'

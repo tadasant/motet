@@ -26,6 +26,7 @@ from fastapi.responses import RedirectResponse
 from motet_db import (
     CredentialPurpose,
     Highlight,
+    IngestionStatus,
     RuleError,
     SmartRule,
     SourceKind,
@@ -48,6 +49,7 @@ from motet_sources import (
 from motet_storage import ObjectStore, StorageError
 from motet_vault import DekWrapper, VaultError
 from motet_workers import (
+    DEFAULT_MAX_ATTEMPTS,
     enqueue_episode,
     enqueue_paste,
     enqueue_smart_episode,
@@ -92,6 +94,7 @@ from .schemas import (
     FeedInfoResponse,
     HealthResponse,
     HighlightResponse,
+    IngestionItemResponse,
     ListenProgressRequest,
     ListenProgressResponse,
     LoginResponse,
@@ -506,6 +509,18 @@ def paste_source(body: PasteRequest, conn: Conn, user_id: User) -> SourceItemRes
     return SourceItemResponse(id=stored.id, title=stored.title, state=stored.state.value)
 
 
+@app.get("/v1/ingestion", response_model=list[IngestionItemResponse], tags=["ingestion"])
+def list_ingestion(conn: Conn, user_id: User) -> list[IngestionItemResponse]:
+    """What has been pasted or polled but is not in the backlog yet, and why.
+
+    The backlog answers "what do I have to listen to"; it cannot answer "where did the
+    thing I just pasted go", because an item that never integrates never becomes a news
+    item and so never appears there at all. That gap is the whole reason this route
+    exists: content that fails is content that silently disappears.
+    """
+    return [_ingestion_item(item) for item in repo.list_ingestion(conn, user_id)]
+
+
 @app.get("/v1/news-items", response_model=list[NewsItemResponse], tags=["backlog"])
 def list_news_items(conn: Conn, user_id: User) -> list[NewsItemResponse]:
     """The backlog: deduped news items with their read state (invariant 5)."""
@@ -687,6 +702,24 @@ def episode_audio(
         content=data,
         media_type=episode.audio_media_type or "audio/mpeg",
         headers={"Content-Length": str(len(data))},
+    )
+
+
+def _ingestion_item(item: IngestionStatus) -> IngestionItemResponse:
+    """The retry ceiling is the worker's constant, reported rather than restated here.
+
+    A second copy of the number would be wrong the moment one of them moved, and "attempt
+    3 of 5" is only useful to a reader if the 5 is the 5 the queue is actually counting to.
+    """
+    return IngestionItemResponse(
+        id=item.id,
+        title=item.title,
+        state=item.state.value,
+        attempts=item.attempts,
+        max_attempts=DEFAULT_MAX_ATTEMPTS,
+        next_attempt_at=item.next_attempt_at,
+        last_error=item.last_error,
+        created_at=item.created_at,
     )
 
 

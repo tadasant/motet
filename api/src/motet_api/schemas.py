@@ -70,6 +70,48 @@ class SourceItemResponse(BaseModel):
     )
 
 
+class IngestionItemResponse(BaseModel):
+    """One ingested item that has not settled into the backlog yet — and why not.
+
+    This exists because "pending" used to be a thing the system knew and never said. A
+    paste was accepted, queued, retried, and eventually abandoned entirely inside the
+    worker, and the only surface that could have shown any of it — the backlog — lists
+    news items, which is precisely what a failed item never becomes.
+
+    ``attempts`` and ``next_attempt_at`` are here so that *retrying* and *stuck* are
+    distinguishable. They are not the same thing to a person standing there waiting, and
+    a spinner that means both is a spinner that means neither.
+    """
+
+    id: str
+    title: str
+    state: str = Field(
+        description=(
+            "'pending' while the queue still owns it, 'failed' once the retries ran out, "
+            "'integrated' for the few minutes after it succeeded."
+        )
+    )
+    attempts: int = Field(
+        description="Processing attempts spent so far. 0 means it has not been picked up yet."
+    )
+    max_attempts: int = Field(
+        description="Attempts before the pipeline gives up and the state becomes 'failed'."
+    )
+    next_attempt_at: datetime | None = Field(
+        description=(
+            "When the next attempt is due. Null means there is nothing scheduled: it is "
+            "either being processed right now, or it is finished — see 'state'."
+        )
+    )
+    last_error: str | None = Field(
+        description=(
+            "What the most recent attempt said. Present while retrying as well as after "
+            "failing, because the reason is the thing that says whether to wait or re-paste."
+        )
+    )
+    created_at: datetime
+
+
 class SourceSpanModel(BaseModel):
     """A half-open character range in a source item — what makes a claim checkable."""
 
