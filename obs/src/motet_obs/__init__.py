@@ -39,7 +39,14 @@ Composing it is therefore *this* process's job. ``GLITCHTIP_DSN`` is the same st
 without the formatting: it is the name the secret was placed under.
 """
 
-from .runtime import configure, instrument_fastapi, logger, shutdown, status
+from .runtime import (
+    configure,
+    instrument_fastapi,
+    logger,
+    record_exception,
+    shutdown,
+    status,
+)
 from .settings import (
     ERROR_DSN_ENV,
     GLITCHTIP_DSN_ENV,
@@ -74,6 +81,7 @@ __all__ = [
     "ObsStatus",
     "configure",
     "instrument_fastapi",
+    "record_exception",
     "logger",
     "parse_headers",
     "resolve_deployment_environment",

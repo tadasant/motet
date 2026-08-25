@@ -19,8 +19,9 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
-from motet_api.deps import reset_store
+from motet_api.deps import dek_wrapper, reset_store
 from motet_db import CredentialPurpose, phase2, repo
+from motet_vault import BACKEND_ENV, KMS_KEY_ENV, CloudKmsKeyManager
 from motet_workers import Queue, drain
 
 TOKEN = "test-api-token"
@@ -165,6 +166,79 @@ def test_the_credential_never_appears_in_a_response(api: TestClient) -> None:
             assert not any(
                 "token" in name or "secret" in name or "credential" in name for name in (key or {})
             ), f"a credential-shaped field reached a response: {sorted(key)}"
+
+
+def test_a_vault_that_cannot_seal_answers_503_rather_than_500(api: TestClient) -> None:
+    """The Gmail-connect bug, end to end, at the layer that decides what a browser is told.
+
+    Sealing goes through Cloud KMS in a deployed environment, and everything KMS can
+    refuse with — no permission, no key, no SDK in the image — used to escape as itself.
+    The route catches `VaultError`, so a vendor exception went straight past it into an
+    unhandled 500: the one response Starlette sends *outside* the CORS middleware, which
+    a browser will not hand to the caller at all. `fetch` rejected with `TypeError:
+    Failed to fetch`, naming no status and no cause, and that was the whole of what the
+    user could report.
+
+    The real `CloudKmsKeyManager` is used, with only its client stubbed, so the
+    translation being tested is the one that runs in production. 503 rather than 500
+    because nothing is wrong with the request: the capability is not available. The token
+    is discarded rather than stored unsealed — invariant 8 has no degraded mode.
+    """
+    started = api.post(
+        "/v1/sources/connect",
+        json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+        headers=AUTH,
+    )
+    assert started.status_code == 201, started.text
+
+    class RefusingKms:
+        def encrypt(self, request: dict[str, Any]) -> Any:
+            raise PermissionError("caller does not have cloudkms...useToEncrypt")
+
+    key = CloudKmsKeyManager("projects/secret-proj/locations/y/keyRings/z/cryptoKeys/k")
+    key._client = RefusingKms()  # noqa: SLF001 — the SDK seam, and there is no other way in
+    app.dependency_overrides[dek_wrapper] = lambda: key
+    try:
+        done = api.post(
+            "/v1/sources/callback",
+            json={"state": started.json()["state"], "code": "fake-auth-code"},
+            headers=AUTH,
+        )
+    finally:
+        app.dependency_overrides.pop(dek_wrapper, None)
+
+    assert done.status_code == 503, done.text
+    # And the reason is not the exception: a KMS refusal quotes the key resource path,
+    # which is infrastructure topology.
+    assert "useToEncrypt" not in done.text
+    assert "secret-proj" not in done.text
+
+
+def test_a_vault_that_will_not_build_answers_503_before_the_exchange(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half, and it is refused a dependency earlier.
+
+    `dek_wrapper` is a *dependency*, so it resolves before the route body — which means
+    the `except VaultError` around the seal cannot see a vault that failed to build at
+    all. Translating it there rather than here is what keeps an unconfigured vault from
+    being a 500 as well.
+    """
+    monkeypatch.setenv(BACKEND_ENV, "kms")
+    monkeypatch.delenv(KMS_KEY_ENV, raising=False)
+    refused = api.post(
+        "/v1/sources/callback", json={"state": "st_anything", "code": "c"}, headers=AUTH
+    )
+    assert refused.status_code == 503, refused.text
+    assert KMS_KEY_ENV in refused.text, "the message has to name the variable to set"
+
+    # And that message is for the owner, not the internet. It is only ever reached behind
+    # authentication because `user_id` precedes `wrapper` in the route signature and
+    # FastAPI resolves dependencies in declaration order — which is worth an assertion,
+    # since reordering two parameters is not a change anybody would read as security.
+    anonymous = api.post("/v1/sources/callback", json={"state": "st_anything", "code": "c"})
+    assert anonymous.status_code == 401, anonymous.text
+    assert KMS_KEY_ENV not in anonymous.text
 
 
 def test_a_replayed_callback_is_refused(api: TestClient) -> None:

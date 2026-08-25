@@ -451,6 +451,31 @@ describe('connecting a mailbox', () => {
 
     expect(await screen.findByText(/GOOGLE_OAUTH_CLIENT_ID is not set/)).toBeDefined()
   })
+
+  it('says what a failed fetch means instead of showing the browser string', async () => {
+    // The bug as the user met it. A rejected `fetch` means the request never completed
+    // at the network layer, and the browser tells JavaScript nothing about why — the
+    // same `TypeError: Failed to fetch` covers a refused cross-origin response, DNS,
+    // TLS, being offline, and a server that closed the connection. That bare string was
+    // once the entire report of a broken Gmail connect. It now arrives naming the URL
+    // and saying that no answer came back from Motet at all.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes('/v1/sources/connect')) {
+          throw new TypeError('Failed to fetch')
+        }
+        return { ok: true, status: 200, json: async () => [GMAIL_SOURCE] } as Response
+      }),
+    )
+    render(<Sources navigate={vi.fn()} />)
+    await screen.findByText('Gmail')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
+
+    const shown = await screen.findByText(/never completed/)
+    expect(shown.textContent).toContain('/v1/sources/connect')
+  })
 })
 
 describe('the /oauth/callback landing', () => {
@@ -750,6 +775,8 @@ describe('the generated contract', () => {
       errors_configured: false,
       authenticated: true,
       login_configured: true,
+      vault_backend: 'kms',
+      vault_ready: true,
       inference_mode: 'fake',
     }
     expect(health.status).toBe('ok')

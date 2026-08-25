@@ -9,7 +9,11 @@ dependencies = [
     "motet-obs",
     "motet-sources",
     "motet-storage",
-    "motet-vault",
+    # `[kms]` for the same reason motet-api asks for it, and with more at stake: the API
+    # only ever seals, while a worker *unwraps* every credential it polls a mailbox with.
+    # Invariant 8's asymmetry is IAM's job, not the package's — both processes need the
+    # SDK, and only one of them holds `useToDecrypt`.
+    "motet-vault[kms]",
     # A direct import, so a direct dependency: `runner` opens a span and records a
     # counter per job. The API package only — no SDK — so it costs nothing until
     # `motet_obs.configure` installs a real provider behind it.

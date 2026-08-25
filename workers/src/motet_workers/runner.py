@@ -36,6 +36,7 @@ import time
 
 import motet_obs
 from motet_inference.llm import validate_startup as validate_llm_startup
+from motet_vault import vault_status
 
 from .loop import MAX_JOBS_PER_RUN, drain
 from .queues import Queue
@@ -81,6 +82,22 @@ def main(argv: list[str] | None = None) -> int:
     # first. Ordering this ahead of the database check keeps the credential failure the one
     # you see when both are wrong.
     logger.info("llm: %s", validate_llm_startup().describe())
+
+    # The vault, said out loud, because this process is the one that cannot be asked. The
+    # API reports the same thing on `/internal/health`; a Cloud Run job has no route, so a
+    # log line at startup is the whole of what an operator can see. And the worker is the
+    # *decrypt* side — a poll that cannot unwrap its credential fails per run, forever,
+    # with nothing tying it to a missing SDK or a withdrawn IAM grant. Not fatal for the
+    # same reason as in the API: every queue except `poll` is untouched by this.
+    vault = vault_status()
+    if vault.ready:
+        logger.info("vault: backend=%s ready=true", vault.backend)
+    else:
+        logger.error(
+            "vault: backend=%s ready=false — polling a mailbox will fail on every run: %s",
+            vault.backend,
+            vault.detail,
+        )
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:

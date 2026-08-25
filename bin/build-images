@@ -97,7 +97,18 @@ smoke_api() {
   # No DATABASE_URL and no vendor key on purpose. Health must answer without either — it
   # is what Cloud Run's startup probe hits, and a health check that needed the database
   # would report the database's health rather than the revision's.
-  docker run -d --name "$name" -P "motet-api:${TAG}" >/dev/null
+  #
+  # The vault variables ARE set, and they are the exception that earns its keep. Sealing a
+  # Gmail credential imports google-cloud-kms lazily, the SDK lived behind an optional
+  # extra nothing depended on, and so every image shipped without it — visible nowhere
+  # until a human finished a Google consent screen and the callback raised inside a
+  # request. The key path is a throwaway string; nothing here calls Cloud KMS. What is on
+  # trial is whether the SDK is in the *image*, which is the one claim the workspace's own
+  # venv cannot make on the image's behalf. Same lesson as motet#16.
+  docker run -d --name "$name" -P \
+    -e MOTET_VAULT_BACKEND=kms \
+    -e MOTET_VAULT_KMS_KEY=projects/smoke/locations/smoke/keyRings/smoke/cryptoKeys/smoke \
+    "motet-api:${TAG}" >/dev/null
   port="$(host_port "$name")"
 
   local body
@@ -106,6 +117,11 @@ smoke_api() {
   case "$body" in
     *'"status":"ok"'*) ;;
     *) echo "smoke: ${API_HEALTH_PATH} did not report ok" >&2; return 1 ;;
+  esac
+  case "$body" in
+    *'"vault_ready":true'*) ;;
+    *) echo "smoke: the image cannot seal a credential — google-cloud-kms is missing" >&2
+       return 1 ;;
   esac
 
   # And nothing may be served under a path the platform claims. A local 404 here is the
@@ -160,6 +176,19 @@ smoke_worker() {
     *integrate*assemble*script*tts*) ;;
     *) echo "smoke: worker --help did not list the Phase 1 queues" >&2; return 1 ;;
   esac
+
+  # The same claim `smoke_api` makes through /internal/health, made the only way a job
+  # container can make it: this image is the *decrypt* side of the vault, so a missing
+  # google-cloud-kms here means every mailbox poll fails on every run rather than one
+  # consent flow failing once. Two images, one tree, two targets — and the extra could go
+  # missing from either independently.
+  if ! docker run --rm --entrypoint python "motet-worker:${TAG}" -c \
+    'import sys; from motet_vault import kms_sdk_installed; sys.exit(0 if kms_sdk_installed() else 1)'
+  then
+    echo "smoke: the worker image cannot open a credential — google-cloud-kms is missing" >&2
+    return 1
+  fi
+  echo "    google-cloud-kms is in the image (the vault's decrypt side)"
 }
 
 # --- web -------------------------------------------------------------------

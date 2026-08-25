@@ -136,6 +136,32 @@ function headers(): Record<string, string> {
   }
 }
 
+/**
+ * `fetch`, with the one failure it reports as nothing at all turned into a sentence.
+ *
+ * A rejected `fetch` means the request never completed at the network layer, and the
+ * browser deliberately tells JavaScript nothing about why — the same opaque
+ * `TypeError: Failed to fetch` covers a refused cross-origin response, a DNS failure, a
+ * TLS error, an offline device and a server that closed the connection. That string
+ * reached a user verbatim once already, as the only evidence that connecting Gmail was
+ * broken, and it named neither the URL nor the fact that a request was even attempted.
+ *
+ * `status` is 0 because there was no response to have one — the same convention
+ * `XMLHttpRequest` uses, and what tells a caller apart from an HTTP error it could act on.
+ */
+async function send(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch (cause) {
+    throw new ApiError(
+      0,
+      `Could not reach the API at ${url} — the request never completed. That is a ` +
+        'network, DNS, TLS or cross-origin failure rather than an answer from Motet: ' +
+        `${cause instanceof Error ? cause.message : String(cause)}`,
+    )
+  }
+}
+
 async function refuse(response: Response, method: string, path: string): Promise<ApiError> {
   // The API answers with `{"detail": "..."}`; a proxy or a crash might not. Falling back
   // to the status keeps an error message from being the literal string "undefined".
@@ -155,7 +181,7 @@ async function parse<T>(response: Response, method: string, path: string): Promi
 }
 
 export async function apiGet<P extends keyof paths>(path: P): Promise<GetResponse<P>> {
-  const response = await fetch(`${apiBaseUrl()}${path}`, { headers: headers() })
+  const response = await send(`${apiBaseUrl()}${path}`, { headers: headers() })
   return parse<GetResponse<P>>(response, 'GET', path)
 }
 
@@ -163,7 +189,7 @@ export async function apiPost<P extends keyof paths>(
   path: P,
   body?: unknown,
 ): Promise<PostResponse<P>> {
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
+  const response = await send(`${apiBaseUrl()}${path}`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
@@ -178,7 +204,7 @@ export async function apiPost<P extends keyof paths>(
  * body throws — so "no content" has to be a different code path, not a different argument.
  */
 export async function apiPostNoContent<P extends keyof paths>(path: P): Promise<void> {
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
+  const response = await send(`${apiBaseUrl()}${path}`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: '{}',
@@ -198,7 +224,7 @@ export async function apiGetPath<P extends keyof paths>(
   _template: P,
   url: string,
 ): Promise<GetResponse<P>> {
-  const response = await fetch(`${apiBaseUrl()}${url}`, { headers: headers() })
+  const response = await send(`${apiBaseUrl()}${url}`, { headers: headers() })
   return parse<GetResponse<P>>(response, 'GET', url)
 }
 
@@ -207,7 +233,7 @@ export async function apiPostPath<P extends keyof paths>(
   url: string,
   body?: unknown,
 ): Promise<PostResponse<P>> {
-  const response = await fetch(`${apiBaseUrl()}${url}`, {
+  const response = await send(`${apiBaseUrl()}${url}`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),

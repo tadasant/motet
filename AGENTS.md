@@ -206,8 +206,12 @@ The health route reports both, and `obs/tests/test_export.py` asserts the second
 a real process against a local OTLP collector and decoding what arrived, because that is
 the one claim no flag can support.
 
-Only **`http/protobuf`** is installed: the obs stack ingests OTLP over HTTP, and the gRPC
-exporter would drag `grpcio` into both images for nothing. A different
+Only **`http/protobuf`** is installed: the obs stack ingests OTLP over HTTP, so the gRPC
+exporter would buy nothing and cost a second transport to reason about. It used to also be
+the argument that `grpcio` was in neither image, and that half has expired —
+`google-cloud-kms` brings `google-api-core[grpc]` and `grpcio` with it, unconditionally and
+whichever transport KMS is asked for. The conclusion is unchanged; one of its reasons is
+not. A different
 `OTEL_EXPORTER_OTLP_PROTOCOL` is logged as an error at startup rather than silently
 half-honoured.
 
@@ -313,7 +317,7 @@ executed against a vendor, because the vendor does not exist yet:
 | Dormant path | Waiting on | Turning it on |
 |---|---|---|
 | Gmail ingestion | a Google OAuth client (a **one-time human-owned** step, invariant 9) | `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET`, and `MOTET_INFERENCE_MODE=real` |
-| KMS-backed credentials | a Cloud KMS keyring | `MOTET_VAULT_BACKEND=kms` + `MOTET_VAULT_KMS_KEY` |
+| KMS-backed credentials | nothing — the keyring is **provisioned**, and the deployed API resolves the kms backend | `MOTET_VAULT_BACKEND=kms` + `MOTET_VAULT_KMS_KEY`, both set by the service definition |
 
 Both are **configuration changes, not refactors** — that is the property the seams exist to
 buy, and the thing to preserve.
@@ -863,6 +867,57 @@ implements the contract honestly with a local KEK, so the whole path runs in CI.
 **refused when `MOTET_INFERENCE_MODE=real`**, because it is also the *default* — a deployed
 environment quietly encrypting real tokens under a key in its own memory would satisfy
 every test and none of invariant 8.
+
+**`motet-api` and `motet-workers` depend on `motet-vault[kms]`, not on bare
+`motet-vault`** — and that one bracket is what broke Gmail connect on production.
+The SDK is imported lazily inside `CloudKmsKeyManager` so a laptop and CI
+never pull in a cloud dependency they cannot use, which is right, and it is **not** a
+reason for the *image* to be missing it: `uv sync --no-dev` installs default extras only,
+nothing asked for `[kms]`, and so nothing had it. The lesson generalises past this one
+package — **a lazy import is a statement about when, never about whether.**
+
+Three things about how that failure presented are worth more than the fix:
+
+- **It surfaced as far from its cause as it is possible to get.** The SDK went missing at
+  build time; the first line of code to notice was an import, inside a request, in the
+  OAuth callback, *after* Google had already issued a refresh token. Everything before it
+  worked, including a clean `/internal/health`.
+- **An unhandled exception is the one response that skips CORS**, so the browser could
+  report nothing at all. Starlette's `ServerErrorMiddleware` sits outside every middleware
+  `add_middleware` installs, `CORSMiddleware` included — so its 500 carries no
+  `Access-Control-Allow-Origin`, a browser refuses to hand it to the caller, and `fetch`
+  rejects with a bare `TypeError: Failed to fetch`: no status, no body, no clue. That
+  string was the entire bug report. `main.UnhandledErrorMiddleware` now converts it into a
+  500 the browser is allowed to read, from *inside* `CORSMiddleware`, which is what puts
+  the header on it. **The stack is not what it looks like, and both of its two extra lines
+  exist because of that.** `FastAPIInstrumentor` patches `build_middleware_stack` rather
+  than calling `add_middleware`, so OpenTelemetry is **outermost** — outside CORS, outside
+  everything the app adds. Catching an exception therefore hides it from two things that
+  were relying on seeing it: OTel's own exception handler, which is why the middleware
+  calls `obs.record_exception` (without it the span keeps an ERROR status and loses the
+  type, message and stacktrace), and the Sentry SDK's outermost capture, which is why it
+  calls `logger.exception` (the SDK's logging integration is what then carries it to
+  GlitchTip). Deleting either line deletes a signal silently. `api/tests/test_deploy_wiring.py`
+  walks the real stack and asserts the positions, because the first version of this
+  described the order backwards and no behavioural test could tell. On the client side,
+  `client.ts`'s `send()` turns a rejected `fetch` into a sentence naming the URL.
+- **A key manager raises `VaultError`, and the kms backend used not to.**
+  `PermissionDenied`, `NotFound`, `DefaultCredentialsError` and a missing SDK all escaped
+  as themselves, straight past the callback's `except VaultError` and its 503. They are
+  translated at the boundary now. `dek_wrapper` does the same for a vault that will not
+  *build*, because a dependency resolves before the route body and the route's own handler
+  cannot see that one.
+
+**`/internal/health` reports `vault_backend` and `vault_ready`**, for exactly the reason it
+reports `login_configured`: the vault is exercised once per mailbox, by a human, at the end
+of a consent flow, so a deployment that cannot seal and one nobody has asked to seal for
+look identical from outside. It resolves configuration and **does not call Cloud KMS** — the
+route is unauthenticated, and a billed vendor call per request would be a free way to spend
+money. The key path is never in the response; it is topology. The *backend name* is not —
+the private repo's own service definition calls it "not secret", and "this deployment is on
+the local backend" is precisely the misconfiguration the field exists to make visible. `bin/build-images` asserts the
+flag against the real container, because whether the SDK is in the *image* is the one claim
+the workspace's own venv cannot make on the image's behalf.
 
 ### Podcast clients read show notes, chapters and transcripts in more places than one
 
