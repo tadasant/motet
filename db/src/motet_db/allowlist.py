@@ -14,6 +14,16 @@ session is minted.
 arrive". A deployment that forgot the variable must be a deployment nobody can sign in to,
 because the alternative failure is silent and unbounded. ``/internal/health`` reports
 ``login_configured: false`` for exactly that state, in the same spirit as ``authenticated``.
+
+**Why this lives in ``motet_db`` rather than next to the sign-in route it guards.** Two
+things now decide whether an address may hold a session: the Google sign-in route in
+``motet_api``, and :mod:`motet_db.mint_session`, the staging deploy's job entrypoint. A
+second copy of these nine lines is the failure to avoid — an allowlist that admits
+somebody through one door and refuses them at the other is worse than either door alone,
+and it would drift silently because nothing compares the two. ``motet-api`` depends on
+``motet-db`` and never the reverse, so the shared definition has to sit here; the API
+re-exports it from :mod:`motet_api.auth`, which is still where a reader of the sign-in
+route will look for it.
 """
 
 from __future__ import annotations

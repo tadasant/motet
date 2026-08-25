@@ -719,14 +719,45 @@ quietly become one wrong set.
 **An agent cannot sign in, and that is settled rather than untried.** Google refuses an
 automated browser at the *identifier* step — before a password is ever requested — with
 "this browser or app may not be secure", both headless and with the usual fingerprint
-masking. So an agent exercising staging uses the `MOTET_API_TOKEN` bearer, which is exactly
-why that token kept working when the button arrived. The consequence worth writing down is
-the one that is easy to forget when a test run goes green: **an agent's green run says
-nothing about whether a human can sign in**, because it exercises no part of the consent
-screen, the redirect-URI registration, or the ID-token verification. A human clicks the real
-button once per environment after any change to `motet_api.auth` or `web/src/oauth.ts`.
+masking. The consequence worth writing down is the one that is easy to forget when a test
+run goes green: **an agent's green run says nothing about whether a human can sign in**,
+because it exercises no part of the consent screen, the redirect-URI registration, or the
+ID-token verification. A human clicks the real button once per environment after any change
+to `motet_api.auth` or `web/src/oauth.ts`.
 [`docs/testing-staging.md`](docs/testing-staging.md) is the runbook, the evidence, and the
 list of what it does not cover.
+
+**So the staging deploy mints an agent a session instead — variant A of
+[tadasant-internal#1620](https://github.com/tadasant/tadasant-internal/issues/1620),
+approved 2026-08-25.** The alternative was to copy staging's `MOTET_API_TOKEN` into the
+estate's shared secret store, and that was declined: it documents a routine human step as
+the procedure, which is the failure mode invariant 9 names, and it parks a non-expiring
+owner-equivalent credential in a second durable store. `motet_db.mint_session` is a job
+entry point — never a route, never reachable from the API — that writes one `auth_sessions`
+row from a **digest** handed to it as an argument, refusing unless
+`MOTET_STAGING_SESSION_MINT=1`, unless the address is on `MOTET_ALLOWED_EMAILS`, and unless
+the TTL is inside a day. The plaintext is generated in the deploy workflow's shell and comes
+back to the requesting agent encrypted to a key that agent generated, so it exists in no
+log, no Actions output, and no job-execution record.
+
+Three things about it are the decision rather than the implementation:
+
+- **No API change, and that is the whole reason it is cheap.** `require_caller` already
+  accepted a session token in the `Authorization: Bearer` slot. The mint adds a second
+  *writer* of one table, not a second way to authenticate. A `POST /v1/auth/staging/session`
+  route — the redeemable-token variant — was declined for exactly this: it would put a new
+  authentication path into the deployed production API, guarded by a secret being unset.
+- **Production isolation is structural.** The Terraform `count` does not create the job
+  outside staging, the workflow holds only staging's workload identity, and the interlock is
+  a third lock on top. Two of the three are diffs a reviewer sees (invariant 10 is untouched
+  — production has no such job to run).
+- **The allowlist is the sign-in path's own**, `motet_db.allowlist`, which is why it lives a
+  package below the route that reads it: even CI cannot mint a session for an address Google
+  sign-in would refuse. A second copy of that list is the thing to never write.
+
+The widening this does buy, said plainly: **CI can write an `auth_sessions` row without
+anybody signing in.** In staging that is not new reach — CI already applies every migration
+and replaces every revision there — but it is a real change in what CI does.
 
 ### The vault is the seam to a credential that is not ours
 

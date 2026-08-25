@@ -10,7 +10,7 @@ alongside `gmail.readonly` on that one client.
 published and unverified, so *anyone* on the internet can reach the end of the flow — which
 means the only thing standing between a stranger and this API is the pair of checks below:
 the ID token is genuinely Google's and genuinely about a verified address, and that address
-is on the allowlist. The second lives in :mod:`motet_api.auth.allowlist`. This module owns
+is on the allowlist. The second lives in :mod:`motet_db.allowlist`. This module owns
 the first, and it is strict on purpose:
 
 * the signature verifies against Google's published JWKS, over RS256 only;

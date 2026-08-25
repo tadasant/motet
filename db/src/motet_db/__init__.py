@@ -9,7 +9,12 @@ slightly differently, and a slight difference in the definition of "unread" is h
 invariant 5 stops being true.
 """
 
-from . import auth, phase2, repo
+# `mint_session` is deliberately NOT imported here, and that is structural rather than
+# an oversight: it is executed as `python -m motet_db.mint_session`, so a module the
+# package has already pulled into `sys.modules` would be executed a second time under a
+# second name, with a second copy of its module-level state. That shipped once already in
+# `motet_workers.runner` (motet#21); `db/tests/test_mint_session.py` fails if it recurs.
+from . import allowlist, auth, phase2, repo
 from .auth import AuthSession
 from .migrate import MIGRATIONS_DIR, Migration, MigrationError, discover, migrate
 from .models import (
@@ -53,6 +58,7 @@ __all__ = [
     "StoredSegment",
     "StoredSource",
     "StoredSourceItem",
+    "allowlist",
     "auth",
     "connect",
     "discover",

@@ -11,16 +11,19 @@ Three pieces, and the middle one is the security control:
 * :mod:`~motet_api.auth.interfaces`, :mod:`~motet_api.auth.google`,
   :mod:`~motet_api.auth.fakes`, :mod:`~motet_api.auth.registry` — the vendor seam,
   switched by ``MOTET_INFERENCE_MODE`` like every other.
-* :mod:`~motet_api.auth.allowlist` — **who may sign in.** The consent screen on this
+* :mod:`motet_db.allowlist` — **who may sign in.** The consent screen on this
   OAuth client is published and unverified, so completing a Google sign-in proves only
   that somebody has a Google account. Without the allowlist this would be a strictly
-  worse door than the shared token it replaces. Unset means deny.
+  worse door than the shared token it replaces. Unset means deny. It is re-exported here,
+  where the sign-in route reads it, but it *lives* one package down — see that module for
+  why the staging session mint has to be able to ask the same question.
 * :mod:`motet_db.auth` — the session rows a signed-in browser holds.
 """
 
 from __future__ import annotations
 
-from .allowlist import ALLOWED_EMAILS_ENV, allowed_emails, is_allowed
+from motet_db.allowlist import ALLOWED_EMAILS_ENV, allowed_emails, is_allowed
+
 from .fakes import FAKE_EMAIL, FakeIdentityProvider
 from .google import (
     CLIENT_ID_ENV,
