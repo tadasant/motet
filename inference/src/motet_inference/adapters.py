@@ -22,12 +22,13 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from .accounting import record_script_drop, record_usage
 from .cartesia import CartesiaSpeechSynthesizer
 from .interfaces import IntegrationResult
-from .llm import LlmClient, LlmStage, build_client, build_request
+from .llm import LlmBudgetExhaustedError, LlmClient, LlmStage, build_client, build_request
 from .prompts import (
     GROUNDING_SCHEMA,
     INTEGRATE_SCHEMA,
@@ -71,8 +72,45 @@ INTEGRATE_MAX_TOKENS = 2_000
 #: whole episode's worth of upstream work.
 SCRIPT_MAX_TOKENS = 32_000
 
-#: One short verdict per claim.
-GROUNDING_MAX_TOKENS = 8_000
+#: How many claims one grounding call judges at once.
+#:
+#: **The bound is on the work, not on the budget, and that is the fix for motet#42.** A
+#: single call carrying every claim in an episode needs an output ceiling that grows with
+#: the backlog, so any constant is a backlog size beyond which the stage cannot complete
+#: -- and 8k was reached at 19 news items, which is a normal morning. Chunking bounds the
+#: request instead: the number of calls grows with the episode and the size of each one
+#: does not. Verdicts are independent per claim, so nothing is lost by splitting them.
+GROUNDING_CLAIMS_PER_CALL = 8
+
+#: A second bound on the same call, because claims are not the same size. Evidence spans
+#: are whole sentences out of a newsletter, so eight long ones are a much bigger ask than
+#: eight short ones, and the reasoning that has to chew through them scales with the text
+#: rather than with the count.
+GROUNDING_CHARS_PER_CALL = 12_000
+
+#: Room for the answer: one verdict is an index, a boolean, and one short sentence.
+GROUNDING_TOKENS_PER_CLAIM = 250
+
+#: Room to think before the first verdict is written. Grounding runs at the deepest effort
+#: in the system on purpose (invariant 3), so the headroom is what stops thinking and
+#: answering from competing for the same tokens -- which is what produced an 8,000-token
+#: response containing 8,000 reasoning tokens and no verdicts at all.
+GROUNDING_REASONING_HEADROOM = 8_000
+
+#: What a claim's failure says when the validator could not get a verdict out of the model
+#: within its budget. Prefix-matched by ``accounting.classify_grounding_reason``, so keep
+#: the two in step.
+GROUNDING_BUDGET_REASON = "grounding validation ran out of token budget for this claim"
+
+
+def grounding_max_tokens(claims: int) -> int:
+    """The output ceiling for a grounding call judging ``claims`` claims.
+
+    A function rather than a constant because the required output is a function of the
+    work. The headroom is flat: it is thinking depth, which does not care how many claims
+    are in front of it, and the per-claim term is the answer itself.
+    """
+    return GROUNDING_REASONING_HEADROOM + GROUNDING_TOKENS_PER_CLAIM * claims
 
 
 class ClaudeIntegrator:
@@ -249,18 +287,66 @@ class ClaudeScriptGenerator:
         return tuple(claims)
 
 
+@dataclass(frozen=True)
+class _Judgeable:
+    """One claim that survived the mechanical check, with the evidence it cites."""
+
+    news_item_id: str
+    claim_text: str
+    evidence: str
+
+
+def _chunk(items: Sequence[_Judgeable]) -> list[list[_Judgeable]]:
+    """Split claims into calls, bounded by both count and size.
+
+    Order is preserved and never re-sorted: a chunk that follows the script's own order
+    keeps claims from one story together, which is the arrangement a reader of the log
+    lines expects and costs nothing to maintain.
+    """
+    chunks: list[list[_Judgeable]] = []
+    current: list[_Judgeable] = []
+    size = 0
+    for item in items:
+        cost = len(item.claim_text) + len(item.evidence)
+        full = len(current) >= GROUNDING_CLAIMS_PER_CALL or size + cost > GROUNDING_CHARS_PER_CALL
+        if current and full:
+            chunks.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += cost
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class ClaudeGroundingValidator:
     """Judge whether each claim is supported by the span it cites, paraphrase included.
 
-    **Invariant 3.** This runs before synthesis, never after, and a report with failures
-    means nothing gets spoken.
+    **Invariant 3.** This runs before synthesis, never after, and a claim whose evidence
+    does not support it is not spoken.
 
     Two checks, in order. First a mechanical one — does the span resolve to real text at
-    all — which needs no model and catches a corrupted or stale span. Then one model call
-    for every surviving claim at once, asking whether the evidence actually supports what
-    would be said. Batching is deliberate: a per-claim call would multiply the most
-    expensive per-token stage in the pipeline by the number of claims in an episode, and
-    the verdicts are independent, so there is nothing to gain from isolating them.
+    all — which needs no model and catches a corrupted or stale span. Then a model call
+    per **chunk** of surviving claims, asking whether the evidence actually supports what
+    would be said.
+
+    **Chunked rather than batched, and that is motet#42.** Batching every claim into one
+    call was deliberate once — verdicts are independent, so isolating them buys nothing,
+    and the most expensive stage in the pipeline should not be multiplied by the length of
+    an episode. What that reasoning missed is that the *output* it needs grows with the
+    episode while its ceiling does not: at 19 news items the model spent all 8,000 tokens
+    of a fixed budget thinking and emitted no verdict at all, deterministically, on every
+    retry. A bounded chunk is the only shape where the stage's headroom is a property of
+    the call rather than of the backlog. The cost argument survives it: chunk size is what
+    trades calls against risk, not one call against many.
+
+    **A chunk that still exhausts its budget is halved, and a single claim that exhausts
+    it fails closed.** The alternative is what motet#42 actually did — lose the whole
+    episode over one call — and that is strictly worse than losing the claims involved:
+    ``handle_script`` drops ungrounded claims and ships the rest, so a failure here costs
+    the sentences nobody could check and nothing else. It is never an *approval*: an
+    unchecked claim is a failure, which is the same rule a missing verdict already
+    followed.
     """
 
     stage: ClassVar[LlmStage] = LlmStage.GROUNDING
@@ -270,8 +356,7 @@ class ClaudeGroundingValidator:
 
     def validate(self, script: Script, sources: Mapping[str, SourceItem]) -> GroundingReport:
         failures: list[GroundingFailure] = []
-        judgeable: list[tuple[int, str, str]] = []
-        origins: dict[int, tuple[str, str]] = {}
+        judgeable: list[_Judgeable] = []
 
         for segment in script.segments:
             for claim in segment.claims:
@@ -285,18 +370,86 @@ class ClaudeGroundingValidator:
                         )
                     )
                     continue
-                index = len(judgeable)
-                judgeable.append((index, claim.text, resolved))
-                origins[index] = (segment.news_item_id, claim.text)
+                judgeable.append(
+                    _Judgeable(
+                        news_item_id=segment.news_item_id,
+                        claim_text=claim.text,
+                        evidence=resolved,
+                    )
+                )
 
-        if not judgeable:
-            return GroundingReport(failures=tuple(failures))
+        for chunk in _chunk(judgeable):
+            failures.extend(self._judge(chunk))
+        return GroundingReport(failures=tuple(failures))
 
+    def _judge(self, chunk: Sequence[_Judgeable]) -> list[GroundingFailure]:
+        """Judge one chunk, halving it if the model cannot answer within its budget."""
+        try:
+            verdicts = self._ask(chunk)
+        except LlmBudgetExhaustedError as exc:
+            if len(chunk) == 1:
+                logger.warning(
+                    "grounding could not judge a claim on %s within its budget; "
+                    "dropping the claim: %s",
+                    chunk[0].news_item_id,
+                    exc,
+                )
+                return [
+                    GroundingFailure(
+                        news_item_id=chunk[0].news_item_id,
+                        claim_text=chunk[0].claim_text,
+                        reason=GROUNDING_BUDGET_REASON,
+                    )
+                ]
+            middle = len(chunk) // 2
+            logger.warning(
+                "grounding ran out of budget on %d claims; splitting into %d and %d: %s",
+                len(chunk),
+                middle,
+                len(chunk) - middle,
+                exc,
+            )
+            return self._judge(chunk[:middle]) + self._judge(chunk[middle:])
+
+        failures: list[GroundingFailure] = []
+        for index, item in enumerate(chunk):
+            verdict = verdicts.get(index)
+            if verdict is None:
+                # Fail closed. A claim the validator did not answer for is a claim nobody
+                # checked, and "unchecked" must never be spoken as if it were "supported".
+                failures.append(
+                    GroundingFailure(
+                        news_item_id=item.news_item_id,
+                        claim_text=item.claim_text,
+                        reason="grounding validation returned no verdict for this claim",
+                    )
+                )
+                continue
+            supported, reason = verdict
+            if not supported:
+                failures.append(
+                    GroundingFailure(
+                        news_item_id=item.news_item_id,
+                        claim_text=item.claim_text,
+                        reason=reason or "the cited span does not support this claim",
+                    )
+                )
+        return failures
+
+    def _ask(self, chunk: Sequence[_Judgeable]) -> dict[int, tuple[bool, str]]:
+        """One call, indexed from zero *within this chunk*.
+
+        Local indices rather than the claim's position in the episode: a model that
+        renumbered a list starting at CLAIM 17 would file its verdicts against the wrong
+        claims, and an index that is also a position in the chunk cannot be mis-mapped.
+        """
         response = self._client.complete(
             build_request(
                 self.stage,
-                grounding_messages(judgeable),
-                max_output_tokens=GROUNDING_MAX_TOKENS,
+                grounding_messages(
+                    [(index, item.claim_text, item.evidence) for index, item in enumerate(chunk)]
+                ),
+                max_output_tokens=grounding_max_tokens(len(chunk)),
                 response_format=GROUNDING_SCHEMA,
             )
         )
@@ -314,30 +467,7 @@ class ClaudeGroundingValidator:
                 continue
             reason = raw.get("reason")
             verdicts[raw_index] = (supported, reason if isinstance(reason, str) else "")
-
-        for index, (news_item_id, claim_text) in origins.items():
-            verdict = verdicts.get(index)
-            if verdict is None:
-                # Fail closed. A claim the validator did not answer for is a claim nobody
-                # checked, and "unchecked" must never be spoken as if it were "supported".
-                failures.append(
-                    GroundingFailure(
-                        news_item_id=news_item_id,
-                        claim_text=claim_text,
-                        reason="grounding validation returned no verdict for this claim",
-                    )
-                )
-                continue
-            supported, reason = verdict
-            if not supported:
-                failures.append(
-                    GroundingFailure(
-                        news_item_id=news_item_id,
-                        claim_text=claim_text,
-                        reason=reason or "the cited span does not support this claim",
-                    )
-                )
-        return GroundingReport(failures=tuple(failures))
+        return verdicts
 
 
 def _list_of_objects(value: object, *, what: str) -> list[Mapping[str, Any]]:

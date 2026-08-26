@@ -60,6 +60,7 @@ import httpx
 from .credentials import Credential
 from .types import (
     JsonSchemaFormat,
+    LlmBudgetExhaustedError,
     LlmRequest,
     LlmResponse,
     LlmTransportError,
@@ -227,6 +228,18 @@ class OpenRouterClient:
             raise LlmTransportError(f"OpenRouter returned a {type(data).__name__}, not an object")
         return self._parse(request, data)
 
+    @staticmethod
+    def _budget_detail(request: LlmRequest, usage: Usage, finish_reason: str | None) -> str:
+        """The numbers that say whether the ceiling or the effort is what ran out."""
+        return (
+            f"(finish_reason={finish_reason!r}, "
+            f"max_output_tokens={request.max_output_tokens}, "
+            f"output_tokens={usage.output_tokens}, "
+            f"reasoning_tokens={usage.reasoning_tokens}). If finish_reason is 'length', "
+            "the token budget ran out before a complete answer was produced -- send less "
+            "work per call, raise max_output_tokens, or lower the stage's effort."
+        )
+
     def _parse(self, request: LlmRequest, data: dict[str, Any]) -> LlmResponse:
         # OpenRouter reports some upstream failures as a 200 carrying an error object.
         error = data.get("error")
@@ -247,18 +260,27 @@ class OpenRouterClient:
         finish_reason_raw = choice.get("finish_reason")
         finish_reason = finish_reason_raw if isinstance(finish_reason_raw, str) else None
 
-        # An empty completion is never useful, and it arrives looking like a success.
-        # The most likely cause is reasoning consuming the whole max_tokens budget --
-        # very plausible at effort=max -- which passes the reasoning check above and then
-        # hands "" to a caller that will fail parsing it several frames away, with
-        # nothing pointing back at truncation.
+        # Two shapes of one failure, and both are the budget running out. An **empty**
+        # completion means reasoning ate the whole ceiling before the first character of
+        # the answer -- very plausible at effort=max, and it passes the reasoning check
+        # above, so without this the caller gets "" and fails parsing it several frames
+        # away with nothing pointing back at truncation. A **partial** one under a JSON
+        # schema is no better off: a truncated document cannot parse, so however much of
+        # it arrived, none of it is usable.
+        #
+        # `LlmBudgetExhaustedError` rather than a bare transport error because this one is
+        # deterministic -- retrying the identical request spends the identical budget --
+        # so a caller that can send less work should do that instead of retrying. That is
+        # what the grounding validator does (motet#42).
         if not isinstance(content, str) or not content.strip():
-            raise LlmTransportError(
-                f"OpenRouter returned an empty completion (finish_reason="
-                f"{finish_reason!r}, output_tokens={usage.output_tokens}, "
-                f"reasoning_tokens={usage.reasoning_tokens}). If finish_reason is "
-                "'length', the token budget was spent before any answer was produced -- "
-                "raise max_output_tokens or lower the stage's effort."
+            raise LlmBudgetExhaustedError(
+                "OpenRouter returned an empty completion "
+                + self._budget_detail(request, usage, finish_reason)
+            )
+        if finish_reason == "length" and request.response_format is not None:
+            raise LlmBudgetExhaustedError(
+                "OpenRouter truncated a schema-constrained answer, which cannot be parsed "
+                + self._budget_detail(request, usage, finish_reason)
             )
         if finish_reason == "length":
             logger.warning(

@@ -54,6 +54,22 @@ class LlmTransportError(LlmError):
     """The provider could not be reached, or answered with something unusable."""
 
 
+class LlmBudgetExhaustedError(LlmTransportError):
+    """The answer hit ``max_output_tokens`` before it was finished.
+
+    Its own class because it is the one transport failure that is **deterministic and
+    about the request rather than the provider**: the same call will exhaust the same
+    budget every time, so the job-queue retry ladder buys nothing and a caller that can
+    make the work smaller should do that instead. That is motet#42, where grounding
+    validation batched every claim in a 19-item episode into one call with a fixed 8k
+    ceiling, spent all 8,000 tokens reasoning, returned no verdict at all, and then did it
+    again on every retry until the episode gave up.
+
+    It subclasses :class:`LlmTransportError` deliberately: a caller with nothing smaller
+    to try keeps the behaviour it already had.
+    """
+
+
 class ReasoningNotAppliedError(LlmError):
     """Reasoning was requested and the response carries no evidence it happened.
 

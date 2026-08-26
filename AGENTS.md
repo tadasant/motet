@@ -683,6 +683,56 @@ no row anywhere.
 **A clean episode says so.** "No drops today" and "grounding never ran" must not be the
 same observation, which is the never-infer-"no errors"-from-"no data" trap one section up.
 
+### The grounding gate is chunked, and its ceiling is a function of the work
+
+`ClaudeGroundingValidator` used to judge every claim in an episode in **one** call under a
+fixed 8,000-token ceiling. At nineteen news items — a normal Tuesday — the model spent all
+8,000 tokens reasoning and returned no verdict at all, so `_parse` got an empty completion
+and raised; the input never changed, so every retry did the same thing and the episode
+never left `scripting`. That is motet#42, and it was invisible until then because every
+earlier end-to-end run used two claims, where 8k is never approached.
+
+**The diagnosis is not "the ceiling was too low", and that distinction is the fix.** The
+*required output* of that call grows with the backlog and a constant does not, so every
+constant is a backlog size beyond which the stage cannot complete. Raising it moves the
+size; it does not remove it. So the bound moved onto the work instead: claims are chunked
+(`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because eight paragraph-sized
+evidence spans are not the same ask as eight short ones) and each call's ceiling is
+`grounding_max_tokens(n)` — flat reasoning headroom plus a per-claim allowance for the
+answer. The number of calls grows with the episode; the size of each one does not.
+
+Three things fall out of that, and none of them is decoration:
+
+- **Verdicts are independent per claim, which is what makes chunking free.** The original
+  batching argument — do not multiply the most expensive stage in the pipeline by the
+  length of an episode — survives intact. Chunk size is what trades calls against risk.
+- **A chunk that still exhausts is halved, and a claim that exhausts on its own fails
+  closed.** The floor matters more than the ceiling here: an unjudged claim is a *failure*,
+  exactly as a missing verdict already was, so it is dropped rather than spoken.
+  `handle_script` then ships what survived — an episode a story short instead of no episode
+  at all, which is what motet#42 actually cost. It records itself as
+  `motet.grounding.claims_dropped{reason="budget_exhausted"}`, the one drop reason that
+  means nobody judged the claim rather than that the gate judged it.
+- **`LlmBudgetExhaustedError` is its own error because it is the one transport failure
+  worth *not* retrying.** The same request spends the same budget every time, so the
+  caller that can send less work should, and the job-queue retry ladder buys nothing. A
+  truncated answer under a JSON schema raises it too: half a document parses no better than
+  none, and the old path surfaced that as malformed JSON — pointing at the model's spelling
+  rather than at the ceiling that cut it off.
+
+**The effort stays at `max`, and that is a decision rather than an oversight.** Grounding is
+where invariant 3 lives; the failure was the *shape* of the request rather than the depth
+of the thinking; and moving both at once would leave nobody able to say which one fixed it.
+What has changed is that effort is now a free-standing cost lever with no correctness cliff
+behind it — `MOTET_LLM_EFFORT_GROUNDING` moves it in configuration, and a real run at
+realistic scale is the evidence that should decide it, not this file.
+
+**What did not change is what the gate can see.** A claim is judged against its own quoted
+span and nothing around it, so support one sentence outside the span reads as fabrication —
+a claim citing 185 voter IDs was refused on staging while `185` sat in the same source item,
+a paragraph away. Chunking moves which call a claim travels in and nothing about the
+evidence that travels with it. That is motet#45, and it belongs behind the golden set.
+
 ### Ingestion state is a join onto the job queue, not a column
 
 `GET /v1/ingestion` (`repo.list_ingestion`) is what stops a paste from silently

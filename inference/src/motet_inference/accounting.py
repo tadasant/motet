@@ -243,11 +243,12 @@ def record_grounding(*, kept: int, dropped: int, reasons: Sequence[str]) -> None
         _grounding_drops.add(1, {"reason": kind})
 
 
-#: The two reasons :class:`~motet_inference.adapters.ClaudeGroundingValidator` produces
+#: The reasons :class:`~motet_inference.adapters.ClaudeGroundingValidator` produces
 #: itself, matched on prefix. Anything else came out of the model's mouth as free text.
 _MECHANICAL_REASONS: Final = (
     ("span does not resolve", "span_unresolved"),
     ("grounding validation returned no verdict", "no_verdict"),
+    ("grounding validation ran out of token budget", "budget_exhausted"),
 )
 
 
@@ -257,8 +258,13 @@ def classify_grounding_reason(reason: str) -> str:
     A model's own reason is a sentence, and a sentence as a label is a new time series per
     claim — which is how a cardinality problem is built. The distinction that matters for
     the metric is only *which kind* of failure it was: a span that would not resolve is a
-    script-stage bug, a missing verdict is a validator-response bug, and an unsupported
-    claim is the gate working as designed. The sentence itself survives in the log line.
+    script-stage bug, a missing verdict is a validator-response bug, an exhausted budget
+    is a claim nobody managed to judge at all (motet#42), and an unsupported claim is the
+    gate working as designed. The sentence itself survives in the log line.
+
+    ``budget_exhausted`` is the one to watch rather than merely count: it is the only
+    reason here that costs a claim without any judgement having been made, so a rate that
+    stops being ~0 says the chunk size in ``adapters`` no longer fits the model.
     """
     lowered = reason.lower()
     for prefix, kind in _MECHANICAL_REASONS:

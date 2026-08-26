@@ -40,6 +40,7 @@ from motet_inference.llm import (
     CredentialKind,
     FakeLlmClient,
     JsonSchemaFormat,
+    LlmBudgetExhaustedError,
     LlmClient,
     LlmConfigError,
     LlmRequest,
@@ -724,6 +725,34 @@ def test_a_truncated_but_non_empty_completion_warns(caplog: pytest.LogCaptureFix
         response = a_client(responder(truncated)).complete(a_request())
     assert response.finish_reason == "length"
     assert "truncated" in caplog.text
+
+
+def test_running_out_of_budget_is_its_own_error_rather_than_a_transport_failure() -> None:
+    """A caller has to be able to tell "send less" apart from "try again".
+
+    Every other :class:`LlmTransportError` is worth a retry; this one is not — the same
+    request spends the same budget every time, which is how motet#42 burned a whole retry
+    ladder on an episode that was never going to complete.
+    """
+    truncated = completion(text="", reasoning_tokens=8_000)
+    truncated["choices"][0]["finish_reason"] = "length"
+    client = a_client(responder(truncated))
+    with pytest.raises(LlmBudgetExhaustedError, match="max_output_tokens=1024"):
+        client.complete(a_request(reasoning=Reasoning(effort="max")))
+
+
+def test_a_truncated_answer_under_a_schema_is_the_same_failure_as_an_empty_one() -> None:
+    """Half a JSON document is not half an answer — it does not parse at all.
+
+    Without this the caller sees a ``PromptResponseError`` about malformed JSON, which
+    points at the model's spelling rather than at the ceiling that cut it off.
+    """
+    truncated = completion(text='{"verdicts": [{"index": 0, "supp')
+    truncated["choices"][0]["finish_reason"] = "length"
+    client = a_client(responder(truncated))
+    schema = JsonSchemaFormat(name="verdicts", schema={"type": "object"})
+    with pytest.raises(LlmBudgetExhaustedError, match="truncated"):
+        client.complete(a_request(response_format=schema))
 
 
 def test_the_fake_keys_its_cache_on_the_last_breakpoint_not_the_first() -> None:
