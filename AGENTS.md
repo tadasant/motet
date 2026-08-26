@@ -849,11 +849,14 @@ evidence of anything.
 threshold missed on genuinely independent prose about one event is a question about the
 dedup prompt and window, and it is still open. What is not a judgement call is the narrow
 case here: dedup *writes* the titles, so two items carrying the same one is one stage
-disagreeing with itself. The cost of being wrong is worth naming rather than waving at —
-the window includes recently-*read* items, so a merge can fold a source item into a story
-the listener already heard, where assembly never speaks it. That is what the window is
-for, and the model-driven merge has always done it; what is new is only that this path
-takes it where the model said "new".
+disagreeing with itself.
+
+**The backstop is scoped to *unread* twins, and that bound is what keeps its cost argument
+true.** The window also carries recently-read items, and folding a fresh story into one the
+listener has already heard means assembly never speaks it: a log line is its only trace,
+and a re-paste hits the same rule rather than undoing it. The model-driven merge may still
+do that and always could — it is what the window is *for*, and there it is a judgement
+about two texts. A string match is not that judgement, so it does not get that reach.
 
 ### The episode tab reflects server state, not this page's lifetime
 

@@ -172,16 +172,18 @@ def _merge_target(
     it stays open. What is *not* a judgement call is this: dedup writes the titles, so two
     items carrying the same one is dedup contradicting itself.
 
-    **The cost of being wrong is a story swallowed, and it is worth naming rather than
-    waving at.** The window includes items that are already *read* but recent, so a
-    backstop merge can fold this source item into a story the listener has already heard —
-    where assembly, which selects unread items, will never speak it. That is not a new
-    hazard: it is what the window is *for* (see ``repo.news_item_window`` — a follow-up
-    should absorb into this morning's story rather than reappear), and the model-driven
-    merge has done it since the beginning. What is new is that this path takes it where
-    the model said "new". The case where that is wrong is two unrelated events producing
-    byte-identical headlines inside one window, and against it sits the same story read
-    aloud twice under one heading, which is the failure dedup exists to prevent.
+    **Unread items only, and that bound is what keeps the cost argument true.** The window
+    also carries anything *read* within ``WINDOW_DAYS``, and a backstop merge into one of
+    those would fold a fresh story into something the listener has already heard — where
+    assembly, which selects unread items, will never speak it, leaving a log line as its
+    only trace and a re-paste hitting the same rule rather than undoing it. The
+    model-driven merge may still do that, and always could: it is what the window is *for*
+    (see ``repo.news_item_window`` — a follow-up should absorb into this morning's story
+    rather than reappear), and there it is a judgement about those two texts. A string
+    match is not that judgement, so it does not get that reach. Against an *unread* twin
+    the trade is the one motet#41 describes: two unrelated events producing byte-identical
+    headlines inside one window, against the same story read aloud twice under one
+    heading, which is the failure dedup exists to prevent.
 
     An empty proposed title matches nothing, deliberately. ``_normalize_title`` collapses
     whitespace, so a blank title and a whitespace-only one are the same string — and two
@@ -198,7 +200,14 @@ def _merge_target(
 
     proposed = _normalize_title(result.news_item.title)
     twin = (
-        next((item for item in window if _normalize_title(item.title) == proposed), None)
+        next(
+            (
+                item
+                for item in window
+                if item.read_at is None and _normalize_title(item.title) == proposed
+            ),
+            None,
+        )
         if proposed
         else None
     )
