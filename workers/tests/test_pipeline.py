@@ -714,9 +714,57 @@ class TestIdenticalTitles:
         class Stored:
             id = "ni_blank"
             title = "   "
+            read_at = None
 
         result = _stub_result(title="")
         assert _merge_target(result, [Stored()])[0] is None  # type: ignore[list-item]
+
+    def test_an_already_read_story_is_left_alone(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The window also carries recently *read* items, and merging into one hides a story.
+
+        Assembly selects unread items, so a fresh story folded into one already heard is
+        never spoken, leaves a log line as its only trace, and a re-paste hits the same
+        rule rather than undoing it. The model may still merge into a read item — that is
+        a judgement about two texts, and what the window is for — but a string match is
+        not that judgement, so it does not get that reach.
+        """
+        from motet_inference import IntegrationResult, NewsItem, SourceItem
+        from motet_workers import handlers
+
+        read_item = repo.insert_news_item(
+            db,
+            user_id=USER,
+            title="Canada announces $20bn retaliatory tariffs",
+            summary="Canada announced tariffs.",
+            source_item_id_=paste(db, MORNING),
+        )
+        repo.set_news_item_read(db, user_id=USER, item_id=read_item, read=True)
+        source_item_id = paste(db, EVENING)
+        db.commit()
+
+        class AlwaysNew:
+            def integrate(self, item: SourceItem, window: Any) -> IntegrationResult:  # noqa: ARG002
+                return IntegrationResult(
+                    news_item=NewsItem(
+                        id="ni_proposed",
+                        title="Canada announces $20bn retaliatory tariffs",
+                        summary="A second outlet on the same tariffs.",
+                        source_item_ids=(item.id,),
+                    ),
+                    merged=False,
+                )
+
+        context = handlers.Context(conn=db, stages=_stages_with(AlwaysNew()), store=None)
+        handlers.handle_integrate(context, {"source_item_id": source_item_id})
+
+        assert len(repo.list_news_items(db, USER)) == 2
+        # Said directly rather than inferred from the count: the read item was left
+        # exactly as it was, and the new story is the one an episode will now speak.
+        read_again = next(i for i in repo.list_news_items(db, USER) if i.id == read_item)
+        assert source_item_id not in read_again.source_item_ids
+        assert [i.read for i in repo.list_news_items(db, USER, unread_only=True)] == [False]
 
     def test_a_genuinely_new_story_is_still_new(
         self, db: psycopg.Connection[Any], _migrated: str
