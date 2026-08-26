@@ -16,14 +16,33 @@ import json
 
 import httpx
 import pytest
+from motet_inference.accounting import classify_grounding_reason
 from motet_inference.adapters import (
+    GROUNDING_BUDGET_REASON,
+    GROUNDING_CLAIMS_PER_CALL,
     ClaudeGroundingValidator,
     ClaudeIntegrator,
     ClaudeScriptGenerator,
+    grounding_max_tokens,
 )
-from motet_inference.llm import Credential, CredentialKind, FakeLlmClient, LlmRequest
+from motet_inference.llm import (
+    Credential,
+    CredentialKind,
+    FakeLlmClient,
+    LlmBudgetExhaustedError,
+    LlmRequest,
+    LlmResponse,
+    LlmStage,
+    Usage,
+    build_request,
+)
 from motet_inference.llm.openrouter import OpenRouterClient
-from motet_inference.prompts import PromptResponseError, locate_quote
+from motet_inference.prompts import (
+    GROUNDING_SCHEMA,
+    PromptResponseError,
+    grounding_messages,
+    locate_quote,
+)
 from motet_inference.types import (
     Claim,
     NewsItem,
@@ -383,7 +402,7 @@ class TestGroundingValidator:
         )
         assert len(report.failures) == 2
 
-    def test_every_claim_is_judged_in_one_call(self) -> None:
+    def test_a_small_episode_is_still_judged_in_one_call(self) -> None:
         client = canned(
             {
                 "verdicts": [
@@ -404,9 +423,237 @@ class TestGroundingValidator:
             )
         )
         assert ClaudeGroundingValidator(client).validate(script, SOURCES).ok
-        # Grounding runs at the highest effort in the system; a call per claim would
-        # multiply the most expensive stage by the length of the episode.
+        # Grounding runs at the highest effort in the system, so claims are batched up to
+        # a bound rather than sent one at a time. Below the bound that is still one call.
         assert len(client.calls) == 1
+
+
+class BudgetBoundClient:
+    """A model that thinks per claim and answers only if the ceiling outlasts the thinking.
+
+    motet#42 reduced to arithmetic. On the staging run the grounding stage came back with
+    ``output_tokens == reasoning_tokens == 8000`` and not one verdict, for a request
+    carrying twelve claims — so reasoning cost at least ~660 tokens a claim and the answer
+    never started. This client reproduces that shape offline: it spends
+    ``reasoning_per_claim`` before writing anything, and a call whose ceiling runs out
+    first raises exactly what the real adapter raises.
+
+    It is deliberately *not* a ``FakeLlmClient``: the fake is honest about prompts and
+    knows nothing about budgets, and a budget is the whole subject here.
+    """
+
+    reasoning_per_claim = 700
+    answer_per_claim = 40
+
+    def __init__(self, *, exhaust_on: str | None = None, max_claims_answered: int = 10_000):
+        self.calls: list[LlmRequest] = []
+        self._exhaust_on = exhaust_on
+        self._max_claims_answered = max_claims_answered
+
+    def complete(self, request: LlmRequest) -> LlmResponse:
+        self.calls.append(request)
+        prompt = request.messages[-1].text
+        claims = sum(1 for line in prompt.splitlines() if line.startswith("CLAIM "))
+        spent = (self.reasoning_per_claim + self.answer_per_claim) * claims
+        starved = self._exhaust_on is not None and self._exhaust_on in prompt
+        if spent > request.max_output_tokens or starved or claims > self._max_claims_answered:
+            raise LlmBudgetExhaustedError(
+                f"budget exhausted: {claims} claims would spend {spent} of "
+                f"{request.max_output_tokens}"
+            )
+        text = json.dumps(
+            {"verdicts": [{"index": i, "supported": True, "reason": ""} for i in range(claims)]}
+        )
+        return LlmResponse(
+            text=text,
+            model=request.model,
+            usage=Usage(output_tokens=spent, reasoning_tokens=self.reasoning_per_claim * claims),
+            reasoning_applied=True,
+            finish_reason="stop",
+        )
+
+
+def a_backlog(news_items: int, claims_each: int = 3) -> tuple[Script, dict[str, SourceItem]]:
+    """A script the size of a real morning: one segment per news item, several claims each.
+
+    The evidence spans are paragraph-sized because that is what a newsletter sentence
+    resolves to, and the size of the evidence is half of what a grounding call has to
+    chew through.
+    """
+    sources: dict[str, SourceItem] = {}
+    segments = []
+    for item in range(news_items):
+        source_id = f"si_{item}"
+        sentences = [
+            f"Story {item} sentence {n}: the company said something specific and checkable "
+            f"about its plans for the coming quarter, with a number in it ({n * 7}%)."
+            for n in range(claims_each)
+        ]
+        text = " ".join(sentences)
+        sources[source_id] = SourceItem(id=source_id, title=f"Story {item}", text=text)
+        claims = []
+        offset = 0
+        for sentence in sentences:
+            start = text.index(sentence, offset)
+            offset = start + len(sentence)
+            claims.append(
+                Claim(
+                    text=f"Story {item}: {sentence[:60]}",
+                    span=SourceSpan(source_item_id=source_id, start=start, end=offset),
+                )
+            )
+        segments.append(ScriptSegment(news_item_id=f"ni_{item}", claims=tuple(claims)))
+    return Script(segments=tuple(segments)), sources
+
+
+def _claims_per_call(client: BudgetBoundClient) -> list[int]:
+    """How many claims each call actually carried, read off the prompts it was sent."""
+    return [
+        sum(1 for line in call.messages[-1].text.splitlines() if line.startswith("CLAIM "))
+        for call in client.calls
+    ]
+
+
+class TestGroundingAtRealisticScale:
+    """motet#42: the stage that could not finish an episode of nineteen news items."""
+
+    @pytest.mark.parametrize("news_items", [13, 19, 20])
+    def test_one_batched_call_at_a_fixed_ceiling_returns_nothing(self, news_items: int) -> None:
+        """The shape this stage had before the fix, asserted rather than described.
+
+        Every claim in one request against the old ``GROUNDING_MAX_TOKENS = 8_000``. The
+        model spends the whole ceiling thinking and produces no verdict, which is what
+        staging saw at 19 news items and again at 13 — deterministically, so every retry
+        did it again and the episode never left ``scripting``.
+        """
+        script, sources = a_backlog(news_items)
+        claims = [
+            (index, claim.text, sources[claim.span.source_item_id].text)
+            for index, claim in enumerate(
+                claim for segment in script.segments for claim in segment.claims
+            )
+        ]
+        one_batched_call = build_request(
+            LlmStage.GROUNDING,
+            grounding_messages(claims),
+            max_output_tokens=8_000,
+            response_format=GROUNDING_SCHEMA,
+        )
+        with pytest.raises(LlmBudgetExhaustedError):
+            BudgetBoundClient().complete(one_batched_call)
+
+    @pytest.mark.parametrize("news_items", [13, 19, 20])
+    def test_the_same_backlog_is_fully_judged_once_it_is_chunked(self, news_items: int) -> None:
+        """The fix: the same model, the same claims, every one of them judged.
+
+        Nothing about the model changed between this test and the one above it. What
+        changed is that no single call is asked for more than it can answer, and the
+        ceiling is a function of how much work the call carries.
+        """
+        script, sources = a_backlog(news_items)
+        client = BudgetBoundClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        assert len(client.calls) > 1
+        judged = 0
+        for call in client.calls:
+            in_call = sum(
+                1 for line in call.messages[-1].text.splitlines() if line.startswith("CLAIM ")
+            )
+            judged += in_call
+            assert in_call <= GROUNDING_CLAIMS_PER_CALL
+            # The ceiling tracks the work rather than a constant. This is the property
+            # that has no backlog size beyond which the stage stops working.
+            assert call.max_output_tokens == grounding_max_tokens(in_call)
+        assert judged == news_items * 3
+
+    def test_a_chunk_that_still_exhausts_is_halved_rather_than_lost(self) -> None:
+        """Chunk size is a guess about the model; halving is what survives a wrong guess."""
+        script, sources = a_backlog(4)
+        client = BudgetBoundClient(max_claims_answered=2)
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        sizes = _claims_per_call(client)
+        assert max(sizes) == GROUNDING_CLAIMS_PER_CALL  # the first attempt, before halving
+        assert min(sizes) <= 2  # and what it came down to
+
+    def test_long_evidence_makes_chunks_smaller_than_the_claim_bound(self) -> None:
+        """The character bound, which the claim count on its own cannot reach.
+
+        Eight paragraph-sized evidence spans are a far bigger ask than eight short ones,
+        and a count cannot tell them apart. Newsletters produce both.
+        """
+        parts = [f"Paragraph {n}. " + ("word " * 1_000) for n in range(6)]
+        source = SourceItem(id="si_long", title="Long", text="".join(parts))
+        claims, offset = [], 0
+        for part in parts:
+            claims.append(
+                Claim(
+                    text=f"A claim about {part[:11]}",
+                    span=SourceSpan("si_long", offset, offset + len(part)),
+                )
+            )
+            offset += len(part)
+        script = Script(segments=(ScriptSegment(news_item_id="ni_long", claims=tuple(claims)),))
+        client = BudgetBoundClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, {source.id: source})
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        sizes = _claims_per_call(client)
+        assert sum(sizes) == len(parts)
+        assert max(sizes) < GROUNDING_CLAIMS_PER_CALL
+
+    def test_one_claim_larger_than_the_whole_bound_is_sent_on_its_own(self) -> None:
+        """The bound is a bound on chunks, not a promise about any single claim.
+
+        A claim whose evidence is larger than the whole character budget cannot be made to
+        fit, so it goes alone rather than being dropped or looping forever.
+        """
+        huge = "word " * 4_000
+        source = SourceItem(id="si_huge", title="Huge", text=huge + "and a short tail.")
+        script = Script(
+            segments=(
+                ScriptSegment(
+                    news_item_id="ni_huge",
+                    claims=(
+                        Claim(text="the long one", span=SourceSpan("si_huge", 0, len(huge))),
+                        Claim(
+                            text="the short one",
+                            span=SourceSpan("si_huge", len(huge), len(huge) + 17),
+                        ),
+                    ),
+                ),
+            )
+        )
+        client = BudgetBoundClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, {source.id: source})
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        assert _claims_per_call(client) == [1, 1]
+
+    def test_a_single_claim_that_cannot_be_judged_fails_closed(self) -> None:
+        """The floor of the halving, and the one place invariant 3 could have been bent.
+
+        A claim nobody could get a verdict for is dropped, exactly as a claim with no
+        verdict already was. It is never approved, and it never costs the other claims:
+        ``handle_script`` ships what survived, so the episode is a story short rather than
+        absent altogether.
+        """
+        script, sources = a_backlog(2)
+        poisoned = script.segments[1].claims[0].text
+        client = BudgetBoundClient(exhaust_on=poisoned)
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert [failure.claim_text for failure in report.failures] == [poisoned]
+        assert report.failures[0].reason == GROUNDING_BUDGET_REASON
+        assert classify_grounding_reason(report.failures[0].reason) == "budget_exhausted"
 
 
 class TestLocateQuote:
