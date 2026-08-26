@@ -98,6 +98,11 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
         repo.connect(database_url) as conn,
     ):
         conn.autocommit = True
+        # Before claiming anything, and whether or not there is anything to claim. "A
+        # worker is running" is what an empty pass proves, and it is the fact motet#38
+        # turned on: with no heartbeat, a queue nothing is draining looks exactly like a
+        # queue that is draining fine and has nothing to do.
+        repo.record_worker_heartbeat(conn, queue.value)
         while processed < max_jobs:
             job = jobs.claim(conn, queue)
             if job is None:

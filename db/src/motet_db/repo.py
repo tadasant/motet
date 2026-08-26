@@ -681,6 +681,48 @@ def user_for_feed_token(conn: psycopg.Connection[Any], token: str) -> str | None
     return row["user_id"] if row else None
 
 
+# --- worker heartbeats -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WorkerHeartbeat:
+    """When a worker last ran a drain pass over one queue."""
+
+    queue: str
+    last_seen_at: datetime
+
+
+def record_worker_heartbeat(conn: psycopg.Connection[Any], queue: str) -> None:
+    """Say that a worker is draining ``queue``, now.
+
+    Written at the top of every pass, whether or not the pass finds work: an idle queue
+    with a worker on it and an idle queue with nothing on it are the two states motet#38
+    is about, and they are indistinguishable from the jobs table alone.
+
+    The database's clock, for the same reason :func:`_now` uses it — a worker and the API
+    are different machines, and a heartbeat "from the future" would read as fresh forever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO worker_heartbeats (queue, last_seen_at)
+            VALUES (%s, now())
+            ON CONFLICT (queue) DO UPDATE SET last_seen_at = excluded.last_seen_at
+            """,
+            (queue,),
+        )
+
+
+def worker_heartbeats(conn: psycopg.Connection[Any]) -> list[WorkerHeartbeat]:
+    """Every queue a worker has ever been seen on, most recently seen first."""
+    rows = _all(
+        conn,
+        "SELECT queue, last_seen_at FROM worker_heartbeats ORDER BY last_seen_at DESC, queue",
+        (),
+    )
+    return [WorkerHeartbeat(queue=row["queue"], last_seen_at=row["last_seen_at"]) for row in rows]
+
+
 # --- row plumbing ------------------------------------------------------------------
 
 

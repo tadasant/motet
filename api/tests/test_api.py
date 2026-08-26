@@ -379,6 +379,30 @@ class TestEndToEnd:
         # else to be.
         assert api.get("/v1/news-items", headers=AUTH).json() == []
 
+    def test_processing_reports_whether_anything_is_draining_the_queue(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        """motet#38's missing fact, and the reason it is a route rather than a guess.
+
+        `/v1/ingestion` says what is waiting. Nothing said whether anything was coming for
+        it, so the SPA told the user "a worker takes it off the queue within a few
+        seconds" against a queue no worker had ever touched. Null and a timestamp are two
+        different sentences on screen, which is why null is not flattened to an epoch.
+        """
+        before = api.get("/v1/processing", headers=AUTH).json()
+        assert before == {"worker_last_seen_at": None, "queues": []}
+
+        drain(Queue.INTEGRATE, _migrated)
+
+        after = api.get("/v1/processing", headers=AUTH).json()
+        assert after["worker_last_seen_at"] is not None
+        assert [entry["queue"] for entry in after["queues"]] == ["integrate"]
+
+    def test_processing_is_behind_the_same_lock_as_everything_else(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        assert api.get("/v1/processing").status_code == 401
+
     def test_read_state_round_trips(self, api: TestClient, _migrated: str) -> None:
         api.post(
             "/v1/sources/paste",

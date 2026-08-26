@@ -6,7 +6,14 @@
 
 import { useState } from 'react'
 
-import { ApiError, type Episode, type IngestionItem, type NewsItem, api } from '../api/client'
+import {
+  ApiError,
+  type Episode,
+  type IngestionItem,
+  type NewsItem,
+  type ProcessingStatus,
+  api,
+} from '../api/client'
 import { Processing } from './Processing'
 
 const DEFAULT_MAX_MINUTES = 20
@@ -15,12 +22,14 @@ export function Backlog({
   items,
   ingestion,
   ingestionUnavailable,
+  processing,
   onChanged,
   onOpenEpisode,
 }: {
   items: NewsItem[]
   ingestion: IngestionItem[]
   ingestionUnavailable: boolean
+  processing: ProcessingStatus | null
   onChanged: () => void
   onOpenEpisode: (episode: Episode) => void
 }) {
@@ -64,7 +73,7 @@ export function Backlog({
           pasted go" is asked immediately after pasting, and an answer under a long list of
           older stories is an answer nobody scrolls to. It renders nothing when there is
           nothing in flight. */}
-      <Processing items={ingestion} unavailable={ingestionUnavailable} />
+      <Processing items={ingestion} unavailable={ingestionUnavailable} processing={processing} />
 
       <p className="hint">
         {unread.length} unread of {items.length}. An episode takes everything unread, oldest

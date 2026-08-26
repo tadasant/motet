@@ -499,6 +499,50 @@ public struct PasteRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// Whether anything is actually draining the queues — motet#38's missing fact.
+///
+/// The Processing panel used to tell the user "a worker takes it off the queue within a
+/// few seconds" whatever was true, because nothing in the system could say otherwise: a
+/// queued item looks the same whether a worker is chewing through a backlog or whether no
+/// worker has run since Tuesday. The client cannot derive it either — an item's age says
+/// how long it has waited, not whether anything is coming.
+///
+/// ``worker_last_seen_at`` is null when no worker has *ever* run against this database,
+/// which is a different statement from "one ran a while ago" and reads differently on
+/// screen. Per-queue rows are here for the operator's version of the same question; the
+/// SPA reads the aggregate, because a Phase 1 deployment runs one process over all of
+/// them (``runner all``).
+public struct ProcessingStatusResponse: Codable, Hashable, Sendable {
+    public var queues: [QueueHeartbeatResponse]
+    public var workerLastSeenAt: Date?
+
+    public init(queues: [QueueHeartbeatResponse], workerLastSeenAt: Date? = nil) {
+        self.queues = queues
+        self.workerLastSeenAt = workerLastSeenAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case queues
+        case workerLastSeenAt = "worker_last_seen_at"
+    }
+}
+
+/// One queue, and when a worker was last draining it.
+public struct QueueHeartbeatResponse: Codable, Hashable, Sendable {
+    public var lastSeenAt: Date
+    public var queue: String
+
+    public init(lastSeenAt: Date, queue: String) {
+        self.lastSeenAt = lastSeenAt
+        self.queue = queue
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastSeenAt = "last_seen_at"
+        case queue
+    }
+}
+
 /// Mark one news item read or unread.
 ///
 /// A body rather than two endpoints, because "unread" is a real thing a user wants: the
@@ -915,6 +959,11 @@ public enum MotetEndpoints {
     /// `POST /v1/news-items/{news_item_id}/read` — Set News Item Read
     public static func setNewsItemRead(newsItemId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/news-items/\(MotetPathComponent(newsItemId))/read")
+    }
+
+    /// `GET /v1/processing` — Processing Status
+    public static var processingStatus: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/processing")
     }
 
     /// `GET /v1/sources` — List Sources

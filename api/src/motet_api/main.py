@@ -103,6 +103,8 @@ from .schemas import (
     NewsItemResponse,
     OAuthCallbackRequest,
     PasteRequest,
+    ProcessingStatusResponse,
+    QueueHeartbeatResponse,
     ReadStateRequest,
     RevokedResponse,
     SaveHighlightRequest,
@@ -627,6 +629,29 @@ def list_ingestion(conn: Conn, user_id: User) -> list[IngestionItemResponse]:
     never turned into one — so it is invisible here and is tracked separately as motet#35.
     """
     return [_ingestion_item(item) for item in repo.list_ingestion(conn, user_id)]
+
+
+@app.get("/v1/processing", response_model=ProcessingStatusResponse, tags=["ingestion"])
+def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
+    """Whether anything is draining the queues — the other half of "where did my paste go".
+
+    ``/v1/ingestion`` says what is waiting. It cannot say whether anything is coming for
+    it, and a client that assumes one is is how the SPA came to promise "a few seconds"
+    against a queue nothing had touched in hours (motet#38).
+
+    Deployment state rather than user state, so it takes ``user_id`` only to sit behind
+    the same lock as everything else under ``/v1``. There is one account in Phase 1 and one
+    set of workers behind it; when there are many, the queues are still shared and this
+    answer is still the same one.
+    """
+    beats = repo.worker_heartbeats(conn)
+    return ProcessingStatusResponse(
+        worker_last_seen_at=beats[0].last_seen_at if beats else None,
+        queues=[
+            QueueHeartbeatResponse(queue=beat.queue, last_seen_at=beat.last_seen_at)
+            for beat in beats
+        ],
+    )
 
 
 @app.get("/v1/news-items", response_model=list[NewsItemResponse], tags=["backlog"])

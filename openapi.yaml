@@ -551,6 +551,52 @@ components:
       - text
       title: PasteRequest
       type: object
+    ProcessingStatusResponse:
+      description: "Whether anything is actually draining the queues \u2014 motet#38's missing fact.\n\
+        \nThe Processing panel used to tell the user \"a worker takes it off the queue within a\nfew seconds\"\
+        \ whatever was true, because nothing in the system could say otherwise: a\nqueued item looks the\
+        \ same whether a worker is chewing through a backlog or whether no\nworker has run since Tuesday.\
+        \ The client cannot derive it either \u2014 an item's age says\nhow long it has waited, not whether\
+        \ anything is coming.\n\n``worker_last_seen_at`` is null when no worker has *ever* run against\
+        \ this database,\nwhich is a different statement from \"one ran a while ago\" and reads differently\
+        \ on\nscreen. Per-queue rows are here for the operator's version of the same question; the\nSPA\
+        \ reads the aggregate, because a Phase 1 deployment runs one process over all of\nthem (``runner\
+        \ all``)."
+      properties:
+        queues:
+          description: Per queue, most recently drained first. Absent queues have never run.
+          items:
+            $ref: '#/components/schemas/QueueHeartbeatResponse'
+          title: Queues
+          type: array
+        worker_last_seen_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: 'When any worker last ran a drain pass, over any queue. Null means none ever has:
+            nothing will happen to a queued item until one does.'
+          title: Worker Last Seen At
+      required:
+      - worker_last_seen_at
+      - queues
+      title: ProcessingStatusResponse
+      type: object
+    QueueHeartbeatResponse:
+      description: One queue, and when a worker was last draining it.
+      properties:
+        last_seen_at:
+          format: date-time
+          title: Last Seen At
+          type: string
+        queue:
+          title: Queue
+          type: string
+      required:
+      - queue
+      - last_seen_at
+      title: QueueHeartbeatResponse
+      type: object
     ReadStateRequest:
       description: 'Mark one news item read or unread.
 
@@ -1728,6 +1774,41 @@ paths:
       summary: Set News Item Read
       tags:
       - backlog
+  /v1/processing:
+    get:
+      description: "Whether anything is draining the queues \u2014 the other half of \"where did my paste\
+        \ go\".\n\n``/v1/ingestion`` says what is waiting. It cannot say whether anything is coming for\n\
+        it, and a client that assumes one is is how the SPA came to promise \"a few seconds\"\nagainst\
+        \ a queue nothing had touched in hours (motet#38).\n\nDeployment state rather than user state,\
+        \ so it takes ``user_id`` only to sit behind\nthe same lock as everything else under ``/v1``.\
+        \ There is one account in Phase 1 and one\nset of workers behind it; when there are many, the\
+        \ queues are still shared and this\nanswer is still the same one."
+      operationId: processing_status_v1_processing_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingStatusResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Processing Status
+      tags:
+      - ingestion
   /v1/sources:
     get:
       description: 'Every source, connected or paused, with whether a credential exists.

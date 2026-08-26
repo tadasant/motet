@@ -781,6 +781,62 @@ In the SPA it is a panel above the backlog and a count on the tab — visible fr
 something is pending, and the fetch is **best-effort**: the backlog is the primary list and
 must not go blank because the secondary one 404s.
 
+### A queue nobody drains, and a UI that promised otherwise
+
+`motet_workers.runner`, `worker_heartbeats`, `GET /v1/processing`. Two halves of motet#38,
+and they answer different questions.
+
+**A worker has to be able to just run.** The runner shipped as one process per queue,
+draining once and exiting — which is exactly what a Cloud Run *job* wants, and a job has to
+be *started*. The only thing that started one was a `workflow_dispatch` in the private
+infrastructure repo, so the product worked for somebody holding a CI credential and for
+nobody else. `runner all --poll-seconds N` is the other shape: one process, sweeping
+`queues.PIPELINE` in order, so a paste integrates and an episode assembles, scripts and
+renders on one pass rather than one stage per poll interval. Both shapes stay, because both
+are real deployments — and SIGTERM now stops the loop rather than killing the process,
+since a long-lived worker is the thing Cloud Run signals on every deploy and the obs flush
+lives in the `finally`.
+
+**Turning it on in a deployment is configuration, not code**, and it is deliberately still
+the private repo's call: an always-on worker against `MOTET_INFERENCE_MODE=real` is a
+standing authorization to spend money at OpenRouter and Cartesia, which is a decision about
+an environment rather than about an application.
+
+**Which is precisely why the SPA must not assume.** It used to state, of every queued item,
+that "a worker takes it off the queue within a few seconds" — as a fact, with nothing behind
+it. **A queued item looks identical whether a worker is chewing through a backlog or
+whether none has ever run**, so the failure was silent and read as slowness. That is the
+never-infer-"no errors"-from-"no data" trap wearing the queue's clothes.
+
+So a drain writes one `worker_heartbeats` row per queue **at the top of every pass, whether
+or not it finds work** — an empty pass is what proves a worker is alive — and
+`/v1/processing` reports it. The panel's copy is a function of that: a worker is running, no
+worker has run recently, or *the question could not be asked*. Three, not two: a 404 from an
+older API is an outage in the panel, not an idle pipeline, and must not produce the same
+sentence. **Deriving it from the item's age instead would be the same mistake with more
+arithmetic** — age says how long something has waited, never whether anything is coming for
+it.
+
+Two smaller things follow. The age is shown *as well*, because once a stall clears the thing
+worth knowing is which item has been waiting twenty minutes. And the episode screen carries
+the same split, because "Working… this page polls" is the identical promise one stage later
+and several vendor calls more expensive.
+
+### The episode tab reflects server state, not this page's lifetime
+
+`web/src/App.tsx`. Nothing loaded episode state on mount, so a reload — the realistic thing
+to do while a multi-minute pipeline runs — emptied the tab and left a finished episode
+reachable only through the RSS feed (motet#44). **The shape of that bug is that the longer
+an episode takes, the more likely it is to be lost**, and the first one is the slowest
+because the backlog is fullest.
+
+`GET /v1/episodes` is loaded once the app has a way in, and it **seeds** rather than
+assigns: `current ?? list[0]`, so a tab already opened from the backlog is not dragged back
+to the newest episode, and the three-second backlog poll does not do it either. The list is
+kept as well as the newest item, because "make an episode" is the only other way into this
+screen and it always makes a *new* one — one loaded episode would leave yesterday's just as
+unreachable.
+
 ### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
 
 `api/src/motet_api/feed.py`. RSS is Phase 1's listening surface *instead of* an in-app

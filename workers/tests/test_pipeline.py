@@ -9,13 +9,15 @@ Skips without ``DATABASE_URL`` so a quick local run needs no Postgres; CI always
 
 from __future__ import annotations
 
+import os
+import signal
 from typing import Any
 
 import psycopg
 import pytest
 from motet_db import EpisodeState, SourceItemState, repo
 from motet_storage import LocalObjectStore
-from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs
+from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, runner
 
 MORNING = (
     "Acme raises $20M Series A",
@@ -551,3 +553,151 @@ class TestDedupWindow:
         titles = [item.title for item in window]
 
         assert titles == ["Story 3", "Story 4"]  # newest two, re-sorted oldest-first
+
+
+class TestNothingDrainsTheQueue:
+    """motet#38: the SPA promised a worker within seconds, and nothing was running.
+
+    The application half of the fix is here — a worker that polls, over every queue, in
+    one process — plus the heartbeat that lets the API say which of the two situations a
+    queued item is actually in.
+    """
+
+    def test_runner_all_carries_a_paste_the_whole_way_to_audio(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """One invocation, no per-stage dispatch, no human.
+
+        The old shape was one process per queue, started by hand: `integrate`, then
+        `assemble`, then `script`, then `tts`, each a separate `workflow_dispatch` in a
+        repository the product's user has never heard of. This is that whole sequence as
+        one command, which is what makes an always-on worker a deployment rather than a
+        rewrite.
+        """
+        paste(db, MORNING)
+        episode_id = enqueue_episode(db, user_id=USER, title="Briefing", max_duration_ms=600_000)
+        db.commit()
+
+        assert runner.main(["all"]) == 0
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert episode.state is EpisodeState.READY
+        assert episode.audio_key is not None
+
+    def test_a_drain_says_it_ran_even_when_there_was_nothing_to_do(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The whole point: an idle queue with a worker on it, and one without, differ.
+
+        Nothing in the `jobs` table distinguishes them, which is why a queued item looked
+        identical whether it was about to move or never would.
+        """
+        assert repo.worker_heartbeats(db) == []
+
+        drain(Queue.INTEGRATE, _migrated)
+
+        beats = repo.worker_heartbeats(db)
+        assert [beat.queue for beat in beats] == ["integrate"]
+
+    def test_polling_over_everything_heartbeats_every_queue(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        assert runner.main(["all"]) == 0
+        assert {beat.queue for beat in repo.worker_heartbeats(db)} == {q.value for q in Queue}
+
+    def test_sigterm_stops_the_poll_loop_rather_than_killing_the_process(
+        self, monkeypatch: pytest.MonkeyPatch, _migrated: str
+    ) -> None:
+        """A long-lived worker is the thing Cloud Run signals on every deploy.
+
+        Without a handler the default disposition kills it outright, skipping the obs
+        flush in `main`'s `finally` — so the spans and metrics describing the shutdown are
+        the ones that never leave.
+        """
+        drained: list[Queue] = []
+
+        def fake_drain(queue: Queue, url: str, *, max_jobs: int) -> int:
+            drained.append(queue)
+            # A bound, so a flag that never gets set fails this test instead of hanging
+            # the suite until GitHub's six-hour limit.
+            assert len(drained) <= 4, "SIGTERM did not stop the poll loop"
+            os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+        monkeypatch.setattr(runner, "drain", fake_drain)
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            assert runner.main(["integrate", "--poll-seconds", "0.01"]) == 0
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        assert drained[0] is Queue.INTEGRATE
+
+
+class TestIdenticalTitles:
+    """motet#41: a "new" story whose headline the backlog already carries is a merge."""
+
+    def test_a_new_story_with_a_title_already_in_the_window_merges_instead(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Three write-ups of one story; the third came back as its own news item.
+
+        Dedup writes the titles, so two items carrying the same one is dedup contradicting
+        itself — and in audio it is the story read out twice, under one heading. The stub
+        here answers "new" the way the real model did on staging.
+        """
+        from motet_inference import IntegrationResult, NewsItem, SourceItem
+        from motet_workers import handlers
+
+        existing = repo.insert_news_item(
+            db,
+            user_id=USER,
+            title="Canada announces $20bn retaliatory tariffs",
+            summary="Canada announced tariffs.",
+            source_item_id_=paste(db, MORNING),
+        )
+        source_item_id = paste(db, EVENING)
+        db.commit()
+
+        class AlwaysNew:
+            def integrate(self, item: SourceItem, window: Any) -> IntegrationResult:  # noqa: ARG002
+                return IntegrationResult(
+                    news_item=NewsItem(
+                        id="ni_proposed",
+                        # Byte-identical, capitalisation and spacing aside — which is
+                        # exactly what normalizing the comparison is for.
+                        title="  canada announces $20bn RETALIATORY tariffs ",
+                        summary="A third outlet on the same tariffs.",
+                        source_item_ids=(item.id,),
+                    ),
+                    merged=False,
+                )
+
+        context = handlers.Context(conn=db, stages=_stages_with(AlwaysNew()), store=None)
+        handlers.handle_integrate(context, {"source_item_id": source_item_id})
+
+        items = repo.list_news_items(db, USER)
+        assert [item.id for item in items] == [existing]
+        assert set(items[0].source_item_ids) == {items[0].source_item_ids[0], source_item_id}
+        # The stored title is untouched: the merge is a backstop, and the model was
+        # answering a different question when it wrote that title.
+        assert items[0].title == "Canada announces $20bn retaliatory tariffs"
+
+    def test_a_genuinely_new_story_is_still_new(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        paste(db, MORNING)
+        paste(db, INQUIRY)
+        db.commit()
+        drain(Queue.INTEGRATE, _migrated)
+
+        assert len(repo.list_news_items(db, USER)) == 2
+
+
+def _stages_with(integrator: Any) -> Any:
+    """The deterministic stage set with dedup swapped out for a stub."""
+    from dataclasses import replace
+
+    from motet_inference import get_stages
+
+    return replace(get_stages(), integrator=integrator)

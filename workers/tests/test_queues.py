@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from motet_inference.llm import LlmConfigError
 from motet_workers import Queue, runner
+from motet_workers.queues import PIPELINE
 
 
 def test_queue_names_cover_every_pipeline_stage() -> None:
@@ -20,6 +21,29 @@ def test_queue_names_cover_every_pipeline_stage() -> None:
         "script",
         "tts",
     ]
+
+
+def test_the_pipeline_covers_every_queue_in_order() -> None:
+    """A queue missing from `PIPELINE` is a queue `runner all` silently never drains.
+
+    That is motet#38 one level down: the always-on worker would come up, report itself
+    healthy, and leave one stage's jobs sitting there forever. Order is asserted too, so a
+    pass carries an item as far as it can go rather than one stage per poll interval.
+    """
+    assert PIPELINE == (
+        Queue.POLL,
+        Queue.EXTRACT,
+        Queue.INTEGRATE,
+        Queue.ASSEMBLE,
+        Queue.SCRIPT,
+        Queue.TTS,
+    )
+    assert set(PIPELINE) == set(Queue)
+
+
+def test_all_is_not_itself_a_queue() -> None:
+    """It is a thing to ask a worker for, not a row in the `jobs` table."""
+    assert runner.ALL_QUEUES not in {queue.value for queue in Queue}
 
 
 def test_queues_are_plain_strings() -> None:

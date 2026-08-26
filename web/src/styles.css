@@ -52,6 +52,11 @@ label { font-weight: 600; font-size: .9rem; }
    listen to" — and because a queued item that reads as a backlog entry is exactly the
    confusion this whole surface exists to remove. */
 .processing { border: 1px solid var(--line); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1.25rem; }
+/* "Nothing is draining the queue." Loud enough to be read before the list under it, and
+   not an error: the deployment is misconfigured or idle, not broken (motet#38). */
+.stalled { border-left: 3px solid var(--bad); background: #fdf6f6; padding: .5rem .75rem; margin: .5rem 0 0; font-size: .9rem; }
+/* A button that reads as a link, for choosing between things rather than doing one. */
+.linkish { background: none; border: 0; padding: 0; color: var(--fg); text-decoration: underline; }
 .processing h3 { margin-top: 0; }
 .processing .items li:first-child { border-top: none; }
 .badge { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .5rem; white-space: nowrap; }

@@ -28,6 +28,7 @@ from motet_inference import (
     WAV_MEDIA_TYPE,
     Audio,
     GroundingReport,
+    IntegrationResult,
     NewsItem,
     Script,
     ScriptSegment,
@@ -130,28 +131,75 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
             spend.summary(),
         )
 
-    if result.merged:
+    merge_into, title, summary = _merge_target(result, window)
+    if merge_into is not None:
         repo.merge_source_into_news_item(
             context.conn,
-            news_item_id_=result.news_item.id,
+            news_item_id_=merge_into,
             source_item_id_=stored.id,
-            title=result.news_item.title,
-            summary=result.news_item.summary,
+            title=title,
+            summary=summary,
         )
-        logger.info("merged source %s into news item %s", stored.id, result.news_item.id)
+        logger.info("merged source %s into news item %s", stored.id, merge_into)
     else:
         # The id the integrator proposed is discarded: primary keys are the database's to
         # assign, and a stage that could choose them could collide with an existing row.
         news_item_id = repo.insert_news_item(
             context.conn,
             user_id=stored.user_id,
-            title=result.news_item.title,
-            summary=result.news_item.summary,
+            title=title,
+            summary=summary,
             source_item_id_=stored.id,
         )
         logger.info("source %s became new news item %s", stored.id, news_item_id)
 
     repo.mark_source_item(context.conn, stored.id, SourceItemState.INTEGRATED)
+
+
+def _merge_target(
+    result: IntegrationResult, window: Sequence[StoredNewsItem]
+) -> tuple[str | None, str, str]:
+    """Which news item this source item joins, if any — and the title and summary to store.
+
+    The model's decision, plus one deterministic backstop: **a "new story" whose title is
+    already in the window is a merge.** That is motet#41, where three write-ups of one
+    story were pasted, two merged, and the third came back as a separate news item under a
+    byte-identical headline — so the backlog listed the same sentence twice and an episode
+    would have read the story out twice under one heading.
+
+    It is a backstop rather than the fix. Whether the threshold holds up on genuinely
+    independent prose about one event is a question about the dedup prompt and window, and
+    it stays open. What is *not* a judgement call is this: dedup writes the titles, so two
+    items carrying the same one is dedup contradicting itself, and the case where that is
+    correct — two unrelated events that happen to produce identical headlines within one
+    window — costs a merge that a re-paste undoes, against a duplicate story read aloud.
+
+    Compared on a normalized title so that trailing whitespace or a capitalisation the
+    model varied does not defeat it, and no further: fuzzy matching here would be a
+    similarity threshold of its own, in the one place that is meant to have no opinion.
+    Only the *stored* title and summary travel with the merge — the model was answering a
+    different question and never wrote a combined summary for these two.
+    """
+    if result.merged:
+        return result.news_item.id, result.news_item.title, result.news_item.summary
+
+    proposed = _normalize_title(result.news_item.title)
+    twin = next((item for item in window if _normalize_title(item.title) == proposed), None)
+    if twin is None:
+        return None, result.news_item.title, result.news_item.summary
+
+    logger.warning(
+        "dedup returned a NEW story titled %r, which news item %s already carries; "
+        "merging instead (motet#41)",
+        result.news_item.title,
+        twin.id,
+    )
+    return twin.id, twin.title, twin.summary
+
+
+def _normalize_title(title: str) -> str:
+    """Case, and runs of whitespace, and nothing else. See :func:`_merge_target`."""
+    return " ".join(title.split()).casefold()
 
 
 # --- assemble ------------------------------------------------------------------------

@@ -141,6 +141,40 @@ class IngestionItemResponse(BaseModel):
     created_at: datetime
 
 
+class QueueHeartbeatResponse(BaseModel):
+    """One queue, and when a worker was last draining it."""
+
+    queue: str
+    last_seen_at: datetime
+
+
+class ProcessingStatusResponse(BaseModel):
+    """Whether anything is actually draining the queues — motet#38's missing fact.
+
+    The Processing panel used to tell the user "a worker takes it off the queue within a
+    few seconds" whatever was true, because nothing in the system could say otherwise: a
+    queued item looks the same whether a worker is chewing through a backlog or whether no
+    worker has run since Tuesday. The client cannot derive it either — an item's age says
+    how long it has waited, not whether anything is coming.
+
+    ``worker_last_seen_at`` is null when no worker has *ever* run against this database,
+    which is a different statement from "one ran a while ago" and reads differently on
+    screen. Per-queue rows are here for the operator's version of the same question; the
+    SPA reads the aggregate, because a Phase 1 deployment runs one process over all of
+    them (``runner all``).
+    """
+
+    worker_last_seen_at: datetime | None = Field(
+        description=(
+            "When any worker last ran a drain pass, over any queue. Null means none ever "
+            "has: nothing will happen to a queued item until one does."
+        )
+    )
+    queues: list[QueueHeartbeatResponse] = Field(
+        description="Per queue, most recently drained first. Absent queues have never run."
+    )
+
+
 class SourceSpanModel(BaseModel):
     """A half-open character range in a source item — what makes a claim checkable."""
 

@@ -565,6 +565,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/processing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Processing Status
+         * @description Whether anything is draining the queues — the other half of "where did my paste go".
+         *
+         *     ``/v1/ingestion`` says what is waiting. It cannot say whether anything is coming for
+         *     it, and a client that assumes one is is how the SPA came to promise "a few seconds"
+         *     against a queue nothing had touched in hours (motet#38).
+         *
+         *     Deployment state rather than user state, so it takes ``user_id`` only to sit behind
+         *     the same lock as everything else under ``/v1``. There is one account in Phase 1 and one
+         *     set of workers behind it; when there are many, the queues are still shared and this
+         *     answer is still the same one.
+         */
+        get: operations["processing_status_v1_processing_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources": {
         parameters: {
             query?: never;
@@ -1120,6 +1149,47 @@ export interface components {
             text: string;
             /** Title */
             title: string;
+        };
+        /**
+         * ProcessingStatusResponse
+         * @description Whether anything is actually draining the queues — motet#38's missing fact.
+         *
+         *     The Processing panel used to tell the user "a worker takes it off the queue within a
+         *     few seconds" whatever was true, because nothing in the system could say otherwise: a
+         *     queued item looks the same whether a worker is chewing through a backlog or whether no
+         *     worker has run since Tuesday. The client cannot derive it either — an item's age says
+         *     how long it has waited, not whether anything is coming.
+         *
+         *     ``worker_last_seen_at`` is null when no worker has *ever* run against this database,
+         *     which is a different statement from "one ran a while ago" and reads differently on
+         *     screen. Per-queue rows are here for the operator's version of the same question; the
+         *     SPA reads the aggregate, because a Phase 1 deployment runs one process over all of
+         *     them (``runner all``).
+         */
+        ProcessingStatusResponse: {
+            /**
+             * Queues
+             * @description Per queue, most recently drained first. Absent queues have never run.
+             */
+            queues: components["schemas"]["QueueHeartbeatResponse"][];
+            /**
+             * Worker Last Seen At
+             * @description When any worker last ran a drain pass, over any queue. Null means none ever has: nothing will happen to a queued item until one does.
+             */
+            worker_last_seen_at: string | null;
+        };
+        /**
+         * QueueHeartbeatResponse
+         * @description One queue, and when a worker was last draining it.
+         */
+        QueueHeartbeatResponse: {
+            /**
+             * Last Seen At
+             * Format: date-time
+             */
+            last_seen_at: string;
+            /** Queue */
+            queue: string;
         };
         /**
          * ReadStateRequest
@@ -2121,6 +2191,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NewsItemResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    processing_status_v1_processing_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessingStatusResponse"];
                 };
             };
             /** @description Validation Error */
