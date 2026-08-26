@@ -170,9 +170,22 @@ def _merge_target(
     It is a backstop rather than the fix. Whether the threshold holds up on genuinely
     independent prose about one event is a question about the dedup prompt and window, and
     it stays open. What is *not* a judgement call is this: dedup writes the titles, so two
-    items carrying the same one is dedup contradicting itself, and the case where that is
-    correct — two unrelated events that happen to produce identical headlines within one
-    window — costs a merge that a re-paste undoes, against a duplicate story read aloud.
+    items carrying the same one is dedup contradicting itself.
+
+    **The cost of being wrong is a story swallowed, and it is worth naming rather than
+    waving at.** The window includes items that are already *read* but recent, so a
+    backstop merge can fold this source item into a story the listener has already heard —
+    where assembly, which selects unread items, will never speak it. That is not a new
+    hazard: it is what the window is *for* (see ``repo.news_item_window`` — a follow-up
+    should absorb into this morning's story rather than reappear), and the model-driven
+    merge has done it since the beginning. What is new is that this path takes it where
+    the model said "new". The case where that is wrong is two unrelated events producing
+    byte-identical headlines inside one window, and against it sits the same story read
+    aloud twice under one heading, which is the failure dedup exists to prevent.
+
+    An empty proposed title matches nothing, deliberately. ``_normalize_title`` collapses
+    whitespace, so a blank title and a whitespace-only one are the same string — and two
+    items that both failed to get a title are not evidence of anything.
 
     Compared on a normalized title so that trailing whitespace or a capitalisation the
     model varied does not defeat it, and no further: fuzzy matching here would be a
@@ -184,7 +197,11 @@ def _merge_target(
         return result.news_item.id, result.news_item.title, result.news_item.summary
 
     proposed = _normalize_title(result.news_item.title)
-    twin = next((item for item in window if _normalize_title(item.title) == proposed), None)
+    twin = (
+        next((item for item in window if _normalize_title(item.title) == proposed), None)
+        if proposed
+        else None
+    )
     if twin is None:
         return None, result.news_item.title, result.news_item.summary
 

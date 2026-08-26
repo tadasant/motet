@@ -11,10 +11,10 @@
 import { useEffect, useState } from 'react'
 
 import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api } from '../api/client'
-import { ago, workerState } from './Processing'
+import { ago, serverNow, workerState } from './Processing'
 
-/** States a client should keep polling through. */
-const IN_PROGRESS = new Set(['pending', 'scripting', 'rendering'])
+/** States a client should keep polling through. Exported: the app polls on it too. */
+export const IN_PROGRESS = new Set(['pending', 'scripting', 'rendering'])
 
 const POLL_INTERVAL_MS = 2000
 
@@ -82,7 +82,7 @@ export function EpisodeScreen({
       </p>
 
       {IN_PROGRESS.has(episode.state) &&
-        (worker === 'running' || worker === 'unknown' ? (
+        (worker === 'running' || worker === 'unknown' || episode.state !== 'pending' ? (
           <p className="hint" role="status">
             Working… assembly, script, grounding validation, then audio. This page polls.
           </p>
@@ -90,10 +90,15 @@ export function EpisodeScreen({
           // The same lie the Processing panel used to tell, one stage later and more
           // expensive: an episode that reached `pending` and has no worker behind it is
           // not working, and "this page polls" invites somebody to sit and watch it.
+          //
+          // Only in `pending`, which is the state nothing has touched yet. Past it a
+          // worker demonstrably reached this episode, and a long TTS render is exactly
+          // the job that can outlast the heartbeat's freshness window — so the banner
+          // would be accusing a worker that is at that moment paying Cartesia.
           <p className="stalled" role="status">
             Not moving: nothing is draining the queues
             {processing?.worker_last_seen_at
-              ? ` — a worker last ran ${ago(processing.worker_last_seen_at)}`
+              ? ` — a worker last ran ${ago(processing.worker_last_seen_at, serverNow(processing))}`
               : ' — no worker has ever run here'}
             . Assembly, script and audio all wait on one.
           </p>

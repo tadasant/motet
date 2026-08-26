@@ -30,26 +30,43 @@ import type { IngestionItem, ProcessingStatus } from '../api/client'
 /**
  * How recently a worker must have run for one to count as running now.
  *
- * A polling worker heartbeats every pass — seconds — so anything on this side of the line
- * is alive. Well past that, and a *finished* one-shot drain reads as what it is: a worker
- * that ran, exited, and will not be back for the item queued behind it.
+ * A polling worker heartbeats before **every** claim, so a busy one is loud: the gap
+ * between two heartbeats is one job. Five minutes rather than one is deliberate — the
+ * cost of the two errors is not symmetric. Calling a live worker dead puts a red banner
+ * over a pipeline that is working, which is the same class of lie motet#38 was about,
+ * pointing the other way; calling a dead one live for five minutes leaves the item's own
+ * age on screen saying how long it has really been.
+ *
+ * The residual case this does not cover is a *single* job longer than this — a large TTS
+ * render is the realistic one. Two things keep that from becoming a contradiction rather
+ * than merely a delay: the banner ignores items a worker has already picked up, and each
+ * item's own line still says "running now" for the one actually in flight.
  */
-const WORKER_FRESH_MS = 90_000
+const WORKER_FRESH_MS = 5 * 60_000
 
 type WorkerState = 'running' | 'idle' | 'never' | 'unknown'
 
-/** Whether anything is draining the queues, from the heartbeat the API reports. */
-export function workerState(
-  processing: ProcessingStatus | null,
-  now: number = Date.now(),
-): WorkerState {
+/**
+ * Whether anything is draining the queues, from the heartbeat the API reports.
+ *
+ * Aged against the **server's** clock, which the same response carries, so a browser whose
+ * own clock is wrong — resumed from sleep, an unsynced VM — cannot report a healthy worker
+ * as gone. `Date.now()` is only the fallback for a response too old to carry one.
+ */
+export function workerState(processing: ProcessingStatus | null): WorkerState {
   // Null is the route answering nothing — an older API, or a failed fetch. It is not
   // "no worker": the panel must not report an outage as an idle queue.
   if (!processing) return 'unknown'
   if (!processing.worker_last_seen_at) return 'never'
   const seen = new Date(processing.worker_last_seen_at).getTime()
   if (!Number.isFinite(seen)) return 'unknown'
-  return now - seen <= WORKER_FRESH_MS ? 'running' : 'idle'
+  return serverNow(processing) - seen <= WORKER_FRESH_MS ? 'running' : 'idle'
+}
+
+/** The server's clock at the moment it answered, or this browser's if it did not say. */
+export function serverNow(processing: ProcessingStatus | null): number {
+  const stamp = processing ? new Date(processing.now).getTime() : Number.NaN
+  return Number.isFinite(stamp) ? stamp : Date.now()
 }
 
 export function Processing({
@@ -78,7 +95,12 @@ export function Processing({
   }
   if (items.length === 0) return null
 
-  const stalled = items.some((item) => item.state === 'pending') && !isMoving(worker)
+  // `attempts === 0` and not merely `pending`: an item a worker has already claimed is
+  // still `pending` until it succeeds, and its own line two elements down correctly says
+  // "running now". A banner saying nothing is processing, over an item that says it is
+  // being processed, is worse than either sentence alone.
+  const stalled =
+    items.some((item) => item.state === 'pending' && item.attempts === 0) && !isMoving(worker)
 
   return (
     <section className="processing" aria-labelledby="processing-heading">
@@ -98,7 +120,7 @@ export function Processing({
               <strong>{item.title}</strong>
               <span className={`badge ${item.state}`}>{badge(item)}</span>
             </div>
-            <p className="hint">{explain(item, worker)}</p>
+            <p className="hint">{explain(item, worker, serverNow(processing))}</p>
             {item.last_error && (
               // The reason, verbatim. A truncated or prettified vendor error is one a
               // person cannot search for and cannot paste into an issue.
@@ -163,13 +185,14 @@ function stalledReason(processing: ProcessingStatus | null, worker: WorkerState)
     )
   }
   const seen = processing?.worker_last_seen_at
+  const when = seen ? ago(seen, serverNow(processing)) : 'a while ago'
   return (
-    `Nothing is processing right now — a worker last ran ${seen ? ago(seen) : 'a while ago'}. ` +
+    `Nothing is processing right now — a worker last ran ${when}. ` +
     'Queued items will sit here until one runs again.'
   )
 }
 
-function explain(item: IngestionItem, worker: WorkerState): string {
+function explain(item: IngestionItem, worker: WorkerState, now: number): string {
   if (item.state === 'integrated') {
     return 'Integrated. It is in the backlog below — under whatever title dedup settled on.'
   }
@@ -182,7 +205,7 @@ function explain(item: IngestionItem, worker: WorkerState): string {
   if (item.attempts === 0) {
     // The age is here and not only in the banner because it is per item: after a stall
     // clears, the thing worth knowing is which of these has been waiting twenty minutes.
-    const queued = `Queued ${ago(item.created_at)}.`
+    const queued = `Queued ${ago(item.created_at, now)}.`
     if (worker === 'running') return `${queued} A worker is draining the queue now.`
     if (worker === 'unknown') return `${queued} Waiting for a worker to take it.`
     return `${queued} Nothing is draining the queue, so it is not moving yet.`

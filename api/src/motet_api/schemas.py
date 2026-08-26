@@ -162,8 +162,21 @@ class ProcessingStatusResponse(BaseModel):
     screen. Per-queue rows are here for the operator's version of the same question; the
     SPA reads the aggregate, because a Phase 1 deployment runs one process over all of
     them (``runner all``).
+
+    ``now`` is here so the client never has to compare a database timestamp against a
+    browser clock. It is a small field against a whole class of wrongness: a laptop
+    resumed from sleep, or an unsynced VM, would otherwise report a perfectly healthy
+    worker as gone and put a red banner over a pipeline that is running fine.
     """
 
+    now: datetime = Field(
+        description=(
+            "The server's clock, at the moment this was answered. Every other timestamp "
+            "the SPA ages — this one, an item's created_at — comes from the same clock, "
+            "so a client that subtracts from this rather than from its own is immune to "
+            "the two disagreeing."
+        )
+    )
     worker_last_seen_at: datetime | None = Field(
         description=(
             "When any worker last ran a drain pass, over any queue. Null means none ever "

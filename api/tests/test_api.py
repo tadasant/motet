@@ -390,13 +390,18 @@ class TestEndToEnd:
         different sentences on screen, which is why null is not flattened to an epoch.
         """
         before = api.get("/v1/processing", headers=AUTH).json()
-        assert before == {"worker_last_seen_at": None, "queues": []}
+        assert before["worker_last_seen_at"] is None
+        assert before["queues"] == []
+        # The server's own clock, so the client never ages a database timestamp against a
+        # browser one. Present even when nothing has ever run.
+        assert before["now"]
 
         drain(Queue.INTEGRATE, _migrated)
 
         after = api.get("/v1/processing", headers=AUTH).json()
         assert after["worker_last_seen_at"] is not None
         assert [entry["queue"] for entry in after["queues"]] == ["integrate"]
+        assert after["now"] >= after["worker_last_seen_at"]
 
     def test_processing_is_behind_the_same_lock_as_everything_else(
         self, api: TestClient, _migrated: str

@@ -33,7 +33,7 @@ import {
 } from './api/client'
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
 import { Backlog } from './screens/Backlog'
-import { EpisodeScreen } from './screens/EpisodeScreen'
+import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
 import { OAuthCallback } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
@@ -77,9 +77,12 @@ export default function App() {
   // new one.
   const [episode, setEpisode] = useState<Episode | null>(null)
   const [episodes, setEpisodes] = useState<Episode[]>([])
-  // Kept apart from `episodes.length === 0` so that "you have no episodes" is not shown
-  // to somebody who has one and is a hundred milliseconds early.
+  // Three states, not two, for the same reason `ingestionUnavailable` exists: "you have no
+  // episodes", "I have not looked yet" and "I could not find out" are different claims,
+  // and showing the first for either of the others is the disappearance motet#44 is about
+  // wearing a different hat.
   const [episodesLoaded, setEpisodesLoaded] = useState(false)
+  const [episodesUnavailable, setEpisodesUnavailable] = useState(false)
   const [token, setTokenState] = useState(getToken())
   const [error, setError] = useState('')
   // Read once, in an initializer, so every later render works from state rather than
@@ -140,13 +143,20 @@ export default function App() {
     api
       .episodes()
       .then((list) => {
-        setEpisodes(list)
+        // Merged rather than assigned, so an episode created while this request was in
+        // flight is not dropped from the picker — `openEpisode` puts it in front, and the
+        // server's copy of the list is a moment older than that.
+        setEpisodes((current) => {
+          const known = new Set(list.map((entry) => entry.id))
+          return [...current.filter((entry) => !known.has(entry.id)), ...list]
+        })
         // `current ?? list[0]` and never a plain assignment: this runs after a tab has
         // possibly already been opened from the backlog, and the newest episode is a
         // starting point rather than an override.
         setEpisode((current) => current ?? list[0] ?? null)
+        setEpisodesUnavailable(false)
       })
-      .catch(() => undefined)
+      .catch(() => setEpisodesUnavailable(true))
       .finally(() => setEpisodesLoaded(true))
   }, [])
 
@@ -165,7 +175,13 @@ export default function App() {
   // seconds, so an item that resolves has to resolve *on screen*: a status that is only
   // correct until you look away is the same disappearance in slow motion. It stops on its
   // own the moment nothing is pending, so an idle tab makes no requests.
-  const waiting = ingestion.some((item) => item.state === 'pending')
+  // An episode mid-pipeline counts too, and not only for the badge: `processing` is
+  // fetched by `refresh`, and the episode screen's own "is anything draining the queues"
+  // banner would otherwise be computed from a heartbeat frozen at mount — going stale on
+  // its own after a few minutes and accusing a worker that is running fine.
+  const waiting =
+    ingestion.some((item) => item.state === 'pending') ||
+    (episode !== null && IN_PROGRESS.has(episode.state))
   // A stuck item gets a louder count than a busy one. "3 in flight" and "3, one of which
   // is never coming back" want different reactions. Settled items are not counted at all:
   // a badge that stays at 3 for ten minutes after everything landed means nothing.
@@ -325,7 +341,11 @@ export default function App() {
               <section aria-labelledby="episode-heading">
                 <h2 id="episode-heading">Episode</h2>
                 <p className="hint">
-                  {episodesLoaded ? 'Make one from the backlog.' : 'Looking for your episodes…'}
+                  {!episodesLoaded
+                    ? 'Looking for your episodes…'
+                    : episodesUnavailable
+                      ? 'Could not load your episodes. This is not the same as having none.'
+                      : 'Make one from the backlog.'}
                 </p>
               </section>
             ))}

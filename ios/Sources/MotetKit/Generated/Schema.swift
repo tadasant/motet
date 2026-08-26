@@ -512,16 +512,24 @@ public struct PasteRequest: Codable, Hashable, Sendable {
 /// screen. Per-queue rows are here for the operator's version of the same question; the
 /// SPA reads the aggregate, because a Phase 1 deployment runs one process over all of
 /// them (``runner all``).
+///
+/// ``now`` is here so the client never has to compare a database timestamp against a
+/// browser clock. It is a small field against a whole class of wrongness: a laptop
+/// resumed from sleep, or an unsynced VM, would otherwise report a perfectly healthy
+/// worker as gone and put a red banner over a pipeline that is running fine.
 public struct ProcessingStatusResponse: Codable, Hashable, Sendable {
+    public var now: Date
     public var queues: [QueueHeartbeatResponse]
     public var workerLastSeenAt: Date?
 
-    public init(queues: [QueueHeartbeatResponse], workerLastSeenAt: Date? = nil) {
+    public init(now: Date, queues: [QueueHeartbeatResponse], workerLastSeenAt: Date? = nil) {
+        self.now = now
         self.queues = queues
         self.workerLastSeenAt = workerLastSeenAt
     }
 
     private enum CodingKeys: String, CodingKey {
+        case now
         case queues
         case workerLastSeenAt = "worker_last_seen_at"
     }

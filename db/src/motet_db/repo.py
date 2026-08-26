@@ -713,14 +713,29 @@ def record_worker_heartbeat(conn: psycopg.Connection[Any], queue: str) -> None:
         )
 
 
-def worker_heartbeats(conn: psycopg.Connection[Any]) -> list[WorkerHeartbeat]:
-    """Every queue a worker has ever been seen on, most recently seen first."""
+def worker_heartbeats(
+    conn: psycopg.Connection[Any],
+) -> tuple[datetime, list[WorkerHeartbeat]]:
+    """The database's clock, and every queue a worker has been seen on, newest first.
+
+    The clock comes back with the rows, from the same statement, because the only thing a
+    caller does with these timestamps is subtract them from *now* — and a browser doing
+    that against its own clock is one resumed laptop away from reporting a healthy worker
+    as gone. One query rather than two so the pair cannot drift between them.
+    """
     rows = _all(
         conn,
-        "SELECT queue, last_seen_at FROM worker_heartbeats ORDER BY last_seen_at DESC, queue",
+        """
+        SELECT now() AS now, queue, last_seen_at
+        FROM worker_heartbeats
+        ORDER BY last_seen_at DESC, queue
+        """,
         (),
     )
-    return [WorkerHeartbeat(queue=row["queue"], last_seen_at=row["last_seen_at"]) for row in rows]
+    beats = [WorkerHeartbeat(queue=row["queue"], last_seen_at=row["last_seen_at"]) for row in rows]
+    # An empty table returns no rows and therefore no clock, which is the case that has to
+    # answer "no worker has ever run" — so the clock is asked for separately only then.
+    return (rows[0]["now"] if rows else _now(conn)), beats
 
 
 # --- row plumbing ------------------------------------------------------------------

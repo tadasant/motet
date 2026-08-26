@@ -225,16 +225,22 @@ class TestWorkerHeartbeats:
     def test_a_heartbeat_is_written_once_per_queue_and_then_moves(
         self, db: psycopg.Connection[Any]
     ) -> None:
-        assert repo.worker_heartbeats(db) == []
+        now, beats = repo.worker_heartbeats(db)
+        assert beats == []
+        # The clock comes back even with no rows: "no worker has ever run" is the case
+        # that most needs a `now` to age the answer against.
+        assert now is not None
 
         repo.record_worker_heartbeat(db, "integrate")
-        (first,) = repo.worker_heartbeats(db)
+        _, (first,) = repo.worker_heartbeats(db)
 
         repo.record_worker_heartbeat(db, "integrate")
-        (second,) = repo.worker_heartbeats(db)
+        server_now, (second,) = repo.worker_heartbeats(db)
 
         assert second.queue == "integrate"
         assert second.last_seen_at >= first.last_seen_at
+        # The clock is the database's, and it is at or after the heartbeat it wrote.
+        assert server_now >= second.last_seen_at
 
     def test_queues_come_back_most_recently_seen_first(self, db: psycopg.Connection[Any]) -> None:
         """So the newest is `[0]`, which is what "when did any worker last run" reads."""
@@ -243,4 +249,4 @@ class TestWorkerHeartbeats:
         repo.record_worker_heartbeat(db, "integrate")
         db.commit()
 
-        assert [beat.queue for beat in repo.worker_heartbeats(db)] == ["integrate", "tts"]
+        assert [beat.queue for beat in repo.worker_heartbeats(db)[1]] == ["integrate", "tts"]

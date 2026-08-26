@@ -644,8 +644,9 @@ def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
     set of workers behind it; when there are many, the queues are still shared and this
     answer is still the same one.
     """
-    beats = repo.worker_heartbeats(conn)
+    now, beats = repo.worker_heartbeats(conn)
     return ProcessingStatusResponse(
+        now=now,
         worker_last_seen_at=beats[0].last_seen_at if beats else None,
         queues=[
             QueueHeartbeatResponse(queue=beat.queue, last_seen_at=beat.last_seen_at)

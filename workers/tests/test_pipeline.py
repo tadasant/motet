@@ -593,18 +593,18 @@ class TestNothingDrainsTheQueue:
         Nothing in the `jobs` table distinguishes them, which is why a queued item looked
         identical whether it was about to move or never would.
         """
-        assert repo.worker_heartbeats(db) == []
+        assert repo.worker_heartbeats(db)[1] == []
 
         drain(Queue.INTEGRATE, _migrated)
 
-        beats = repo.worker_heartbeats(db)
+        _, beats = repo.worker_heartbeats(db)
         assert [beat.queue for beat in beats] == ["integrate"]
 
     def test_polling_over_everything_heartbeats_every_queue(
         self, db: psycopg.Connection[Any], _migrated: str
     ) -> None:
         assert runner.main(["all"]) == 0
-        assert {beat.queue for beat in repo.worker_heartbeats(db)} == {q.value for q in Queue}
+        assert {beat.queue for beat in repo.worker_heartbeats(db)[1]} == {q.value for q in Queue}
 
     def test_the_llm_client_is_built_once_for_the_process_not_once_per_drain(
         self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
@@ -705,6 +705,19 @@ class TestIdenticalTitles:
         # answering a different question when it wrote that title.
         assert items[0].title == "Canada announces $20bn retaliatory tariffs"
 
+    def test_an_empty_title_matches_nothing(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """Two items that both failed to get a title are not evidence of anything."""
+        from motet_workers.handlers import _merge_target
+
+        class Stored:
+            id = "ni_blank"
+            title = "   "
+
+        result = _stub_result(title="")
+        assert _merge_target(result, [Stored()])[0] is None  # type: ignore[list-item]
+
     def test_a_genuinely_new_story_is_still_new(
         self, db: psycopg.Connection[Any], _migrated: str
     ) -> None:
@@ -723,3 +736,13 @@ def _stages_with(integrator: Any) -> Any:
     from motet_inference import get_stages
 
     return replace(get_stages(), integrator=integrator)
+
+
+def _stub_result(*, title: str) -> Any:
+    """An integrator answer that says "new", carrying whatever title the case needs."""
+    from motet_inference import IntegrationResult, NewsItem
+
+    return IntegrationResult(
+        news_item=NewsItem(id="ni_proposed", title=title, summary="s", source_item_ids=("si_1",)),
+        merged=False,
+    )
