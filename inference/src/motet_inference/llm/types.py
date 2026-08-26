@@ -65,9 +65,22 @@ class LlmBudgetExhaustedError(LlmTransportError):
     ceiling, spent all 8,000 tokens reasoning, returned no verdict at all, and then did it
     again on every retry until the episode gave up.
 
-    It subclasses :class:`LlmTransportError` deliberately: a caller with nothing smaller
-    to try keeps the behaviour it already had.
+    It subclasses :class:`LlmTransportError` so that a caller which knows nothing about
+    it still behaves as it did. The worker loop *does* know about it, and turns it into a
+    permanent failure rather than a retry — for a stage that cannot subdivide its work
+    (dedup, script) the ladder would buy five identical billed failures and a longer wait
+    before the error is visible.
+
+    It carries the ``usage`` the failed call was billed for, because that call happened
+    and was charged for: a stage that catches this still has to record what it spent, or
+    the most expensive completions in the system would be the ones no metric ever sees
+    (motet#24).
     """
+
+    def __init__(self, message: str, *, usage: Usage | None = None, model: str = "") -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.model = model
 
 
 class ReasoningNotAppliedError(LlmError):

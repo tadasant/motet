@@ -162,8 +162,9 @@ def test_a_nineteen_item_backlog_scripts_grounds_and_renders(
 ) -> None:
     """The journey that produced no audio: paste a morning's reading, get an episode.
 
-    Every assertion below held before the fix except the ones about grounding: the script
-    stage wrote its script, and then the gate could not return a single verdict.
+    Everything up to the gate worked on staging — the paste, the dedup, the assembly, the
+    script — and then the gate could not return a single verdict, so nothing downstream of
+    it ever ran.
     """
     for index in range(BACKLOG):
         title, text = newsletter(index)
@@ -238,9 +239,12 @@ def test_a_claim_the_gate_cannot_afford_costs_that_claim_and_not_the_episode(
 
     episode = repo.get_episode(db, episode_id)
     assert episode is not None
-    # Not rendering — nothing was grounded, so nothing may be spoken — but the failure is
-    # a reported one rather than a retry loop, and it named every claim it could not
-    # judge rather than dying inside the model call.
-    assert episode.state is not EpisodeState.RENDERING
+    # Not rendering — nothing was grounded, so nothing may be spoken. What *did* change is
+    # that this is a reported failure rather than a retry loop: `scripting` with a null
+    # error, burning attempts, is precisely the state motet#42 left the episode in.
+    assert episode.state is EpisodeState.FAILED
+    assert episode.last_error is not None
+    assert "survived grounding validation" in episode.last_error
+    assert "ran out of token budget" in episode.last_error
     assert model.grounding_calls  # it kept halving instead of giving up on the first call
     assert min(model.grounding_calls) == 1

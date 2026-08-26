@@ -44,6 +44,7 @@ from typing import Any
 import psycopg
 from motet_db import repo
 from motet_inference import get_stages
+from motet_inference.llm import LlmBudgetExhaustedError
 from motet_storage import build_store
 from opentelemetry import metrics, trace
 from opentelemetry.trace import Status, StatusCode
@@ -180,6 +181,17 @@ def _execute(
     try:
         with conn.transaction():
             handler(context, job.payload)
+    except LlmBudgetExhaustedError as exc:
+        # A stage that can subdivide its work has already caught this and sent less
+        # (grounding does, motet#42). Reaching here means the stage cannot, and the same
+        # request would spend the same budget on every attempt — so the ladder buys five
+        # identical billed failures and delays the error a user needs to see.
+        message = f"{type(exc).__name__}: {exc}"
+        logger.exception("job %d on %s ran out of token budget", job.id, job.queue.value)
+        with conn.transaction():
+            jobs.fail(conn, job, message, max_attempts=0)
+            _record_failure(conn, job, recorders, message)
+        return "failed_permanently"
     except PermanentFailure as exc:
         # Retrying cannot help, so skip the backoff ladder entirely and surface it now.
         message = f"{type(exc).__name__}: {exc}"

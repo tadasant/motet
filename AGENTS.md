@@ -698,8 +698,11 @@ constant is a backlog size beyond which the stage cannot complete. Raising it mo
 size; it does not remove it. So the bound moved onto the work instead: claims are chunked
 (`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because eight paragraph-sized
 evidence spans are not the same ask as eight short ones) and each call's ceiling is
-`grounding_max_tokens(n)` — flat reasoning headroom plus a per-claim allowance for the
-answer. The number of calls grows with the episode; the size of each one does not.
+`grounding_max_tokens(n)` — a flat term for reading the instructions plus a **per-claim**
+term covering both the verdict and the thinking that produces it. Per-claim rather than
+flat because that is what the staging numbers say: 8,000 reasoning tokens over twelve
+claims, and *cut off*, so ≥660 a claim is a floor and the real figure is unknown. The
+number of calls grows with the episode; the size of each one does not.
 
 Three things fall out of that, and none of them is decoration:
 
@@ -707,18 +710,31 @@ Three things fall out of that, and none of them is decoration:
   batching argument — do not multiply the most expensive stage in the pipeline by the
   length of an episode — survives intact. Chunk size is what trades calls against risk.
 - **A chunk that still exhausts is halved, and a claim that exhausts on its own fails
-  closed.** The floor matters more than the ceiling here: an unjudged claim is a *failure*,
-  exactly as a missing verdict already was, so it is dropped rather than spoken.
-  `handle_script` then ships what survived — an episode a story short instead of no episode
-  at all, which is what motet#42 actually cost. It records itself as
+  closed.** Both terms of the ceiling are estimates against one truncated observation, so
+  the halving is the part that has to be right: it is what makes a wrong estimate cost a
+  retry rather than an episode. The floor matters more than the ceiling — an unjudged claim
+  is a *failure*, exactly as a missing verdict already was, so it is dropped rather than
+  spoken. `handle_script` then ships what survived — an episode a story short instead of no
+  episode at all, which is what motet#42 actually cost. It records itself as
   `motet.grounding.claims_dropped{reason="budget_exhausted"}`, the one drop reason that
   means nobody judged the claim rather than that the gate judged it.
+- **Halving costs calls, so it is instrumented rather than merely logged.** A chunk that
+  never fits costs up to `2n-1` calls at the most expensive effort in the system, and the
+  claim-drop counter only fires at the *floor* — so without a second instrument "the chunk
+  size no longer suits the model" would be invisible until claims started disappearing,
+  which is the never-infer-"no errors"-from-"no data" trap one section up wearing a new
+  hat. `motet.llm.budget_exhausted{stage,model}` counts every exhausted call, and the
+  tokens it burned still land in `motet.llm.tokens`: billed and useless is still billed.
 - **`LlmBudgetExhaustedError` is its own error because it is the one transport failure
   worth *not* retrying.** The same request spends the same budget every time, so the
-  caller that can send less work should, and the job-queue retry ladder buys nothing. A
-  truncated answer under a JSON schema raises it too: half a document parses no better than
-  none, and the old path surfaced that as malformed JSON — pointing at the model's spelling
-  rather than at the ceiling that cut it off.
+  caller that can send less work should, and for a stage that *cannot* subdivide — dedup,
+  script — the worker loop fails the job permanently rather than buying five identical
+  billed failures. A truncated answer under a JSON schema raises it too: half a document
+  parses no better than none, and the old path surfaced that as malformed JSON — pointing
+  at the model's spelling rather than at the ceiling that cut it off. It is raised **only**
+  on `finish_reason='length'`: an empty answer for any other reason is not deterministic,
+  is worth its retry, and calling it a budget failure would tell the validator to send less
+  work until it had dropped every claim in the chunk.
 
 **The effort stays at `max`, and that is a decision rather than an oversight.** Grounding is
 where invariant 3 lives; the failure was the *shape* of the request rather than the depth

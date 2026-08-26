@@ -506,6 +506,14 @@ def a_backlog(news_items: int, claims_each: int = 3) -> tuple[Script, dict[str, 
     return Script(segments=tuple(segments)), sources
 
 
+def _claims_per_call(client: BudgetBoundClient) -> list[int]:
+    """How many claims each call actually carried, read off the prompts it was sent."""
+    return [
+        sum(1 for line in call.messages[-1].text.splitlines() if line.startswith("CLAIM "))
+        for call in client.calls
+    ]
+
+
 class TestGroundingAtRealisticScale:
     """motet#42: the stage that could not finish an episode of nineteen news items."""
 
@@ -569,12 +577,65 @@ class TestGroundingAtRealisticScale:
         report = ClaudeGroundingValidator(client).validate(script, sources)
 
         assert report.ok, [failure.reason for failure in report.failures]
-        sizes = [
-            sum(1 for line in call.messages[-1].text.splitlines() if line.startswith("CLAIM "))
-            for call in client.calls
-        ]
+        sizes = _claims_per_call(client)
         assert max(sizes) == GROUNDING_CLAIMS_PER_CALL  # the first attempt, before halving
         assert min(sizes) <= 2  # and what it came down to
+
+    def test_long_evidence_makes_chunks_smaller_than_the_claim_bound(self) -> None:
+        """The character bound, which the claim count on its own cannot reach.
+
+        Eight paragraph-sized evidence spans are a far bigger ask than eight short ones,
+        and a count cannot tell them apart. Newsletters produce both.
+        """
+        parts = [f"Paragraph {n}. " + ("word " * 1_000) for n in range(6)]
+        source = SourceItem(id="si_long", title="Long", text="".join(parts))
+        claims, offset = [], 0
+        for part in parts:
+            claims.append(
+                Claim(
+                    text=f"A claim about {part[:11]}",
+                    span=SourceSpan("si_long", offset, offset + len(part)),
+                )
+            )
+            offset += len(part)
+        script = Script(segments=(ScriptSegment(news_item_id="ni_long", claims=tuple(claims)),))
+        client = BudgetBoundClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, {source.id: source})
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        sizes = _claims_per_call(client)
+        assert sum(sizes) == len(parts)
+        assert max(sizes) < GROUNDING_CLAIMS_PER_CALL
+
+    def test_one_claim_larger_than_the_whole_bound_is_sent_on_its_own(self) -> None:
+        """The bound is a bound on chunks, not a promise about any single claim.
+
+        A claim whose evidence is larger than the whole character budget cannot be made to
+        fit, so it goes alone rather than being dropped or looping forever.
+        """
+        huge = "word " * 4_000
+        source = SourceItem(id="si_huge", title="Huge", text=huge + "and a short tail.")
+        script = Script(
+            segments=(
+                ScriptSegment(
+                    news_item_id="ni_huge",
+                    claims=(
+                        Claim(text="the long one", span=SourceSpan("si_huge", 0, len(huge))),
+                        Claim(
+                            text="the short one",
+                            span=SourceSpan("si_huge", len(huge), len(huge) + 17),
+                        ),
+                    ),
+                ),
+            )
+        )
+        client = BudgetBoundClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, {source.id: source})
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        assert _claims_per_call(client) == [1, 1]
 
     def test_a_single_claim_that_cannot_be_judged_fails_closed(self) -> None:
         """The floor of the halving, and the one place invariant 3 could have been bent.

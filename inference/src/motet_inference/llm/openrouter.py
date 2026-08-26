@@ -71,6 +71,14 @@ from .types import (
 
 logger = logging.getLogger("motet.llm.openrouter")
 
+
+def served_model(data: dict[str, Any], request: LlmRequest) -> str:
+    """The model OpenRouter says it served, which can be more specific than what we asked
+    for (a dated snapshot). Falls back to the request."""
+    model = data.get("model")
+    return model if isinstance(model, str) else request.model
+
+
 DEFAULT_BASE_URL: Final = "https://openrouter.ai/api/v1"
 
 #: Where this provider's key is expected. Cloud Run injects it from Secret Manager under
@@ -261,26 +269,41 @@ class OpenRouterClient:
         finish_reason = finish_reason_raw if isinstance(finish_reason_raw, str) else None
 
         # Two shapes of one failure, and both are the budget running out. An **empty**
-        # completion means reasoning ate the whole ceiling before the first character of
-        # the answer -- very plausible at effort=max, and it passes the reasoning check
-        # above, so without this the caller gets "" and fails parsing it several frames
-        # away with nothing pointing back at truncation. A **partial** one under a JSON
-        # schema is no better off: a truncated document cannot parse, so however much of
-        # it arrived, none of it is usable.
+        # completion at finish_reason='length' means reasoning ate the whole ceiling
+        # before the first character of the answer -- very plausible at effort=max, and it
+        # passes the reasoning check above, so without this the caller gets "" and fails
+        # parsing it several frames away with nothing pointing back at truncation. A
+        # **partial** one under a JSON schema is no better off: a truncated document
+        # cannot parse, so however much of it arrived, none of it is usable.
         #
         # `LlmBudgetExhaustedError` rather than a bare transport error because this one is
         # deterministic -- retrying the identical request spends the identical budget --
         # so a caller that can send less work should do that instead of retrying. That is
         # what the grounding validator does (motet#42).
+        #
+        # **Both branches are gated on finish_reason, and that gate is load-bearing.** An
+        # empty answer for any *other* reason -- a content filter, a provider hiccup -- is
+        # not deterministic and is worth exactly the retry it always got. Calling it a
+        # budget failure would tell the grounding validator to send less work, which it
+        # would do all the way down to dropping every claim in the chunk.
         if not isinstance(content, str) or not content.strip():
-            raise LlmBudgetExhaustedError(
+            if finish_reason == "length":
+                raise LlmBudgetExhaustedError(
+                    "OpenRouter spent the whole budget before writing an answer "
+                    + self._budget_detail(request, usage, finish_reason),
+                    usage=usage,
+                    model=served_model(data, request),
+                )
+            raise LlmTransportError(
                 "OpenRouter returned an empty completion "
                 + self._budget_detail(request, usage, finish_reason)
             )
         if finish_reason == "length" and request.response_format is not None:
             raise LlmBudgetExhaustedError(
                 "OpenRouter truncated a schema-constrained answer, which cannot be parsed "
-                + self._budget_detail(request, usage, finish_reason)
+                + self._budget_detail(request, usage, finish_reason),
+                usage=usage,
+                model=served_model(data, request),
             )
         if finish_reason == "length":
             logger.warning(
@@ -288,12 +311,9 @@ class OpenRouterClient:
                 "incomplete, not merely short",
                 data.get("model") or request.model,
             )
-        # OpenRouter echoes the model it actually served, which can be more specific than
-        # what was asked for (a dated snapshot). Prefer it, fall back to the request.
-        served_model = data.get("model")
         response = LlmResponse(
             text=content,
-            model=served_model if isinstance(served_model, str) else request.model,
+            model=served_model(data, request),
             usage=usage,
             reasoning_applied=applied,
             finish_reason=finish_reason,

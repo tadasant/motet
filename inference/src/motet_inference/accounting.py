@@ -39,7 +39,7 @@ from typing import Final
 
 from opentelemetry import metrics
 
-from .llm import LlmResponse, LlmStage, Usage
+from .llm import LlmBudgetExhaustedError, LlmResponse, LlmStage, Usage
 
 __all__ = [
     "Ledger",
@@ -47,6 +47,7 @@ __all__ = [
     "classify_grounding_reason",
     "collect_usage",
     "describe_usage",
+    "record_budget_exhausted",
     "record_grounding",
     "record_script_drop",
     "record_tts_characters",
@@ -74,6 +75,15 @@ _requests = _meter.create_counter(
     "motet.llm.requests",
     unit="{request}",
     description="Completions made, by stage and model.",
+)
+_budget_exhausted = _meter.create_counter(
+    "motet.llm.budget_exhausted",
+    unit="{request}",
+    description=(
+        "Completions that hit max_output_tokens before finishing an answer, by stage and "
+        "model. On grounding this is also the chunk-amplification signal: each one is a "
+        "chunk that will be split and re-sent, so it rises before any claim is dropped."
+    ),
 )
 _characters = _meter.create_counter(
     "motet.tts.characters",
@@ -180,8 +190,34 @@ def record_usage(stage: LlmStage, response: LlmResponse) -> None:
     does not carry one — a request knows its model, which is already decided by the time it
     exists.
     """
-    usage = response.usage
-    attributes = {"stage": stage.value, "model": response.model}
+    _record(stage, response.model, response.usage)
+
+
+def record_budget_exhausted(stage: LlmStage, error: LlmBudgetExhaustedError) -> None:
+    """Count a completion that was billed and produced nothing usable.
+
+    **The bill does not care that the answer was unusable.** A call that spends its whole
+    ceiling on reasoning is the most expensive kind there is, so leaving it out of
+    ``motet.llm.tokens`` would mean the costliest completions in the system are the ones no
+    metric ever sees — motet#24's defect, on the one path where it costs the most.
+
+    ``motet.llm.budget_exhausted`` is the separate question: *how often does a call not fit
+    its ceiling?* On the grounding stage that is also the amplification signal, because
+    every one of these is a chunk about to be split and re-sent. A rate that stops being
+    ~0 says the chunk size no longer fits the model — and it says so **before** claims
+    start being dropped, which is the only warning that arrives while nothing is yet wrong.
+    """
+    model = error.model or "unknown"
+    _budget_exhausted.add(1, {"stage": stage.value, "model": model})
+    logger.warning(
+        "llm %s on %s spent its budget without producing an answer: %s", stage.value, model, error
+    )
+    if error.usage is not None:
+        _record(stage, model, error.usage)
+
+
+def _record(stage: LlmStage, model: str, usage: Usage) -> None:
+    attributes = {"stage": stage.value, "model": model}
     _requests.add(1, attributes)
     for kind, value in (
         ("input", usage.input_tokens),
@@ -193,11 +229,11 @@ def record_usage(stage: LlmStage, response: LlmResponse) -> None:
         if value:
             _tokens.add(value, {**attributes, "kind": kind})
 
-    logger.info("llm %s on %s: %s", stage.value, response.model, describe_usage(usage))
+    logger.info("llm %s on %s: %s", stage.value, model, describe_usage(usage))
 
     ledger = _ledger.get()
     if ledger is not None:
-        ledger.entries.append(StageUsage(stage=stage, model=response.model, usage=usage))
+        ledger.entries.append(StageUsage(stage=stage, model=model, usage=usage))
 
 
 def record_tts_characters(count: int) -> None:

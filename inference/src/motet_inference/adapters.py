@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from .accounting import record_script_drop, record_usage
+from .accounting import record_budget_exhausted, record_script_drop, record_usage
 from .cartesia import CartesiaSpeechSynthesizer
 from .interfaces import IntegrationResult
 from .llm import LlmBudgetExhaustedError, LlmClient, LlmStage, build_client, build_request
@@ -88,14 +88,16 @@ GROUNDING_CLAIMS_PER_CALL = 8
 #: rather than with the count.
 GROUNDING_CHARS_PER_CALL = 12_000
 
-#: Room for the answer: one verdict is an index, a boolean, and one short sentence.
-GROUNDING_TOKENS_PER_CLAIM = 250
+#: Per claim: one verdict — an index, a boolean and one short sentence — plus the thinking
+#: that produces it. Staging spent **at least** 660 reasoning tokens a claim before it was
+#: cut off, and "at least" is as much as that observation supports: the call ran out, so
+#: what it actually needed is unknown. This is that floor with room above it.
+GROUNDING_TOKENS_PER_CLAIM = 1_000
 
-#: Room to think before the first verdict is written. Grounding runs at the deepest effort
-#: in the system on purpose (invariant 3), so the headroom is what stops thinking and
-#: answering from competing for the same tokens -- which is what produced an 8,000-token
-#: response containing 8,000 reasoning tokens and no verdicts at all.
-GROUNDING_REASONING_HEADROOM = 8_000
+#: The part of the budget that is not per claim: reading the instructions and settling into
+#: the task. Flat because it does not repeat per claim — unlike the term above, which is
+#: what the first draft of this fix got wrong by making the whole allowance flat.
+GROUNDING_REASONING_HEADROOM = 6_000
 
 #: What a claim's failure says when the validator could not get a verdict out of the model
 #: within its budget. Prefix-matched by ``accounting.classify_grounding_reason``, so keep
@@ -106,9 +108,10 @@ GROUNDING_BUDGET_REASON = "grounding validation ran out of token budget for this
 def grounding_max_tokens(claims: int) -> int:
     """The output ceiling for a grounding call judging ``claims`` claims.
 
-    A function rather than a constant because the required output is a function of the
-    work. The headroom is flat: it is thinking depth, which does not care how many claims
-    are in front of it, and the per-claim term is the answer itself.
+    A function rather than a constant because the work is a function of the claim count and
+    a constant is not. Both terms are estimates against a single truncated observation, so
+    the halving in :meth:`ClaudeGroundingValidator._judge` is the part that has to be
+    right: it is what makes a wrong estimate cost a retry instead of an episode.
     """
     return GROUNDING_REASONING_HEADROOM + GROUNDING_TOKENS_PER_CLAIM * claims
 
@@ -387,6 +390,10 @@ class ClaudeGroundingValidator:
         try:
             verdicts = self._ask(chunk)
         except LlmBudgetExhaustedError as exc:
+            # Billed and useless is still billed, and this is the most expensive call
+            # shape in the system. Counting it here is also what makes an under-sized
+            # chunk visible while it is still only costing money.
+            record_budget_exhausted(self.stage, exc)
             if len(chunk) == 1:
                 logger.warning(
                     "grounding could not judge a claim on %s within its budget; "
