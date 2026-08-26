@@ -58,6 +58,9 @@ TABLES = (
     "oauth_states",
     "highlights",
     "auth_sessions",
+    # Not user data: one row per queue saying a worker was there. Truncated all the same,
+    # so a test that drains a queue cannot make a later test think one is running.
+    "worker_heartbeats",
 )
 
 #: Sources a test connected, without disturbing the seeded paste source. Cascades to that

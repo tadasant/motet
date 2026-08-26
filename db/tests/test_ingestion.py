@@ -213,3 +213,40 @@ def test_the_expression_index_covers_the_job_lookup(db: psycopg.Connection[Any])
         (item_id,),
     ).fetchall()
     assert any("jobs_source_item_idx" in str(row) for row in plan), plan
+
+
+class TestWorkerHeartbeats:
+    """Is anything draining the queue? — the fact motet#38 turned on.
+
+    Nothing in `jobs` distinguishes an idle queue with a worker on it from an idle queue
+    with none, which is why a stalled paste and a busy one looked identical.
+    """
+
+    def test_a_heartbeat_is_written_once_per_queue_and_then_moves(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        now, beats = repo.worker_heartbeats(db)
+        assert beats == []
+        # The clock comes back even with no rows: "no worker has ever run" is the case
+        # that most needs a `now` to age the answer against.
+        assert now is not None
+
+        repo.record_worker_heartbeat(db, "integrate")
+        _, (first,) = repo.worker_heartbeats(db)
+
+        repo.record_worker_heartbeat(db, "integrate")
+        server_now, (second,) = repo.worker_heartbeats(db)
+
+        assert second.queue == "integrate"
+        assert second.last_seen_at >= first.last_seen_at
+        # The clock is the database's, and it is at or after the heartbeat it wrote.
+        assert server_now >= second.last_seen_at
+
+    def test_queues_come_back_most_recently_seen_first(self, db: psycopg.Connection[Any]) -> None:
+        """So the newest is `[0]`, which is what "when did any worker last run" reads."""
+        repo.record_worker_heartbeat(db, "tts")
+        db.commit()
+        repo.record_worker_heartbeat(db, "integrate")
+        db.commit()
+
+        assert [beat.queue for beat in repo.worker_heartbeats(db)[1]] == ["integrate", "tts"]

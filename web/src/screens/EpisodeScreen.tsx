@@ -10,10 +10,11 @@
 
 import { useEffect, useState } from 'react'
 
-import { ApiError, type Episode, type FeedInfo, api } from '../api/client'
+import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api } from '../api/client'
+import { ago, serverNow, workerState } from './Processing'
 
-/** States a client should keep polling through. */
-const IN_PROGRESS = new Set(['pending', 'scripting', 'rendering'])
+/** States a client should keep polling through. Exported: the app polls on it too. */
+export const IN_PROGRESS = new Set(['pending', 'scripting', 'rendering'])
 
 const POLL_INTERVAL_MS = 2000
 
@@ -26,13 +27,20 @@ function formatDuration(ms: number): string {
 
 export function EpisodeScreen({
   episode,
+  episodes,
+  processing,
   onEpisodeChanged,
+  onSelectEpisode,
   onBacklogChanged,
 }: {
   episode: Episode
+  episodes: Episode[]
+  processing: ProcessingStatus | null
   onEpisodeChanged: (episode: Episode) => void
+  onSelectEpisode: (episode: Episode) => void
   onBacklogChanged: () => void
 }) {
+  const worker = workerState(processing)
   const [feed, setFeed] = useState<FeedInfo | null>(null)
   const [error, setError] = useState('')
   const [listened, setListened] = useState<number | null>(null)
@@ -73,11 +81,28 @@ export function EpisodeScreen({
         {episode.state === 'ready' && ` · ${formatDuration(episode.duration_ms)}`}
       </p>
 
-      {IN_PROGRESS.has(episode.state) && (
-        <p className="hint" role="status">
-          Working… assembly, script, grounding validation, then audio. This page polls.
-        </p>
-      )}
+      {IN_PROGRESS.has(episode.state) &&
+        (worker === 'running' || worker === 'unknown' || episode.state !== 'pending' ? (
+          <p className="hint" role="status">
+            Working… assembly, script, grounding validation, then audio. This page polls.
+          </p>
+        ) : (
+          // The same lie the Processing panel used to tell, one stage later and more
+          // expensive: an episode that reached `pending` and has no worker behind it is
+          // not working, and "this page polls" invites somebody to sit and watch it.
+          //
+          // Only in `pending`, which is the state nothing has touched yet. Past it a
+          // worker demonstrably reached this episode, and a long TTS render is exactly
+          // the job that can outlast the heartbeat's freshness window — so the banner
+          // would be accusing a worker that is at that moment paying Cartesia.
+          <p className="stalled" role="status">
+            Not moving: nothing is draining the queues
+            {processing?.worker_last_seen_at
+              ? ` — a worker last ran ${ago(processing.worker_last_seen_at, serverNow(processing))}`
+              : ' — no worker has ever run here'}
+            . Assembly, script and audio all wait on one.
+          </p>
+        ))}
       {episode.state === 'failed' && (
         <p className="error" role="alert">
           {episode.last_error ?? 'This episode failed.'}
@@ -100,6 +125,26 @@ export function EpisodeScreen({
             </span>
           )}
         </div>
+      )}
+
+      {/* Every episode there is, so the one you made yesterday is reachable. Before
+          motet#44 this screen only ever knew about an episode opened in this page's
+          lifetime, which meant a reload lost a finished one for good. */}
+      {episodes.length > 1 && (
+        <p className="hint">
+          Other episodes:{' '}
+          {episodes
+            .filter((entry) => entry.id !== episode.id)
+            .map((entry, index) => (
+              <span key={entry.id}>
+                {index > 0 && ' · '}
+                <button type="button" className="linkish" onClick={() => onSelectEpisode(entry)}>
+                  {entry.title}
+                </button>{' '}
+                <span className="hint">({entry.state})</span>
+              </span>
+            ))}
+        </p>
       )}
 
       {feed && episode.state === 'ready' && (

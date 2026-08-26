@@ -88,13 +88,29 @@ const GMAIL_SOURCE: Source = {
   created_at: '2026-08-24T00:00:00Z',
 }
 
-/** Route a fake fetch by URL, so a test asserts on what the SPA actually requested. */
+/**
+ * Route a fake fetch by URL, so a test asserts on what the SPA actually requested.
+ *
+ * A key may be prefixed with a method — `'GET /v1/episodes'` — and those are matched
+ * first, and **exactly**. `/v1/episodes` is the one path where GET and POST mean
+ * genuinely different things: the list, and making a new one. Without the distinction the
+ * list route served a single episode object, which typechecks nowhere and is not what the
+ * API does — and without the *exact* match, `GET /v1/episodes/ep_1` would be served the
+ * list, so the polling path the episode screen runs on would be tested against a shape it
+ * never sees.
+ */
 function mockApi(overrides: Record<string, unknown> = {}) {
   const calls: { url: string; method: string; body: unknown }[] = []
   const routes: Record<string, unknown> = {
     '/v1/news-items': [NEWS_ITEM],
     '/v1/ingestion': [],
+    '/v1/processing': {
+      now: '2026-08-24T00:00:10Z',
+      worker_last_seen_at: null,
+      queues: [],
+    },
     '/v1/feed': { url: 'https://example.test/feed.xml?token=secret', token: 'secret' },
+    'GET /v1/episodes': [EPISODE],
     '/v1/episodes': EPISODE,
     '/v1/sources': [GMAIL_SOURCE],
     '/v1/auth/session': SESSION,
@@ -107,14 +123,19 @@ function mockApi(overrides: Record<string, unknown> = {}) {
   }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
+    const method = init?.method ?? 'GET'
     calls.push({
       url,
-      method: init?.method ?? 'GET',
+      method,
       body: init?.body ? JSON.parse(String(init.body)) : undefined,
     })
-    const key = Object.keys(routes)
-      .sort((a, b) => b.length - a.length)
-      .find((route) => url.startsWith(route))
+    const longestFirst = (names: string[]) => names.sort((a, b) => b.length - a.length)
+    const names = Object.keys(routes)
+    const key =
+      names.filter((route) => route.includes(' ')).find((route) => `${method} ${url}` === route) ??
+      longestFirst(names.filter((route) => !route.includes(' '))).find((route) =>
+        url.startsWith(route),
+      )
     return {
       ok: key !== undefined,
       status: key === undefined ? 404 : 200,
@@ -316,6 +337,73 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Episode' })).toBeDefined()
     const created = calls.find((call) => call.method === 'POST' && call.url.endsWith('/v1/episodes'))
     expect(created?.body).toMatchObject({ max_duration_ms: 20 * 60_000 })
+  })
+
+  it('finds the episode you already have, without anyone opening it first', async () => {
+    // motet#44. Nothing loaded episode state on mount, so a reload — the realistic thing
+    // to do while a multi-minute pipeline runs — emptied the tab and left a finished
+    // episode reachable only through the RSS feed. This test is a fresh page load: no
+    // backlog visit, no "Make an episode", straight to the tab.
+    mockApi()
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+
+    expect(await screen.findByText(/Morning briefing/)).toBeDefined()
+    expect(screen.queryByText('Make one from the backlog.')).toBeNull()
+  })
+
+  it('says so when there is genuinely no episode, and not before it has looked', async () => {
+    mockApi({ 'GET /v1/episodes': [] })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+
+    expect(await screen.findByText('Make one from the backlog.')).toBeDefined()
+  })
+
+  it('does not report a failed episode fetch as having no episodes', async () => {
+    // The same distinction the ingestion panel keeps: "you have none" and "I could not
+    // find out" are different claims, and the second one wearing the first one's clothes
+    // is exactly the disappearance motet#44 is about.
+    mockApi({ 'GET /v1/episodes': undefined, '/v1/episodes': undefined })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+
+    expect(await screen.findByText(/Could not load your episodes/)).toBeDefined()
+    expect(screen.queryByText('Make one from the backlog.')).toBeNull()
+  })
+
+  it('keeps asking whether a worker is running while an episode is mid-pipeline', async () => {
+    // `processing` is fetched by the backlog refresh, which used to stop the moment
+    // nothing was pending in ingestion. On a reload during a render that is immediately,
+    // so the episode screen's banner would be computed from a heartbeat frozen at mount
+    // and would turn red on its own a few minutes later.
+    const pending = { ...EPISODE, state: 'rendering', segments: [] }
+    const calls = mockApi({ 'GET /v1/episodes': [pending], '/v1/episodes': pending })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    await screen.findByText(/Working…/)
+
+    const before = calls.filter((call) => call.url.startsWith('/v1/processing')).length
+    await waitFor(
+      () =>
+        expect(
+          calls.filter((call) => call.url.startsWith('/v1/processing')).length,
+        ).toBeGreaterThan(before),
+      { timeout: 6000 },
+    )
+  })
+
+  it('offers every other episode, so the second-newest is reachable too', async () => {
+    const older = { ...EPISODE, id: 'ep_0', title: 'Yesterday briefing' }
+    mockApi({ 'GET /v1/episodes': [EPISODE, older] })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    await screen.findByText(/Morning briefing/)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Yesterday briefing' }))
+    // The heading line, not the picker entry it was chosen from: `strong` is the title
+    // of the episode on screen, and the picker only ever lists the *other* ones.
+    expect(await screen.findByText('Yesterday briefing', { selector: 'strong' })).toBeDefined()
   })
 
   it('shows every claim beside the source span it cites', async () => {

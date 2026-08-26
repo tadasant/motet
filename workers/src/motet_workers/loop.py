@@ -1,8 +1,18 @@
 """The worker loop — claim jobs off one queue, run them, record how each went.
 
-A worker takes a queue name, drains it, and exits. It is never a long-lived server,
-because Cloud Run jobs are how the pipeline stages are scheduled — and because a process
-that exits cannot leak a connection, a lock, or a half-finished transaction across runs.
+A worker takes a queue name and drains it. **There are two shapes and both are real
+deployments**: a Cloud Run job calls this once and exits, and ``runner all --poll-seconds``
+calls it in a loop forever. The job shape came first and for a long time was the only one,
+which is motet#38 — a job has to be *started*, and the only thing that started one was a
+human dispatching a workflow.
+
+The connection is opened and closed **per call**, and that stays true in the poll loop even
+though the stages and the object store are now hoisted out of it (see :func:`drain`). The
+two are not the same trade: an ``LlmClient`` per pass throws away OpenRouter's sticky
+routing and with it the dedup prompt cache, while a connection per pass costs a handshake
+and buys a poll loop that heals itself when Postgres drops one — a process that exits
+cannot leak a connection, a lock, or a half-finished transaction across runs, and a pass
+that ends is the same guarantee at a smaller scale.
 
 **This is the importable half; the entry point is ``motet_workers.runner``**, and the two
 are separate modules on purpose. The package's ``__init__`` re-exports :func:`drain`, so
@@ -43,9 +53,9 @@ from typing import Any
 
 import psycopg
 from motet_db import repo
-from motet_inference import get_stages
+from motet_inference import Stages, get_stages
 from motet_inference.llm import LlmBudgetExhaustedError
-from motet_storage import build_store
+from motet_storage import ObjectStore, build_store
 from opentelemetry import metrics, trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -81,13 +91,32 @@ _job_duration = _meter.create_histogram(
 MAX_JOBS_PER_RUN = 500
 
 
-def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) -> int:
-    """Claim and run every ready job on ``queue``. Returns the number processed."""
+def drain(
+    queue: Queue,
+    database_url: str,
+    *,
+    max_jobs: int = MAX_JOBS_PER_RUN,
+    stages: Stages | None = None,
+    store: ObjectStore | None = None,
+) -> int:
+    """Claim and run every ready job on ``queue``. Returns the number processed.
+
+    **A long-lived worker passes ``stages`` and ``store`` in, and that is not an
+    optimisation.** Resolving them here is right for a Cloud Run job, which drains once
+    and exits — but ``runner all --poll-seconds N`` calls this several times a second, and
+    ``real_stages()`` mints a fresh ``LlmClient`` every time it is called. OpenRouter's
+    sticky upstream routing is *per client*, and that routing is what keeps the dedup
+    prompt cache warm — the largest LLM cost lever in the system (see AGENTS.md). A client
+    per pass would throw the cache away on every sweep and leak a connection pool doing it.
+
+    They stay optional so that a one-shot drain, and every test that calls this, needs to
+    know none of it.
+    """
     handler = HANDLERS.get(queue)
     if handler is None:
         raise ValueError(f"queue {queue.value!r} has no handler registered")
-    stages = get_stages()
-    store = build_store()
+    stages = get_stages() if stages is None else stages
+    store = build_store() if store is None else store
     recorders = failure_recorders()
     processed = 0
 
@@ -99,6 +128,22 @@ def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) 
     ):
         conn.autocommit = True
         while processed < max_jobs:
+            # Before every claim, including the one that finds nothing. "A worker is
+            # running" is what an *empty* pass proves, and it is the fact motet#38 turned
+            # on: with no heartbeat, a queue nothing is draining looks exactly like a queue
+            # that is draining fine and has nothing to do.
+            #
+            # Inside the loop rather than only above it, because a drain runs up to
+            # `MAX_JOBS_PER_RUN` jobs and a busy worker would otherwise go quiet for as
+            # long as that takes — reporting "nothing is processing" over a list of items
+            # it is at that moment processing. One upsert of one row per job, against a
+            # job that is about to call a model.
+            #
+            # What this still cannot cover is a *single* job longer than the client's
+            # freshness window; a large TTS render is the realistic one. The surfaces
+            # that read this are built so that the residual case degrades quietly rather
+            # than into a contradiction — see `web/src/screens/Processing.tsx`.
+            repo.record_worker_heartbeat(conn, queue.value)
             job = jobs.claim(conn, queue)
             if job is None:
                 break

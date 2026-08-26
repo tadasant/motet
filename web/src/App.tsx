@@ -25,6 +25,7 @@ import {
   type Episode,
   type IngestionItem,
   type NewsItem,
+  type ProcessingStatus,
   type SessionInfo,
   api,
   getToken,
@@ -32,7 +33,7 @@ import {
 } from './api/client'
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
 import { Backlog } from './screens/Backlog'
-import { EpisodeScreen } from './screens/EpisodeScreen'
+import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
 import { OAuthCallback } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
@@ -63,7 +64,25 @@ export default function App() {
   // Whether the last attempt to ask actually got an answer. Kept apart from an empty list
   // because "nothing is being processed" and "I could not find out" are different claims.
   const [ingestionUnavailable, setIngestionUnavailable] = useState(false)
+  // Whether anything is draining the queues, or null when the question could not be
+  // asked. Best-effort in exactly the way `ingestion` is, and for the same reason.
+  const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
+  // The episode on screen, and every episode there is.
+  //
+  // **Both, because `episode` alone was only ever what happened in this page's lifetime.**
+  // Nothing loaded it on mount, so a reload — the realistic thing to do while a
+  // multi-minute pipeline runs — emptied the tab and left a finished episode reachable
+  // only through the RSS feed (motet#44). The list is what makes the second-newest one
+  // reachable too, since "make an episode" is the only other way in and it always makes a
+  // new one.
   const [episode, setEpisode] = useState<Episode | null>(null)
+  const [episodes, setEpisodes] = useState<Episode[]>([])
+  // Three states, not two, for the same reason `ingestionUnavailable` exists: "you have no
+  // episodes", "I have not looked yet" and "I could not find out" are different claims,
+  // and showing the first for either of the others is the disappearance motet#44 is about
+  // wearing a different hat.
+  const [episodesLoaded, setEpisodesLoaded] = useState(false)
+  const [episodesUnavailable, setEpisodesUnavailable] = useState(false)
   const [token, setTokenState] = useState(getToken())
   const [error, setError] = useState('')
   // Read once, in an initializer, so every later render works from state rather than
@@ -102,14 +121,43 @@ export default function App() {
     // never resolves is the disappearance this panel exists to prevent, wearing a
     // different hat — so a failure clears the list and says so, which also stops the poll
     // below rather than hammering a broken route every three seconds.
-    Promise.all([api.newsItems(), api.ingestion().catch(() => null)])
-      .then(([nextItems, nextIngestion]) => {
+    Promise.all([
+      api.newsItems(),
+      api.ingestion().catch(() => null),
+      api.processing().catch(() => null),
+    ])
+      .then(([nextItems, nextIngestion, nextProcessing]) => {
         setItems(nextItems)
         setIngestion(nextIngestion ?? [])
         setIngestionUnavailable(nextIngestion === null)
+        setProcessing(nextProcessing)
         setError('')
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
+  }, [])
+
+  // The episode list, loaded once the app has a way in. Separate from `refresh` because
+  // it seeds `episode`, and seeding on every three-second poll would drag the screen back
+  // to the newest episode while somebody was reading an older one.
+  const loadEpisodes = useCallback(() => {
+    api
+      .episodes()
+      .then((list) => {
+        // Merged rather than assigned, so an episode created while this request was in
+        // flight is not dropped from the picker — `openEpisode` puts it in front, and the
+        // server's copy of the list is a moment older than that.
+        setEpisodes((current) => {
+          const known = new Set(list.map((entry) => entry.id))
+          return [...current.filter((entry) => !known.has(entry.id)), ...list]
+        })
+        // `current ?? list[0]` and never a plain assignment: this runs after a tab has
+        // possibly already been opened from the backlog, and the newest episode is a
+        // starting point rather than an override.
+        setEpisode((current) => current ?? list[0] ?? null)
+        setEpisodesUnavailable(false)
+      })
+      .catch(() => setEpisodesUnavailable(true))
+      .finally(() => setEpisodesLoaded(true))
   }, [])
 
   // Not while the callback is on screen, and not before there is a token: each has its
@@ -117,14 +165,23 @@ export default function App() {
   // error above the answer the user is actually waiting for — "GET /v1/news-items failed:
   // 401" over the top of a sign-in button being the silliest version of that.
   useEffect(() => {
-    if (!callback && (token || unlocked)) refresh()
-  }, [callback, refresh, token, unlocked])
+    if (!callback && (token || unlocked)) {
+      refresh()
+      loadEpisodes()
+    }
+  }, [callback, loadEpisodes, refresh, token, unlocked])
 
   // Poll while — and only while — something is actually in flight. Ingestion takes
   // seconds, so an item that resolves has to resolve *on screen*: a status that is only
   // correct until you look away is the same disappearance in slow motion. It stops on its
   // own the moment nothing is pending, so an idle tab makes no requests.
-  const waiting = ingestion.some((item) => item.state === 'pending')
+  // An episode mid-pipeline counts too, and not only for the badge: `processing` is
+  // fetched by `refresh`, and the episode screen's own "is anything draining the queues"
+  // banner would otherwise be computed from a heartbeat frozen at mount — going stale on
+  // its own after a few minutes and accusing a worker that is running fine.
+  const waiting =
+    ingestion.some((item) => item.state === 'pending') ||
+    (episode !== null && IN_PROGRESS.has(episode.state))
   // A stuck item gets a louder count than a busy one. "3 in flight" and "3, one of which
   // is never coming back" want different reactions. Settled items are not counted at all:
   // a badge that stays at 3 for ten minutes after everything landed means nothing.
@@ -170,8 +227,18 @@ export default function App() {
 
   const openEpisode = (next: Episode) => {
     setEpisode(next)
+    // In front, and de-duplicated: the backlog's button makes a *new* episode, so this is
+    // normally an id the list has never seen.
+    setEpisodes((list) => [next, ...list.filter((entry) => entry.id !== next.id)])
     setTab('episode')
   }
+
+  // The polling episode screen reports every state change. The list has to hear it too,
+  // or the picker keeps saying "pending" about an episode that finished ten minutes ago.
+  const episodeChanged = useCallback((next: Episode) => {
+    setEpisode(next)
+    setEpisodes((list) => list.map((entry) => (entry.id === next.id ? next : entry)))
+  }, [])
 
   const signOut = () => {
     // Fire and forget the revoke, then drop the token locally whatever the server said —
@@ -255,6 +322,7 @@ export default function App() {
               items={items}
               ingestion={ingestion}
               ingestionUnavailable={ingestionUnavailable}
+              processing={processing}
               onChanged={refresh}
               onOpenEpisode={openEpisode}
             />
@@ -263,13 +331,22 @@ export default function App() {
             (episode ? (
               <EpisodeScreen
                 episode={episode}
-                onEpisodeChanged={setEpisode}
+                episodes={episodes}
+                processing={processing}
+                onEpisodeChanged={episodeChanged}
+                onSelectEpisode={setEpisode}
                 onBacklogChanged={refresh}
               />
             ) : (
               <section aria-labelledby="episode-heading">
                 <h2 id="episode-heading">Episode</h2>
-                <p className="hint">Make one from the backlog.</p>
+                <p className="hint">
+                  {!episodesLoaded
+                    ? 'Looking for your episodes…'
+                    : episodesUnavailable
+                      ? 'Could not load your episodes. This is not the same as having none.'
+                      : 'Make one from the backlog.'}
+                </p>
               </section>
             ))}
           {tab === 'sources' && <Sources />}

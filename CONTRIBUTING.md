@@ -107,16 +107,22 @@ Nothing happens on the request thread: the API writes a row and enqueues a job, 
 worker does the work. So a local run needs both.
 
 ```bash
-uv run uvicorn motet_api:app --reload          # the API
-uv run python -m motet_workers.runner integrate  # ...and one drain per stage
-uv run python -m motet_workers.runner assemble
-uv run python -m motet_workers.runner script
-uv run python -m motet_workers.runner tts
-npm --prefix web run dev                       # the SPA
+uv run uvicorn motet_api:app --reload                 # the API
+uv run python -m motet_workers.runner all --poll-seconds 2   # ...and a worker
+npm --prefix web run dev                              # the SPA
 ```
 
-Each drain exits when its queue is empty, which is what a Cloud Run job wants. Pass
-`--poll-seconds 2` to keep one running while you work.
+`all` sweeps every queue in pipeline order on each pass, so a paste integrates and an
+episode assembles, scripts and renders without you starting anything per stage. Name a
+single queue instead (`runner integrate`) when you want one stage on its own.
+
+Without `--poll-seconds` a drain exits as soon as its queue is empty, which is what a
+Cloud Run *job* wants. **Something still has to start that job**, and for a long time
+nothing did — the SPA told the user a worker would take their paste "within a few seconds"
+while the only thing that drained the queue was a workflow dispatch in the private
+infrastructure repo (motet#38). The polling shape is the answer to that, and
+`/v1/processing` reports when a worker last ran so the SPA can say which situation a
+queued item is in rather than assuming.
 
 With `MOTET_INFERENCE_MODE=fake` (the default) none of this touches a vendor: the fakes
 produce deterministic news items, a script whose claims quote their sources verbatim, and

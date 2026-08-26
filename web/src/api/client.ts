@@ -28,6 +28,7 @@ export type PostResponse<P extends keyof paths> = paths[P] extends {
 export type HealthResponse = GetResponse<'/internal/health'>
 export type NewsItem = GetResponse<'/v1/news-items'>[number]
 export type IngestionItem = GetResponse<'/v1/ingestion'>[number]
+export type ProcessingStatus = GetResponse<'/v1/processing'>
 export type Episode = GetResponse<'/v1/episodes'>[number]
 export type EpisodeSegment = Episode['segments'][number]
 export type Claim = EpisodeSegment['claims'][number]
@@ -258,6 +259,9 @@ export const api = {
   // What has been pasted but is not a news item yet. The backlog cannot answer that:
   // an item that fails never becomes a news item, so it never appears there at all.
   ingestion: () => apiGet('/v1/ingestion'),
+  // Whether anything is draining the queues. The companion to `ingestion`, which says
+  // what is waiting and cannot say whether anything is coming for it (motet#38).
+  processing: () => apiGet('/v1/processing'),
   episodes: () => apiGet('/v1/episodes'),
   feed: () => apiGet('/v1/feed'),
   paste: (title: string, text: string) => apiPost('/v1/sources/paste', { title, text }),

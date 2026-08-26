@@ -681,6 +681,63 @@ def user_for_feed_token(conn: psycopg.Connection[Any], token: str) -> str | None
     return row["user_id"] if row else None
 
 
+# --- worker heartbeats -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WorkerHeartbeat:
+    """When a worker last ran a drain pass over one queue."""
+
+    queue: str
+    last_seen_at: datetime
+
+
+def record_worker_heartbeat(conn: psycopg.Connection[Any], queue: str) -> None:
+    """Say that a worker is draining ``queue``, now.
+
+    Written at the top of every pass, whether or not the pass finds work: an idle queue
+    with a worker on it and an idle queue with nothing on it are the two states motet#38
+    is about, and they are indistinguishable from the jobs table alone.
+
+    The database's clock, for the same reason :func:`_now` uses it — a worker and the API
+    are different machines, and a heartbeat "from the future" would read as fresh forever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO worker_heartbeats (queue, last_seen_at)
+            VALUES (%s, now())
+            ON CONFLICT (queue) DO UPDATE SET last_seen_at = excluded.last_seen_at
+            """,
+            (queue,),
+        )
+
+
+def worker_heartbeats(
+    conn: psycopg.Connection[Any],
+) -> tuple[datetime, list[WorkerHeartbeat]]:
+    """The database's clock, and every queue a worker has been seen on, newest first.
+
+    The clock comes back with the rows, from the same statement, because the only thing a
+    caller does with these timestamps is subtract them from *now* — and a browser doing
+    that against its own clock is one resumed laptop away from reporting a healthy worker
+    as gone. One query rather than two so the pair cannot drift between them.
+    """
+    rows = _all(
+        conn,
+        """
+        SELECT now() AS now, queue, last_seen_at
+        FROM worker_heartbeats
+        ORDER BY last_seen_at DESC, queue
+        """,
+        (),
+    )
+    beats = [WorkerHeartbeat(queue=row["queue"], last_seen_at=row["last_seen_at"]) for row in rows]
+    # An empty table returns no rows and therefore no clock, which is the case that has to
+    # answer "no worker has ever run" — so the clock is asked for separately only then.
+    return (rows[0]["now"] if rows else _now(conn)), beats
+
+
 # --- row plumbing ------------------------------------------------------------------
 
 
