@@ -43,9 +43,9 @@ from typing import Any
 
 import psycopg
 from motet_db import repo
-from motet_inference import get_stages
+from motet_inference import Stages, get_stages
 from motet_inference.llm import LlmBudgetExhaustedError
-from motet_storage import build_store
+from motet_storage import ObjectStore, build_store
 from opentelemetry import metrics, trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -81,13 +81,32 @@ _job_duration = _meter.create_histogram(
 MAX_JOBS_PER_RUN = 500
 
 
-def drain(queue: Queue, database_url: str, *, max_jobs: int = MAX_JOBS_PER_RUN) -> int:
-    """Claim and run every ready job on ``queue``. Returns the number processed."""
+def drain(
+    queue: Queue,
+    database_url: str,
+    *,
+    max_jobs: int = MAX_JOBS_PER_RUN,
+    stages: Stages | None = None,
+    store: ObjectStore | None = None,
+) -> int:
+    """Claim and run every ready job on ``queue``. Returns the number processed.
+
+    **A long-lived worker passes ``stages`` and ``store`` in, and that is not an
+    optimisation.** Resolving them here is right for a Cloud Run job, which drains once
+    and exits — but ``runner all --poll-seconds N`` calls this several times a second, and
+    ``real_stages()`` mints a fresh ``LlmClient`` every time it is called. OpenRouter's
+    sticky upstream routing is *per client*, and that routing is what keeps the dedup
+    prompt cache warm — the largest LLM cost lever in the system (see AGENTS.md). A client
+    per pass would throw the cache away on every sweep and leak a connection pool doing it.
+
+    They stay optional so that a one-shot drain, and every test that calls this, needs to
+    know none of it.
+    """
     handler = HANDLERS.get(queue)
     if handler is None:
         raise ValueError(f"queue {queue.value!r} has no handler registered")
-    stages = get_stages()
-    store = build_store()
+    stages = get_stages() if stages is None else stages
+    store = build_store() if store is None else store
     recorders = failure_recorders()
     processed = 0
 

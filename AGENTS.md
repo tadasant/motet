@@ -797,6 +797,14 @@ are real deployments — and SIGTERM now stops the loop rather than killing the 
 since a long-lived worker is the thing Cloud Run signals on every deploy and the obs flush
 lives in the `finally`.
 
+**The stages and the object store are built once for the process and passed into `drain`,
+and that is correctness rather than tidiness.** `real_stages()` mints a fresh `LlmClient`
+on every call; OpenRouter's sticky upstream routing is *per client*, and that routing is
+what keeps the dedup prompt cache warm. Resolving them inside `drain` is right for a job
+that drains once and exits, and would throw the cache away six times a sweep in a poll
+loop. They stay optional arguments so a one-shot drain, and every test, needs to know
+none of it.
+
 **Turning it on in a deployment is configuration, not code**, and it is deliberately still
 the private repo's call: an always-on worker against `MOTET_INFERENCE_MODE=real` is a
 standing authorization to spend money at OpenRouter and Cartesia, which is a decision about

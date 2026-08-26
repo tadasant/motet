@@ -606,6 +606,28 @@ class TestNothingDrainsTheQueue:
         assert runner.main(["all"]) == 0
         assert {beat.queue for beat in repo.worker_heartbeats(db)} == {q.value for q in Queue}
 
+    def test_the_llm_client_is_built_once_for_the_process_not_once_per_drain(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`real_stages()` mints a fresh `LlmClient` every call.
+
+        OpenRouter's sticky upstream routing is per client, and that routing is what keeps
+        the dedup prompt cache warm — the largest LLM cost lever in the system. A poll loop
+        resolving stages per drain would throw it away on every sweep, six times a pass.
+        """
+        from motet_inference import get_stages as real_get_stages
+
+        calls = 0
+
+        def counted() -> Any:
+            nonlocal calls
+            calls += 1
+            return real_get_stages()
+
+        monkeypatch.setattr(runner, "get_stages", counted)
+        assert runner.main(["all"]) == 0
+        assert calls == 1
+
     def test_sigterm_stops_the_poll_loop_rather_than_killing_the_process(
         self, monkeypatch: pytest.MonkeyPatch, _migrated: str
     ) -> None:
@@ -617,7 +639,7 @@ class TestNothingDrainsTheQueue:
         """
         drained: list[Queue] = []
 
-        def fake_drain(queue: Queue, url: str, *, max_jobs: int) -> int:
+        def fake_drain(queue: Queue, url: str, *, max_jobs: int, **_: Any) -> int:
             drained.append(queue)
             # A bound, so a flag that never gets set fails this test instead of hanging
             # the suite until GitHub's six-hour limit.

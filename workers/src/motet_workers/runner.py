@@ -51,7 +51,9 @@ from dataclasses import dataclass
 from types import FrameType
 
 import motet_obs
+from motet_inference import get_stages
 from motet_inference.llm import validate_startup as validate_llm_startup
+from motet_storage import build_store
 from motet_vault import vault_status
 
 from .loop import MAX_JOBS_PER_RUN, drain
@@ -109,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     # under `python -m` is the file — so `--help` announced itself as `runner.py`, a name
     # that appears nowhere an operator could type it.
     parser = argparse.ArgumentParser(
-        prog="motet-worker", description="Drain one Motet pipeline queue."
+        prog="motet-worker", description="Drain a Motet pipeline queue, or all of them."
     )
     parser.add_argument(
         "queue",
@@ -167,11 +169,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("DATABASE_URL is not set")
 
     queues = list(PIPELINE) if args.queue == ALL_QUEUES else [Queue(args.queue)]
+
+    # Once for the life of the process, rather than once per drain. A poll loop that
+    # rebuilt these would mint a fresh LLM client on every sweep, and OpenRouter's sticky
+    # upstream routing — what keeps the dedup prompt cache warm — is per client. Building
+    # them here also moves a misconfigured object store from "fails on the first job that
+    # needs audio" to "fails at start-up", which is where this file puts everything else.
+    stages = get_stages()
+    store = build_store()
+
     stop = _Stop()
     try:
         if args.poll_seconds <= 0:
             for queue in queues:
-                drain(queue, database_url, max_jobs=args.max_jobs)
+                drain(queue, database_url, max_jobs=args.max_jobs, stages=stages, store=store)
             return 0
 
         _install_sigterm(stop)
@@ -181,7 +192,9 @@ def main(argv: list[str] | None = None) -> int:
             for queue in queues:
                 if stop.requested:
                     break
-                processed += drain(queue, database_url, max_jobs=args.max_jobs)
+                processed += drain(
+                    queue, database_url, max_jobs=args.max_jobs, stages=stages, store=store
+                )
             # Only when the whole sweep found nothing. Sleeping after every pass would add
             # a poll interval to each stage; sleeping only when the pipeline is empty means
             # a busy one runs flat out and an idle one costs one query per queue per tick.
