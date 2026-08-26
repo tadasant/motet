@@ -838,8 +838,8 @@ merged two and returned the third as a *new* news item under a byte-identical he
 read the story out twice under one heading — the failure dedup exists to prevent, and the
 one that is most obvious in audio.
 
-**A "new story" whose normalized title the window already carries is merged instead**, in
-the handler rather than in the adapter, so it holds for any `Integrator` and is testable
+**A "new story" whose normalized title an *unread* item in the window already carries is
+merged into it instead**, in the handler rather than in the adapter, so it holds for any `Integrator` and is testable
 without a model. Normalization is case and runs of whitespace and nothing else: fuzzy
 matching here would be a similarity threshold of its own, in the one place meant to have
 no opinion. An empty title matches nothing — two items that both failed to get one are not

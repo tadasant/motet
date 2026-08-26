@@ -760,6 +760,11 @@ class TestIdenticalTitles:
         handlers.handle_integrate(context, {"source_item_id": source_item_id})
 
         assert len(repo.list_news_items(db, USER)) == 2
+        # Said directly rather than inferred from the count: the read item was left
+        # exactly as it was, and the new story is the one an episode will now speak.
+        read_again = next(i for i in repo.list_news_items(db, USER) if i.id == read_item)
+        assert source_item_id not in read_again.source_item_ids
+        assert [i.read for i in repo.list_news_items(db, USER, unread_only=True)] == [False]
 
     def test_a_genuinely_new_story_is_still_new(
         self, db: psycopg.Connection[Any], _migrated: str
