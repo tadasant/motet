@@ -216,19 +216,10 @@ jobs:
           ls /Applications | grep -i '^Xcode' || true
 
       - name: Build the app for the simulator
-        # `generic/platform=iOS Simulator` compiles and links without booting a simulator,
-        # which is all this job claims to prove. Running the app is device work, and
-        # ios/README.md lists what a build cannot tell you.
-        run: |
-          xcodebuild build \
-            -project ios/App/Motet.xcodeproj \
-            -scheme Motet \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+        # A script, not an inlined command, for the reason `bin/build-images` is a script:
+        # a check that exists only in YAML cannot be run by hand and will rot. Anyone with
+        # a Mac runs exactly this.
+        run: ios/bin/build-app
 
       - name: Run the MotetKit tests against Apple's toolchain
         # They already pass on Linux in `bin/ci`, so this asserts nothing new about the

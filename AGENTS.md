@@ -30,7 +30,8 @@ behind it. If a change seems to require an infrastructure fact in this repo, tha
 signal it belongs in the private repo instead — say so and stop rather than inlining it.
 
 Deploy workflows live in the private repo. CI in *this* repo runs on the shared
-self-hosted runner pool behind a fork guard — see [Runner policy](#runner-policy).
+self-hosted runner pool behind a fork guard, with one job on a GitHub-hosted macOS runner
+because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
 
 ---
 
@@ -444,16 +445,24 @@ subprocesses and anything reading the environment get the same isolated database
 the truncate gentler (retry it, `DELETE` instead) would have left both runs deleting each
 other's rows, quietly.
 
-There is one other script, and exactly one reason it is separate:
+Two other scripts sit outside it, each for the same one reason — it needs a toolchain
+`bin/ci` deliberately does not require:
 
 ```bash
-bin/build-images
+bin/build-images     # needs a Docker daemon
+ios/bin/build-app    # needs Xcode
 ```
 
 It builds and smoke-tests the three container images, and it is its own script because it
 needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop without Docker must
 still be able to run every check in it. It is still a script rather than YAML, for the
 same reason `bin/ci` is. CI runs it as a second job.
+
+`ios/bin/build-app` is the same argument with a different toolchain: `xcodebuild` exists on
+no machine in this project except the GitHub-hosted macOS runner the `ios` job uses, so
+calling it from `bin/ci` would turn every Linux run red. It skips on a Mac without Xcode
+and **fails when `CI` is set** — the same shape as `ios/bin/ci-swift`, and for the same
+reason: a green run that compiled nothing is worse than a red one.
 
 ### The container images
 
@@ -504,6 +513,29 @@ run even if a guard were dropped.
 
 **If you add a job to `ci.yml`, it needs the fork guard and an entry in
 `all-checks-pass`.** A job without the guard is the whole hole.
+
+**One job is deliberately not on that pool: `ios`, which runs `xcodebuild` on GitHub-hosted
+`macos-latest`.** There is no Mac in the pool, and there is no Mac anywhere in this
+project — which is why the iOS app went months without a compiler ever being pointed at
+it. It is free because this repo is public, and it needs no Apple Developer Program
+credential because a **simulator** build needs no identity, no certificate, no provisioning
+profile and no App Store Connect key. That is the property to preserve: adding signing, a
+TestFlight upload, or a `CODE_SIGN_ENTITLEMENTS` pointing at
+`ios/App/Motet/Motet.entitlements` would put a credential and a human back into a job that
+currently needs neither — and the entitlement it asks for
+(`com.apple.developer.carplay-audio`) is granted by Apple's manual review, so wiring it in
+before the grant arrives makes the build fail *to sign* rather than merely lack CarPlay.
+
+It carries the same fork guard as everything else. A hosted runner is ephemeral, so a fork
+PR reaching it would not be the shared-machine problem the guard exists for — but there is
+no reason for a fork to run it either.
+
+**A macOS runner bills at a higher multiplier, so `ios-changes` decides whether it starts.**
+It is a no-checkout job that asks the API which files moved and answers one question: did
+anything under `ios/**` change? A job rather than an `on: paths:` filter, because `paths`
+is workflow-wide and `all-checks-pass` has to keep aggregating exactly one workflow — and a
+skipped job is already a first-class outcome for that gate, so this reuses the existing
+design rather than working around it.
 
 Deploy workflows are a different matter — they live in the private repo.
 

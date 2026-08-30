@@ -21,7 +21,7 @@ ios/
   Tests/MotetKitTests/     85 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/Motet.xcodeproj/     the app target
-  bin/                     toolchain install + the CI entry point
+  bin/                     toolchain install + the two CI entry points
   tools/                   the openapi.yaml -> Swift generator
 ```
 
@@ -72,10 +72,27 @@ afterwards); on a Mac it uses Xcode's. Locally:
 
 ```bash
 ios/bin/ci-swift          # swift build && swift test
+ios/bin/build-app         # xcodebuild, for the simulator — needs a Mac
 bin/generate-ios-client   # regenerate the client from openapi.yaml
 ```
 
-**Verified:** `MotetKit` compiles under Swift 6's strict concurrency checking, and 85 tests
+`bin/ci` is the Linux half. The Mac half is the `ios` job in `.github/workflows/ci.yml`,
+on a GitHub-hosted `macos-latest` runner — free, because this repo is public, and
+credential-free, because a **simulator** build needs no identity, no certificate, no
+provisioning profile and no App Store Connect key. It runs on any change under `ios/**`,
+and it runs `ios/bin/build-app` and `swift test --package-path ios`, nothing else.
+
+**`ios/bin/build-app` is a script rather than a command inlined in the workflow**, for the
+same reason `bin/build-images` is: a check that exists only in YAML cannot be run by hand
+and will rot. It is *not* called from `bin/ci`, and that is the same reason again in
+reverse — it needs Xcode, which no machine in this project has except that runner, so
+calling it from `bin/ci` would turn every Linux run red. On a Mac without Xcode it skips
+and says so; in CI it fails, because a green run that compiled nothing is worse than a red
+one.
+
+**Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
+`Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
+strict concurrency checking, and 85 tests
 pass — segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
 in flight), the download policy, position resume across a simulated relaunch, interruption
@@ -92,52 +109,60 @@ three taps of *next story* as having heard three stories — and quietly empty t
 which is the product's memory. The coverage is persisted beside the position, so a story
 skipped on Monday is still unread on Tuesday.
 
-## What is **not** verified — the list to work through once enrolment lands
+## What is **not** verified — and what no longer belongs on that list
 
-There is no Apple Developer Program membership yet, **and there is no macOS machine in this
-project's CI or agent environment at all.** The second constraint is the larger one: it means
-nothing in `App/`, nothing in `Sources/MotetPlayback/`, and not `Motet.xcodeproj` itself has
-been compiled, run, or screenshotted. Every item below is written to be correct and is
-unproven.
+Three things used to head this list: that the app had never been built by Xcode, that
+`Motet.xcodeproj` might not even parse, and that no simulator SDK had ever seen it. All
+three are now answered by CI on every change under `ios/**`, and the answers were cheap:
+the project file parses, and the first compiler ever pointed at this app found **three**
+errors in about a thousand lines of unproven Swift.
 
-1. **It has never been built by Xcode.** `MotetPlayback` and the SwiftUI/CarPlay sources are
-   syntax-checked by review only. Expect to fix compile errors on the first build; that is
-   the honest expectation, not a surprise.
-2. **`Motet.xcodeproj` is hand-written** (Xcode 16 synchronized root groups, so it is small
-   and has no per-file entries). If Xcode refuses to open it: File > New > Project > App
-   named `Motet`, delete the generated sources, drag `App/Motet` in as a folder reference,
-   add `ios` as a local package dependency, and select MotetKit + MotetPlayback. Two
-   minutes, and nothing is lost — the sources are the deliverable.
-3. **Simulator playback.** No simulator has run this. `xcodebuild -scheme Motet -sdk
-   iphonesimulator build` is the first command to try; signing is already disabled
-   (`CODE_SIGNING_ALLOWED = NO`) so it needs no identity.
-4. **Background audio.** `UIBackgroundModes: audio` plus the `.playback` category with
+Worth keeping, because they are the shape of what review cannot catch:
+
+* Two in `NowPlayingController` — `MPRemoteCommandEvent` is a non-Sendable class MediaPlayer
+  still owns, and a `Task` body is a `sending` closure, so reading `positionTime` *inside*
+  the task is a data race rather than a convenience. Read the number out first, send the
+  number.
+* One in `CarPlaySceneDelegate` — `??` takes its right-hand side as an autoclosure, and an
+  autoclosure is not `async`, so an `await` cannot live there however well the chain reads.
+
+Everything below is still unproven, and the reason is the same for all of it: **a build is
+not a run, and a simulator is not a phone.** A green `ios` job says the code compiles and
+links. It says nothing about any of this.
+
+1. **Nothing has been run or screenshotted.** The job builds for
+   `generic/platform=iOS Simulator`, which never boots a simulator. No screen in this app
+   has been looked at by anyone.
+2. **Background audio.** `UIBackgroundModes: audio` plus the `.playback` category with
    `.spokenAudio` and `.longFormAudio` is written; a simulator's host OS does not enforce
    any of it. Prove it on a device: play, lock the screen, put the phone in a pocket, walk.
-5. **The mute switch.** `.playback` is what keeps audio going when the ringer is silenced.
+3. **The mute switch.** `.playback` is what keeps audio going when the ringer is silenced.
    Device-only.
-6. **Lockscreen and Control Centre.** `MPNowPlayingInfoCenter` publishes *our* elapsed time
+4. **Lockscreen and Control Centre.** `MPNowPlayingInfoCenter` publishes *our* elapsed time
    and the real rate (a rate of 1.0 while playing at 1.5 makes the scrubber drift). Check
    the artwork-less layout, that the scrubber tracks, and that the skip intervals show as
    30/15.
-7. **Remote commands.** Play/pause/skip/next/previous/seek/rate are wired to
+5. **Remote commands.** Play/pause/skip/next/previous/seek/rate are wired to
    `MPRemoteCommandCenter`. Test from the lockscreen, from headphone buttons, and — the one
    most likely to be wrong — next/previous *track*, which this app maps to next/previous
    **story**.
-8. **Interruptions and route changes.** A real phone call, Siri, and AirPods disconnecting
+6. **Interruptions and route changes.** A real phone call, Siri, and AirPods disconnecting
    (`.oldDeviceUnavailable` — otherwise a briefing suddenly plays out of the phone speaker
    on the street). The simulator does not generate these faithfully.
-9. **Background downloads.** `URLSession.background` transfers that finish while the app is
+7. **Background downloads.** `URLSession.background` transfers that finish while the app is
    suspended, and the `handleEventsForBackgroundURLSession` wake-up. Device-only, and the
    thing to watch is that a download started over breakfast is *there* when the walk starts.
-10. **The Keychain.** `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` behaves differently
-    on a simulator than on a device.
-11. **CarPlay.** `com.apple.developer.carplay-audio` is granted by Apple's manual review
-    *after* enrolment, and can take weeks. **Do not wire `Motet.entitlements` into
-    `CODE_SIGN_ENTITLEMENTS` before the grant arrives** — an ungranted entitlement makes the
-    build fail to sign rather than merely lack CarPlay. Once granted: set that build
-    setting, then test with the simulator's CarPlay window and in a car.
-12. **TestFlight and device installs.** Both need the membership.
+8. **The Keychain.** `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` behaves differently
+   on a simulator than on a device.
+9. **CarPlay.** Enrolment has landed, but `com.apple.developer.carplay-audio` is a separate
+   manual review by Apple and can take weeks. **Do not wire `Motet.entitlements` into
+   `CODE_SIGN_ENTITLEMENTS` before the grant arrives** — an ungranted entitlement makes the
+   build fail to sign rather than merely lack CarPlay, which would take the `ios` job red
+   for a reason that has nothing to do with the code. Once granted: set that build setting,
+   then test with the simulator's CarPlay window and in a car.
+10. **TestFlight and device installs.** Enrolment is done, so these are now unblocked
+    rather than impossible — and both need signing, which the `ios` job deliberately does
+    not do.
 
 ## Playback position is still device-local, and that is now a client gap
 
