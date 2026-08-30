@@ -23,6 +23,11 @@ name: CI
 # ADDING A JOB? It needs the fork guard AND an entry in `all-checks-pass`. A job without
 # the guard is the whole hole. Adding a *check*, on the other hand, belongs in `bin/ci` —
 # a check that lives only in this file cannot be run on a laptop.
+#
+# ONE JOB IS NOT ON THAT POOL: `ios` runs on GitHub-hosted `macos-latest`, because
+# `xcodebuild` needs a Mac and there is no Mac in the pool. It carries the same fork guard;
+# a hosted runner is ephemeral, so a fork PR reaching it would not be the shared-machine
+# problem the guard exists for, but there is no reason for a fork to run it either.
 
 on:
   pull_request:
@@ -124,6 +129,114 @@ jobs:
         # out from under it.
         run: bin/build-images
 
+  # Does this change touch the iOS app at all?
+  #
+  # macOS runners are the one expensive thing in this workflow — GitHub bills them at a
+  # higher multiplier than Linux, and although this repo is public and therefore free, a
+  # 10-minute Xcode build on every backend commit is gratuitous. So the iOS job below runs
+  # only when `ios/**` (or this workflow) moved.
+  #
+  # This is a JOB rather than an `on: paths:` filter because `paths` is workflow-wide, and
+  # `all-checks-pass` has to keep aggregating one workflow. A skipped job is already a
+  # first-class outcome for that gate (see its comment), so gating the iOS job on this
+  # output slots into the existing design rather than working around it.
+  #
+  # It has NO CHECKOUT — it asks the API which files moved instead of cloning them — for
+  # the same reason `pr-auto-close.yml` has none: the cheapest way to be sure a job cannot
+  # execute somebody else's code is for it to have no code of theirs to execute.
+  ios-changes:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Read-only, and stated rather than inherited: this job asks the API a question and
+    # writes nothing anywhere.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      ios: ${{ steps.filter.outputs.ios }}
+    steps:
+      - name: Look for changes under ios/
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_NUMBER:-}" ]; then
+            files=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+          elif [ -n "${BEFORE:-}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+            files=$(gh api --paginate "repos/${REPO}/compare/${BEFORE}...${SHA}" --jq '.files[].filename')
+          else
+            # A first push, or a force-push whose `before` we cannot compare against. The
+            # honest answer is "we do not know", and the safe one is to build.
+            echo "ios=true" >> "$GITHUB_OUTPUT"
+            echo "Could not determine the changed files; building the iOS app anyway."
+            exit 0
+          fi
+          printf '%s\n' "$files" | sed 's/^/  /'
+          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/ci\.yml$)'; then
+            echo "ios=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ios=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The iOS app, compiled by Xcode for the simulator.
+  #
+  # This is the only job in the repo that does NOT run on the self-hosted pool: there is no
+  # Mac in it, and `xcodebuild` needs one. GitHub's hosted macOS runners are free on a
+  # public repo, which is what makes an unproven-until-now app buildable in CI with nobody
+  # having to own a Mac.
+  #
+  # NOTHING HERE SIGNS ANYTHING, and that is the property to preserve. A simulator build
+  # needs no identity, no certificate, no provisioning profile and no App Store Connect
+  # key, so this job holds no credential and needs no human in the loop — which is the only
+  # reason it can exist at all (AGENTS.md, invariant 9). Do not add signing, a TestFlight
+  # upload, or `CODE_SIGN_ENTITLEMENTS`: `ios/App/Motet/Motet.entitlements` asks for
+  # `com.apple.developer.carplay-audio`, which Apple has not granted, and an ungranted
+  # entitlement makes a build fail to sign rather than merely lack CarPlay.
+  ios:
+    if: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && needs.ios-changes.outputs.ios == 'true' }}
+    needs: ios-changes
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the toolchain
+        # Which Xcode a hosted runner ships changes without notice, and a Swift-version
+        # difference is the first thing to suspect when this job disagrees with a laptop.
+        run: |
+          xcodebuild -version
+          swift --version
+          ls /Applications | grep -i '^Xcode' || true
+
+      - name: Build the app for the simulator
+        # `generic/platform=iOS Simulator` compiles and links without booting a simulator,
+        # which is all this job claims to prove. Running the app is device work, and
+        # ios/README.md lists what a build cannot tell you.
+        run: |
+          xcodebuild build \
+            -project ios/App/Motet.xcodeproj \
+            -scheme Motet \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Run the MotetKit tests against Apple's toolchain
+        # They already pass on Linux in `bin/ci`, so this asserts nothing new about the
+        # logic — it asserts that the *toolchain* agrees. A difference here is itself the
+        # finding. It also compiles `MotetPlayback` for macOS, which is the only place
+        # outside the app target that AVFoundation code gets a compiler pointed at it.
+        run: swift test --package-path ios
+
   # Single aggregate gate. Set THIS job — `all-checks-pass` — as the one required status
   # check, rather than enumerating every job above.
   #
@@ -138,13 +251,17 @@ jobs:
   #   3. `skipped` dependencies neither fail it nor count as passes. The jobs above carry
   #      fork guards and report `skipped` on a fork PR, so a fork PR sees everything skip
   #      and this gate go green — the same tradeoff the guards already make. This job has
-  #      no checkout step, so a fork PR never executes fork code here either.
+  #      no checkout step, so a fork PR never executes fork code here either. `ios` also
+  #      skips on any change that does not touch `ios/**`, which is the same property being
+  #      relied on a second time: a skipped job is a non-answer, not a pass.
   all-checks-pass:
     if: ${{ !cancelled() }}
     runs-on: self-hosted
     needs:
       - ci
       - images
+      - ios-changes
+      - ios
     steps:
       - name: Verify no required check failed or was cancelled
         run: |

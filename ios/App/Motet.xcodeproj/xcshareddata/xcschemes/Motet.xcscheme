@@ -5,7 +5,7 @@
          <BuildActionEntry buildForTesting = "YES" buildForRunning = "YES" buildForProfiling = "YES" buildForArchiving = "YES" buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "AA00000000000000000020"
+               BlueprintIdentifier = "AA0000000000000000000020"
                BuildableName = "Motet.app"
                BlueprintName = "Motet"
                ReferencedContainer = "container:Motet.xcodeproj">
@@ -21,7 +21,7 @@
       <BuildableProductRunnable runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "AA00000000000000000020"
+            BlueprintIdentifier = "AA0000000000000000000020"
             BuildableName = "Motet.app"
             BlueprintName = "Motet"
             ReferencedContainer = "container:Motet.xcodeproj">
@@ -32,7 +32,7 @@
       <BuildableProductRunnable runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "AA00000000000000000020"
+            BlueprintIdentifier = "AA0000000000000000000020"
             BuildableName = "Motet.app"
             BlueprintName = "Motet"
             ReferencedContainer = "container:Motet.xcodeproj">
