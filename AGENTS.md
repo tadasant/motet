@@ -453,8 +453,8 @@ bin/build-images     # needs a Docker daemon
 ios/bin/build-app    # needs Xcode
 ```
 
-It builds and smoke-tests the three container images, and it is its own script because it
-needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop without Docker must
+`bin/build-images` builds and smoke-tests the three container images, and it is its own
+script because it needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop without Docker must
 still be able to run every check in it. It is still a script rather than YAML, for the
 same reason `bin/ci` is. CI runs it as a second job.
 

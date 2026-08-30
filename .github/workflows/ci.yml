@@ -144,6 +144,11 @@ jobs:
   # It has NO CHECKOUT — it asks the API which files moved instead of cloning them — for
   # the same reason `pr-auto-close.yml` has none: the cheapest way to be sure a job cannot
   # execute somebody else's code is for it to have no code of theirs to execute.
+  #
+  # On a pull request it asks about the WHOLE PR, not the last push. That is the property
+  # that matters: a PR that touched `ios/**` and then added a docs-only commit still gets
+  # the iOS job on its head commit, rather than merging an app nothing compiled because the
+  # final commit happened to be prose.
   ios-changes:
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
