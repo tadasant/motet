@@ -80,7 +80,8 @@ bin/generate-ios-client   # regenerate the client from openapi.yaml
 on a GitHub-hosted `macos-latest` runner — free, because this repo is public, and
 credential-free, because a **simulator** build needs no identity, no certificate, no
 provisioning profile and no App Store Connect key. It runs on any change under `ios/**`,
-and it runs `ios/bin/build-app` and `swift test --package-path ios`, nothing else.
+and it runs `ios/bin/build-app` and `ios/bin/ci-swift`, nothing else — the second being the
+same script `bin/ci` calls on Linux, which picks up whichever Swift is on PATH.
 
 **`ios/bin/build-app` is a script rather than a command inlined in the workflow**, for the
 same reason `bin/build-images` is: a check that exists only in YAML cannot be run by hand
