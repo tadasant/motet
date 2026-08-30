@@ -59,10 +59,20 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             let environment = AppEnvironment.shared
             // Offline first: the car is where the signal is worst, so a cached list plus the
             // downloaded audio is the expected case rather than the fallback.
-            let episodes =
-                (try? await environment.library.episodes())
-                ?? (try? await environment.library.cachedEpisodes())
-                ?? []
+            //
+            // Spelled out rather than chained with `??`, because `??` takes its right-hand
+            // side as an autoclosure and an autoclosure is not async — so the fallback
+            // cannot be awaited there. The distinction the branches keep is the one that
+            // matters: the cache is used when the call *failed*, not when it succeeded and
+            // said there is nothing, which would put a stale list in front of a driver.
+            let episodes: [EpisodeResponse]
+            if let fresh = try? await environment.library.episodes() {
+                episodes = fresh
+            } else if let cached = try? await environment.library.cachedEpisodes() {
+                episodes = cached
+            } else {
+                episodes = []
+            }
             let downloaded = (try? await environment.library.downloadedEpisodeIds()) ?? []
             guard !Task.isCancelled else { return }
             let template = makeListTemplate(episodes: episodes, downloaded: downloaded)

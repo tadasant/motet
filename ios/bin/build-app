@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Build the iOS app with Xcode, for the simulator.
+#
+# Its own script for exactly the reason `bin/build-images` is its own script: it needs a
+# toolchain `bin/ci` deliberately does not require. `bin/ci` needs a Postgres and (for
+# MotetKit) a Swift compiler, both of which exist on this repo's Linux runners; this needs
+# Xcode, which does not exist on any machine in this project except a GitHub-hosted macOS
+# runner. Calling it from `bin/ci` would turn every Linux run red.
+#
+# It is still a script rather than YAML, so that the check the `ios` job runs is a check
+# anyone with a Mac can run by hand, unchanged. See ios/README.md.
+#
+# NOTHING HERE SIGNS ANYTHING, and that is the property to preserve: a simulator build
+# needs no identity, no certificate, no provisioning profile and no App Store Connect key,
+# which is what lets this run in CI with no credential and no human. Do not add signing,
+# and do not point CODE_SIGN_ENTITLEMENTS at App/Motet/Motet.entitlements — the CarPlay
+# entitlement it asks for is granted by Apple's manual review, and an ungranted entitlement
+# fails a build TO SIGN rather than merely lacking CarPlay.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if ! command -v xcodebuild >/dev/null 2>&1; then
+  if [ -n "${CI:-}" ]; then
+    printf '\n\033[1;31m==> FAILED: no Xcode in CI\033[0m\n'
+    printf '    This script only runs on the macOS job, which has one. Refusing to report\n'
+    printf '    green on an app nothing compiled.\n\n'
+    exit 1
+  fi
+  printf '\n\033[1;33m==> SKIPPED: the iOS app (no Xcode)\033[0m\n'
+  printf '    Needs a Mac. CI builds it on a GitHub-hosted macOS runner; see ios/README.md.\n\n'
+  exit 0
+fi
+
+printf '    using %s\n' "$(xcodebuild -version | head -1)"
+
+# `generic/platform=iOS Simulator` compiles and links without booting a simulator, which is
+# all this claims to prove. Running the app is device work — ios/README.md lists what a
+# build cannot tell you.
+xcodebuild build \
+  -project App/Motet.xcodeproj \
+  -scheme Motet \
+  -configuration Debug \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO
