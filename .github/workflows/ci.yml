@@ -166,17 +166,27 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # `.files[]?` rather than `.files[]`: the compare endpoint omits `files` entirely
+          # on a diff over 300 files, and iterating null would abort the job.
           if [ -n "${PR_NUMBER:-}" ]; then
-            files=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+            endpoint="repos/${REPO}/pulls/${PR_NUMBER}/files"; filter='.[].filename'
           elif [ -n "${BEFORE:-}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ]; then
-            files=$(gh api --paginate "repos/${REPO}/compare/${BEFORE}...${SHA}" --jq '.files[].filename')
+            endpoint="repos/${REPO}/compare/${BEFORE}...${SHA}"; filter='.files[]?.filename'
           else
-            # A first push, or a force-push whose `before` we cannot compare against. The
-            # honest answer is "we do not know", and the safe one is to build.
+            endpoint=""
+          fi
+
+          # Every way of NOT getting an answer lands here, and the answer it gives is
+          # "build". This job exists to save free minutes, so an unnecessary macOS run
+          # costs nothing that matters — while a job that fails, or that guesses `false`,
+          # either reddens the branch for a reason unrelated to the code or silently skips
+          # the only compiler this app has. Fail towards building.
+          if [ -z "$endpoint" ] || ! files=$(gh api --paginate "$endpoint" --jq "$filter"); then
             echo "ios=true" >> "$GITHUB_OUTPUT"
-            echo "Could not determine the changed files; building the iOS app anyway."
+            echo "Could not determine the changed files; building the iOS app rather than guessing."
             exit 0
           fi
+
           printf '%s\n' "$files" | sed 's/^/  /'
           if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/ci\.yml$)'; then
             echo "ios=true" >> "$GITHUB_OUTPUT"
