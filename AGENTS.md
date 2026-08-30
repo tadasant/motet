@@ -454,9 +454,9 @@ ios/bin/build-app    # needs Xcode
 ```
 
 `bin/build-images` builds and smoke-tests the three container images, and it is its own
-script because it needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop without Docker must
-still be able to run every check in it. It is still a script rather than YAML, for the
-same reason `bin/ci` is. CI runs it as a second job.
+script because it needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop
+without Docker must still be able to run every check in it. It is still a script rather
+than YAML, for the same reason `bin/ci` is. CI runs it as a second job.
 
 `ios/bin/build-app` is the same argument with a different toolchain: `xcodebuild` exists on
 no machine in this project except the GitHub-hosted macOS runner the `ios` job uses, so
