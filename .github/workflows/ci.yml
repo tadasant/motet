@@ -186,7 +186,13 @@ jobs:
           # costs nothing that matters — while a job that fails, or that guesses `false`,
           # either reddens the branch for a reason unrelated to the code or silently skips
           # the only compiler this app has. Fail towards building.
-          if [ -z "$endpoint" ] || ! files=$(gh api --paginate "$endpoint" --jq "$filter"); then
+          #
+          # An EMPTY result counts as not getting an answer too, which is the case the `?`
+          # above would otherwise swallow in silence: `compare` drops `files` on a diff over
+          # 300, so the biggest pushes — the ones most likely to touch `ios/**` — are exactly
+          # the ones that would come back looking like they changed nothing at all.
+          if [ -z "$endpoint" ] || ! files=$(gh api --paginate "$endpoint" --jq "$filter") \
+             || [ -z "$files" ]; then
             echo "ios=true" >> "$GITHUB_OUTPUT"
             echo "Could not determine the changed files; building the iOS app rather than guessing."
             exit 0
