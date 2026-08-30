@@ -74,9 +74,15 @@ public final class NowPlayingController: @unchecked Sendable {
             return .success
         }
 
+        // These two carry a payload, and the event object is a non-Sendable class the
+        // system still owns. Read the number out of it *here* and send the number: a
+        // `Task` body is a `sending` closure, so capturing the event itself is a data race
+        // the compiler refuses (and would be one — nothing stops MediaPlayer mutating or
+        // recycling the event once the handler returns).
         commandCenter.changePlaybackPositionCommand.addTarget { event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            Task { await controller.perform(.seek(toMs: Int(event.positionTime * 1_000))) }
+            let positionMs = Int(event.positionTime * 1_000)
+            Task { await controller.perform(.seek(toMs: positionMs)) }
             return .success
         }
 
@@ -84,7 +90,8 @@ public final class NowPlayingController: @unchecked Sendable {
             PlaybackSettings.rateLadder.map { NSNumber(value: $0) }
         commandCenter.changePlaybackRateCommand.addTarget { event in
             guard let event = event as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
-            Task { await controller.perform(.setRate(Double(event.playbackRate))) }
+            let rate = Double(event.playbackRate)
+            Task { await controller.perform(.setRate(rate)) }
             return .success
         }
     }
