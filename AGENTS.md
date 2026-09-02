@@ -890,6 +890,41 @@ and a re-paste hits the same rule rather than undoing it. The model-driven merge
 do that and always could — it is what the window is *for*, and there it is a judgement
 about two texts. A string match is not that judgement, so it does not get that reach.
 
+### A stage's "already done" guard is bounded by the state it writes, not by the last one
+
+`motet_workers.handlers.SCRIPTED_STATES`. Every handler short-circuits an episode it has
+nothing left to do for, and `handle_script`'s guard read `state is ready` — the *last*
+state in the pipeline rather than the one the handler itself writes. So an episode in
+`rendering` fell straight through it and the whole stage ran again: another billed script
+completion, another grounding pass at `effort='max'`, a `replace_segments` racing whatever
+TTS was reading, and a second TTS job for an episode that already had one. That is
+motet#50, and it is the module docstring's own idempotence contract being broken by the
+one handler most expensive to re-run.
+
+**The re-run is not a bug in the queue — it is the queue working.** `_execute` commits the
+handler's work and `jobs.complete` in two transactions on purpose (squashing them would
+roll the attempt counter back with the work, and a poison job would retry forever), so a
+worker that dies between them leaves the row `running` with the work durably applied, and
+`STALE_LEASE_SECONDS` makes it claimable again. **Reclaim is the recovery every stage
+depends on; converging on the same state is the handler's half of that bargain.**
+
+**The boundary is "at or past the state this handler writes", and the two states left out
+are the decision.** `pending` is *before* the stage — a script job on a pending episode
+means assembly never ran, and the `PermanentFailure` it raises is the right, loud answer;
+widening the guard to `state is not scripting`, the literal shape `handle_assemble` uses,
+would have swallowed that into a silent `return`. `failed` is not past the stage either,
+and short-circuiting it would strand an episode that genuinely needs re-scripting with no
+TTS job and nothing alerting on it — the quiet direction of the same bug, and the one a
+green test suite would never show.
+
+**A state check cannot tell a stale job from a deliberate retry, and that is the residue.**
+A stale `script` row can outlive its own episode's failure and replay a `failed` episode
+through the full stage, clearing the `last_error` on the way (motet#55); a *slow* script
+job reclaimed while the first worker is still running it produces two full renders, and
+there both workers read the episode in `scripting` (motet#53). Neither is closed by a
+state check, and neither should be papered over with a wider one — they want a fence on
+the job, or a lease that heartbeats.
+
 ### The episode tab reflects server state, not this page's lifetime
 
 `web/src/App.tsx`. Nothing loaded episode state on mount, so a reload — the realistic thing

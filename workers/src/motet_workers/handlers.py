@@ -333,9 +333,17 @@ def _rule_for(
 #: **``pending`` and ``failed`` are deliberately absent, because neither is past this
 #: stage.** ``pending`` means assembly never ran, which raises below rather than
 #: returning quietly — a silent return there would hide a real bug. ``failed`` means a
-#: stage gave up: nothing re-enqueues a script job for such an episode today, but if
-#: anything ever does it is a re-script somebody asked for, and short-circuiting it would
-#: strand the episode with no TTS job and nothing to say so.
+#: stage gave up, and a re-scripted failed episode is a *re-script somebody asked for*:
+#: short-circuiting it would strand the episode in ``failed`` with no TTS job and nothing
+#: to say so, which is the quiet direction of this same bug.
+#:
+#: ``failed`` is not free of the problem above, and saying it is would be wrong. A
+#: *stale* script job can outlive its own episode's failure — its row sits ``running``
+#: while the TTS job downstream exhausts its retries and marks the episode ``failed`` —
+#: so a reclaim can still put a failed episode back through the full stage, re-billing it
+#: and clearing the ``last_error`` that said what went wrong. That path predates this
+#: change and is not closed by it; it is motet#55, because closing it wants a way to tell
+#: a stale job from a deliberate retry rather than a wider state check.
 SCRIPTED_STATES = frozenset({EpisodeState.RENDERING, EpisodeState.READY})
 
 
