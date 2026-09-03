@@ -177,6 +177,35 @@ smoke_worker() {
     *) echo "smoke: worker --help did not list the Phase 1 queues" >&2; return 1 ;;
   esac
 
+  # `motet_db`'s entry points ship in this same image — `motet-workers` depends on
+  # `motet-db` — and `migrate` carried the identical defect for longer than the runner
+  # did, because `bin/ci` ran it on every single run and nobody saw the warning: it goes
+  # to stderr and the exit code stays 0 (motet#27). Same `2>&1`, same reason.
+  #
+  # Both of them, not only the one that was broken. `mint_session` is the one that
+  # actually runs as a deployed Cloud Run job, which makes it the case this smoke exists
+  # for: the image's own interpreter and install layout, which the workspace suite cannot
+  # speak to. `db/tests/test_db_entrypoints.py` makes the same pair of claims against the
+  # workspace. `--help` for each, so neither needs a database, and the expected `prog` is
+  # asserted because that is what says the right module answered.
+  local db_entry db_module db_prog db_usage
+  for db_entry in "motet_db.migrate:motet-migrate" "motet_db.mint_session:motet-mint-session"; do
+    db_module="${db_entry%%:*}"
+    db_prog="${db_entry##*:}"
+    db_usage="$(docker run --rm --entrypoint python "motet-worker:${TAG}" \
+      -m "$db_module" --help 2>&1)"
+    case "$db_usage" in
+      *"found in sys.modules"*)
+        echo "smoke: ${db_module} double-executes its entry point (motet#27)" >&2; return 1 ;;
+    esac
+    case "$db_usage" in
+      "usage: ${db_prog}"*) ;;
+      *) echo "smoke: python -m ${db_module} --help did not answer as expected" >&2
+         echo "$db_usage" | head -3 >&2; return 1 ;;
+    esac
+    echo "    python -m ${db_module} --help is clean (motet#27)"
+  done
+
   # The same claim `smoke_api` makes through /internal/health, made the only way a job
   # container can make it: this image is the *decrypt* side of the vault, so a missing
   # google-cloud-kms here means every mailbox poll fails on every run rather than one

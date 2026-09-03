@@ -262,47 +262,15 @@ class TestThePlaintextNeverGetsHere:
         assert not called & {"new_session_token", "token_digest", "create_session", "sha256"}
 
 
-class TestTheEntryPointRunsOnce:
-    """`python -m motet_db.mint_session` must execute this module exactly once.
+class TestTheEntryPointRefusesFromAShell:
+    """The mint-specific half of the entry-point guards.
 
-    The rule `motet_workers.runner` learned the hard way (motet#21): importing the package
-    first pulls `__init__` in, and anything `__init__` re-exported from the entry point is
-    then executed a *second* time under a second name, with a second copy of every
-    module-level object. `runpy` says so on stderr and carries on to exit 0, which is how
-    it reached a production image. Both checks run in a fresh interpreter, because this
-    one has already imported everything.
-
-    See `workers/tests/test_entrypoint.py`, which is the same guard on the other entry
-    point and explains the `-W error::RuntimeWarning` idiom in full.
+    The generic ones — that importing `motet_db` does not pull this module into
+    `sys.modules`, that `--help` is clean of runpy's double-execution warning on *stderr*,
+    and that the usage line names something typeable — live in `db/tests/test_db_entrypoints.py`
+    and run against every `python -m motet_db.*` entry point rather than only this one. See
+    motet#21 and motet#27. What is here is the one claim that is about *this* job.
     """
-
-    def test_importing_the_package_does_not_import_the_entry_point(self) -> None:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import sys, motet_db; sys.exit('motet_db.mint_session' in sys.modules)",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-        )
-        assert result.returncode == 0, (
-            "importing `motet_db` pulled `motet_db.mint_session` into sys.modules, so "
-            "`python -m motet_db.mint_session` now runs it twice. Take the import back "
-            "out of `motet_db/__init__.py`. See motet#21."
-        )
-
-    def test_the_entry_point_prints_help_without_a_runtime_warning(self) -> None:
-        result = subprocess.run(
-            [sys.executable, "-W", "error::RuntimeWarning", "-m", "motet_db.mint_session", "-h"],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-        )
-        assert DOUBLE_EXECUTION not in result.stderr, result.stderr
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.startswith("usage: motet-mint-session"), result.stdout
 
     def test_the_entry_point_refuses_from_a_shell_with_the_interlock_unset(self) -> None:
         """The refusal an operator would actually see, from a real process.
