@@ -177,6 +177,24 @@ smoke_worker() {
     *) echo "smoke: worker --help did not list the Phase 1 queues" >&2; return 1 ;;
   esac
 
+  # The migration entry point ships in this same image — `motet-workers` depends on
+  # `motet-db` — and it had the identical defect for longer, because `bin/ci` ran it on
+  # every single run and nobody saw the warning: it goes to stderr and the exit code stays
+  # 0 (motet#27). Same `2>&1`, same reason. `--help` again, so no database is needed.
+  local migrate_usage
+  migrate_usage="$(docker run --rm --entrypoint python "motet-worker:${TAG}" \
+    -m motet_db.migrate --help 2>&1)"
+  case "$migrate_usage" in
+    *"found in sys.modules"*)
+      echo "smoke: the migrate entry point double-executes itself (motet#27)" >&2; return 1 ;;
+  esac
+  case "$migrate_usage" in
+    "usage: motet-migrate"*) ;;
+    *) echo "smoke: python -m motet_db.migrate --help did not answer as expected" >&2
+       echo "$migrate_usage" | head -3 >&2; return 1 ;;
+  esac
+  echo "    python -m motet_db.migrate --help is clean (motet#27)"
+
   # The same claim `smoke_api` makes through /internal/health, made the only way a job
   # container can make it: this image is the *decrypt* side of the vault, so a missing
   # google-cloud-kms here means every mailbox poll fails on every run rather than one
