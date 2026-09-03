@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from motet_inference.interfaces import SpeechSynthesizer
-from motet_inference.llm import DEFAULT_MODEL, MODEL_ENV, LlmClient, LlmRequest, Message
+from motet_inference.llm import LlmClient, LlmConfig, LlmStage, Message, build_request
 from motet_inference.types import Audio
 
 from ..bargein import BargeInPolicy, TurnDetector, VadTurnDetector
@@ -50,15 +50,6 @@ from .interfaces import (
 )
 
 logger = logging.getLogger("motet.voice.composed")
-
-#: Conversation gets its own model variable so a chat model can be cheap and fast while
-#: script generation stays expensive and careful. Falls back to the seam's own global.
-#:
-#: **This should eventually be a fourth ``LlmStage``** alongside dedup/script/grounding —
-#: that is where per-stage model and effort selection belongs. Adding one means editing
-#: ``inference/``, which a parallel session is working in tonight, so the selection is done
-#: here for now and the follow-up is filed rather than smuggled into this PR.
-VOICE_MODEL_ENV: Final = "MOTET_VOICE_LLM_MODEL"
 
 #: A voice turn is short and latency-critical. Capping output is what stops a model from
 #: monologuing at someone who asked a one-sentence question on a pavement.
@@ -130,13 +121,29 @@ class FakeConversationModel:
 class LlmConversationModel:
     """The LLM leg, through the provider seam — never a vendor SDK directly.
 
-    Reasoning is deliberately **off**: this is a spoken turn, where a second of thinking is
-    a second of a person standing in the street waiting. The stages that need thinking ask
-    for it; a conversational reply is not one of them.
+    **Which model, and how hard it thinks, come from ``LlmStage.VOICE``** — the same
+    per-stage seam dedup, script and grounding use, rather than a variable of this
+    module's own (motet#6). What that buys is the startup catalogue check: a slug typo in
+    ``MOTET_LLM_MODEL_VOICE`` stops the process with a message naming
+    ``bin/check-openrouter-models``, instead of surfacing as a vendor error inside
+    somebody's spoken turn.
+
+    Reasoning is **off by default** for this stage: a spoken turn is generated with a
+    person standing in the street waiting for it, so a second of thinking is a second of
+    silence. The stages that need thinking ask for it; a conversational reply is not one
+    of them. ``MOTET_LLM_EFFORT_VOICE`` is there for a deployment that decides otherwise.
+
+    The config is resolved **once**, when the arm is built, and held. Resolving it per
+    turn would put an environment read and a catalogue validation inside the latency
+    budget this whole arm exists to measure.
     """
 
     client: LlmClient
-    model: str
+    config: LlmConfig
+
+    @property
+    def model(self) -> str:
+        return self.config.for_stage(LlmStage.VOICE).model
 
     @property
     def name(self) -> str:
@@ -150,10 +157,11 @@ class LlmConversationModel:
                 messages.append(Message.of(role, turn.get("text", "")))  # type: ignore[arg-type]
         messages.append(Message.of("user", user_text))
         response = self.client.complete(
-            LlmRequest(
-                model=self.model,
-                messages=tuple(messages),
+            build_request(
+                LlmStage.VOICE,
+                messages,
                 max_output_tokens=MAX_REPLY_TOKENS,
+                config=self.config,
             )
         )
         return response.text
@@ -282,17 +290,16 @@ def build_composed_arm(
         )
 
     from motet_inference.adapters import CartesiaSpeechSynthesizer  # noqa: PLC0415
-    from motet_inference.llm import build_client  # noqa: PLC0415
+    from motet_inference.llm import build_client, load_config  # noqa: PLC0415
 
-    model = (
-        environ.get(VOICE_MODEL_ENV, "").strip()
-        or environ.get(MODEL_ENV, "").strip()
-        or DEFAULT_MODEL
-    )
+    # Resolved once, here, and handed to both halves: the client is per process, and the
+    # config it was built from is what every turn's request is built against. Loading it
+    # twice would let a stale environment and a fresh one disagree about the model.
+    config = load_config(environ)
     return ComposedArm(
         vad_factory=EnergyVad,
         recognizer=DormantSpeechRecognizer(),
-        model=LlmConversationModel(client=build_client(), model=model),
+        model=LlmConversationModel(client=build_client(config, env=environ), config=config),
         synthesizer=CartesiaSpeechSynthesizer(),
         # Two of four legs are live, so the arm can speak but cannot listen. Reported as
         # not-conversational rather than half-conversational, because a session that can

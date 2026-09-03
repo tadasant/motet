@@ -33,6 +33,7 @@ from typing import Any
 import httpx
 import pytest
 from motet_inference.llm import (
+    DEFAULT_EFFORTS,
     DEFAULT_MODEL,
     KNOWN_MODELS,
     CacheControl,
@@ -248,6 +249,87 @@ def test_effort_off_disables_reasoning_for_one_stage() -> None:
     assert request.reasoning is None
 
 
+def test_the_voice_turn_is_a_stage_and_defaults_to_no_thinking() -> None:
+    """A spoken turn is latency-critical, so ``off`` is the default rather than an effort.
+
+    ``off`` is not an :data:`~motet_inference.llm.types.Effort`, which is why
+    :data:`DEFAULT_EFFORTS` is a mapping to ``Effort | None``: it is spelled the same way
+    a deployment spells it, and resolves to the same ``None``.
+    """
+    config = load_config({})
+    assert config.for_stage(LlmStage.VOICE).model == DEFAULT_MODEL
+    assert DEFAULT_EFFORTS[LlmStage.VOICE] is None
+    assert config.for_stage(LlmStage.VOICE).effort is None
+
+    request = build_request(LlmStage.VOICE, MESSAGES, max_output_tokens=400, config=config)
+    assert request.model == DEFAULT_MODEL
+    assert request.reasoning is None
+
+
+def test_the_voice_stage_takes_a_model_and_an_effort_override_like_any_other() -> None:
+    """The variables fall out of the member value; nothing voice-specific resolves them."""
+    assert LlmStage.VOICE.model_env == "MOTET_LLM_MODEL_VOICE"
+    assert LlmStage.VOICE.effort_env == "MOTET_LLM_EFFORT_VOICE"
+
+    config = load_config(
+        {
+            "MOTET_LLM_MODEL_VOICE": "anthropic/claude-haiku-4.5",
+            "MOTET_LLM_MODEL_SCRIPT": "anthropic/claude-opus-5",
+        }
+    )
+    assert config.for_stage(LlmStage.VOICE).model == "anthropic/claude-haiku-4.5"
+    assert config.for_stage(LlmStage.SCRIPT).model == "anthropic/claude-opus-5"
+
+    thinking = load_config({"MOTET_LLM_EFFORT_VOICE": "low"})
+    assert thinking.for_stage(LlmStage.VOICE).effort == "low"
+
+
+def test_the_global_effort_reaches_voice_like_every_other_stage() -> None:
+    """A global override beats a per-stage default — for voice too, deliberately.
+
+    ``MOTET_LLM_EFFORT`` is documented as moving every stage, and a stage that quietly
+    ignored it would be the surprise. Somebody who wants a thinking fleet and a fast
+    mouth writes both variables, and the stage one wins.
+    """
+    everywhere = load_config({"MOTET_LLM_EFFORT": "medium"})
+    assert everywhere.for_stage(LlmStage.VOICE).effort == "medium"
+
+    kept_fast = load_config({"MOTET_LLM_EFFORT": "medium", "MOTET_LLM_EFFORT_VOICE": "off"})
+    assert kept_fast.for_stage(LlmStage.VOICE).effort is None
+    assert kept_fast.for_stage(LlmStage.SCRIPT).effort == "medium"
+
+
+def test_a_bad_voice_slug_now_fails_at_config_load() -> None:
+    """The whole point of motet#6: the voice turn used to resolve its own model.
+
+    Before, ``MOTET_VOICE_LLM_MODEL`` was read in ``motet_voice.realtime.composed`` and
+    never seen by the catalogue, so a typo reached OpenRouter inside somebody's spoken
+    turn. It is a boot failure now, with the fix named in the message.
+    """
+    with pytest.raises(LlmConfigError, match="'voice'.*not in the catalog"):
+        load_config({"MOTET_LLM_MODEL_VOICE": "anthropic/claude-sonnet-42"})
+    with pytest.raises(LlmConfigError, match="bin/check-openrouter-models"):
+        load_config({"MOTET_LLM_MODEL_VOICE": "anthropic/claude-sonnet-42"})
+
+
+def test_the_voice_default_lets_a_model_without_selectable_effort_be_chosen() -> None:
+    """Not a coincidence — a cheap, fast, effortless model is what a voice turn wants.
+
+    ``claude-haiku-4.5`` has no selectable effort, so any stage that defaulted to one
+    would refuse it (see the dedup case below). Voice defaults to ``off``, so it does not.
+    """
+    config = load_config({"MOTET_LLM_MODEL_VOICE": "anthropic/claude-haiku-4.5"})
+    assert config.for_stage(LlmStage.VOICE).effort is None
+
+    with pytest.raises(LlmConfigError, match="no selectable effort"):
+        load_config(
+            {
+                "MOTET_LLM_MODEL_VOICE": "anthropic/claude-haiku-4.5",
+                "MOTET_LLM_EFFORT_VOICE": "high",
+            }
+        )
+
+
 def test_build_request_carries_the_stage_model_and_effort() -> None:
     config = load_config({"MOTET_LLM_MODEL_GROUNDING": "anthropic/claude-opus-5"})
     request = build_request(LlmStage.GROUNDING, MESSAGES, max_output_tokens=512, config=config)
@@ -359,6 +441,13 @@ def test_the_startup_summary_carries_no_secret() -> None:
     summary = validate_startup(REAL).describe()
     assert "sk-or-test" not in summary
     assert DEFAULT_MODEL in summary
+
+
+def test_the_startup_summary_names_every_stage() -> None:
+    """A stage the log line omits is a stage nobody can see the model of at boot."""
+    summary = load_config({}).describe()
+    for stage in LlmStage:
+        assert f"{stage.value}=" in summary
 
 
 # ------------------------------------------------------------------- the wire payload
@@ -566,8 +655,14 @@ def test_the_dropped_config_guard_still_fires_on_a_budget_based_model() -> None:
 
 
 def test_which_models_the_evidence_check_applies_to_comes_from_the_catalogue() -> None:
-    """A fact about the model, resolved once, so no stage has to know a generation."""
-    for stage in LlmStage:
+    """A fact about the model, resolved once, so no stage has to know a generation.
+
+    Driven off :data:`DEFAULT_EFFORTS` rather than off the whole enum: a stage that asks
+    for no reasoning has no reasoning to carry a thinking mode, and voice is one.
+    """
+    thinking_stages = [stage for stage in LlmStage if DEFAULT_EFFORTS[stage] is not None]
+    assert thinking_stages, "every stage now defaults to off — this test asserts nothing"
+    for stage in thinking_stages:
         request = build_request(stage, MESSAGES, max_output_tokens=512, config=load_config({}))
         assert request.reasoning is not None
         assert request.reasoning.thinking == "adaptive"

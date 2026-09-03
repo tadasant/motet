@@ -1,13 +1,15 @@
 """Which model each stage uses, resolved from the environment and checked at startup.
 
-**Model selection is configuration, not code, and it is per stage.** The three text
-stages have genuinely different cost and correctness profiles:
+**Model selection is configuration, not code, and it is per stage.** The four text
+callers have genuinely different cost and correctness profiles:
 
 * **dedup/integrate** runs once per source item against the whole window of news items.
   It is the volume line and the reason prompt caching matters at all.
 * **script** is a handful of calls per episode, and quality is user-visible prose.
 * **grounding** decides whether a claim is allowed to be spoken. Invariant 3 lives here,
   so it gets the most thinking and, when it matters, the strongest model.
+* **voice** is a spoken conversational turn, and its currency is latency rather than
+  depth. It defaults to no reasoning at all.
 
 One global default, one override per stage. Nothing here is a code change.
 
@@ -58,7 +60,15 @@ class Provider(StrEnum):
 
 
 class LlmStage(StrEnum):
-    """The inference stages that call a text model.
+    """Everything in Motet that calls a text model.
+
+    A "stage" here is a *caller with its own cost and correctness profile*, not
+    necessarily a step in the ingestion pipeline. :attr:`VOICE` is the conversational
+    turn on the voice service's composed arm: it is not part of the pipeline, but it is a
+    text-model call whose model and thinking depth a deployment wants to set separately —
+    and, more to the point, one whose slug should be checked against the catalogue at
+    startup rather than sent to a vendor unverified. It resolved its own model from a
+    module-local variable until motet#6.
 
     TTS is not here: it is a different vendor with a different shape, and it sits behind
     its own stage Protocol in ``motet_inference.interfaces``.
@@ -67,6 +77,7 @@ class LlmStage(StrEnum):
     DEDUP = "dedup"
     SCRIPT = "script"
     GROUNDING = "grounding"
+    VOICE = "voice"
 
     @property
     def model_env(self) -> str:
@@ -191,10 +202,16 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
 #: Per-stage defaults. Grounding gets the deepest thinking because a wrong verdict there
 #: is a fabricated claim reaching audio; dedup gets the shallowest because it is the
 #: volume line and its judgement is comparatively mechanical.
-DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort]] = {
+#:
+#: ``None`` is a default in its own right and is spelled the same way a deployment spells
+#: it — :data:`OFF_VALUE`, which :func:`_parse_effort_setting` maps to ``None``. Voice is
+#: the stage that wants it: a spoken turn is generated with somebody standing on a
+#: pavement waiting for it, so a second of thinking is a second of silence.
+DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort | None]] = {
     LlmStage.DEDUP: "low",
     LlmStage.SCRIPT: "high",
     LlmStage.GROUNDING: "max",
+    LlmStage.VOICE: None,
 }
 
 
