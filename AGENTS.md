@@ -1235,6 +1235,8 @@ pass while the SQL was wrong.
 - **TypeScript** is strict. The SPA is Vite + React; `tsc --noEmit` is the typecheck.
 - **Migrations** are plain numbered SQL in `db/migrations/`, applied in order and recorded in
   `schema_migrations`. They are forward-only — write a new migration rather than editing an
-  applied one.
+  applied one. A `--` comment is the one exception, because it never reaches the database and
+  so cannot make two environments disagree; the rule is protecting the SQL. A comment that has
+  gone stale is fixed in place, since that is the line a reader meets first.
 - **No `print`, no `console.log`** in committed code; use the logger, which routes to the obs
   stack.

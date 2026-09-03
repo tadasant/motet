@@ -7,7 +7,7 @@
 -- `jobs_ready_idx` is partial on `state = 'ready'`, so it holds no `running` rows at all
 -- and cannot answer the second arm. A `BitmapOr` needs an index path for *every* arm, so
 -- with only one of them indexed the planner's remaining option was a sequential scan of
--- `jobs` — measured at 50,023 rows removed by filter and 618 shared buffers on a 50k-row
+-- `jobs` — measured at 50,115 rows removed by filter and 619 shared buffers on a 50k-row
 -- table, against 3 buffers with this index in place (motet#49).
 --
 -- That is the hottest query in the system: once per claim, and once more per queue per
@@ -23,7 +23,12 @@
 -- `ORDER BY run_at, id` needs — a `BitmapOr` produces no ordering, and Postgres will not
 -- turn an `OR` into a `MergeAppend` — so ordering columns would be dead weight here.
 --
--- Cheap to carry: the partial predicate means it holds only the jobs currently in flight,
--- which is bounded by the number of workers plus whatever they stranded, rather than by
--- every job ever run.
+-- Cheap to carry, which for an index on a queue table is a claim about writes as much as
+-- about size. The partial predicate means it holds only the jobs currently in flight —
+-- bounded by the number of workers plus whatever they stranded, rather than by every job
+-- ever run — and it measured at 16 kB beside a 1,112 kB `jobs_pkey` on the 50k-row table
+-- above. On the write side a claim already forfeits its HOT update to `jobs_ready_idx`,
+-- whose predicate column `state` it changes, so this adds an index entry per transition
+-- into and out of `running` and does not cost a HOT update that was being had: measured at
+-- 0 HOT updates over 500 claims both with the index and without it.
 CREATE INDEX jobs_stale_idx ON jobs (queue, locked_at) WHERE state = 'running';

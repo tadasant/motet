@@ -140,6 +140,10 @@ class TestTheClaimQueryUsesItsIndexes:
     `EXPLAIN` on :data:`jobs.CLAIM_SQL` plans without executing, and it is the statement
     `claim` actually runs rather than a copy of it — a copy would keep its index while the
     query drifted off it, which is this bug one level down.
+
+    The assertions are on the plan's `Index Cond` lines rather than on index names, for the
+    same reason: a name is satisfied by an index that no longer answers the arm it is named
+    for.
     """
 
     #: Enough `done` rows that a sequential scan is not simply the cheapest thing available:
@@ -181,29 +185,61 @@ class TestTheClaimQueryUsesItsIndexes:
         conn.execute("ANALYZE jobs")
         conn.commit()
 
-    def test_no_queue_falls_back_to_a_sequential_scan(self, db: psycopg.Connection[Any]) -> None:
-        """Asserted for every queue, not one.
+    def _plan(self, conn: psycopg.Connection[Any], queue: Queue) -> list[str]:
+        return [
+            row["QUERY PLAN"]
+            for row in conn.execute(
+                f"EXPLAIN {jobs.CLAIM_SQL}", (queue.value, jobs.STALE_LEASE_SECONDS)
+            ).fetchall()
+        ]
 
-        `integrate` is the queue that would hide the regression: migration 0005's
-        `jobs_source_item_idx` is partial on `queue = 'integrate'`, so the planner can walk
-        *that* instead — no `Seq Scan` in the plan, and still every integrate job ever run
-        read to find the handful that are claimable. Hence the second assertion.
+    def _index_cond(self, plan: list[str], index: str) -> str:
+        """The `Index Cond` line belonging to `index`, which `EXPLAIN` puts directly under it.
+
+        The *name* of an index says nothing about whether the planner could push the arm's
+        predicate into it; the condition is where that shows up, and it is the difference
+        between the index doing the work and the heap doing it.
+        """
+        for scan, cond in zip(plan, plan[1:], strict=False):
+            if f"Bitmap Index Scan on {index}" in scan:
+                assert "Index Cond" in cond, f"{index} has no condition:\n" + "\n".join(plan)
+                return cond
+        raise AssertionError(f"{index} is not in the plan:\n" + "\n".join(plan))
+
+    def test_every_queue_claims_through_an_index_on_each_arm(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Asserted for every queue, and by condition rather than by index name.
+
+        `integrate` is the queue that would hide the regression from the `Seq Scan`
+        assertion alone: migration 0005's `jobs_source_item_idx` is partial on
+        `queue = 'integrate'`, so the planner can walk *that* instead — no `Seq Scan` in the
+        plan, and still every integrate job ever run read to find the handful that are
+        claimable.
+
+        And a name would hide the *shape*. `jobs_stale_idx` on `(queue, run_at, id)` — the
+        shape migration 0007 rejects, which reads every `running` row on the queue and
+        filters the lease in the heap — appears in the plan under exactly the same name.
+        The `Index Cond` is the only place the difference surfaces.
         """
         self._seed(db)
 
         for queue in Queue:
-            plan = "\n".join(
-                str(row)
-                for row in db.execute(
-                    f"EXPLAIN {jobs.CLAIM_SQL}", (queue.value, jobs.STALE_LEASE_SECONDS)
-                ).fetchall()
+            plan = self._plan(db, queue)
+            printed = "\n".join(plan)
+            assert not any("Seq Scan on jobs" in line for line in plan), (
+                f"{queue.value}:\n{printed}"
             )
-            assert "Seq Scan on jobs" not in plan, f"{queue.value}:\n{plan}"
-            # One index per arm: `jobs_ready_idx` (0001) and `jobs_stale_idx` (0007). Named
-            # rather than counted, so an index that stops matching its arm is a failure
-            # here rather than a plan that merely happens to avoid the word "Seq".
-            assert "jobs_ready_idx" in plan, f"{queue.value}:\n{plan}"
-            assert "jobs_stale_idx" in plan, f"{queue.value}:\n{plan}"
+
+            # One index per arm, each carrying its own arm's predicate: `jobs_ready_idx`
+            # (0001) answers "due", `jobs_stale_idx` (0007) answers "lease expired". An
+            # index that stops matching its arm still appears by name; it stops appearing
+            # here.
+            ready = self._index_cond(plan, "jobs_ready_idx")
+            assert "run_at <= now()" in ready, f"{queue.value}:\n{printed}"
+
+            stale = self._index_cond(plan, "jobs_stale_idx")
+            assert "locked_at <" in stale, f"{queue.value}:\n{printed}"
 
     def test_explaining_the_claim_does_not_claim(self, db: psycopg.Connection[Any]) -> None:
         """`EXPLAIN` plans an `UPDATE ... RETURNING` without running it.
