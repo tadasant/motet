@@ -6,7 +6,7 @@
 The runner itself lives in :mod:`motet_db.migrations`, and this file holds the CLI and
 nothing else. **Nothing in this package may import this module.** ``python -m
 motet_db.migrate`` imports the package ``motet_db`` first and only then executes
-``migrate.py`` as ``__main__`` — so a module ``__init__`` has already pulled into
+``migrate.py`` as ``__main__`` — so a module that ``__init__`` has already pulled into
 ``sys.modules`` on the way past is executed a *second* time under a second name, and
 ``runpy`` says so:
 

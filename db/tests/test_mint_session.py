@@ -262,7 +262,7 @@ class TestThePlaintextNeverGetsHere:
         assert not called & {"new_session_token", "token_digest", "create_session", "sha256"}
 
 
-class TestTheEntryPointRunsOnce:
+class TestTheEntryPointRefusesFromAShell:
     """The mint-specific half of the entry-point guards.
 
     The generic ones — that importing `motet_db` does not pull this module into

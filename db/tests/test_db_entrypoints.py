@@ -5,8 +5,8 @@ executes ``migrate.py`` as ``__main__``. If anything reachable from ``__init__``
 that module into ``sys.modules`` on the way past, ``runpy`` executes the same file a second
 time under a second name and warns that this "may result in unpredictable behaviour" — two
 copies of one module, with two copies of every module-level object. That is motet#27 for
-``migrate`` and motet#21 for ``motet_workers.runner`` before it, and the second one shipped
-in the production worker image.
+``migrate`` and motet#21 for ``motet_workers.runner`` before it. Both shipped: they are the
+same image, since ``motet-workers`` depends on ``motet-db``.
 
 The one-line fix is easy to make and just as easy to undo: re-exporting anything defined in
 an entry point brings it straight back, and it comes back as a warning on **stderr** that a
@@ -46,31 +46,57 @@ TIMEOUT_SECONDS = 60
 
 
 def _has_main_guard(source: str) -> bool:
-    """Whether a module ends in ``if __name__ == "__main__":`` at the top level.
+    """Whether a module carries a top-level ``if __name__ == "__main__":``.
 
     Parsed rather than grepped, so that a docstring describing the idiom — every entry
-    point in this package has one — is not itself mistaken for an entry point.
+    point in this package has one — is not itself mistaken for an entry point. The
+    operator is checked as well as the operands, so ``__name__ != "__main__"`` does not
+    answer yes; and a non-matching comparison keeps looking rather than deciding, so an
+    unrelated ``if __name__ == ...`` earlier in a file cannot mask the real guard below it.
     """
     for node in ast.parse(source).body:
         if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
             continue
         left = node.test.left
-        if isinstance(left, ast.Name) and left.id == "__name__":
-            return any(
-                isinstance(c, ast.Constant) and c.value == "__main__" for c in node.test.comparators
-            )
+        if not (isinstance(left, ast.Name) and left.id == "__name__"):
+            continue
+        if all(isinstance(op, ast.Eq) for op in node.test.ops) and any(
+            isinstance(c, ast.Constant) and c.value == "__main__" for c in node.test.comparators
+        ):
+            return True
     return False
 
 
 def _entry_point_modules() -> list[str]:
-    return [
-        f"motet_db.{path.stem}"
-        for path in sorted(PACKAGE_DIR.glob("*.py"))
-        if path.name != "__init__.py" and _has_main_guard(path.read_text())
-    ]
+    """Every module in the package that ``python -m`` could be pointed at.
+
+    ``rglob`` rather than ``glob``: an entry point added inside a future subpackage would
+    be missed by a flat scan, and missed silently — the superset assertion below only
+    notices an entry point that *disappears*, never one that was never seen.
+    """
+    modules = []
+    for path in sorted(PACKAGE_DIR.rglob("*.py")):
+        if path.name == "__init__.py" or not _has_main_guard(path.read_text()):
+            continue
+        dotted = ".".join(path.relative_to(PACKAGE_DIR).with_suffix("").parts)
+        modules.append(f"motet_db.{dotted}")
+    return modules
 
 
 ENTRY_POINTS = _entry_point_modules()
+
+#: The name each entry point announces itself by, for the ones that exist today.
+#:
+#: A table *as well as* the rule below, not instead of it. The rule ("not a filename") is
+#: what a newly discovered entry point is held to, since nothing here can know what it
+#: should be called. The table is what stops an existing command being renamed silently:
+#: `usage:` is the first line an operator reads, and `workers/tests/test_entrypoint.py`
+#: pins `motet-worker` the same way. A module absent from this table is checked against the
+#: rule alone.
+EXPECTED_PROG = {
+    "motet_db.migrate": "motet-migrate",
+    "motet_db.mint_session": "motet-mint-session",
+}
 
 
 def _run(module: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -151,8 +177,8 @@ def test_the_help_output_names_something_a_person_could_type(module: str) -> Non
     """``prog``, because argparse otherwise takes it from ``sys.argv[0]``.
 
     Under ``python -m`` that is the file, so the usage line read ``usage: migrate.py`` — a
-    filename rather than any invocation that exists. Asserted as "not a path" rather than
-    against a table of expected names, so that renaming a command is not a test change.
+    filename rather than a command. The claim held against every entry point is that
+    negative one; :data:`EXPECTED_PROG` pins the names of the two that exist.
     """
     usage = _run(module, "--help").stdout
     assert usage.startswith("usage: "), usage
@@ -161,6 +187,8 @@ def test_the_help_output_names_something_a_person_could_type(module: str) -> Non
         f"{module} --help announces itself as {prog!r}, which is a filename rather than"
         " something anyone could run. Pass `prog=` to ArgumentParser."
     )
+    if module in EXPECTED_PROG:
+        assert prog == EXPECTED_PROG[module], usage
 
 
 @pytest.mark.parametrize("module", ENTRY_POINTS)

@@ -25,9 +25,9 @@ and ``python -m motet_db.migrate`` imports the package *before* executing the na
 — so while the runner lived in the module ``python -m`` targets, ``runpy`` executed that
 file a second time under a second name, with a second copy of every module-level object.
 That is motet#27, and it is the same defect ``motet_workers.runner`` shipped as motet#21.
-Nothing importable may live in ``migrate.py``; ``db/tests/test_db_entrypoints.py`` fails if it
-does. (The directory name collision is only apparent: ``db/migrations/`` holds the ``.sql``
-files this module reads, and is not a Python package.)
+Nothing in this package may import ``migrate.py``; ``db/tests/test_db_entrypoints.py``
+fails if anything does. (The directory name collision is only apparent: ``db/migrations/``
+holds the ``.sql`` files this module reads, and is not a Python package.)
 """
 
 from __future__ import annotations
