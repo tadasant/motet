@@ -57,6 +57,39 @@ BUSY_RETRY_SECONDS = 5
 #: it twice, which is the more expensive mistake of the two.
 STALE_LEASE_SECONDS = 1800
 
+#: The claim statement itself, hoisted out of :func:`claim` so that a test can ``EXPLAIN``
+#: *this* rather than a transcription of it.
+#:
+#: The two arms of the ``WHERE`` clause need an index each — ``jobs_ready_idx`` from
+#: migration 0001 and ``jobs_stale_idx`` from 0007 — because a ``BitmapOr`` needs an index
+#: path for every arm and falls back to a sequential scan of every job ever run without
+#: one. A comment on the index is what failed to notice that the first time (motet#49), so
+#: the plan is asserted in ``workers/tests/test_pipeline.py`` instead. Asserting it against
+#: a copy of this SQL would have reproduced the same failure one level down: the copy would
+#: keep its index while the query being run drifted off it.
+#:
+#: Parameters, in order: the queue name, and :data:`STALE_LEASE_SECONDS`.
+CLAIM_SQL = """
+    UPDATE jobs
+    SET state = 'running', locked_at = now(), attempts = attempts + 1, updated_at = now()
+    WHERE id = (
+        SELECT id FROM jobs
+        WHERE queue = %s
+          AND (
+            (state = 'ready' AND run_at <= now())
+            -- Lease reclaim. A worker that died mid-job left this row `running`
+            -- and nothing else would ever pick it up. `attempts` was already
+            -- incremented when it was first claimed, so the retry ceiling still
+            -- bounds a job that kills every worker that touches it.
+            OR (state = 'running' AND locked_at < now() - make_interval(secs => %s))
+          )
+        ORDER BY run_at, id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+    )
+    RETURNING id, queue, payload, attempts, serialize_key
+"""
+
 
 @dataclass(frozen=True)
 class Job:
@@ -105,31 +138,13 @@ def claim(conn: psycopg.Connection[Any], queue: Queue) -> Job | None:
     standing between a worker killed mid-job and a job nobody ever runs: the process that
     would have marked it done is gone, so without a lease the row is stranded and the only
     fix is manual SQL against production.
+
+    Both arms are indexed — see :data:`CLAIM_SQL`. This runs once per claim *and* once per
+    queue per drain pass to discover the queue is empty, over a table nothing prunes, so it
+    is the one query here where the plan is worth pinning.
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            UPDATE jobs
-            SET state = 'running', locked_at = now(), attempts = attempts + 1, updated_at = now()
-            WHERE id = (
-                SELECT id FROM jobs
-                WHERE queue = %s
-                  AND (
-                    (state = 'ready' AND run_at <= now())
-                    -- Lease reclaim. A worker that died mid-job left this row `running`
-                    -- and nothing else would ever pick it up. `attempts` was already
-                    -- incremented when it was first claimed, so the retry ceiling still
-                    -- bounds a job that kills every worker that touches it.
-                    OR (state = 'running' AND locked_at < now() - make_interval(secs => %s))
-                  )
-                ORDER BY run_at, id
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-            )
-            RETURNING id, queue, payload, attempts, serialize_key
-            """,
-            (queue.value, STALE_LEASE_SECONDS),
-        )
+        cur.execute(CLAIM_SQL, (queue.value, STALE_LEASE_SECONDS))
         row = cur.fetchone()
     if row is None:
         return None

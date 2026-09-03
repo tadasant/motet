@@ -127,6 +127,100 @@ class TestQueue:
         assert row["state"] == "ready"
 
 
+class TestTheClaimQueryUsesItsIndexes:
+    """motet#49: the claim query had an index for one of its two arms.
+
+    `jobs_ready_idx` is partial on `state = 'ready'`, so it holds no `running` rows and
+    cannot answer the lease-reclaim arm. A `BitmapOr` needs an index path for *every* arm,
+    so with only one indexed the planner fell back to a sequential scan of every job ever
+    run — on the hottest query in the system, over a table nothing prunes.
+
+    A comment on the index is what failed to catch that (it said "covers the claim query"
+    for as long as the reclaim arm existed), so the plan is asserted rather than described.
+    `EXPLAIN` on :data:`jobs.CLAIM_SQL` plans without executing, and it is the statement
+    `claim` actually runs rather than a copy of it — a copy would keep its index while the
+    query drifted off it, which is this bug one level down.
+    """
+
+    #: Enough `done` rows that a sequential scan is not simply the cheapest thing available:
+    #: a plan taken over an empty table proves nothing. At this size Postgres 16 costs the
+    #: seq scan at 87 against 22 for the `BitmapOr`, so the margin is not marginal.
+    BACKLOG = 2000
+
+    def _seed(self, conn: psycopg.Connection[Any]) -> None:
+        """A queue that has been running a while: mostly `done`, a few ready, a few stale."""
+        queues = [queue.value for queue in Queue]
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, run_at, locked_at, attempts)
+            SELECT (%s::text[])[1 + (i %% cardinality(%s::text[]))], '{}'::jsonb, 'done',
+                   now() - make_interval(secs => i), now() - make_interval(secs => i), 1
+            FROM generate_series(1, %s) AS i
+            """,
+            (queues, queues, self.BACKLOG),
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, run_at)
+            SELECT q, '{}'::jsonb, 'ready', now() - make_interval(secs => i)
+            FROM generate_series(1, 5) AS i, unnest(%s::text[]) AS q
+            """,
+            (queues,),
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, run_at, locked_at, attempts)
+            SELECT q, '{}'::jsonb, 'running',
+                   now() - make_interval(secs => %s), now() - make_interval(secs => %s), 1
+            FROM generate_series(1, 2) AS i, unnest(%s::text[]) AS q
+            """,
+            (jobs.STALE_LEASE_SECONDS * 2, jobs.STALE_LEASE_SECONDS + 600, queues),
+        )
+        # Without fresh statistics the planner is costing a table it thinks is empty, and
+        # the plan below would say nothing about the one production runs.
+        conn.execute("ANALYZE jobs")
+        conn.commit()
+
+    def test_no_queue_falls_back_to_a_sequential_scan(self, db: psycopg.Connection[Any]) -> None:
+        """Asserted for every queue, not one.
+
+        `integrate` is the queue that would hide the regression: migration 0005's
+        `jobs_source_item_idx` is partial on `queue = 'integrate'`, so the planner can walk
+        *that* instead — no `Seq Scan` in the plan, and still every integrate job ever run
+        read to find the handful that are claimable. Hence the second assertion.
+        """
+        self._seed(db)
+
+        for queue in Queue:
+            plan = "\n".join(
+                str(row)
+                for row in db.execute(
+                    f"EXPLAIN {jobs.CLAIM_SQL}", (queue.value, jobs.STALE_LEASE_SECONDS)
+                ).fetchall()
+            )
+            assert "Seq Scan on jobs" not in plan, f"{queue.value}:\n{plan}"
+            # One index per arm: `jobs_ready_idx` (0001) and `jobs_stale_idx` (0007). Named
+            # rather than counted, so an index that stops matching its arm is a failure
+            # here rather than a plan that merely happens to avoid the word "Seq".
+            assert "jobs_ready_idx" in plan, f"{queue.value}:\n{plan}"
+            assert "jobs_stale_idx" in plan, f"{queue.value}:\n{plan}"
+
+    def test_explaining_the_claim_does_not_claim(self, db: psycopg.Connection[Any]) -> None:
+        """`EXPLAIN` plans an `UPDATE ... RETURNING` without running it.
+
+        The test above would otherwise be claiming jobs as a side effect of measuring how
+        it would claim them, and a later assertion about `attempts` would be about this.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+
+        db.execute(f"EXPLAIN {jobs.CLAIM_SQL}", (Queue.INTEGRATE.value, jobs.STALE_LEASE_SECONDS))
+
+        row = db.execute("SELECT state, attempts FROM jobs").fetchone()
+        assert row is not None
+        assert (row["state"], row["attempts"]) == ("ready", 0)
+
+
 class TestSerialization:
     def test_a_second_worker_cannot_hold_the_same_user_s_key(self, _migrated: str) -> None:
         """Invariant 6, at the mechanism level.
