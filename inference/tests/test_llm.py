@@ -443,11 +443,24 @@ def test_the_startup_summary_carries_no_secret() -> None:
     assert DEFAULT_MODEL in summary
 
 
-def test_the_startup_summary_names_every_stage() -> None:
-    """A stage the log line omits is a stage nobody can see the model of at boot."""
+def test_the_startup_summary_names_every_stage_and_its_effort() -> None:
+    """A stage the log line omits is one nobody can see the configuration of at boot.
+
+    The effort is there as well as the model because it has no other visible surface, and
+    because the global ``MOTET_LLM_EFFORT`` silently overrides a per-stage default —
+    including voice's ``off``, which is the one whose whole point is that it stays off.
+    """
     summary = load_config({}).describe()
     for stage in LlmStage:
-        assert f"{stage.value}=" in summary
+        assert f"{stage.value}={DEFAULT_MODEL}@" in summary
+    assert f"voice={DEFAULT_MODEL}@off" in summary
+    assert f"grounding={DEFAULT_MODEL}@max" in summary
+
+    raised = load_config({"MOTET_LLM_EFFORT": "medium"}).describe()
+    assert f"voice={DEFAULT_MODEL}@medium" in raised, (
+        "a global effort that silently switched thinking on for spoken turns must be "
+        "visible in the one line an operator reads at boot"
+    )
 
 
 # ------------------------------------------------------------------- the wire payload

@@ -238,9 +238,20 @@ class LlmConfig:
         return self.stages[stage]
 
     def describe(self) -> str:
-        """A one-line, secret-free summary for the startup log."""
-        models = " ".join(f"{s.value}={self.stages[s].model}" for s in LlmStage)
-        return f"provider={self.provider.value} credential={self.credential_kind.value} {models}"
+        """A one-line, secret-free summary for the startup log.
+
+        The **effort** is here as well as the model, and that is not decoration: a stage's
+        thinking depth has no other visible surface, and the global ``MOTET_LLM_EFFORT``
+        overrides a per-stage default without saying so. Voice is the stage that makes
+        this bite — its default is ``off`` precisely so a spoken turn stays fast, and an
+        operator who raised the global for pipeline quality would otherwise have no way to
+        see that they had also made every conversational turn think.
+        """
+        stages = " ".join(
+            f"{s.value}={self.stages[s].model}@{self.stages[s].effort or OFF_VALUE}"
+            for s in LlmStage
+        )
+        return f"provider={self.provider.value} credential={self.credential_kind.value} {stages}"
 
 
 def _default_provider(environ: Mapping[str, str]) -> Provider:

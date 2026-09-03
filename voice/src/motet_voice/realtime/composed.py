@@ -161,6 +161,18 @@ class LlmConversationModel:
                 LlmStage.VOICE,
                 messages,
                 max_output_tokens=MAX_REPLY_TOKENS,
+                # The one path where the dropped-reasoning guard costs more than it buys.
+                # It fires *after* a complete, billed answer has arrived, and raising here
+                # would throw that answer away and propagate out of the turn — nothing
+                # between this and :meth:`VoiceSession.respond_to_text` catches it, so the
+                # listener gets silence and an error instead of the sentence that was
+                # already generated. On a batch stage a lost completion is a retry; here it
+                # is the turn. The adapter still logs the warning unconditionally, so the
+                # quality drop is recorded rather than hidden — which is the half that
+                # matters, and the same advisory-not-a-gate shape invariant 3 uses on this
+                # path. Unreachable while voice defaults to ``off``; it stops being
+                # unreachable the moment anyone sets ``MOTET_LLM_EFFORT_VOICE``.
+                require_reasoning_evidence=False,
                 config=self.config,
             )
         )
@@ -290,12 +302,24 @@ def build_composed_arm(
         )
 
     from motet_inference.adapters import CartesiaSpeechSynthesizer  # noqa: PLC0415
-    from motet_inference.llm import build_client, load_config  # noqa: PLC0415
+    from motet_inference.llm import Provider, build_client, load_config  # noqa: PLC0415
 
     # Resolved once, here, and handed to both halves: the client is per process, and the
     # config it was built from is what every turn's request is built against. Loading it
     # twice would let a stale environment and a fresh one disagree about the model.
     config = load_config(environ)
+    if config.provider is Provider.FAKE:
+        # Two readings of "is this real" that can disagree, so say so rather than serving
+        # fabricated replies from an arm that reports itself as real. `settings` came from
+        # one mapping and `config` from `environ`; a caller passing a partial `env` — which
+        # in practice means a test — gets a real-looking arm wired to `FakeLlmClient`.
+        # `load_config`'s own version of this warning cannot fire here, because it reads
+        # the same partial mapping and sees no mode at all.
+        logger.warning(
+            "the composed arm is being built in real mode but the LLM seam resolved "
+            "provider=fake from the environment it was given, so every conversational "
+            "reply will be fabricated. Nothing will reach a vendor."
+        )
     return ComposedArm(
         vad_factory=EnergyVad,
         recognizer=DormantSpeechRecognizer(),

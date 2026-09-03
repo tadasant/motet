@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
-from motet_inference.llm import DEFAULT_MODEL, FakeLlmClient, LlmConfigError, load_config
+from motet_inference.llm import (
+    DEFAULT_MODEL,
+    FakeLlmClient,
+    LlmConfigError,
+    LlmStage,
+    load_config,
+)
 from motet_voice.bargein import BargeInPolicy, VadTurnDetector
 from motet_voice.config import COMPOSED_ARM, OPENAI_REALTIME_ARM, VoiceSettings
 from motet_voice.realtime import (
@@ -236,12 +243,71 @@ def test_an_effort_asked_for_on_the_voice_stage_reaches_the_request() -> None:
 
 
 def test_a_bad_voice_slug_stops_the_arm_from_being_built() -> None:
-    """The catalogue check the old local resolution skipped, at the arm's own boot."""
+    """The catalogue check the old local resolution skipped, at the arm's own boot.
+
+    The mode goes in **both** mappings deliberately. ``VoiceSettings`` and ``load_config``
+    read different ones, and a test that put ``real`` only in the settings would resolve
+    ``provider=fake`` and prove nothing about the real path — the slug check would still
+    fire, because it runs whatever the provider is, and the assertion would pass for the
+    wrong reason.
+    """
+    env = {
+        "MOTET_INFERENCE_MODE": "real",
+        "MOTET_LLM_MODEL_VOICE": "anthropic/claude-sonnet-42",
+    }
+    real = VoiceSettings.from_env({**env, "MOTET_VOICE_SESSION_SECRET": "s"})
+    with pytest.raises(LlmConfigError, match="not in the catalog"):
+        build_composed_arm(real, env=env)
+
+
+def test_the_reasoning_guard_is_off_for_a_spoken_turn() -> None:
+    """A dropped reasoning config must not cost the turn it was already answered in.
+
+    ``ReasoningNotAppliedError`` is raised *after* a complete, billed answer arrives, and
+    nothing between here and ``VoiceSession.respond_to_text`` catches it — so on this path
+    the guard turns a usable reply into silence. The adapter logs it either way, so the
+    quality drop is still recorded.
+    """
+    client = FakeLlmClient()
+    model = LlmConversationModel(
+        client=client, config=load_config({"MOTET_LLM_EFFORT_VOICE": "low"})
+    )
+    model.reply(TurnRequest(persona_instructions="p", voice="narrator"), "hello")
+
+    reasoning = client.calls[0].reasoning
+    assert reasoning is not None
+    assert not reasoning.require_evidence
+
+
+def test_the_real_arms_llm_leg_holds_the_config_built_from_its_own_env(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ "Resolved once, handed to both halves" — asserted on the arm the real branch builds.
+
+    The TTS leg reads ``os.environ`` for its own credential, so those two are set here;
+    neither constructs a client or touches a network. The LLM half is the claim under
+    test: the model on the assembled arm has to be the one ``env`` asked for.
+
+    It doubles as cover for the disagreement warning. ``env`` carries no
+    ``MOTET_INFERENCE_MODE``, so the seam resolves ``provider=fake`` while the settings say
+    real — a real-looking arm that would fabricate every reply. ``load_config``'s own
+    version of that warning cannot fire, because it reads the same partial mapping and sees
+    no mode at all, so the arm has to say it itself.
+    """
+    monkeypatch.setenv("CARTESIA_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("MOTET_TTS_VOICE_ID", "test-voice")
+
     real = VoiceSettings.from_env(
         {"MOTET_INFERENCE_MODE": "real", "MOTET_VOICE_SESSION_SECRET": "s"}
     )
-    with pytest.raises(LlmConfigError, match="not in the catalog"):
-        build_composed_arm(real, env={"MOTET_LLM_MODEL_VOICE": "anthropic/claude-sonnet-42"})
+    with caplog.at_level(logging.WARNING, logger="motet.voice.composed"):
+        arm = build_composed_arm(real, env={"MOTET_LLM_MODEL_VOICE": "anthropic/claude-haiku-4.5"})
+
+    assert isinstance(arm.model, LlmConversationModel)
+    assert arm.model.model == "anthropic/claude-haiku-4.5"
+    assert arm.model.config.for_stage(LlmStage.VOICE).effort is None
+    assert isinstance(arm.model.client, FakeLlmClient)
+    assert any("provider=fake" in record.message for record in caplog.records)
 
 
 def test_the_history_the_caller_supplied_travels_with_the_turn() -> None:
