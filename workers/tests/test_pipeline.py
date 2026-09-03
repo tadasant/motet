@@ -127,6 +127,136 @@ class TestQueue:
         assert row["state"] == "ready"
 
 
+class TestTheClaimQueryUsesItsIndexes:
+    """motet#49: the claim query had an index for one of its two arms.
+
+    `jobs_ready_idx` is partial on `state = 'ready'`, so it holds no `running` rows and
+    cannot answer the lease-reclaim arm. A `BitmapOr` needs an index path for *every* arm,
+    so with only one indexed the planner fell back to a sequential scan of every job ever
+    run — on the hottest query in the system, over a table nothing prunes.
+
+    A comment on the index is what failed to catch that (it said "covers the claim query"
+    for as long as the reclaim arm existed), so the plan is asserted rather than described.
+    `EXPLAIN` on :data:`jobs.CLAIM_SQL` plans without executing, and it is the statement
+    `claim` actually runs rather than a copy of it — a copy would keep its index while the
+    query drifted off it, which is this bug one level down.
+
+    The assertions are on the plan's `Index Cond` lines rather than on index names, for the
+    same reason: a name is satisfied by an index that no longer answers the arm it is named
+    for.
+    """
+
+    #: Enough `done` rows that a sequential scan is not simply the cheapest thing available:
+    #: a plan taken over an empty table proves nothing. At this size Postgres 16 costs the
+    #: seq scan at 87 against 22 for the `BitmapOr`, so the margin is not marginal.
+    BACKLOG = 2000
+
+    def _seed(self, conn: psycopg.Connection[Any]) -> None:
+        """A queue that has been running a while: mostly `done`, a few ready, a few stale."""
+        queues = [queue.value for queue in Queue]
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, run_at, locked_at, attempts)
+            SELECT (%s::text[])[1 + (i %% cardinality(%s::text[]))], '{}'::jsonb, 'done',
+                   now() - make_interval(secs => i), now() - make_interval(secs => i), 1
+            FROM generate_series(1, %s) AS i
+            """,
+            (queues, queues, self.BACKLOG),
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, run_at)
+            SELECT q, '{}'::jsonb, 'ready', now() - make_interval(secs => i)
+            FROM generate_series(1, 5) AS i, unnest(%s::text[]) AS q
+            """,
+            (queues,),
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, run_at, locked_at, attempts)
+            SELECT q, '{}'::jsonb, 'running',
+                   now() - make_interval(secs => %s), now() - make_interval(secs => %s), 1
+            FROM generate_series(1, 2) AS i, unnest(%s::text[]) AS q
+            """,
+            (jobs.STALE_LEASE_SECONDS * 2, jobs.STALE_LEASE_SECONDS + 600, queues),
+        )
+        # Without fresh statistics the planner is costing a table it thinks is empty, and
+        # the plan below would say nothing about the one production runs.
+        conn.execute("ANALYZE jobs")
+        conn.commit()
+
+    def _plan(self, conn: psycopg.Connection[Any], queue: Queue) -> list[str]:
+        return [
+            row["QUERY PLAN"]
+            for row in conn.execute(
+                f"EXPLAIN {jobs.CLAIM_SQL}", (queue.value, jobs.STALE_LEASE_SECONDS)
+            ).fetchall()
+        ]
+
+    def _index_cond(self, plan: list[str], index: str) -> str:
+        """The `Index Cond` line belonging to `index`, which `EXPLAIN` puts directly under it.
+
+        The *name* of an index says nothing about whether the planner could push the arm's
+        predicate into it; the condition is where that shows up, and it is the difference
+        between the index doing the work and the heap doing it.
+        """
+        for scan, cond in zip(plan, plan[1:], strict=False):
+            if f"Bitmap Index Scan on {index}" in scan:
+                assert "Index Cond" in cond, f"{index} has no condition:\n" + "\n".join(plan)
+                return cond
+        raise AssertionError(f"{index} is not in the plan:\n" + "\n".join(plan))
+
+    def test_every_queue_claims_through_an_index_on_each_arm(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Asserted for every queue, and by condition rather than by index name.
+
+        `integrate` is the queue that would hide the regression from the `Seq Scan`
+        assertion alone: migration 0005's `jobs_source_item_idx` is partial on
+        `queue = 'integrate'`, so the planner can walk *that* instead — no `Seq Scan` in the
+        plan, and still every integrate job ever run read to find the handful that are
+        claimable.
+
+        And a name would hide the *shape*. `jobs_stale_idx` on `(queue, run_at, id)` — the
+        shape migration 0007 rejects, which reads every `running` row on the queue and
+        filters the lease in the heap — appears in the plan under exactly the same name.
+        The `Index Cond` is the only place the difference surfaces.
+        """
+        self._seed(db)
+
+        for queue in Queue:
+            plan = self._plan(db, queue)
+            printed = "\n".join(plan)
+            assert not any("Seq Scan on jobs" in line for line in plan), (
+                f"{queue.value}:\n{printed}"
+            )
+
+            # One index per arm, each carrying its own arm's predicate: `jobs_ready_idx`
+            # (0001) answers "due", `jobs_stale_idx` (0007) answers "lease expired". An
+            # index that stops matching its arm still appears by name; it stops appearing
+            # here.
+            ready = self._index_cond(plan, "jobs_ready_idx")
+            assert "run_at <= now()" in ready, f"{queue.value}:\n{printed}"
+
+            stale = self._index_cond(plan, "jobs_stale_idx")
+            assert "locked_at <" in stale, f"{queue.value}:\n{printed}"
+
+    def test_explaining_the_claim_does_not_claim(self, db: psycopg.Connection[Any]) -> None:
+        """`EXPLAIN` plans an `UPDATE ... RETURNING` without running it.
+
+        The test above would otherwise be claiming jobs as a side effect of measuring how
+        it would claim them, and a later assertion about `attempts` would be about this.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+
+        db.execute(f"EXPLAIN {jobs.CLAIM_SQL}", (Queue.INTEGRATE.value, jobs.STALE_LEASE_SECONDS))
+
+        row = db.execute("SELECT state, attempts FROM jobs").fetchone()
+        assert row is not None
+        assert (row["state"], row["attempts"]) == ("ready", 0)
+
+
 class TestSerialization:
     def test_a_second_worker_cannot_hold_the_same_user_s_key(self, _migrated: str) -> None:
         """Invariant 6, at the mechanism level.

@@ -8,6 +8,14 @@ that records it, so a failure leaves nothing half-applied.
 The runner does not track checksums, so an edited file simply never re-runs, and the
 schema silently diverges between environments.
 
+The one carve-out is a ``--`` comment, and it is a carve-out precisely because it cannot
+have that consequence: a comment never reaches the database, so an applied migration and
+an edited copy of it produce identical schemas and nothing can diverge. What the rule is
+protecting is the SQL. Anything that changes what a migration *does* — including adding or
+removing a statement — is not covered, however small it looks. Correcting a comment that
+has gone stale is worth doing in place: the misleading sentence is at the line a reader
+meets first, and a correction filed only in a later migration does not reach them.
+
 No ORM and no migration framework on purpose: the schema is small, and a plain runner is
 one file a reader can hold in their head. See AGENTS.md.
 """

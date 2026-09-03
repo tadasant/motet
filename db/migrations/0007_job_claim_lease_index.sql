@@ -1,0 +1,34 @@
+-- The other half of the claim query's WHERE clause, which has had no index since it was
+-- written.
+--
+-- `jobs.claim` matches two disjoint sets of rows: a ready job that is due, and a `running`
+-- job whose lease has expired (`STALE_LEASE_SECONDS`) — the reclaim that is the only thing
+-- standing between a worker killed mid-job and a job nobody ever runs. Migration 0001's
+-- `jobs_ready_idx` is partial on `state = 'ready'`, so it holds no `running` rows at all
+-- and cannot answer the second arm. A `BitmapOr` needs an index path for *every* arm, so
+-- with only one of them indexed the planner's remaining option was a sequential scan of
+-- `jobs` — measured at 50,115 rows removed by filter and 619 shared buffers on a 50k-row
+-- table, against 3 buffers with this index in place (motet#49).
+--
+-- That is the hottest query in the system: once per claim, and once more per queue per
+-- drain pass to discover the queue is empty, so a long-lived `runner all --poll-seconds`
+-- process runs it at least six times a sweep. And nothing prunes `jobs` — `complete()`
+-- only flips the state to `done` — so the relation it was scanning grows for the life of
+-- the deployment.
+--
+-- `(queue, locked_at)` rather than `(queue, run_at, id)`, which is the shape that would
+-- have mirrored `jobs_ready_idx`: the reclaim arm filters on `locked_at`, and the mirrored
+-- shape puts only `queue` in the index condition, so it reads every `running` row on the
+-- queue and filters the lease in the heap. Neither shape avoids the `Sort` that
+-- `ORDER BY run_at, id` needs — a `BitmapOr` produces no ordering, and Postgres will not
+-- turn an `OR` into a `MergeAppend` — so ordering columns would be dead weight here.
+--
+-- Cheap to carry, which for an index on a queue table is a claim about writes as much as
+-- about size. The partial predicate means it holds only the jobs currently in flight —
+-- bounded by the number of workers plus whatever they stranded, rather than by every job
+-- ever run — and it measured at 16 kB beside a 1,112 kB `jobs_pkey` on the 50k-row table
+-- above. On the write side a claim already forfeits its HOT update to `jobs_ready_idx`,
+-- whose predicate column `state` it changes, so this adds an index entry per transition
+-- into and out of `running` and does not cost a HOT update that was being had: measured at
+-- 0 HOT updates over 500 claims both with the index and without it.
+CREATE INDEX jobs_stale_idx ON jobs (queue, locked_at) WHERE state = 'running';

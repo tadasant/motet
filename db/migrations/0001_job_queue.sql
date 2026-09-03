@@ -20,5 +20,11 @@ CREATE TABLE jobs (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- Covers the claim query: ready jobs in one queue, due now, oldest first.
+-- Covers ONE ARM of the claim query: ready jobs in one queue, due now, oldest first.
+--
+-- It said "covers the claim query" until motet#49, and by then that was half true: the
+-- claim also matches `running` rows whose lease has expired, an arm added after this
+-- migration, and a partial index on `state = 'ready'` holds none of them. The other arm is
+-- `jobs_stale_idx`, in migration 0007 — the two together are what the claim query needs,
+-- and neither alone will do.
 CREATE INDEX jobs_ready_idx ON jobs (queue, run_at, id) WHERE state = 'ready';
