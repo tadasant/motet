@@ -7,7 +7,7 @@ Claude covers dedup/integrate, script generation, and grounding; Cartesia Sonic 
 TTS. Credentials arrive from the environment, resolved by infrastructure that lives in
 the private repo — never read a key from a file in this tree.
 
-The three text stages reach their model through ``motet_inference.llm``: ``build_client()``
+The three stages here reach their model through ``motet_inference.llm``: ``build_client()``
 plus ``build_request(cls.stage, ...)`` hands each class the model and thinking depth
 configured for *its* stage, so filling one in never involves picking a model. The prompts
 and the response schemas live in ``motet_inference.prompts``; what is left here is wiring.

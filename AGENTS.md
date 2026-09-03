@@ -572,9 +572,20 @@ chosen. `MOTET_INFERENCE_MODE=fake` therefore guarantees no test can spend money
 it does for the stage registry.
 
 **The default is `anthropic/claude-sonnet-5`, and switching is a variable, not a commit.**
-`MOTET_LLM_MODEL` moves every stage; `MOTET_LLM_MODEL_{DEDUP,SCRIPT,GROUNDING}` moves one.
-Effort works the same way, defaulting per stage: dedup `low` (the volume line), script
-`high`, grounding `max`.
+`MOTET_LLM_MODEL` moves every stage; `MOTET_LLM_MODEL_{DEDUP,SCRIPT,GROUNDING,VOICE}` moves
+one. Effort works the same way, defaulting per stage: dedup `low` (the volume line), script
+`high`, grounding `max`, voice `off`.
+
+**A "stage" is a caller with its own cost profile, not a step in the pipeline**, which is
+what lets the voice service's conversational turn be one of them (motet#6). It used to
+resolve its own slug from a `MOTET_VOICE_LLM_MODEL` of the voice module's own, and the cost
+of that was not the duplication — it was that the *one* text call in the system a person
+waits on in real time was also the one whose slug nothing checked against the catalogue
+until a vendor rejected it mid-turn. Voice defaults to `off` rather than to an effort
+because a second of thinking there is a second of silence; that is a default, so
+`MOTET_LLM_EFFORT_VOICE` still turns it on. `MOTET_VOICE_LLM_MODEL` is gone rather than
+aliased — nothing set it, and an alias resolved outside `load_config` would have kept
+exactly the bypass the change is for.
 
 Four things about this are settled, and each exists because of a specific failure:
 

@@ -1,9 +1,10 @@
 """The LLM provider seam: one interface, one real adapter, one fake.
 
-Motet's text stages — dedup/integrate, script generation, grounding validation — talk
-to a model through :class:`LlmClient` and nothing else. OpenRouter is the provider Phase
-1 ships, defaulting to Claude Sonnet 5 (``anthropic/claude-sonnet-5``); which model each
-stage uses is environment configuration, not code.
+Motet's text callers — dedup/integrate, script generation, grounding validation, and the
+voice service's conversational turn — talk to a model through :class:`LlmClient` and
+nothing else. OpenRouter is the provider Phase 1 ships, defaulting to Claude Sonnet 5
+(``anthropic/claude-sonnet-5``); which model each stage uses is environment
+configuration, not code.
 
 Reach for :func:`build_client` and :func:`build_request` rather than constructing an
 adapter directly — that is what keeps a stage from learning a vendor's name, and what

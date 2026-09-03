@@ -202,7 +202,8 @@ Every variable is optional; the service starts with none of them set.
 | `MOTET_VOICE_API_BASE_URL` | Where the platform tools call Motet's API |
 | `MOTET_VOICE_API_TOKEN` | Bearer token for that API |
 | `MOTET_VOICE_START_SESSION_TOKEN` | Bearer required to mint a session. **Unset means open**, and an open `StartSession` is a confused deputy: a session's tools carry the credential above. `/internal/health` reports which it is |
-| `MOTET_VOICE_LLM_MODEL` | Conversation model override; falls back to `MOTET_LLM_MODEL` |
+| `MOTET_LLM_MODEL_VOICE` | Conversation model for the composed arm; falls back to `MOTET_LLM_MODEL`, then the seam's default. The per-stage seam in `motet_inference.llm`, not a variable of this service's own — so the slug is checked against the catalogue at startup |
+| `MOTET_LLM_EFFORT_VOICE` | Thinking depth for a spoken turn. Defaults to `off` |
 | `MOTET_VOICE_OPENAI_REALTIME_MODEL` | Realtime model slug |
 | `OPENAI_API_KEY` | Not provisioned. Wakes the realtime arm |
 | `EXA_API_KEY` | Not provisioned. Wakes `start_research` |
