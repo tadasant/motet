@@ -316,6 +316,37 @@ def _rule_for(
 # --- script + grounding --------------------------------------------------------------
 
 
+#: The episode states that mean the script stage has already run to completion.
+#:
+#: ``handle_script`` writes ``rendering`` and enqueues the TTS job in the same
+#: transaction, so an episode at ``rendering`` or beyond has already been scripted,
+#: grounded and handed on — and the *only* thing a re-run can add is a second copy of
+#: everything the module docstring promises there will never be a second copy of: another
+#: billed script completion, another grounding pass at ``effort='max'``, a
+#: ``replace_segments`` racing whatever TTS is reading, and a second TTS job for an
+#: episode that already has one. ``ready`` alone was not enough, because ``rendering`` is
+#: precisely the state this handler itself writes: a job whose worker died between the
+#: work commit and ``jobs.complete`` stays ``running`` with the work durably applied, and
+#: ``jobs.STALE_LEASE_SECONDS`` makes it claimable again. That reclaim is the intended
+#: recovery; re-executing a finished stage is not. (motet#50)
+#:
+#: **``pending`` and ``failed`` are deliberately absent, because neither is past this
+#: stage.** ``pending`` means assembly never ran, which raises below rather than
+#: returning quietly — a silent return there would hide a real bug. ``failed`` means a
+#: stage gave up, and a re-scripted failed episode is a *re-script somebody asked for*:
+#: short-circuiting it would strand the episode in ``failed`` with no TTS job and nothing
+#: to say so, which is the quiet direction of this same bug.
+#:
+#: ``failed`` is not free of the problem above, and saying it is would be wrong. A
+#: *stale* script job can outlive its own episode's failure — its row sits ``running``
+#: while the TTS job downstream exhausts its retries and marks the episode ``failed`` —
+#: so a reclaim can still put a failed episode back through the full stage, re-billing it
+#: and clearing the ``last_error`` that said what went wrong. That path predates this
+#: change and is not closed by it; it is motet#55, because closing it wants a way to tell
+#: a stale job from a deliberate retry rather than a wider state check.
+SCRIPTED_STATES = frozenset({EpisodeState.RENDERING, EpisodeState.READY})
+
+
 def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
     """Write the briefing, then refuse to pass on anything that is not grounded.
 
@@ -325,13 +356,22 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
     claims are individually grounded, so what ships is exactly the subset that passed.
     An episode where *nothing* passed is a failure, loudly, because that is a signal about
     the script stage rather than about one sentence.
+
+    An episode already in :data:`SCRIPTED_STATES` returns before any of that, and it does
+    not weaken the gate: validation *ran* on the pass that got it there, and only the
+    claims that survived were written. This is a stage that has completed, not one that
+    was skipped.
     """
     episode_id = _require(payload, "episode_id")
     episode = repo.get_episode(context.conn, episode_id)
     if episode is None:
         raise PermanentFailure(f"episode {episode_id} no longer exists")
-    if episode.state is EpisodeState.READY:
-        logger.info("episode %s is already rendered; nothing to script", episode_id)
+    if episode.state in SCRIPTED_STATES:
+        logger.info(
+            "episode %s is already scripted (%s); nothing to do",
+            episode_id,
+            episode.state.value,
+        )
         return
     if not episode.segments:
         raise PermanentFailure("episode has no segments; assembly did not run")

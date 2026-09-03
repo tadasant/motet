@@ -11,11 +11,22 @@ from __future__ import annotations
 
 import os
 import signal
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import psycopg
 import pytest
 from motet_db import EpisodeState, SourceItemState, repo
+from motet_inference import (
+    GroundingReport,
+    GroundingValidator,
+    NewsItem,
+    Script,
+    ScriptGenerator,
+    SourceItem,
+    Stages,
+)
+from motet_inference.registry import fake_stages
 from motet_storage import LocalObjectStore
 from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, runner
 
@@ -298,6 +309,14 @@ class TestFullPipeline:
     def test_rerunning_the_script_stage_replaces_segments_rather_than_appending(
         self, db: psycopg.Connection[Any], _migrated: str
     ) -> None:
+        """A retry from `scripting` writes one set of segments, not two.
+
+        The episode is put back into `scripting` before the second run because that is the
+        state a *genuine* retry happens from — a handler that raised, or a worker that
+        died, before `handle_script` committed anything. Left in `rendering` the second run
+        would short-circuit (see `TestAFinishedScriptStageIsNotRerun`) and this would pass
+        without `replace_segments` ever being called.
+        """
         paste(db, MORNING)
         drain(Queue.INTEGRATE, _migrated)
         episode_id = enqueue_episode(db, user_id=USER, title="E", max_duration_ms=600_000)
@@ -306,11 +325,160 @@ class TestFullPipeline:
         drain(Queue.SCRIPT, _migrated)
         before = len(repo.get_episode(db, episode_id).segments)
 
+        repo.set_episode_state(db, episode_id, EpisodeState.SCRIPTING)
         jobs.enqueue(db, Queue.SCRIPT, {"episode_id": episode_id})
         db.commit()
         drain(Queue.SCRIPT, _migrated)
 
         assert len(repo.get_episode(db, episode_id).segments) == before
+
+
+class CountingScriptGenerator:
+    """A script generator that records being asked, and otherwise is the fake."""
+
+    def __init__(self, inner: ScriptGenerator) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    def generate(self, news_items: Sequence[NewsItem], sources: Mapping[str, SourceItem]) -> Script:
+        self.calls += 1
+        return self._inner.generate(news_items, sources)
+
+
+class CountingGroundingValidator:
+    """The same, for the gate — the most expensive call in the pipeline."""
+
+    def __init__(self, inner: GroundingValidator) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    def validate(self, script: Script, sources: Mapping[str, SourceItem]) -> GroundingReport:
+        self.calls += 1
+        return self._inner.validate(script, sources)
+
+
+class TestAFinishedScriptStageIsNotRerun:
+    """motet#50: a `script` job reclaimed after its stage finished must do nothing.
+
+    `_execute` commits the handler's work and `jobs.complete` in two transactions, which
+    is deliberate — squashing them would roll back the attempt counter with the work and a
+    poison job would retry forever. The cost is a window: a worker that dies between them
+    leaves the row `running` with the work durably applied, and `STALE_LEASE_SECONDS`
+    makes it claimable again. That reclaim is the intended recovery for every other stage;
+    for `script` it used to re-execute a stage that had already completed.
+
+    None of that shows up in the database — the stage converges on the same segments — so
+    what this watches is the seams a re-run would have crossed: the two model calls, the
+    segment rewrite, and the TTS job.
+    """
+
+    def _reclaimable(self, conn: psycopg.Connection[Any], queue: Queue) -> None:
+        """Put `queue`'s job back exactly as a killed worker would have left it."""
+        conn.execute(
+            """
+            UPDATE jobs
+            SET state = 'running', locked_at = now() - make_interval(secs => %s)
+            WHERE queue = %s
+            """,
+            (jobs.STALE_LEASE_SECONDS + 60, queue.value),
+        )
+        conn.commit()
+
+    def _tts_jobs(self, conn: psycopg.Connection[Any]) -> list[int]:
+        return [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM jobs WHERE queue = %s ORDER BY id", (Queue.TTS.value,)
+            ).fetchall()
+        ]
+
+    def test_a_reclaimed_script_job_rescripts_nothing_and_queues_nothing(
+        self,
+        db: psycopg.Connection[Any],
+        _migrated: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        base = fake_stages()
+        script_generator = CountingScriptGenerator(base.script_generator)
+        grounding_validator = CountingGroundingValidator(base.grounding_validator)
+        stages = Stages(
+            integrator=base.integrator,
+            script_generator=script_generator,
+            grounding_validator=grounding_validator,
+            speech_synthesizer=base.speech_synthesizer,
+        )
+
+        paste(db, MORNING)
+        drain(Queue.INTEGRATE, _migrated, stages=stages)
+        episode_id = enqueue_episode(db, user_id=USER, title="E", max_duration_ms=600_000)
+        db.commit()
+        drain(Queue.ASSEMBLE, _migrated, stages=stages)
+        assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
+
+        # The state the stage itself wrote, and the work it handed on.
+        assert repo.get_episode(db, episode_id).state is EpisodeState.RENDERING
+        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        queued = self._tts_jobs(db)
+        assert len(queued) == 1
+        segments = [(s.id, s.text) for s in repo.get_episode(db, episode_id).segments]
+
+        rewrites: list[str] = []
+        replace_segments = repo.replace_segments
+
+        def spy(
+            conn: psycopg.Connection[Any],
+            episode_id_: str,
+            specs: Sequence[repo.SegmentSpec],
+        ) -> None:
+            rewrites.append(episode_id_)
+            replace_segments(conn, episode_id_, specs)
+
+        monkeypatch.setattr(repo, "replace_segments", spy)
+
+        self._reclaimable(db, Queue.SCRIPT)
+        # Reclaimed — the point is that it ran and found nothing to do, not that the
+        # lease held it back.
+        assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
+
+        # Not a second billed script completion, and not a second grounding pass at
+        # `effort='max'`.
+        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        # Not a rewrite of segments a concurrent TTS job may be reading.
+        assert rewrites == []
+        # And not a second TTS job for an episode that already has one.
+        assert self._tts_jobs(db) == queued
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode.state is EpisodeState.RENDERING
+        assert [(s.id, s.text) for s in episode.segments] == segments
+        # The reclaimed row is settled rather than left running for the next sweep.
+        row = db.execute(
+            "SELECT state FROM jobs WHERE queue = %s", (Queue.SCRIPT.value,)
+        ).fetchone()
+        assert row is not None and row["state"] == "done"
+
+    def test_a_published_episode_is_still_left_alone(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """The `ready` half of the guard, which is the case it always covered."""
+        paste(db, MORNING)
+        drain(Queue.INTEGRATE, _migrated)
+        episode_id = enqueue_episode(db, user_id=USER, title="E", max_duration_ms=600_000)
+        db.commit()
+        run_all(_migrated)
+        assert repo.get_episode(db, episode_id).state is EpisodeState.READY
+
+        jobs.enqueue(db, Queue.SCRIPT, {"episode_id": episode_id})
+        db.commit()
+        drain(Queue.SCRIPT, _migrated)
+
+        assert repo.get_episode(db, episode_id).state is EpisodeState.READY
+        assert not [
+            row
+            for row in db.execute(
+                "SELECT id FROM jobs WHERE queue = %s AND state = 'ready'", (Queue.TTS.value,)
+            ).fetchall()
+        ]
 
 
 class TestReadState:
@@ -668,7 +836,7 @@ class TestIdenticalTitles:
         itself — and in audio it is the story read out twice, under one heading. The stub
         here answers "new" the way the real model did on staging.
         """
-        from motet_inference import IntegrationResult, NewsItem, SourceItem
+        from motet_inference import IntegrationResult, NewsItem
         from motet_workers import handlers
 
         existing = repo.insert_news_item(
@@ -730,7 +898,7 @@ class TestIdenticalTitles:
         a judgement about two texts, and what the window is for — but a string match is
         not that judgement, so it does not get that reach.
         """
-        from motet_inference import IntegrationResult, NewsItem, SourceItem
+        from motet_inference import IntegrationResult, NewsItem
         from motet_workers import handlers
 
         read_item = repo.insert_news_item(
