@@ -128,7 +128,9 @@ function mockApi(overrides: Record<string, unknown> = {}) {
     '/v1/feed': { url: 'https://example.test/feed.xml?token=secret', token: 'secret' },
     'GET /v1/episodes': [EPISODE],
     '/v1/episodes': EPISODE,
-    '/v1/sources': [GMAIL_SOURCE],
+    // Both, because every real response carries `src_paste` — migration 0002 seeds it —
+    // and a fixture that left it out is part of why motet#39 survived.
+    '/v1/sources': [PASTE_SOURCE, GMAIL_SOURCE],
     '/v1/auth/session': SESSION,
     ...overrides,
   }
@@ -461,6 +463,25 @@ describe('connecting a mailbox', () => {
 
     expect(await screen.findByText('Gmail')).toBeDefined()
     expect(screen.getByText(/gmail . waiting for consent/)).toBeDefined()
+    // The other half of the row, asserted here because the paste case below asserts its
+    // *absence*: a poll line suppressed for everything would satisfy that one on its own.
+    expect(screen.getByText(/Never polled/)).toBeDefined()
+  })
+
+  it('gives a polled source its poll time and its scopes on one line', async () => {
+    const connected: Source = {
+      ...GMAIL_SOURCE,
+      active: true,
+      connected: true,
+      scopes: ['gmail.readonly'],
+      last_polled_at: '2026-08-24T00:00:00Z',
+    }
+    mockApi({ '/v1/sources': [connected] })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+
+    expect(await screen.findByText(/gmail . connected/)).toBeDefined()
+    expect(screen.getByText(/^Last polled .* . gmail.readonly$/)).toBeDefined()
   })
 
   it('reads the paste source off `active`, because consent and polling do not apply to it', async () => {
@@ -473,8 +494,8 @@ describe('connecting a mailbox', () => {
 
     expect(await screen.findByText('Pasted text')).toBeDefined()
     expect(screen.getByText(/paste . ready/)).toBeDefined()
-    // Scoped to the row: the panel below it quotes the phrase, and correctly so — that
-    // paragraph is about mailboxes.
+    // The `paste ·` prefix is what keeps this off the panel below, which quotes the
+    // phrase — correctly, because that paragraph is about mailboxes.
     expect(screen.queryByText(/paste . waiting for consent/)).toBeNull()
     // Nothing polls pasted text, so a poll time is not missing — it is inapplicable, and
     // "Never polled" reads as a fetch that has never fired.

@@ -50,6 +50,10 @@ const isPollable = (source: Source): boolean => source.kind !== PASTE_KIND
  * and the only one.
  */
 function statusOf(source: Source): string {
+  // "paused" anticipates a pause `POST /v1/sources/paste` does not yet honour — it
+  // ingests without reading `active` — but `disconnect_source` will clear the flag on any
+  // source id, and a row saying "ready" with the flag down would be the same lie in the
+  // other direction.
   if (!needsConsent(source)) return source.active ? 'ready' : 'paused'
   if (!source.connected) return 'waiting for consent'
   return source.active ? 'connected' : 'paused'
