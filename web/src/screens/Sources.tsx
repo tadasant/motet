@@ -21,14 +21,36 @@ const DEFAULT_QUERY = 'category:updates OR category:promotions'
 type Status = { kind: 'idle' } | { kind: 'busy' } | { kind: 'error'; message: string }
 
 /**
- * One phrase for the two booleans the API returns.
+ * `paste` is the one kind with nothing behind it: no credential to grant and nothing to
+ * fetch on a schedule. Every other kind is a mailbox or a feed reached with a grant, so
+ * an unrecognised one is read that way rather than as a second paste box — X bookmarks,
+ * if the API tier is ever bought, is an OAuth source too.
+ */
+const PASTE_KIND = 'paste'
+
+/** Whether `connected` says anything about this source. Pasted text has no credential. */
+const needsConsent = (source: Source): boolean => source.kind !== PASTE_KIND
+
+/** Whether anything ever polls it. Pasted text arrives when you paste it, and not before. */
+const isPollable = (source: Source): boolean => source.kind !== PASTE_KIND
+
+/**
+ * One phrase for the two booleans the API returns, read against the kind that decides
+ * which of them applies.
  *
- * A source is created **inactive and unconnected** and only activates once a credential
- * lands, so "waiting for consent" is the correct reading of a row that appears the
- * instant you press Connect — not a failure. Saying so here is what keeps it from
+ * An OAuth source is created **inactive and unconnected** and only activates once a
+ * credential lands, so "waiting for consent" is the correct reading of a row that appears
+ * the instant you press Connect — not a failure. Saying so here is what keeps it from
  * looking like one.
+ *
+ * The paste source is the opposite on both counts: it is created **active**, and it never
+ * connects because there is no credential to connect. `connected: false` is not a state it
+ * is passing through, so reading it as one told the user that the one source actually in
+ * use was an abandoned OAuth attempt (motet#39). `active` is the field that describes it,
+ * and the only one.
  */
 function statusOf(source: Source): string {
+  if (!needsConsent(source)) return source.active ? 'ready' : 'paused'
   if (!source.connected) return 'waiting for consent'
   return source.active ? 'connected' : 'paused'
 }
@@ -100,27 +122,35 @@ export function Sources({
         <p className="hint">No sources yet.</p>
       ) : (
         <ul className="items">
-          {sources.map((source) => (
-            <li key={source.id}>
-              <div className="item-head">
-                <strong>{source.name}</strong>
-                <span className="hint">
-                  {source.kind} · {statusOf(source)}
-                </span>
-              </div>
-              {source.last_error && (
-                <p className="error" role="alert">
-                  {source.last_error}
-                </p>
-              )}
-              <p className="hint">
-                {source.last_polled_at
+          {sources.map((source) => {
+            // A poll time is only news about something that gets polled: "Never polled"
+            // under the paste row read as a stalled fetch rather than as the absence of
+            // one. Composed rather than branched inline because the paste row then has
+            // nothing left to say here at all, and an empty line is its own small lie.
+            const details = [
+              isPollable(source) &&
+                (source.last_polled_at
                   ? `Last polled ${new Date(source.last_polled_at).toLocaleString()}`
-                  : 'Never polled'}
-                {source.scopes.length > 0 && ` · ${source.scopes.join(' ')}`}
-              </p>
-            </li>
-          ))}
+                  : 'Never polled'),
+              source.scopes.length > 0 && source.scopes.join(' '),
+            ].filter((part): part is string => typeof part === 'string')
+            return (
+              <li key={source.id}>
+                <div className="item-head">
+                  <strong>{source.name}</strong>
+                  <span className="hint">
+                    {source.kind} · {statusOf(source)}
+                  </span>
+                </div>
+                {source.last_error && (
+                  <p className="error" role="alert">
+                    {source.last_error}
+                  </p>
+                )}
+                {details.length > 0 && <p className="hint">{details.join(' · ')}</p>}
+              </li>
+            )
+          })}
         </ul>
       )}
 
@@ -128,9 +158,10 @@ export function Sources({
       <p className="hint">
         Motet asks for read-only access to your mail and stores only a refresh token,
         sealed — nothing in the API can read it back. The source row is created before you
-        leave for Google and stays inactive until you come back having said yes, so one
-        listed above as &ldquo;waiting for consent&rdquo; is an abandoned attempt rather
-        than a broken mailbox.
+        leave for Google and stays inactive until you come back having said yes, so a
+        mailbox listed above as &ldquo;waiting for consent&rdquo; is an abandoned attempt
+        rather than a broken one. Pasting in never appears that way: it has no credential
+        to wait for.
       </p>
       <form onSubmit={connect}>
         <label htmlFor="source-name">Name</label>

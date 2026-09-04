@@ -89,6 +89,22 @@ const GMAIL_SOURCE: Source = {
 }
 
 /**
+ * The built-in source, exactly as `GET /v1/sources` reports it: **active**, and
+ * `connected: false` forever, because there is no credential for it to hold.
+ */
+const PASTE_SOURCE: Source = {
+  id: 'src_paste',
+  kind: 'paste',
+  name: 'Pasted text',
+  active: true,
+  connected: false,
+  scopes: [],
+  last_polled_at: null,
+  last_error: null,
+  created_at: '2026-08-24T00:00:00Z',
+}
+
+/**
  * Route a fake fetch by URL, so a test asserts on what the SPA actually requested.
  *
  * A key may be prefixed with a method — `'GET /v1/episodes'` — and those are matched
@@ -445,6 +461,24 @@ describe('connecting a mailbox', () => {
 
     expect(await screen.findByText('Gmail')).toBeDefined()
     expect(screen.getByText(/gmail . waiting for consent/)).toBeDefined()
+  })
+
+  it('reads the paste source off `active`, because consent and polling do not apply to it', async () => {
+    // motet#39. `statusOf` branched on `connected` alone, so the one source that can
+    // never connect — and the only one actually in use — was labelled an
+    // abandoned OAuth attempt, directly under copy saying pasting in needs nothing.
+    mockApi({ '/v1/sources': [PASTE_SOURCE] })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+
+    expect(await screen.findByText('Pasted text')).toBeDefined()
+    expect(screen.getByText(/paste . ready/)).toBeDefined()
+    // Scoped to the row: the panel below it quotes the phrase, and correctly so — that
+    // paragraph is about mailboxes.
+    expect(screen.queryByText(/paste . waiting for consent/)).toBeNull()
+    // Nothing polls pasted text, so a poll time is not missing — it is inapplicable, and
+    // "Never polled" reads as a fetch that has never fired.
+    expect(screen.queryByText(/Never polled/)).toBeNull()
   })
 
   it('offers Gmail and nothing else', async () => {
