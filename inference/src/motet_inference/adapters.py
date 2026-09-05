@@ -323,6 +323,27 @@ class _Judgeable:
     evidence: str
 
 
+@dataclass(frozen=True)
+class _Judgement:
+    """What one chunk found, and what its size cost to discover.
+
+    ``answered`` is the largest chunk size anything in this subtree actually got verdicts
+    for; ``cascaded`` says whether a call carrying *more than one* claim ran out of budget.
+    Together they are the whole of what an episode can learn about its own chunk size that
+    the constants did not already know — a size that worked, and the fact that a bigger one
+    did not.
+
+    **A single claim running out sets neither**, and that asymmetry is deliberate: there is
+    no smaller chunk to retreat to, so it is evidence about that *claim* rather than about
+    how many claims fit in a call. Narrowing on it would let one pathological claim put the
+    rest of the episode on one call per claim, which is the most expensive shape there is.
+    """
+
+    failures: list[GroundingFailure]
+    answered: int | None
+    cascaded: bool
+
+
 def _next_chunk(items: Sequence[_Judgeable], start: int, limit: int) -> int:
     """One past the last claim of the chunk beginning at ``start``, bounded by count and size.
 
@@ -381,9 +402,10 @@ class ClaudeGroundingValidator:
     on one staging episode, ~180k output tokens produced and discarded. Halving that chunk
     is a local decision that forgets what it learned the moment the chunk is done, so the
     next chunk pays the same probe. So :meth:`validate` carries it forward: a chunk that
-    ran out narrows the size used for *every remaining chunk of this episode*, which turns
-    a per-chunk cost into a per-episode one. The constants are still what decide whether
-    the probe happens at all; the narrowing is what bounds it when they are wrong.
+    ran out narrows the size used for *every remaining chunk of this episode*, to the
+    largest size this episode has actually seen answered. That turns a per-chunk cost into
+    a per-episode one. The constants are still what decide whether the probe happens at
+    all; the narrowing is what bounds it when they are wrong.
 
     **Per episode, deliberately, rather than per process.** One pathological chunk should
     not make every later episode chunk small, and a limit that lived on the adapter would
@@ -424,32 +446,31 @@ class ClaudeGroundingValidator:
         start = 0
         while start < len(judgeable):
             end = _next_chunk(judgeable, start, limit)
-            chunk_failures, exhausted_at = self._judge(judgeable[start:end])
-            failures.extend(chunk_failures)
+            judged = self._judge(judgeable[start:end])
+            failures.extend(judged.failures)
             start = end
-            if exhausted_at is None:
+            if not judged.cascaded:
                 continue
-            # The chunk size this episode has actually seen answered. In a binary cascade
-            # that is the smallest size that ran out, halved -- 8 -> 4 -> 2 says two.
-            narrowed = max(1, exhausted_at // 2)
+            # The largest size this episode has actually seen answered -- and one, when it
+            # answered nothing at any size, because that is the floor the halving stops at
+            # anyway.
+            narrowed = judged.answered if judged.answered is not None else 1
             if narrowed < limit:
                 logger.warning(
-                    "grounding narrowing chunks from %d claims to %d after a call ran out "
-                    "of budget at %d; %d claims of this episode remain",
+                    "grounding narrowing chunks from %d claims to %d after a bigger call "
+                    "ran out of budget; %d claims of this episode remain",
                     limit,
                     narrowed,
-                    exhausted_at,
                     len(judgeable) - start,
                 )
                 limit = narrowed
         return GroundingReport(failures=tuple(failures))
 
-    def _judge(self, chunk: Sequence[_Judgeable]) -> tuple[list[GroundingFailure], int | None]:
+    def _judge(self, chunk: Sequence[_Judgeable]) -> _Judgement:
         """Judge one chunk, halving it if the model cannot answer within its budget.
 
-        Returns the failures, and the *smallest* chunk size that ran out of budget on the
-        way — ``None`` when nothing did. That number is what :meth:`validate` narrows on:
-        it is the only thing this episode learned that the constants did not already know.
+        The :class:`_Judgement` carries what :meth:`validate` narrows on as well as the
+        failures — see that class for why a lone claim running out is not part of it.
         """
         try:
             verdicts = self._ask(chunk)
@@ -465,13 +486,17 @@ class ClaudeGroundingValidator:
                     chunk[0].news_item_id,
                     exc,
                 )
-                return [
-                    GroundingFailure(
-                        news_item_id=chunk[0].news_item_id,
-                        claim_text=chunk[0].claim_text,
-                        reason=GROUNDING_BUDGET_REASON,
-                    )
-                ], 1
+                return _Judgement(
+                    failures=[
+                        GroundingFailure(
+                            news_item_id=chunk[0].news_item_id,
+                            claim_text=chunk[0].claim_text,
+                            reason=GROUNDING_BUDGET_REASON,
+                        )
+                    ],
+                    answered=None,
+                    cascaded=False,
+                )
             middle = len(chunk) // 2
             logger.warning(
                 "grounding ran out of budget on %d claims; splitting into %d and %d: %s",
@@ -480,10 +505,14 @@ class ClaudeGroundingValidator:
                 len(chunk) - middle,
                 exc,
             )
-            left, left_at = self._judge(chunk[:middle])
-            right, right_at = self._judge(chunk[middle:])
-            deepest = min(size for size in (len(chunk), left_at, right_at) if size is not None)
-            return left + right, deepest
+            left = self._judge(chunk[:middle])
+            right = self._judge(chunk[middle:])
+            answered = [size for size in (left.answered, right.answered) if size is not None]
+            return _Judgement(
+                failures=left.failures + right.failures,
+                answered=max(answered) if answered else None,
+                cascaded=True,
+            )
 
         failures: list[GroundingFailure] = []
         for index, item in enumerate(chunk):
@@ -508,7 +537,7 @@ class ClaudeGroundingValidator:
                         reason=reason or "the cited span does not support this claim",
                     )
                 )
-        return failures, None
+        return _Judgement(failures=failures, answered=len(chunk), cascaded=False)
 
     def _ask(self, chunk: Sequence[_Judgeable]) -> dict[int, tuple[bool, str]]:
         """One call, indexed from zero *within this chunk*.

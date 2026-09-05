@@ -739,8 +739,8 @@ earlier end-to-end run used two claims, where 8k is never approached.
 *required output* of that call grows with the backlog and a constant does not, so every
 constant is a backlog size beyond which the stage cannot complete. Raising it moves the
 size; it does not remove it. So the bound moved onto the work instead: claims are chunked
-(`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because eight paragraph-sized
-evidence spans are not the same ask as eight short ones) and each call's ceiling is
+(`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because a chunk of paragraph-sized
+evidence spans is not the same ask as a chunk of short ones) and each call's ceiling is
 `grounding_max_tokens(n)` — a flat term for reading the instructions plus a **per-claim**
 term covering both the verdict and the thinking that produces it. Per-claim rather than
 flat because that is what the staging numbers say: 8,000 reasoning tokens over twelve
@@ -787,6 +787,12 @@ that episode*, to the largest size this episode has actually seen answered. Per 
 rather than per process, deliberately: a limit living on the adapter would ratchet down
 over a worker's lifetime and never recover, turning one pathological claim into a
 permanently more expensive stage.
+
+**A claim that runs out on its own narrows nothing**, and that exception is the same
+argument one scope smaller. There is no smaller chunk to retreat to, so a size-one
+exhaustion is evidence about that *claim* — it is why the claim is dropped — and not about
+how many claims fit in a call. Narrowing on it would put every remaining claim of the
+episode on a call of its own, which is the most expensive shape the stage has.
 
 **`effort` was not touched, and that is a decision.** Lowering it is the other direction
 motet#52 offered and it would cut cost the same way — but grounding is where invariant 3

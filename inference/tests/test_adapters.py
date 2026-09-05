@@ -498,8 +498,9 @@ class BudgetBoundClient:
 class StagingShapedClient(BudgetBoundClient):
     """motet#52's staging run, fitted to ``demand(n) = 4000 + 1800n`` output tokens.
 
-    Three anchors came out of that run, and the fit is the only ``F + c*n`` that honours
-    all three at once with room to spare on none of them:
+    Three anchors came out of that run. They define a *region* of ``F + c*n`` rather than a
+    point — ``F=3000, c=2000`` fits them too — and this is one interior point of it, chosen
+    because it clears every anchor without hugging any of them:
 
     ====================  ===============  ==================  ==========
     Observed on staging   Old ceiling      ``demand(n)``       Outcome
@@ -652,7 +653,8 @@ class TestGroundingAtRealisticScale:
     def test_long_evidence_makes_chunks_smaller_than_the_claim_bound(self) -> None:
         """The character bound, which the claim count on its own cannot reach.
 
-        Eight paragraph-sized evidence spans are a far bigger ask than eight short ones,
+        A chunk of paragraph-sized evidence spans is a far bigger ask than a chunk of short
+        ones,
         and a count cannot tell them apart. Newsletters produce both.
         """
         parts = [f"Paragraph {n}. " + ("word " * 1_000) for n in range(6)]
@@ -856,6 +858,65 @@ class TestGroundingSplitCascade:
         ClaudeGroundingValidator(second).validate(script, sources)
 
         assert _claims_per_call(second) == [4, 4]
+
+    def test_one_unjudgeable_claim_does_not_narrow_the_rest_of_the_episode(self) -> None:
+        """A claim that runs out *on its own* says nothing about how many claims fit.
+
+        There is no smaller chunk to retreat to, so the only thing a size-one exhaustion
+        establishes is that this claim cannot be judged — and it is dropped for exactly
+        that reason. Narrowing on it would let one pathological claim put every remaining
+        claim of the episode on a call of its own, which is the most expensive shape the
+        stage has.
+        """
+        script, sources = _claims_of_size([7_000] + [200] * 8)
+        poisoned = script.segments[0].claims[0].text
+        client = BudgetBoundClient(exhaust_on=poisoned)
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert [failure.reason for failure in report.failures] == [GROUNDING_BUDGET_REASON]
+        # The oversized claim is chunked alone by the character bound, runs out, and is
+        # dropped. The eight ordinary claims that follow are still judged four to a call.
+        assert _claims_per_call(client) == [1, 4, 4]
+
+    def test_an_odd_chunk_narrows_to_a_size_it_answered_not_below_it(self) -> None:
+        """Halving three gives one and two, so two is answered — and two is the new size.
+
+        Narrowing by halving the size that *failed* would say one here, throwing away the
+        larger size the episode had just seen work.
+        """
+        script, sources = _claims_of_size([1_800] * 9)
+        client = BudgetBoundClient(max_claims_answered=2)
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        # Three at a time by the character bound; the first runs out and splits 1 + 2, and
+        # the six that remain go two at a time rather than one.
+        assert _claims_per_call(client) == [3, 1, 2, 2, 2, 2]
+        assert client.exhausted == [3]
+
+
+def _claims_of_size(evidence_chars: list[int]) -> tuple[Script, dict[str, SourceItem]]:
+    """One claim per entry, each citing a span of the requested size.
+
+    The character bound is what decides chunk sizes here, so the sizes are the input: a
+    span far larger than the whole budget forces a chunk of one, and spans a third of it
+    force chunks of three.
+    """
+    text = "".join(f"[{index}]".ljust(size, "x") for index, size in enumerate(evidence_chars))
+    source = SourceItem(id="si_sized", title="Sized", text=text)
+    claims, offset = [], 0
+    for index, size in enumerate(evidence_chars):
+        claims.append(
+            Claim(
+                text=f"Claim {index} about a span of {size} characters",
+                span=SourceSpan("si_sized", offset, offset + size),
+            )
+        )
+        offset += size
+    segment = ScriptSegment(news_item_id="ni_sized", claims=tuple(claims))
+    return Script(segments=(segment,)), {source.id: source}
 
 
 def _a_grounding_call(
