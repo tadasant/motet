@@ -158,6 +158,18 @@ describe('Processing', () => {
     expect(screen.getByText(/invalid_grant/)).toBeDefined()
   })
 
+  it('claims no particular repair for a source kind it has never heard of', () => {
+    // X bookmarks are the next source kind. An unknown one has no more claim to the
+    // mailbox sentence than to the paste one, and a confident wrong repair is worse than
+    // saying only what is certain.
+    render(
+      <Processing items={[{ ...FAILED_MESSAGE, source_kind: 'x' }]} processing={running} />,
+    )
+    expect(screen.getByText(/Nothing further will happen to it\.$/)).toBeDefined()
+    expect(screen.queryByText(/paste it again/)).toBeNull()
+    expect(screen.queryByText(/mailbox poll/)).toBeNull()
+  })
+
   it('does not accuse the queue over an item a worker has already claimed', () => {
     // A claimed item is still `pending`, and its own line says "running now". A banner
     // saying nothing is processing above it would be the panel contradicting itself —

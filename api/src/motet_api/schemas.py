@@ -100,10 +100,10 @@ class IngestionItemResponse(BaseModel):
     distinguishable. They are not the same thing to a person standing there waiting, and
     a spinner that means both is a spinner that means neither.
 
-    **Not always a source item.** A mailbox message that never got as far as being parsed
-    has no ``source_items`` row — that is written when extraction succeeds — so it is
-    reported from its extract job, under a synthesized ``id`` and a ``title`` naming the
-    provider's message id. Every other field means the same thing either way. Ids are
+    **Not always a source item.** A mailbox message whose fetch failed has no
+    ``source_items`` row — that is written when extraction succeeds — so it is reported
+    from its extract job, under a synthesized ``id`` and a ``title`` naming the provider's
+    message id. Every other field means the same thing either way. Ids are
     opaque to clients and nothing addresses this route's rows, so the two shapes are one
     response model rather than two (motet#35).
 

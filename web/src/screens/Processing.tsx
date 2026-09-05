@@ -204,13 +204,20 @@ function explain(item: IngestionItem, worker: WorkerState, now: number): string 
     // advanced in the same transaction that queued the fetch — no later poll will offer
     // it again either. Telling someone to paste a newsletter they have never seen the
     // text of would be advice that cannot be followed.
+    //
+    // Three branches rather than two, because a kind this build has never heard of is a
+    // real case — X bookmarks are next — and it has no more claim to the mailbox sentence
+    // than to the paste one. Silence about the repair beats a confident wrong repair.
     if (item.source_kind === 'paste') {
       return `${gaveUp}Nothing further will happen to it: paste it again once the reason below is fixed.`
     }
-    return (
-      `${gaveUp}Nothing further will happen to it: the mailbox poll has already moved ` +
-      'past this message, so fixing the reason below will not bring this one back.'
-    )
+    if (item.source_kind === 'gmail') {
+      return (
+        `${gaveUp}Nothing further will happen to it: the mailbox poll has already moved ` +
+        'past this message, so fixing the reason below will not bring this one back.'
+      )
+    }
+    return `${gaveUp}Nothing further will happen to it.`
   }
   if (item.attempts === 0) {
     // The age is here and not only in the banner because it is per item: after a stall

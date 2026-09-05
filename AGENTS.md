@@ -828,10 +828,15 @@ into the table that anchors every claim and every highlight, and would recast th
 seen". The job row already holds the attempt count, the schedule and the reason, which is
 everything the surface reports.
 
-**A message reported from a job is one line, never two.** A `done` job is a message that
-made it, and its source item is the better answer; the `NOT EXISTS` on
-`(source_id, external_id)` covers the rest — a lease reclaimed after the insert committed,
-a re-listed message a second poll queued. `source_kind` rides on both arms because it is
+**A message reported from a job is one line, never two, and it takes two exclusions to
+mean that.** The first is on `(source_id, external_id)` and drops a job whose message
+already has a source item — a `done` job in the ordinary case, a lease reclaimed after the
+insert committed in the awkward one. The second keeps only the newest *open* job for a
+message, because a message can genuinely have two: an expired provider cursor makes
+`handle_poll` re-list a window, and a message whose earlier extraction *failed* has no
+source item, so the pre-check that makes a re-poll idempotent does not fire. Reporting one
+newsletter twice would be the accounting surface contradicting itself, which is motet#41's
+shape one stage up. `source_kind` rides on both arms because it is
 what decides the repair: a failed paste can be pasted again, and a failed mailbox message
 cannot, because the cursor has moved past it. The SPA says so rather than offering a button
 that does not exist.

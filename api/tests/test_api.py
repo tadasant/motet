@@ -395,7 +395,7 @@ class TestEndToEnd:
         source = phase2.create_source(
             db, user_id=repo.OWNER_USER_ID, kind=SourceKind.GMAIL.value, name="Gmail"
         )
-        error = "ExtractionError: no text/plain or text/html part"
+        error = "PermanentFailure: source needs reconnecting: invalid_grant"
         db.execute(
             """
             INSERT INTO jobs (queue, payload, attempts, state, last_error)

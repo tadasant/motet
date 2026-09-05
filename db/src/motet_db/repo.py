@@ -27,6 +27,7 @@ from .models import (
     EpisodeState,
     IngestionStatus,
     SourceItemState,
+    SourceKind,
     StoredClaim,
     StoredEpisode,
     StoredNewsItem,
@@ -68,7 +69,10 @@ INTEGRATED_GRACE = timedelta(minutes=10)
 #: not produced a title yet. A kind missing from here falls back to the stored value, so a
 #: third provider reads as "x message 123" rather than crashing the route that exists to
 #: say where something went.
-SOURCE_KIND_LABELS: Final[dict[str, str]] = {"paste": "Pasted", "gmail": "Gmail"}
+SOURCE_KIND_LABELS: Final[dict[str, str]] = {
+    SourceKind.PASTE.value: "Pasted",
+    SourceKind.GMAIL.value: "Gmail",
+}
 
 #: A ceiling on the ingestion list, because the SPA polls it every few seconds while
 #: anything is pending and each row can carry two kilobytes of error text. One Gmail poll
@@ -111,6 +115,97 @@ def insert_source_item(
     return _source_item(row)
 
 
+#: The ingestion query, hoisted so that a test can ``EXPLAIN`` *this* rather than a
+#: transcription of it.
+#:
+#: Same reasoning as ``motet_workers.jobs.CLAIM_SQL``: the extract arm leans on migration
+#: 0008's partial expression index, and a copy of the statement in a test would keep
+#: matching that index while the statement actually being run drifted off it — which is
+#: motet#49 with the roles reversed. Parameters are named because ``limit`` appears three
+#: times: once per arm and once over the union.
+INGESTION_SQL = """
+SELECT * FROM (
+    (SELECT si.id,
+            false AS from_job,
+            si.title,
+            NULL::text AS message_id,
+            src.kind AS source_kind,
+            si.state,
+            si.created_at,
+            COALESCE(si.last_error, job.last_error) AS last_error,
+            COALESCE(job.attempts, 0)              AS attempts,
+            CASE WHEN si.state = 'pending' AND job.state = 'ready'
+                 THEN job.run_at END AS next_attempt_at
+     FROM source_items si
+     JOIN sources src ON src.id = si.source_id
+     LEFT JOIN LATERAL (
+         SELECT attempts, state, run_at, last_error
+         FROM jobs
+         WHERE queue = 'integrate' AND payload ->> 'source_item_id' = si.id
+         ORDER BY id DESC
+         LIMIT 1
+     ) job ON true
+     WHERE si.user_id = %(user_id)s
+       AND (
+         si.state <> 'integrated'
+         OR si.integrated_at > COALESCE(%(now)s, now())
+                               - make_interval(secs => %(grace)s)
+       )
+     ORDER BY si.created_at DESC, si.id DESC
+     LIMIT %(limit)s)
+
+    UNION ALL
+
+    -- A polled message with no source item yet: queued for extraction, being
+    -- retried, or given up on. `state <> 'done'` is what keeps a message that
+    -- made it out of this arm, and the NOT EXISTS is what keeps one whose row
+    -- landed anyway — a reclaimed lease — from being reported twice.
+    (SELECT 'extract:' || j.id AS id,
+            true AS from_job,
+            NULL::text AS title,
+            -- Coalesced because a job whose payload is missing this fails
+            -- permanently on its first attempt, and that row still has to be
+            -- reportable — with a title, since every caller renders one.
+            COALESCE(j.payload ->> 'message_id', '(no id)') AS message_id,
+            src.kind AS source_kind,
+            CASE WHEN j.state = 'failed' THEN 'failed' ELSE 'pending' END AS state,
+            j.created_at,
+            j.last_error,
+            j.attempts,
+            CASE WHEN j.state = 'ready' THEN j.run_at END AS next_attempt_at
+     FROM jobs j
+     JOIN sources src ON src.id = j.payload ->> 'source_id'
+     WHERE j.queue = 'extract'
+       AND j.state <> 'done'
+       AND src.user_id = %(user_id)s
+       AND NOT EXISTS (
+           SELECT 1 FROM source_items si
+           WHERE si.source_id = src.id
+             AND si.external_id = j.payload ->> 'message_id'
+       )
+       -- The newest open job for this message, and only it. Equality on a NULL
+       -- message id matches nothing, which is right: two payloads that both
+       -- failed to carry one are not evidence of the same message.
+       AND NOT EXISTS (
+           SELECT 1 FROM jobs newer
+           WHERE newer.queue = 'extract'
+             AND newer.state <> 'done'
+             AND newer.id > j.id
+             AND newer.payload ->> 'source_id' = j.payload ->> 'source_id'
+             AND newer.payload ->> 'message_id' = j.payload ->> 'message_id'
+       )
+     -- Sorted on the id this arm *emits*, not on `j.id`: the outer sort is over
+     -- text, where 'extract:9' follows 'extract:250'. A per-arm limit is only
+     -- sound when both levels order by the same key, and one poll enqueues a
+     -- whole page of jobs sharing a `created_at`, so the tie-break decides.
+     ORDER BY j.created_at DESC, ('extract:' || j.id) DESC
+     LIMIT %(limit)s)
+) ingestion
+ORDER BY created_at DESC, id DESC
+LIMIT %(limit)s
+"""
+
+
 def list_ingestion(
     conn: psycopg.Connection[Any], user_id: str, *, now: datetime | None = None
 ) -> list[IngestionStatus]:
@@ -124,10 +219,16 @@ def list_ingestion(
     The first arm is a source item joined to its ``integrate`` job. The second is an
     ``extract`` job that has *not* produced a source item, which is the whole of what a
     Gmail message is between being polled and being parsed: ``handle_extract`` writes the
-    row only once extraction succeeds, so a message that fails — a revoked grant, an
-    unreadable body, a vault that will not open — leaves the job row and nothing else.
-    Reported from ``source_items`` alone it was invisible on every surface the user has,
-    while the poll cursor had already moved past it (motet#35).
+    row only once extraction succeeds, so a message whose fetch *raises* — a revoked
+    grant, a mailbox that will not answer, a vault that will not open — leaves the job row
+    and nothing else. Reported from ``source_items`` alone it was invisible on every
+    surface the user has, while the poll cursor had already moved past it (motet#35).
+
+    **A message ``handle_extract`` deliberately skips is a different thing and stays
+    unreported.** An ``ExtractionError`` — a receipt, a calendar invite, a message with no
+    body — is caught there, recorded on the source, and the job completes: a mailbox is
+    mostly not newsletters, and a `done` job is not a loss. ``state <> 'done'`` below is
+    what draws that line.
 
     The join is a ``LEFT JOIN LATERAL`` onto the *newest* integrate job for each item
     rather than an aggregate: a source item has one such job in every normal case, and
@@ -141,12 +242,16 @@ def list_ingestion(
     answer given to a caller has to be coherent either way. The extract arm needs no such
     gate: it has one row, so the two cannot disagree.
 
-    **The extract arm excludes what the first arm already reports**, on the same
-    ``(source_id, external_id)`` key the unique index is built on. A ``done`` job is the
-    ordinary case of that — the message has a row, and the row is a better answer than the
-    job — and the ``NOT EXISTS`` covers the rest: a job re-claimed after its lease expired
-    with the insert already committed, and a re-listed message a second poll queued. One
-    message is one line, whichever of the two produced it.
+    **One message is one line, and it takes two exclusions to mean that.** The first drops
+    a job whose message already has a source item, on the ``(source_id, external_id)`` key
+    the unique index is built on: a ``done`` job is the ordinary case, and a job re-claimed
+    after its lease expired with the insert already committed is the rest. The second drops
+    all but the newest *open* job for one message, because a message can genuinely have
+    two: an expired provider cursor makes ``handle_poll`` re-list a window, and a message
+    whose earlier extraction *failed* has no source item, so the pre-check that keeps a
+    re-poll idempotent does not fire and a second job is queued. Without it the panel
+    reports one newsletter twice — the accounting surface contradicting itself, which is
+    motet#41's shape one stage up.
 
     Bounded by :data:`INGESTION_MAX_ITEMS`, per arm as well as over the union. A route the
     SPA polls every few seconds must not be able to return an unbounded list of rows each
@@ -162,72 +267,7 @@ def list_ingestion(
     """
     rows = _all(
         conn,
-        """
-        SELECT * FROM (
-            (SELECT si.id,
-                    false AS from_job,
-                    si.title,
-                    NULL::text AS message_id,
-                    src.kind AS source_kind,
-                    si.state,
-                    si.created_at,
-                    COALESCE(si.last_error, job.last_error) AS last_error,
-                    COALESCE(job.attempts, 0)              AS attempts,
-                    CASE WHEN si.state = 'pending' AND job.state = 'ready'
-                         THEN job.run_at END AS next_attempt_at
-             FROM source_items si
-             JOIN sources src ON src.id = si.source_id
-             LEFT JOIN LATERAL (
-                 SELECT attempts, state, run_at, last_error
-                 FROM jobs
-                 WHERE queue = 'integrate' AND payload ->> 'source_item_id' = si.id
-                 ORDER BY id DESC
-                 LIMIT 1
-             ) job ON true
-             WHERE si.user_id = %(user_id)s
-               AND (
-                 si.state <> 'integrated'
-                 OR si.integrated_at > COALESCE(%(now)s, now())
-                                       - make_interval(secs => %(grace)s)
-               )
-             ORDER BY si.created_at DESC, si.id DESC
-             LIMIT %(limit)s)
-
-            UNION ALL
-
-            -- A polled message with no source item yet: queued for extraction, being
-            -- retried, or given up on. `state <> 'done'` is what keeps a message that
-            -- made it out of this arm, and the NOT EXISTS is what keeps one whose row
-            -- landed anyway — a reclaimed lease — from being reported twice.
-            (SELECT 'extract:' || j.id AS id,
-                    true AS from_job,
-                    NULL::text AS title,
-                    -- Coalesced because a job whose payload is missing this fails
-                    -- permanently on its first attempt, and that row still has to be
-                    -- reportable — with a title, since every caller renders one.
-                    COALESCE(j.payload ->> 'message_id', '(no id)') AS message_id,
-                    src.kind AS source_kind,
-                    CASE WHEN j.state = 'failed' THEN 'failed' ELSE 'pending' END AS state,
-                    j.created_at,
-                    j.last_error,
-                    j.attempts,
-                    CASE WHEN j.state = 'ready' THEN j.run_at END AS next_attempt_at
-             FROM jobs j
-             JOIN sources src ON src.id = j.payload ->> 'source_id'
-             WHERE j.queue = 'extract'
-               AND j.state <> 'done'
-               AND src.user_id = %(user_id)s
-               AND NOT EXISTS (
-                   SELECT 1 FROM source_items si
-                   WHERE si.source_id = src.id
-                     AND si.external_id = j.payload ->> 'message_id'
-               )
-             ORDER BY j.created_at DESC, j.id DESC
-             LIMIT %(limit)s)
-        ) ingestion
-        ORDER BY created_at DESC, id DESC
-        LIMIT %(limit)s
-        """,
+        INGESTION_SQL,
         {
             "user_id": user_id,
             "now": now,

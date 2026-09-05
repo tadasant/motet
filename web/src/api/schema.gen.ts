@@ -512,9 +512,11 @@ export interface paths {
          *     Covers both stages a thing can be stuck in on its way to the backlog, which needed
          *     saying because for a while it covered one. A pasted item has a ``source_items`` row
          *     from the moment it is accepted; a polled mailbox message does not get one until
-         *     extraction succeeds, so a message that could not be fetched or parsed was reported
-         *     nowhere at all while the poll cursor had already moved past it (motet#35). Both arms
-         *     live in ``repo.list_ingestion``.
+         *     extraction succeeds, so a message the fetch *raised* on — a revoked grant, a mailbox
+         *     that would not answer — was reported nowhere at all while the poll cursor had already
+         *     moved past it (motet#35). A message the extractor deliberately skips, because it is a
+         *     receipt rather than a newsletter, is a different thing and is still not reported. Both
+         *     arms live in ``repo.list_ingestion``.
          */
         get: operations["list_ingestion_v1_ingestion_get"];
         put?: never;
@@ -1004,10 +1006,10 @@ export interface components {
          *     distinguishable. They are not the same thing to a person standing there waiting, and
          *     a spinner that means both is a spinner that means neither.
          *
-         *     **Not always a source item.** A mailbox message that never got as far as being parsed
-         *     has no ``source_items`` row — that is written when extraction succeeds — so it is
-         *     reported from its extract job, under a synthesized ``id`` and a ``title`` naming the
-         *     provider's message id. Every other field means the same thing either way. Ids are
+         *     **Not always a source item.** A mailbox message whose fetch failed has no
+         *     ``source_items`` row — that is written when extraction succeeds — so it is reported
+         *     from its extract job, under a synthesized ``id`` and a ``title`` naming the provider's
+         *     message id. Every other field means the same thing either way. Ids are
          *     opaque to clients and nothing addresses this route's rows, so the two shapes are one
          *     response model rather than two (motet#35).
          *

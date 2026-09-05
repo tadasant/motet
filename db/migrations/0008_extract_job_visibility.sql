@@ -12,9 +12,14 @@
 -- ever run — nothing prunes `jobs`; `complete()` only flips the state to 'done' — so the
 -- relation grows for the life of the deployment while the useful part of it does not.
 --
--- Partial on both halves of that predicate, which is what keeps it small: only `extract`
--- jobs carry a `message_id`, and a job that is `done` is a message that made it and is
--- reported from its `source_items` row instead. What is left is the jobs in flight plus
--- the ones that failed, which is bounded by the mailbox rather than by history.
+-- Partial on both halves of that predicate, and each half earns its place differently.
+-- `queue = 'extract'` is needed *because* the key is not exclusive to this queue — a
+-- `poll` job carries a `source_id` too — so without it the index would hold rows the
+-- query can never want. `state <> 'done'` is the half that keeps it small: a job that is
+-- `done` is a message that made it and is reported from its `source_items` row instead,
+-- and `done` is where all but a handful of extract jobs end up. What is left is the jobs
+-- in flight plus the ones that failed. Nothing prunes `jobs`, so the failed half does
+-- accumulate for the life of the deployment — a fraction of the table rather than a
+-- bound, which is enough for this to be worth carrying.
 CREATE INDEX jobs_extract_open_idx ON jobs ((payload ->> 'source_id'))
     WHERE queue = 'extract' AND state <> 'done';

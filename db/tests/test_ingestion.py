@@ -287,26 +287,26 @@ class TestExtractJobsWithNoSourceItem:
             "18f2a3b4c5",
             attempts=5,
             state="failed",
-            last_error="ExtractionError: no text/plain or text/html part",
+            last_error="RuntimeError: gmail returned 503 for message 18f2a3b4c5",
         )
 
         (status,) = repo.list_ingestion(db, USER)
         assert status.state is SourceItemState.FAILED
         assert status.attempts == 5
-        assert status.last_error is not None and "ExtractionError" in status.last_error
+        assert status.last_error is not None and "503" in status.last_error
         assert status.next_attempt_at is None
         # Named by the provider's id, because reading the subject line is the step that
         # failed — there is no title anywhere to show instead.
         assert status.title == "Gmail message 18f2a3b4c5"
         assert status.source_kind == SourceKind.GMAIL.value
 
-    def test_an_auth_failure_and_a_parse_failure_are_told_apart_by_their_reasons(
+    def test_an_auth_failure_and_a_fetch_failure_are_told_apart_by_their_reasons(
         self, db: psycopg.Connection[Any]
     ) -> None:
-        """Two failure classes, two repairs: reconnect the mailbox, or report the message.
+        """Two failure classes, two repairs: reconnect the mailbox, or wait for it.
 
-        Both are permanent and both look identical from the queue's side, which is exactly
-        why the reason has to travel with the row.
+        Both look identical from the queue's side — a failed job on the extract queue —
+        which is exactly why the reason has to travel with the row.
         """
         source_id = gmail_source(db)
         enqueue_extract(
@@ -323,12 +323,12 @@ class TestExtractJobsWithNoSourceItem:
             "bbb",
             attempts=5,
             state="failed",
-            last_error="ExtractionError: could not decode the body",
+            last_error="RuntimeError: gmail returned 503 for message bbb",
         )
 
         reasons = {status.title: status.last_error for status in repo.list_ingestion(db, USER)}
         assert "invalid_grant" in (reasons["Gmail message aaa"] or "")
-        assert "could not decode" in (reasons["Gmail message bbb"] or "")
+        assert "503" in (reasons["Gmail message bbb"] or "")
 
     def test_a_message_still_being_retried_reports_the_attempt_and_the_next_one(
         self, db: psycopg.Connection[Any]
@@ -422,6 +422,49 @@ class TestExtractJobsWithNoSourceItem:
         # The extract jobs were written last, so newest-first puts them at the front.
         assert statuses[0].title.startswith("Gmail message")
 
+    def test_a_message_the_extractor_deliberately_skipped_is_not_reported(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The line this arm draws, and the reason it is drawn at `done` rather than later.
+
+        ``handle_extract`` catches ``ExtractionError`` — a receipt, a calendar invite, a
+        message with no body — records it on the source, and returns, so the job completes
+        with no source item behind it. A mailbox is mostly not newsletters, and reporting
+        every one of them as content that failed to arrive would drown the one that did.
+        """
+        source_id = gmail_source(db)
+        enqueue_extract(db, source_id, "a-receipt", attempts=1, state="done")
+
+        assert repo.list_ingestion(db, USER) == []
+
+    def test_two_open_jobs_for_one_message_report_it_once(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """A message can genuinely be queued twice, and it is still one message.
+
+        The provider's history window expires, ``handle_poll`` drops the cursor and
+        re-lists — and a message whose earlier extraction *failed* has no source item, so
+        the pre-check that makes a re-poll idempotent does not fire and a second job is
+        queued. Two lines for one newsletter would be the accounting surface contradicting
+        itself, which is motet#41's shape one stage up.
+        """
+        source_id = gmail_source(db)
+        enqueue_extract(db, source_id, "dup", attempts=5, state="failed", last_error="boom")
+        enqueue_extract(db, source_id, "dup", attempts=0, state="ready")
+
+        (status,) = repo.list_ingestion(db, USER)
+        # The newest, because it is the one something is still going to do.
+        assert status.state is SourceItemState.PENDING
+        assert status.attempts == 0
+
+    def test_the_extract_arm_is_bounded_on_its_own(self, db: psycopg.Connection[Any]) -> None:
+        """One Gmail poll queues a page of jobs; several polls queue several pages."""
+        source_id = gmail_source(db)
+        for index in range(repo.INGESTION_MAX_ITEMS + 10):
+            enqueue_extract(db, source_id, f"msg-{index}")
+
+        assert len(repo.list_ingestion(db, USER)) == repo.INGESTION_MAX_ITEMS
+
     def test_a_job_with_no_message_id_is_still_reportable(
         self, db: psycopg.Connection[Any]
     ) -> None:
@@ -459,16 +502,23 @@ def test_the_extract_index_covers_the_open_job_lookup(db: psycopg.Connection[Any
     Same reasoning as the integrate one above: nothing prunes `jobs`, so without a
     matching partial expression index this arm is a sequential scan of every job ever run,
     behind a route the SPA polls while anything is pending.
+
+    ``EXPLAIN`` runs against ``repo.INGESTION_SQL`` itself rather than a transcription of
+    the arm. A copy would keep matching the index while the statement being run drifted
+    off it, which is exactly the failure ``motet_workers.jobs.CLAIM_SQL`` was hoisted to
+    avoid after motet#49.
     """
     source_id = gmail_source(db)
     enqueue_extract(db, source_id, "ggg")
     db.execute("SET enable_seqscan = off")
     plan = db.execute(
-        """
-        EXPLAIN SELECT attempts FROM jobs
-        WHERE queue = 'extract' AND state <> 'done' AND payload ->> 'source_id' = %s
-        """,
-        (source_id,),
+        f"EXPLAIN {repo.INGESTION_SQL}",
+        {
+            "user_id": USER,
+            "now": None,
+            "grace": repo.INTEGRATED_GRACE.total_seconds(),
+            "limit": repo.INGESTION_MAX_ITEMS,
+        },
     ).fetchall()
     assert any("jobs_extract_open_idx" in str(row) for row in plan), plan
 
