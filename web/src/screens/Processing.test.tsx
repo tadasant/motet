@@ -16,10 +16,35 @@ const QUEUED: IngestionItem = {
   next_attempt_at: null,
   last_error: null,
   created_at: '2026-08-25T21:55:00Z',
+  source_kind: 'paste',
 }
 
 /** The same paste, after a worker has claimed it. Still `pending` until it succeeds. */
 const CLAIMED: IngestionItem = { ...QUEUED, id: 'si_2', attempts: 1 }
+
+/** A paste the pipeline gave up on. Re-pasting it is a repair a person can perform. */
+const FAILED_PASTE: IngestionItem = {
+  ...QUEUED,
+  id: 'si_3',
+  state: 'failed',
+  attempts: 5,
+  last_error: 'OpenRouter refused: 402 insufficient credits',
+}
+
+/**
+ * A mailbox message that never became a source item at all — motet#35's row.
+ *
+ * It comes off the extract job rather than off `source_items`, which is why its title is
+ * the provider's message id: nothing has read the subject line, because reading it is the
+ * step that failed.
+ */
+const FAILED_MESSAGE: IngestionItem = {
+  ...FAILED_PASTE,
+  id: 'extract:41',
+  title: 'Gmail message 18f2a3b4c5',
+  source_kind: 'gmail',
+  last_error: 'PermanentFailure: source src_gmail needs reconnecting: invalid_grant',
+}
 
 // Every fixture carries the server's clock, which is the whole point of the field: these
 // assertions are then about the code rather than about what day the suite is run on.
@@ -114,6 +139,35 @@ describe('Processing', () => {
   it('shows how long an item has been queued, so a stalled queue looks stalled', () => {
     render(<Processing items={[QUEUED]} processing={never} />)
     expect(screen.getByText(/Queued \d+[smhd] ago/)).toBeDefined()
+  })
+
+  it('offers re-pasting for a failed paste, which is a thing a person can actually do', () => {
+    render(<Processing items={[FAILED_PASTE]} processing={running} />)
+    expect(screen.getByText(/paste it again once the reason below is fixed/)).toBeDefined()
+  })
+
+  it('does not tell someone to re-paste a mailbox message they have never seen', () => {
+    // The advice has to be true of the row it is under. A polled message has no text on
+    // this screen to paste, and the poll cursor moved past it in the same transaction
+    // that queued the fetch, so no later poll offers it again either.
+    render(<Processing items={[FAILED_MESSAGE]} processing={running} />)
+    expect(screen.getByText(/the mailbox poll has already moved past this message/)).toBeDefined()
+    expect(screen.queryByText(/paste it again/)).toBeNull()
+    // And it says which message, because the subject line is exactly what was never read.
+    expect(screen.getByText('Gmail message 18f2a3b4c5')).toBeDefined()
+    expect(screen.getByText(/invalid_grant/)).toBeDefined()
+  })
+
+  it('claims no particular repair for a source kind it has never heard of', () => {
+    // X bookmarks are the next source kind. An unknown one has no more claim to the
+    // mailbox sentence than to the paste one, and a confident wrong repair is worse than
+    // saying only what is certain.
+    render(
+      <Processing items={[{ ...FAILED_MESSAGE, source_kind: 'x' }]} processing={running} />,
+    )
+    expect(screen.getByText(/Nothing further will happen to it\.$/)).toBeDefined()
+    expect(screen.queryByText(/paste it again/)).toBeNull()
+    expect(screen.queryByText(/mailbox poll/)).toBeNull()
   })
 
   it('does not accuse the queue over an item a worker has already claimed', () => {

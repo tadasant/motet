@@ -1,4 +1,4 @@
-// What has been pasted but is not in the backlog yet.
+// What has been ingested but is not in the backlog yet.
 //
 // This is the answer to "I pasted something, it said it was pending, and I never saw it
 // again." The backlog lists *news items*, and an item that fails ingestion never becomes
@@ -197,10 +197,27 @@ function explain(item: IngestionItem, worker: WorkerState, now: number): string 
     return 'Integrated. It is in the backlog below — under whatever title dedup settled on.'
   }
   if (item.state === 'failed') {
-    return (
-      `Gave up after ${item.attempts} attempt${item.attempts === 1 ? '' : 's'}. ` +
-      'Nothing further will happen to it: paste it again once the reason below is fixed.'
-    )
+    const gaveUp = `Gave up after ${item.attempts} attempt${item.attempts === 1 ? '' : 's'}. `
+    // What to *do* about it is not the same sentence for the two ways in, which is the
+    // whole reason `source_kind` is on the contract. Re-pasting is a repair a person can
+    // perform; a mailbox message has no such button, and — because the poll cursor
+    // advanced in the same transaction that queued the fetch — no later poll will offer
+    // it again either. Telling someone to paste a newsletter they have never seen the
+    // text of would be advice that cannot be followed.
+    //
+    // Three branches rather than two, because a kind this build has never heard of is a
+    // real case — X bookmarks are next — and it has no more claim to the mailbox sentence
+    // than to the paste one. Silence about the repair beats a confident wrong repair.
+    if (item.source_kind === 'paste') {
+      return `${gaveUp}Nothing further will happen to it: paste it again once the reason below is fixed.`
+    }
+    if (item.source_kind === 'gmail') {
+      return (
+        `${gaveUp}Nothing further will happen to it: the mailbox poll has already moved ` +
+        'past this message, so fixing the reason below will not bring this one back.'
+      )
+    }
+    return `${gaveUp}Nothing further will happen to it.`
   }
   if (item.attempts === 0) {
     // The age is here and not only in the banner because it is per item: after a stall

@@ -790,7 +790,17 @@ def failure_recorders() -> Mapping[Queue, Any]:
     return {
         # `poll` and `extract` have no domain object to mark failed: a mailbox that could
         # not be reached has its error recorded on the source by the handler itself, and a
-        # message that could not be fetched simply has no row yet.
+        # message that could not be fetched has no row to mark — extraction is what writes
+        # one.
+        #
+        # **That is not the same as leaving the failure unreported, and for a while it
+        # was** (motet#35). The failed job row is the only record that the message was
+        # ever seen, and the poll cursor has already moved past it, so nothing else will
+        # ever look at it again. `repo.list_ingestion` reads those rows directly rather
+        # than a recorder writing a stand-in row here: a `source_items` row invented at
+        # this point would have no text, would sit in the table that anchors every
+        # highlight and every claim, and would be indistinguishable from a message that
+        # arrived empty.
         Queue.INTEGRATE: source_item_failed,
         Queue.ASSEMBLE: episode_failed,
         Queue.SCRIPT: episode_failed,

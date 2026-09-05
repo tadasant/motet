@@ -509,9 +509,14 @@ export interface paths {
          *     item and so never appears there at all. That gap is the whole reason this route
          *     exists: content that fails is content that silently disappears.
          *
-         *     Scoped to the ``integrate`` stage, because that is the stage a ``source_items`` row
-         *     exists for. A Gmail ``extract`` that fails has no row to report — the message was
-         *     never turned into one — so it is invisible here and is tracked separately as motet#35.
+         *     Covers both stages a thing can be stuck in on its way to the backlog, which needed
+         *     saying because for a while it covered one. A pasted item has a ``source_items`` row
+         *     from the moment it is accepted; a polled mailbox message does not get one until
+         *     extraction succeeds, so a message the fetch *raised* on — a revoked grant, a mailbox
+         *     that would not answer — was reported nowhere at all while the poll cursor had already
+         *     moved past it (motet#35). A message the extractor deliberately skips, because it is a
+         *     receipt rather than a newsletter, is a different thing and is still not reported. Both
+         *     arms live in ``repo.list_ingestion``.
          */
         get: operations["list_ingestion_v1_ingestion_get"];
         put?: never;
@@ -1001,6 +1006,13 @@ export interface components {
          *     distinguishable. They are not the same thing to a person standing there waiting, and
          *     a spinner that means both is a spinner that means neither.
          *
+         *     **Not always a source item.** A mailbox message whose fetch failed has no
+         *     ``source_items`` row — that is written when extraction succeeds — so it is reported
+         *     from its extract job, under a synthesized ``id`` and a ``title`` naming the provider's
+         *     message id. Every other field means the same thing either way. Ids are
+         *     opaque to clients and nothing addresses this route's rows, so the two shapes are one
+         *     response model rather than two (motet#35).
+         *
          *     **``last_error`` is the exception the stage raised, unedited, and that is the decision
          *     rather than an oversight.** It is a new egress: an httpx error names the base URL it
          *     dialled, a psycopg one names the database host. The caller is the deployment's single
@@ -1039,6 +1051,11 @@ export interface components {
              * @description When the next attempt is due. Null means there is nothing scheduled: it is either being processed right now, or it is finished — see 'state'.
              */
             next_attempt_at: string | null;
+            /**
+             * Source Kind
+             * @description How this arrived: 'paste' for text pasted in, 'gmail' for a polled mailbox message. It decides what a person can do about a failure — a failed paste can be pasted again, and a failed mailbox message cannot, because the poll cursor has already moved past it.
+             */
+            source_kind: string;
             /**
              * State
              * @description 'pending' while the queue still owns it, 'failed' once the retries ran out, 'integrated' for the few minutes after it succeeded.

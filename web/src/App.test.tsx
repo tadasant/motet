@@ -35,6 +35,7 @@ const QUEUED: IngestionItem = {
   next_attempt_at: '2026-08-24T00:00:05Z',
   last_error: null,
   created_at: '2026-08-24T00:00:00Z',
+  source_kind: 'paste',
 }
 
 const EPISODE: Episode = {

@@ -9,6 +9,7 @@ them.
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
 import feedparser
@@ -26,6 +27,7 @@ from motet_api.obs import (
     OTLP_HEADERS_ENV,
     OTLP_TOKEN_ENV,
 )
+from motet_db import SourceKind, phase2, repo
 from motet_inference.llm import LlmConfigError
 from motet_vault import BACKEND_ENV, KMS_KEY_ENV
 from motet_workers import DEFAULT_MAX_ATTEMPTS, Queue, drain, jobs
@@ -378,6 +380,41 @@ class TestEndToEnd:
         # And it is still nowhere in the backlog, which is the reason it needed somewhere
         # else to be.
         assert api.get("/v1/news-items", headers=AUTH).json() == []
+
+    def test_a_mailbox_message_that_never_extracted_is_reported_too(
+        self, api: TestClient, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """motet#35: for part of its life a polled message has no ``source_items`` row.
+
+        Extraction is what writes that row, so a message that could not be fetched or
+        parsed has only its job row — and the poll cursor moved past it in the same
+        transaction that queued the fetch, so nothing will look at it again. Reported from
+        source items alone it was invisible on every surface the user has, exactly as a
+        failed paste was before this route existed.
+        """
+        source = phase2.create_source(
+            db, user_id=repo.OWNER_USER_ID, kind=SourceKind.GMAIL.value, name="Gmail"
+        )
+        error = "PermanentFailure: source needs reconnecting: invalid_grant"
+        db.execute(
+            """
+            INSERT INTO jobs (queue, payload, attempts, state, last_error)
+            VALUES ('extract', %s::jsonb, 5, 'failed', %s)
+            """,
+            (json.dumps({"source_id": source.id, "message_id": "18f2a3b4c5"}), error),
+        )
+        db.commit()
+
+        (failed,) = api.get("/v1/ingestion", headers=AUTH).json()
+        assert failed["state"] == "failed"
+        assert failed["attempts"] == 5
+        assert failed["last_error"] == error
+        assert failed["next_attempt_at"] is None
+        # Named by the message id, because reading the subject line is what failed.
+        assert failed["title"] == "Gmail message 18f2a3b4c5"
+        # And by the route it came in on, which is what says whether re-pasting is a
+        # repair the reader can perform. For a mailbox message it is not.
+        assert failed["source_kind"] == "gmail"
 
     def test_processing_reports_whether_anything_is_draining_the_queue(
         self, api: TestClient, _migrated: str

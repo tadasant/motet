@@ -624,9 +624,14 @@ def list_ingestion(conn: Conn, user_id: User) -> list[IngestionItemResponse]:
     item and so never appears there at all. That gap is the whole reason this route
     exists: content that fails is content that silently disappears.
 
-    Scoped to the ``integrate`` stage, because that is the stage a ``source_items`` row
-    exists for. A Gmail ``extract`` that fails has no row to report — the message was
-    never turned into one — so it is invisible here and is tracked separately as motet#35.
+    Covers both stages a thing can be stuck in on its way to the backlog, which needed
+    saying because for a while it covered one. A pasted item has a ``source_items`` row
+    from the moment it is accepted; a polled mailbox message does not get one until
+    extraction succeeds, so a message the fetch *raised* on — a revoked grant, a mailbox
+    that would not answer — was reported nowhere at all while the poll cursor had already
+    moved past it (motet#35). A message the extractor deliberately skips, because it is a
+    receipt rather than a newsletter, is a different thing and is still not reported. Both
+    arms live in ``repo.list_ingestion``.
     """
     return [_ingestion_item(item) for item in repo.list_ingestion(conn, user_id)]
 
@@ -854,6 +859,7 @@ def _ingestion_item(item: IngestionStatus) -> IngestionItemResponse:
         next_attempt_at=item.next_attempt_at,
         last_error=item.last_error,
         created_at=item.created_at,
+        source_kind=item.source_kind,
     )
 
 

@@ -22,6 +22,7 @@ from motet_vault import build_key_manager
 from motet_workers import Queue, drain, enqueue_source_poll, poll_key
 from motet_workers.handlers import Context, PermanentFailure
 from motet_workers.ingest import handle_extract, handle_poll
+from motet_workers.jobs import DEFAULT_MAX_ATTEMPTS
 
 USER = repo.OWNER_USER_ID
 
@@ -301,6 +302,172 @@ def test_a_second_full_run_adds_nothing(db: psycopg.Connection[Any], database_ur
     assert {item.id for item in repo.list_news_items(db, USER)} == before
 
 
+# --- a message that never becomes a source item ---------------------------------------
+#
+# motet#35. `handle_extract` writes the `source_items` row when extraction *succeeds*, so
+# until then the extract job row is the only record that the message was ever seen — and
+# `handle_poll` advanced the cursor in the same transaction that queued it, so nothing
+# will ever look at that message again. These go through `drain` rather than calling the
+# handler, because what is under test is what survives the *runner's* failure path: the
+# job row it writes, and whether the accounting surface can see it.
+
+
+class _Unreachable:
+    """A mailbox that lists fine and then fails every fetch, as a provider outage does."""
+
+    def __init__(self, mailbox: Any) -> None:
+        self._mailbox = mailbox
+
+    def list_messages(self, **kwargs: Any) -> Any:
+        return self._mailbox.list_messages(**kwargs)
+
+    def fetch_message(self, message_id: str) -> Any:
+        raise RuntimeError("gmail returned 503 for message " + message_id)
+
+
+def _burn_the_retry_ladder(db: psycopg.Connection[Any], database_url: str) -> None:
+    """Drain `extract` until the queue gives up on it.
+
+    The backoff schedules each retry into the future, so the clock is moved rather than
+    waited on — `run_at` is the only thing between a claimable job and one that is not.
+    """
+    for _ in range(DEFAULT_MAX_ATTEMPTS):
+        db.execute("UPDATE jobs SET run_at = now() WHERE queue = 'extract'")
+        db.commit()
+        drain(Queue.EXTRACT, database_url)
+    db.commit()
+
+
+def test_a_message_that_never_extracts_is_reported_rather_than_lost(
+    db: psycopg.Connection[Any], database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The defect, end to end: polled, failed five times, and accounted for.
+
+    Before this the answer was nothing at all — no source item, no news item, and an
+    ingestion list built from `source_items` that could not report a row that does not
+    exist. The message was gone, and the surface whose entire job is "where did my content
+    go" said everything was fine.
+    """
+    from motet_sources import FakeMailClient
+
+    source_id = connected_source(db)
+    enqueue_source_poll(db, source_id)
+    db.commit()
+    assert drain(Queue.POLL, database_url) == 1
+
+    monkeypatch.setattr(
+        "motet_workers.ingest.build_mail_client",
+        lambda token, env=None: _Unreachable(FakeMailClient()),
+    )
+    _burn_the_retry_ladder(db, database_url)
+
+    # Nothing else in the system knows these messages existed.
+    assert _source_items(db, source_id) == []
+    assert repo.list_news_items(db, USER) == []
+
+    statuses = repo.list_ingestion(db, USER)
+    assert len(statuses) >= 3, "every polled message should be accounted for"
+    for status in statuses:
+        assert status.state is SourceItemState.FAILED
+        assert status.attempts == DEFAULT_MAX_ATTEMPTS
+        assert status.last_error is not None and "503" in status.last_error
+        assert status.next_attempt_at is None
+        assert status.source_kind == SourceKind.GMAIL.value
+        assert status.title.startswith("Gmail message ")
+
+
+def test_a_revoked_mailbox_reports_every_message_it_could_not_fetch(
+    db: psycopg.Connection[Any], database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other failure class, and the one the extract stage cannot recover from.
+
+    An auth failure happens *before* a single byte of the message is fetched, which is why
+    the fix reads the job row rather than writing a source item from the raw message: at
+    this point there is no raw message. The reason has to say `reconnecting` rather than
+    the transport error above, because the repairs are different — one is a wait and the
+    other is a consent screen.
+    """
+
+    class Revoked:
+        def refresh(self, *, refresh_token: str) -> Any:
+            raise SourceAuthError("invalid_grant")
+
+    source_id = connected_source(db)
+    enqueue_source_poll(db, source_id)
+    db.commit()
+    drain(Queue.POLL, database_url)
+
+    # The poll left a fresh access token behind; dropping it is what sends the extract
+    # stage back to the refresh grant the user has revoked.
+    db.execute("DELETE FROM source_credentials WHERE purpose = 'access'")
+    db.commit()
+    monkeypatch.setattr("motet_workers.ingest.build_oauth_client", lambda env=None: Revoked())
+
+    drain(Queue.EXTRACT, database_url)
+    db.commit()
+
+    statuses = repo.list_ingestion(db, USER)
+    assert statuses, "a revoked mailbox must not swallow the messages it already saw"
+    for status in statuses:
+        assert status.state is SourceItemState.FAILED
+        # One attempt, not five: only re-consent fixes this, so the ladder is skipped.
+        assert status.attempts == 1
+        assert status.last_error is not None and "reconnecting" in status.last_error
+
+
+def test_a_message_still_queued_for_extraction_is_visible_before_it_fails(
+    db: psycopg.Connection[Any], database_url: str
+) -> None:
+    """Not only failures. A queued fetch is content on its way in, and it says so.
+
+    Same reason the paste half reports pending items: "working on it" and "nothing is
+    coming for this" look identical from outside, and one Gmail poll can queue fifty.
+    """
+    source_id = connected_source(db)
+    enqueue_source_poll(db, source_id)
+    db.commit()
+    drain(Queue.POLL, database_url)
+    db.commit()
+
+    statuses = repo.list_ingestion(db, USER)
+    assert len(statuses) >= 3
+    assert all(status.state is SourceItemState.PENDING for status in statuses)
+    assert all(status.attempts == 0 for status in statuses)
+    assert all(status.next_attempt_at is not None for status in statuses)
+
+
+def test_extraction_succeeding_replaces_the_job_row_with_the_item_it_wrote(
+    db: psycopg.Connection[Any], database_url: str
+) -> None:
+    """One message is one line, and extraction is the moment it changes which line.
+
+    The idempotence case the unique index guarantees is the one that could break this
+    quietly: a job re-run after its insert committed leaves both records describing one
+    message, and a panel showing it twice would be the accounting surface disagreeing with
+    itself.
+    """
+    source_id = connected_source(db)
+    enqueue_source_poll(db, source_id)
+    db.commit()
+    drain(Queue.POLL, database_url)
+    drain(Queue.EXTRACT, database_url)
+    db.commit()
+
+    items = _source_items(db, source_id)
+    statuses = repo.list_ingestion(db, USER)
+    assert len(statuses) == len(items), "each message is reported once, from its own row"
+    assert {status.id for status in statuses} == {item["id"] for item in items}
+    assert all(not status.title.startswith("Gmail message ") for status in statuses)
+
+    # And re-running an extract job that already has its row — the reclaimed-lease case —
+    # changes neither the row count nor the ingestion list.
+    for job in _jobs_any_state(db, Queue.EXTRACT):
+        handle_extract(context(db), job["payload"])
+    db.commit()
+    assert len(_source_items(db, source_id)) == len(items)
+    assert {status.id for status in repo.list_ingestion(db, USER)} == {item["id"] for item in items}
+
+
 # --- helpers -------------------------------------------------------------------------
 
 
@@ -325,4 +492,11 @@ def _source_items(db: psycopg.Connection[Any], source_id: str) -> list[dict[str,
             "ORDER BY created_at, id",
             (source_id,),
         )
+        return list(cur.fetchall())
+
+
+def _jobs_any_state(db: psycopg.Connection[Any], queue: Queue) -> list[dict[str, Any]]:
+    """Every job on a queue, whatever became of it — including the ones already done."""
+    with db.cursor() as cur:
+        cur.execute("SELECT payload FROM jobs WHERE queue = %s ORDER BY id", (queue.value,))
         return list(cur.fetchall())
