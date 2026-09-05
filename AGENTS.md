@@ -739,13 +739,67 @@ earlier end-to-end run used two claims, where 8k is never approached.
 *required output* of that call grows with the backlog and a constant does not, so every
 constant is a backlog size beyond which the stage cannot complete. Raising it moves the
 size; it does not remove it. So the bound moved onto the work instead: claims are chunked
-(`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because eight paragraph-sized
-evidence spans are not the same ask as eight short ones) and each call's ceiling is
+(`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because a chunk of paragraph-sized
+evidence spans is not the same ask as a chunk of short ones) and each call's ceiling is
 `grounding_max_tokens(n)` — a flat term for reading the instructions plus a **per-claim**
 term covering both the verdict and the thinking that produces it. Per-claim rather than
 flat because that is what the staging numbers say: 8,000 reasoning tokens over twelve
 claims, and *cut off*, so ≥660 a claim is a floor and the real figure is unknown. The
 number of calls grows with the episode; the size of each one does not.
+
+**The second observation, and what it moved: motet#52.** A full 21-item backlog survived
+that shape and took 43 minutes and 58 calls to do it, fifteen of which spent their whole
+output ceiling and returned no verdict — ~180k output tokens produced and discarded, on
+the order of $2.70, several times the cost of the episode's useful inference. **Every
+split was discovered by paying for it**, and the docstring above had already conceded the
+gap: both terms were estimates against a single truncated observation, and this is the
+second one.
+
+Three anchors came out of it — eight claims exhausted 14,000, four exhausted 10,000, and
+the cascades stopped at two under 8,000 with no claim dropped for budget. Written as
+`demand(n) = F + c·n` those say `F + 2c ≤ 8000` and `F + 4c > 10000`, hence **`c > 1000`,
+which is exactly the value the per-claim term had**, and `F ≤ 8000 − 2c`. Two things
+follow, and they are the change:
+
+- **The demand is per-claim dominated and the formula was headroom dominated, which is why
+  halving cascaded.** A flat term is the part halving cannot reduce, so a ceiling made
+  mostly of one loses budget faster than it loses work — 8 → 4 → 2 in the logs, each rung
+  paid for. The weight moved onto the per-claim term (2,750) and off the flat one (5,000).
+- **Room per claim is bought by carrying fewer claims, not by lifting the ceiling.** At
+  eight claims, reaching the ~4,000 a claim the exhaustions imply would have meant a
+  32,000-token call; at four it costs 16,000 — which is `demand(4)`'s maximum over the
+  *whole* region consistent with all three anchors, so it is the largest demand the data
+  admits rather than a guess above it. `GROUNDING_CLAIMS_PER_CALL` is 4, and the character
+  bound halved with it so that the characters a chunk may carry per claim are unchanged.
+
+Said plainly, because the merge gate rates it: **the maximum per-call `max_output_tokens`
+goes from 14,000 to 16,000**, and every bound that actually caps grounding spend — the
+chunk count, the halving, the fail-closed single-claim drop — is untouched. The ceiling is
+a truncation bound rather than a charge; what is billed is what the model produces, and an
+exhausted call is the one case where the whole ceiling is billed for nothing. Net spend
+falls: for the eight claims of one cascade rung, 64,400 output tokens become 22,400.
+
+**And the estimate no longer has to be right, because a wrong one is paid once an episode
+rather than once a chunk.** Halving is a local decision that forgets what it learned as
+soon as the chunk is done, so the next chunk paid the same probe — sixteen times over a
+full backlog. A chunk that runs out now narrows the size used for *every remaining chunk of
+that episode*, to the largest size this episode has actually seen answered. Per episode
+rather than per process, deliberately: a limit living on the adapter would ratchet down
+over a worker's lifetime and never recover, turning one pathological claim into a
+permanently more expensive stage.
+
+**A claim that runs out on its own narrows nothing**, and that exception is the same
+argument one scope smaller. There is no smaller chunk to retreat to, so a size-one
+exhaustion is evidence about that *claim* — it is why the claim is dropped — and not about
+how many claims fit in a call. Narrowing on it would put every remaining claim of the
+episode on a call of its own, which is the most expensive shape the stage has.
+
+**`effort` was not touched, and that is a decision.** Lowering it is the other direction
+motet#52 offered and it would cut cost the same way — but grounding is where invariant 3
+lives, the golden set runs against fakes and so cannot score verdict quality, and a stage
+that silently got worse at catching a fabricated number is the one regression this system
+has no instrument for. `MOTET_LLM_EFFORT_GROUNDING` is still the lever if a real run says
+so.
 
 Three things fall out of that, and none of them is decoration:
 

@@ -80,24 +80,44 @@ SCRIPT_MAX_TOKENS = 32_000
 #: -- and 8k was reached at 19 news items, which is a normal morning. Chunking bounds the
 #: request instead: the number of calls grows with the episode and the size of each one
 #: does not. Verdicts are independent per claim, so nothing is lost by splitting them.
-GROUNDING_CLAIMS_PER_CALL = 8
+#:
+#: **Eight, and then four: motet#52.** Carrying fewer claims is how a claim is bought more
+#: room to be thought about, because the alternative is lifting the ceiling. At eight
+#: claims a 14,000-token ceiling is 1,750 a claim, and reaching the ~4,000 a claim the
+#: staging exhaustions imply would have meant a 32,000-token call; at four it costs 16,000.
+#: Same headroom per claim, and a per-call bound that moves 14,000 -> 16,000 rather than
+#: doubling. The cost of the trade is that the flat term below is paid twice as often.
+GROUNDING_CLAIMS_PER_CALL = 4
 
 #: A second bound on the same call, because claims are not the same size. Evidence spans
-#: are whole sentences out of a newsletter, so eight long ones are a much bigger ask than
-#: eight short ones, and the reasoning that has to chew through them scales with the text
-#: rather than with the count.
-GROUNDING_CHARS_PER_CALL = 12_000
+#: are whole sentences out of a newsletter, so four long ones are a much bigger ask than
+#: four short ones, and the reasoning that has to chew through them scales with the text
+#: rather than with the count. Halved alongside the claim bound above, so that the
+#: characters a chunk may carry *per claim* are unchanged.
+GROUNDING_CHARS_PER_CALL = 6_000
 
 #: Per claim: one verdict — an index, a boolean and one short sentence — plus the thinking
-#: that produces it. Staging spent **at least** 660 reasoning tokens a claim before it was
-#: cut off, and "at least" is as much as that observation supports: the call ran out, so
-#: what it actually needed is unknown. This is that floor with room above it.
-GROUNDING_TOKENS_PER_CLAIM = 1_000
+#: that produces it.
+#:
+#: **motet#52 is the second observation that :func:`grounding_max_tokens` was waiting for**,
+#: and it moves the weight of the ceiling onto this term. Staging gives three anchors: eight
+#: claims exhausted a 14,000 ceiling, four exhausted 10,000, and the cascades stopped at two
+#: under 8,000 with no claim dropped for budget. Written as ``demand(n) = F + c*n`` those say
+#: ``F + 2c <= 8000`` and ``F + 4c > 10000``, hence ``c > 1000`` — the old value was exactly
+#: the boundary it had to be above — and ``F <= 8000 - 2c``. Across that whole region
+#: ``demand(4)`` peaks at 16,000, which is what ``grounding_max_tokens(4)`` now allows: not a
+#: guess above the observations but the largest demand consistent with all of them.
+GROUNDING_TOKENS_PER_CLAIM = 2_750
 
 #: The part of the budget that is not per claim: reading the instructions and settling into
 #: the task. Flat because it does not repeat per claim — unlike the term above, which is
-#: what the first draft of this fix got wrong by making the whole allowance flat.
-GROUNDING_REASONING_HEADROOM = 6_000
+#: what the first draft of the motet#42 fix got wrong by making the whole allowance flat.
+#:
+#: It is the smaller half of the ceiling now, and that is the point. A flat term is the part
+#: halving cannot reduce, so a ceiling dominated by it is one where splitting a chunk removes
+#: budget faster than it removes work — which is precisely the 8 -> 4 -> 2 cascade motet#52
+#: reported, where halving the claims did not stop the halves exhausting too.
+GROUNDING_REASONING_HEADROOM = 5_000
 
 #: What a claim's failure says when the validator could not get a verdict out of the model
 #: within its budget. Prefix-matched by ``accounting.classify_grounding_reason``, so keep
@@ -109,9 +129,13 @@ def grounding_max_tokens(claims: int) -> int:
     """The output ceiling for a grounding call judging ``claims`` claims.
 
     A function rather than a constant because the work is a function of the claim count and
-    a constant is not. Both terms are estimates against a single truncated observation, so
-    the halving in :meth:`ClaudeGroundingValidator._judge` is the part that has to be
-    right: it is what makes a wrong estimate cost a retry instead of an episode.
+    a constant is not. Both terms were estimates against a single truncated observation
+    when motet#42 wrote them; motet#52 is the second observation, and the constants above
+    say what it moved. They are still estimates, which is why the halving in
+    :meth:`ClaudeGroundingValidator._judge` stays: it is what makes a wrong estimate cost a
+    retry instead of an episode. What is new is that a wrong estimate is now paid *once* an
+    episode rather than once a chunk — see the narrowing in
+    :meth:`ClaudeGroundingValidator.validate`.
     """
     return GROUNDING_REASONING_HEADROOM + GROUNDING_TOKENS_PER_CLAIM * claims
 
@@ -299,27 +323,48 @@ class _Judgeable:
     evidence: str
 
 
-def _chunk(items: Sequence[_Judgeable]) -> list[list[_Judgeable]]:
-    """Split claims into calls, bounded by both count and size.
+@dataclass(frozen=True)
+class _Judgement:
+    """What one chunk found, and what its size cost to discover.
+
+    ``answered`` is the largest chunk size anything in this subtree actually got verdicts
+    for; ``cascaded`` says whether a call carrying *more than one* claim ran out of budget.
+    Together they are the whole of what an episode can learn about its own chunk size that
+    the constants did not already know — a size that worked, and the fact that a bigger one
+    did not.
+
+    **A single claim running out sets neither**, and that asymmetry is deliberate: there is
+    no smaller chunk to retreat to, so it is evidence about that *claim* rather than about
+    how many claims fit in a call. Narrowing on it would let one pathological claim put the
+    rest of the episode on one call per claim, which is the most expensive shape there is.
+    """
+
+    failures: list[GroundingFailure]
+    answered: int | None
+    cascaded: bool
+
+
+def _next_chunk(items: Sequence[_Judgeable], start: int, limit: int) -> int:
+    """One past the last claim of the chunk beginning at ``start``, bounded by count and size.
 
     Order is preserved and never re-sorted: a chunk that follows the script's own order
     keeps claims from one story together, which is the arrangement a reader of the log
     lines expects and costs nothing to maintain.
+
+    Taken one chunk at a time rather than all at once because ``limit`` can narrow partway
+    through an episode — see :meth:`ClaudeGroundingValidator.validate`. A claim whose
+    evidence is on its own larger than the whole character budget still goes, alone: the
+    bound is a bound on chunks, not a promise about any single claim.
     """
-    chunks: list[list[_Judgeable]] = []
-    current: list[_Judgeable] = []
+    end = start
     size = 0
-    for item in items:
-        cost = len(item.claim_text) + len(item.evidence)
-        full = len(current) >= GROUNDING_CLAIMS_PER_CALL or size + cost > GROUNDING_CHARS_PER_CALL
-        if current and full:
-            chunks.append(current)
-            current, size = [], 0
-        current.append(item)
+    while end < len(items):
+        cost = len(items[end].claim_text) + len(items[end].evidence)
+        if end > start and (end - start >= limit or size + cost > GROUNDING_CHARS_PER_CALL):
+            break
         size += cost
-    if current:
-        chunks.append(current)
-    return chunks
+        end += 1
+    return end
 
 
 class ClaudeGroundingValidator:
@@ -350,6 +395,22 @@ class ClaudeGroundingValidator:
     the sentences nobody could check and nothing else. It is never an *approval*: an
     unchecked claim is a failure, which is the same rule a missing verdict already
     followed.
+
+    **What the halving costs, and why it is now paid once: motet#52.** Discovering that a
+    chunk was too big means spending its whole output budget and getting nothing back, and
+    the constants above were doing that on every chunk of a full backlog — fifteen times
+    on one staging episode, ~180k output tokens produced and discarded. Halving that chunk
+    is a local decision that forgets what it learned the moment the chunk is done, so the
+    next chunk pays the same probe. So :meth:`validate` carries it forward: a chunk that
+    ran out narrows the size used for *every remaining chunk of this episode*, to the
+    largest size this episode has actually seen answered. That turns a per-chunk cost into
+    a per-episode one. The constants are still what decide whether the probe happens at
+    all; the narrowing is what bounds it when they are wrong.
+
+    **Per episode, deliberately, rather than per process.** One pathological chunk should
+    not make every later episode chunk small, and a limit that lived on the adapter would
+    ratchet down and never recover — the constants are the estimate, and a single call is
+    not enough evidence to overwrite them permanently.
     """
 
     stage: ClassVar[LlmStage] = LlmStage.GROUNDING
@@ -381,12 +442,36 @@ class ClaudeGroundingValidator:
                     )
                 )
 
-        for chunk in _chunk(judgeable):
-            failures.extend(self._judge(chunk))
+        limit = GROUNDING_CLAIMS_PER_CALL
+        start = 0
+        while start < len(judgeable):
+            end = _next_chunk(judgeable, start, limit)
+            judged = self._judge(judgeable[start:end])
+            failures.extend(judged.failures)
+            start = end
+            if not judged.cascaded:
+                continue
+            # The largest size this episode has actually seen answered -- and one, when it
+            # answered nothing at any size, because that is the floor the halving stops at
+            # anyway.
+            narrowed = judged.answered if judged.answered is not None else 1
+            if narrowed < limit:
+                logger.warning(
+                    "grounding narrowing chunks from %d claims to %d after a bigger call "
+                    "ran out of budget; %d claims of this episode remain",
+                    limit,
+                    narrowed,
+                    len(judgeable) - start,
+                )
+                limit = narrowed
         return GroundingReport(failures=tuple(failures))
 
-    def _judge(self, chunk: Sequence[_Judgeable]) -> list[GroundingFailure]:
-        """Judge one chunk, halving it if the model cannot answer within its budget."""
+    def _judge(self, chunk: Sequence[_Judgeable]) -> _Judgement:
+        """Judge one chunk, halving it if the model cannot answer within its budget.
+
+        The :class:`_Judgement` carries what :meth:`validate` narrows on as well as the
+        failures — see that class for why a lone claim running out is not part of it.
+        """
         try:
             verdicts = self._ask(chunk)
         except LlmBudgetExhaustedError as exc:
@@ -401,13 +486,17 @@ class ClaudeGroundingValidator:
                     chunk[0].news_item_id,
                     exc,
                 )
-                return [
-                    GroundingFailure(
-                        news_item_id=chunk[0].news_item_id,
-                        claim_text=chunk[0].claim_text,
-                        reason=GROUNDING_BUDGET_REASON,
-                    )
-                ]
+                return _Judgement(
+                    failures=[
+                        GroundingFailure(
+                            news_item_id=chunk[0].news_item_id,
+                            claim_text=chunk[0].claim_text,
+                            reason=GROUNDING_BUDGET_REASON,
+                        )
+                    ],
+                    answered=None,
+                    cascaded=False,
+                )
             middle = len(chunk) // 2
             logger.warning(
                 "grounding ran out of budget on %d claims; splitting into %d and %d: %s",
@@ -416,7 +505,14 @@ class ClaudeGroundingValidator:
                 len(chunk) - middle,
                 exc,
             )
-            return self._judge(chunk[:middle]) + self._judge(chunk[middle:])
+            left = self._judge(chunk[:middle])
+            right = self._judge(chunk[middle:])
+            answered = [size for size in (left.answered, right.answered) if size is not None]
+            return _Judgement(
+                failures=left.failures + right.failures,
+                answered=max(answered) if answered else None,
+                cascaded=True,
+            )
 
         failures: list[GroundingFailure] = []
         for index, item in enumerate(chunk):
@@ -441,7 +537,7 @@ class ClaudeGroundingValidator:
                         reason=reason or "the cited span does not support this claim",
                     )
                 )
-        return failures
+        return _Judgement(failures=failures, answered=len(chunk), cascaded=False)
 
     def _ask(self, chunk: Sequence[_Judgeable]) -> dict[int, tuple[bool, str]]:
         """One call, indexed from zero *within this chunk*.
