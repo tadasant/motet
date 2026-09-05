@@ -100,6 +100,13 @@ class IngestionItemResponse(BaseModel):
     distinguishable. They are not the same thing to a person standing there waiting, and
     a spinner that means both is a spinner that means neither.
 
+    **Not always a source item.** A mailbox message that never got as far as being parsed
+    has no ``source_items`` row — that is written when extraction succeeds — so it is
+    reported from its extract job, under a synthesized ``id`` and a ``title`` naming the
+    provider's message id. Every other field means the same thing either way. Ids are
+    opaque to clients and nothing addresses this route's rows, so the two shapes are one
+    response model rather than two (motet#35).
+
     **``last_error`` is the exception the stage raised, unedited, and that is the decision
     rather than an oversight.** It is a new egress: an httpx error names the base URL it
     dialled, a psycopg one names the database host. The caller is the deployment's single
@@ -139,6 +146,14 @@ class IngestionItemResponse(BaseModel):
         )
     )
     created_at: datetime
+    source_kind: str = Field(
+        description=(
+            "How this arrived: 'paste' for text pasted in, 'gmail' for a polled mailbox "
+            "message. It decides what a person can do about a failure — a failed paste "
+            "can be pasted again, and a failed mailbox message cannot, because the poll "
+            "cursor has already moved past it."
+        )
+    )
 
 
 class QueueHeartbeatResponse(BaseModel):

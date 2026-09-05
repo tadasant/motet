@@ -5,6 +5,9 @@ job queue, and the interesting cases are the ones where the two rows disagree: a
 item that is still ``pending`` while its job has already lost three attempts, and a source
 item that is ``integrated`` while its job row says ``done``.
 
+The second half of this file is the case where there is no domain table row *at all* — a
+polled mailbox message whose extraction failed, which is motet#35.
+
 Skips without ``DATABASE_URL`` so a quick local run needs no Postgres; CI always has one.
 """
 
@@ -15,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
-from motet_db import SourceItemState, repo
+from motet_db import SourceItemState, SourceKind, phase2, repo
 
 USER = repo.OWNER_USER_ID
 
@@ -23,6 +26,54 @@ USER = repo.OWNER_USER_ID
 def paste(conn: psycopg.Connection[Any], title: str = "Acme raises $20M") -> str:
     stored = repo.insert_source_item(conn, user_id=USER, title=title, text="Acme raised money.")
     return stored.id
+
+
+def gmail_source(db: psycopg.Connection[Any], *, user_id: str = USER) -> str:
+    return phase2.create_source(db, user_id=user_id, kind=SourceKind.GMAIL.value, name="Gmail").id
+
+
+def polled_item(db: psycopg.Connection[Any], source_id: str, message_id: str) -> str:
+    """A source item extraction did produce, keyed by the provider's message id."""
+    item_id = phase2.insert_polled_source_item(
+        db,
+        user_id=USER,
+        source_id_=source_id,
+        external_id=message_id,
+        title="Acme raises $20M",
+        text="Acme raised money.",
+    )
+    assert item_id is not None
+    return item_id
+
+
+def enqueue_extract(
+    db: psycopg.Connection[Any],
+    source_id: str,
+    message_id: str,
+    *,
+    attempts: int = 0,
+    state: str = "ready",
+    last_error: str | None = None,
+    due_in_seconds: int = 0,
+) -> None:
+    """The job row a poll leaves behind, in whatever state the case under test needs.
+
+    Written directly for the same reason ``enqueue_integrate`` is: ``db`` does not depend
+    on ``workers``, and what is under test is the shape of the row the query reads.
+    """
+    db.execute(
+        """
+        INSERT INTO jobs (queue, payload, attempts, state, last_error, run_at)
+        VALUES ('extract', %s::jsonb, %s, %s, %s, now() + make_interval(secs => %s))
+        """,
+        (
+            json.dumps({"source_id": source_id, "message_id": message_id}),
+            attempts,
+            state,
+            last_error,
+            due_in_seconds,
+        ),
+    )
 
 
 def enqueue_integrate(
@@ -213,6 +264,213 @@ def test_the_expression_index_covers_the_job_lookup(db: psycopg.Connection[Any])
         (item_id,),
     ).fetchall()
     assert any("jobs_source_item_idx" in str(row) for row in plan), plan
+
+
+class TestExtractJobsWithNoSourceItem:
+    """motet#35 — a polled message before, or instead of, a ``source_items`` row.
+
+    ``handle_extract`` writes the row when extraction *succeeds*, so between the poll and
+    the parse the job row is the entire record that the message was ever seen. A message
+    whose extraction fails five times leaves only that, and the poll cursor advanced in
+    the same transaction that queued it — so it is never looked at again by anything.
+    Reported from ``source_items`` alone, it was invisible on every surface the user has.
+    """
+
+    def test_a_message_that_never_extracted_is_reported_with_its_reason(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The defect, stated as an assertion. This list is the only place it can appear."""
+        source_id = gmail_source(db)
+        enqueue_extract(
+            db,
+            source_id,
+            "18f2a3b4c5",
+            attempts=5,
+            state="failed",
+            last_error="ExtractionError: no text/plain or text/html part",
+        )
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.state is SourceItemState.FAILED
+        assert status.attempts == 5
+        assert status.last_error is not None and "ExtractionError" in status.last_error
+        assert status.next_attempt_at is None
+        # Named by the provider's id, because reading the subject line is the step that
+        # failed — there is no title anywhere to show instead.
+        assert status.title == "Gmail message 18f2a3b4c5"
+        assert status.source_kind == SourceKind.GMAIL.value
+
+    def test_an_auth_failure_and_a_parse_failure_are_told_apart_by_their_reasons(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Two failure classes, two repairs: reconnect the mailbox, or report the message.
+
+        Both are permanent and both look identical from the queue's side, which is exactly
+        why the reason has to travel with the row.
+        """
+        source_id = gmail_source(db)
+        enqueue_extract(
+            db,
+            source_id,
+            "aaa",
+            attempts=1,
+            state="failed",
+            last_error="PermanentFailure: source needs reconnecting: invalid_grant",
+        )
+        enqueue_extract(
+            db,
+            source_id,
+            "bbb",
+            attempts=5,
+            state="failed",
+            last_error="ExtractionError: could not decode the body",
+        )
+
+        reasons = {status.title: status.last_error for status in repo.list_ingestion(db, USER)}
+        assert "invalid_grant" in (reasons["Gmail message aaa"] or "")
+        assert "could not decode" in (reasons["Gmail message bbb"] or "")
+
+    def test_a_message_still_being_retried_reports_the_attempt_and_the_next_one(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The same *working* / *stuck* distinction the integrate arm makes, one stage up."""
+        source_id = gmail_source(db)
+        enqueue_extract(
+            db,
+            source_id,
+            "ccc",
+            attempts=2,
+            state="ready",
+            last_error="timed out",
+            due_in_seconds=30,
+        )
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.state is SourceItemState.PENDING
+        assert status.attempts == 2
+        assert status.next_attempt_at is not None
+
+    def test_a_message_a_worker_holds_right_now_has_nothing_scheduled(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        source_id = gmail_source(db)
+        enqueue_extract(db, source_id, "ddd", attempts=1, state="running")
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.state is SourceItemState.PENDING
+        assert status.next_attempt_at is None
+
+    def test_a_message_that_made_it_is_reported_from_its_source_item_only(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """One message is one line. The row is the better answer, so the job stands down."""
+        source_id = gmail_source(db)
+        enqueue_extract(db, source_id, "eee", attempts=1, state="done")
+        item_id = polled_item(db, source_id, "eee")
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.id == item_id
+        assert status.title == "Acme raises $20M"
+        assert status.source_kind == SourceKind.GMAIL.value
+
+    def test_a_reclaimed_job_whose_row_already_landed_is_not_reported_twice(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The lease-reclaim case, which ``state <> 'done'`` alone does not cover.
+
+        A worker that inserted the source item and died before ``jobs.complete`` leaves a
+        ``running`` row that another worker will claim again. Both records then describe
+        one message, and the ``NOT EXISTS`` on ``(source_id, external_id)`` — the key the
+        unique index is built on — is what keeps the panel from showing it twice.
+        """
+        source_id = gmail_source(db)
+        enqueue_extract(db, source_id, "fff", attempts=2, state="running")
+        item_id = polled_item(db, source_id, "fff")
+
+        statuses = repo.list_ingestion(db, USER)
+        assert [status.id for status in statuses] == [item_id]
+
+    def test_it_reports_only_this_user(self, db: psycopg.Connection[Any]) -> None:
+        """Scoped through the source, because a job payload carries no user id."""
+        # `users` is not truncated between tests — the seeded owner has to survive — so
+        # this is idempotent rather than an insert.
+        db.execute("INSERT INTO users (id, email) VALUES ('other', NULL) ON CONFLICT DO NOTHING")
+        enqueue_extract(db, gmail_source(db, user_id="other"), "theirs")
+        enqueue_extract(db, gmail_source(db), "mine")
+
+        assert [status.title for status in repo.list_ingestion(db, USER)] == ["Gmail message mine"]
+
+    def test_the_two_arms_are_ordered_and_bounded_together(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Newest first across both, and one bound over the union rather than one each.
+
+        A per-arm limit that was also the answer's limit would let a full mailbox return
+        twice what the route promises, on a list the SPA polls every few seconds.
+        """
+        source_id = gmail_source(db)
+        for index in range(repo.INGESTION_MAX_ITEMS):
+            paste(db, title=f"Paste {index}")
+        # Aged, because everything a test writes shares one transaction timestamp and the
+        # ordering under test is by time. In life the two arms are written minutes apart.
+        db.execute("UPDATE source_items SET created_at = created_at - interval '1 hour'")
+        for index in range(10):
+            enqueue_extract(db, source_id, f"msg-{index}")
+
+        statuses = repo.list_ingestion(db, USER)
+        assert len(statuses) == repo.INGESTION_MAX_ITEMS
+        # The extract jobs were written last, so newest-first puts them at the front.
+        assert statuses[0].title.startswith("Gmail message")
+
+    def test_a_job_with_no_message_id_is_still_reportable(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """A malformed payload fails permanently on its first attempt, and still shows.
+
+        It is the one row whose reason nobody could guess from anywhere else, so falling
+        over on the missing field — or reporting it with no title at all, when every
+        caller renders one — would lose exactly the case worth keeping.
+        """
+        source_id = gmail_source(db)
+        db.execute(
+            """
+            INSERT INTO jobs (queue, payload, attempts, state, last_error)
+            VALUES ('extract', %s::jsonb, 1, 'failed', 'PermanentFailure: missing message_id')
+            """,
+            (json.dumps({"source_id": source_id}),),
+        )
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.title == "Gmail message (no id)"
+        assert status.state is SourceItemState.FAILED
+
+    def test_a_pasted_item_reports_the_kind_it_came_by(self, db: psycopg.Connection[Any]) -> None:
+        """``source_kind`` is on both arms, because it is what says which repair applies."""
+        item_id = paste(db)
+        enqueue_integrate(db, item_id)
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.source_kind == SourceKind.PASTE.value
+
+
+def test_the_extract_index_covers_the_open_job_lookup(db: psycopg.Connection[Any]) -> None:
+    """Migration 0008's index is the one the extract arm uses.
+
+    Same reasoning as the integrate one above: nothing prunes `jobs`, so without a
+    matching partial expression index this arm is a sequential scan of every job ever run,
+    behind a route the SPA polls while anything is pending.
+    """
+    source_id = gmail_source(db)
+    enqueue_extract(db, source_id, "ggg")
+    db.execute("SET enable_seqscan = off")
+    plan = db.execute(
+        """
+        EXPLAIN SELECT attempts FROM jobs
+        WHERE queue = 'extract' AND state <> 'done' AND payload ->> 'source_id' = %s
+        """,
+        (source_id,),
+    ).fetchall()
+    assert any("jobs_extract_open_idx" in str(row) for row in plan), plan
 
 
 class TestWorkerHeartbeats:

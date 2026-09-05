@@ -794,7 +794,7 @@ evidence that travels with it. That is motet#45, and it belongs behind the golde
 
 ### Ingestion state is a join onto the job queue, not a column
 
-`GET /v1/ingestion` (`repo.list_ingestion`) is what stops a paste from silently
+`GET /v1/ingestion` (`repo.list_ingestion`) is what stops content from silently
 disappearing. It reports source items that are not in the backlog yet — pending, failed,
 and for ten minutes after they succeed — each joined to its `integrate` job.
 
@@ -806,6 +806,42 @@ there" — which is the one distinction someone waiting actually cares about. Po
 the queue as well as the datastore is what makes that a join rather than a second system
 to ask, and migration 0005's partial expression index on `payload ->> 'source_item_id'` is
 what keeps it off a sequential scan of every job ever run.
+
+**A polled message has no domain object for part of its life, and reporting only on the
+domain object lost it entirely.** `handle_extract` writes the `source_items` row when
+extraction *succeeds*, so between the poll and the parse the extract job row is the whole
+record that the message was ever seen — and `handle_poll` advances the cursor in the same
+transaction that queues the fetch, so nothing ever looks at that message again. A
+newsletter that arrived, was polled, and then failed extraction five times was therefore
+invisible on every surface the user has, which is the paste-in defect this route was built
+for — motet#33's defect, one stage earlier (motet#35). So `list_ingestion` is two arms: a
+source item joined to its `integrate` job, and an `extract` job that has produced no source
+item. Migration 0008's partial expression index is 0005's, one queue over.
+
+**Reading the job row is the fix; writing a stand-in `source_items` row is not**, and the
+reason is that the earliest failures happen before there is anything to write one from. A
+revoked grant fails in `_access_token`, before a single byte of the message has been
+fetched — so "write the row first, from the raw bytes" cannot see the class of failure that
+motivates this at all, and moving the write back to *poll* time would put a textless row
+into the table that anchors every claim and every highlight, and would recast the
+`(source_id, external_id)` index from "this message is ingested" to "this message was
+seen". The job row already holds the attempt count, the schedule and the reason, which is
+everything the surface reports.
+
+**A message reported from a job is one line, never two.** A `done` job is a message that
+made it, and its source item is the better answer; the `NOT EXISTS` on
+`(source_id, external_id)` covers the rest — a lease reclaimed after the insert committed,
+a re-listed message a second poll queued. `source_kind` rides on both arms because it is
+what decides the repair: a failed paste can be pasted again, and a failed mailbox message
+cannot, because the cursor has moved past it. The SPA says so rather than offering a button
+that does not exist.
+
+**An unparseable message is still a deliberate skip, not a failure.** `handle_extract`
+catches `ExtractionError` and records it on the source: a mailbox is mostly receipts and
+calendar invites, and treating each one as an error would make the source permanently red.
+What is now reported is everything that *raises* — the auth failure, the transport failure,
+the vault that will not open — because those are the ones where content the user wanted was
+lost.
 
 Three smaller things are decisions rather than implementation:
 

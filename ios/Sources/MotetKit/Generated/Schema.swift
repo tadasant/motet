@@ -317,6 +317,13 @@ public struct HighlightResponse: Codable, Hashable, Sendable {
 /// distinguishable. They are not the same thing to a person standing there waiting, and
 /// a spinner that means both is a spinner that means neither.
 ///
+/// **Not always a source item.** A mailbox message that never got as far as being parsed
+/// has no ``source_items`` row — that is written when extraction succeeds — so it is
+/// reported from its extract job, under a synthesized ``id`` and a ``title`` naming the
+/// provider's message id. Every other field means the same thing either way. Ids are
+/// opaque to clients and nothing addresses this route's rows, so the two shapes are one
+/// response model rather than two (motet#35).
+///
 /// **``last_error`` is the exception the stage raised, unedited, and that is the decision
 /// rather than an oversight.** It is a new egress: an httpx error names the base URL it
 /// dialled, a psycopg one names the database host. The caller is the deployment's single
@@ -333,6 +340,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
     public var lastError: String?
     public var maxAttempts: Int
     public var nextAttemptAt: Date?
+    public var sourceKind: String
     public var state: String
     public var title: String
 
@@ -343,6 +351,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
         lastError: String? = nil,
         maxAttempts: Int,
         nextAttemptAt: Date? = nil,
+        sourceKind: String,
         state: String,
         title: String
     ) {
@@ -352,6 +361,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
         self.lastError = lastError
         self.maxAttempts = maxAttempts
         self.nextAttemptAt = nextAttemptAt
+        self.sourceKind = sourceKind
         self.state = state
         self.title = title
     }
@@ -363,6 +373,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
         case lastError = "last_error"
         case maxAttempts = "max_attempts"
         case nextAttemptAt = "next_attempt_at"
+        case sourceKind = "source_kind"
         case state
         case title
     }

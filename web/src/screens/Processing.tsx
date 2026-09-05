@@ -1,4 +1,4 @@
-// What has been pasted but is not in the backlog yet.
+// What has been ingested but is not in the backlog yet.
 //
 // This is the answer to "I pasted something, it said it was pending, and I never saw it
 // again." The backlog lists *news items*, and an item that fails ingestion never becomes
@@ -197,9 +197,19 @@ function explain(item: IngestionItem, worker: WorkerState, now: number): string 
     return 'Integrated. It is in the backlog below — under whatever title dedup settled on.'
   }
   if (item.state === 'failed') {
+    const gaveUp = `Gave up after ${item.attempts} attempt${item.attempts === 1 ? '' : 's'}. `
+    // What to *do* about it is not the same sentence for the two ways in, which is the
+    // whole reason `source_kind` is on the contract. Re-pasting is a repair a person can
+    // perform; a mailbox message has no such button, and — because the poll cursor
+    // advanced in the same transaction that queued the fetch — no later poll will offer
+    // it again either. Telling someone to paste a newsletter they have never seen the
+    // text of would be advice that cannot be followed.
+    if (item.source_kind === 'paste') {
+      return `${gaveUp}Nothing further will happen to it: paste it again once the reason below is fixed.`
+    }
     return (
-      `Gave up after ${item.attempts} attempt${item.attempts === 1 ? '' : 's'}. ` +
-      'Nothing further will happen to it: paste it again once the reason below is fixed.'
+      `${gaveUp}Nothing further will happen to it: the mailbox poll has already moved ` +
+      'past this message, so fixing the reason below will not bring this one back.'
     )
   }
   if (item.attempts === 0) {

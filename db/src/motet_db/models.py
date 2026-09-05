@@ -65,6 +65,17 @@ class IngestionStatus:
 
     ``attempts`` is zero and ``next_attempt_at`` is ``None`` when there is no job row at
     all: nothing to report rather than nothing happening.
+
+    **Sometimes there is no source item at all, and that is motet#35.** A polled message
+    only becomes a ``source_items`` row once extraction *succeeds*, so a Gmail message
+    that fails to extract has just the job row — and the job row is then the whole record
+    that the message was ever seen. Such an entry carries a synthesized ``id`` and
+    ``title`` (see :func:`~motet_db.repo.list_ingestion`); every other field means exactly
+    what it means for a source item.
+
+    ``source_kind`` is the ingestion route it arrived by. It is here because it decides
+    what a person can *do* about a failure: a failed paste can be pasted again, and a
+    failed mailbox message cannot — the poll cursor has already moved past it.
     """
 
     id: str
@@ -74,6 +85,7 @@ class IngestionStatus:
     next_attempt_at: datetime | None
     last_error: str | None
     created_at: datetime
+    source_kind: str
 
 
 @dataclass(frozen=True)

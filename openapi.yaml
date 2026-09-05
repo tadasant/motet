@@ -348,7 +348,12 @@ components:
         \ precisely what a failed item never becomes.\n\n``attempts`` and ``next_attempt_at`` are here\
         \ so that *retrying* and *stuck* are\ndistinguishable. They are not the same thing to a person\
         \ standing there waiting, and\na spinner that means both is a spinner that means neither.\n\n\
-        **``last_error`` is the exception the stage raised, unedited, and that is the decision\nrather\
+        **Not always a source item.** A mailbox message that never got as far as being parsed\nhas no\
+        \ ``source_items`` row \u2014 that is written when extraction succeeds \u2014 so it is\nreported\
+        \ from its extract job, under a synthesized ``id`` and a ``title`` naming the\nprovider's message\
+        \ id. Every other field means the same thing either way. Ids are\nopaque to clients and nothing\
+        \ addresses this route's rows, so the two shapes are one\nresponse model rather than two (motet#35).\n\
+        \n**``last_error`` is the exception the stage raised, unedited, and that is the decision\nrather\
         \ than an oversight.** It is a new egress: an httpx error names the base URL it\ndialled, a psycopg\
         \ one names the database host. The caller is the deployment's single\nowner behind ``require_caller``\
         \ \u2014 the same person who reads the obs stack, where the\nidentical string already goes \u2014\
@@ -389,6 +394,12 @@ components:
           description: "When the next attempt is due. Null means there is nothing scheduled: it is either\
             \ being processed right now, or it is finished \u2014 see 'state'."
           title: Next Attempt At
+        source_kind:
+          description: "How this arrived: 'paste' for text pasted in, 'gmail' for a polled mailbox message.\
+            \ It decides what a person can do about a failure \u2014 a failed paste can be pasted again,\
+            \ and a failed mailbox message cannot, because the poll cursor has already moved past it."
+          title: Source Kind
+          type: string
         state:
           description: '''pending'' while the queue still owns it, ''failed'' once the retries ran out,
             ''integrated'' for the few minutes after it succeeded.'
@@ -406,6 +417,7 @@ components:
       - next_attempt_at
       - last_error
       - created_at
+      - source_kind
       title: IngestionItemResponse
       type: object
     ListenProgressRequest:
@@ -1671,13 +1683,29 @@ paths:
       - highlights
   /v1/ingestion:
     get:
-      description: "What has been ingested but is not in the backlog yet, and why.\n\nThe backlog answers\
-        \ \"what do I have to listen to\"; it cannot answer \"where did the\nthing I just pasted go\"\
-        , because an item that never integrates never becomes a news\nitem and so never appears there\
-        \ at all. That gap is the whole reason this route\nexists: content that fails is content that\
-        \ silently disappears.\n\nScoped to the ``integrate`` stage, because that is the stage a ``source_items``\
-        \ row\nexists for. A Gmail ``extract`` that fails has no row to report \u2014 the message was\n\
-        never turned into one \u2014 so it is invisible here and is tracked separately as motet#35."
+      description: 'What has been ingested but is not in the backlog yet, and why.
+
+
+        The backlog answers "what do I have to listen to"; it cannot answer "where did the
+
+        thing I just pasted go", because an item that never integrates never becomes a news
+
+        item and so never appears there at all. That gap is the whole reason this route
+
+        exists: content that fails is content that silently disappears.
+
+
+        Covers both stages a thing can be stuck in on its way to the backlog, which needed
+
+        saying because for a while it covered one. A pasted item has a ``source_items`` row
+
+        from the moment it is accepted; a polled mailbox message does not get one until
+
+        extraction succeeds, so a message that could not be fetched or parsed was reported
+
+        nowhere at all while the poll cursor had already moved past it (motet#35). Both arms
+
+        live in ``repo.list_ingestion``.'
       operationId: list_ingestion_v1_ingestion_get
       parameters:
       - in: header
