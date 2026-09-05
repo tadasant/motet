@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -602,14 +603,14 @@ class TestASlowJobKeepsItsLease:
         takes over.
         """
         monkeypatch.setattr(jobs, "LEASE_TOUCH_SECONDS", 0.05)
-        monkeypatch.setattr(jobs, "MAX_LEASE_EXTENSION_SECONDS", 0.2)
+        monkeypatch.setattr(jobs, "MAX_LEASE_EXTENSION_SECONDS", 0.1)
         seen: dict[str, Any] = {}
 
         def body() -> None:
-            # Long enough that the keeper has passed its cap and stopped.
-            time.sleep(1.0)
+            # Past the cap, after which the deadline is checked *before* every touch — so
+            # no touch can land after the backdate however slow the machine is.
+            time.sleep(0.5)
             self._backdate(_migrated, jobs.STALE_LEASE_SECONDS + 60)
-            time.sleep(0.3)
             with repo.connect(_migrated) as other:
                 other.autocommit = True
                 job_id = other.execute("SELECT id FROM jobs").fetchone()["id"]  # type: ignore[index]
@@ -633,7 +634,7 @@ class TestASlowJobKeepsItsLease:
         first = jobs.claim(db, Queue.INTEGRATE)
         assert first is not None
 
-        assert jobs.touch(db, first.id, attempts=first.attempts) is True
+        assert jobs.touch(db, first.id, attempts=first.attempts) is jobs.LeaseTouch.HELD
 
         db.execute(
             "UPDATE jobs SET locked_at = now() - make_interval(secs => %s) WHERE id = %s",
@@ -642,22 +643,97 @@ class TestASlowJobKeepsItsLease:
         second = jobs.claim(db, Queue.INTEGRATE)
         assert second is not None and second.id == first.id
 
-        assert jobs.touch(db, first.id, attempts=first.attempts) is False
-        assert jobs.touch(db, second.id, attempts=second.attempts) is True
+        # `LOST`, not `SETTLED`: the row is still running, under somebody else's claim.
+        assert jobs.touch(db, first.id, attempts=first.attempts) is jobs.LeaseTouch.LOST
+        assert jobs.touch(db, second.id, attempts=second.attempts) is jobs.LeaseTouch.HELD
 
-    def test_a_finished_job_is_not_touched_back_to_running(
+    def test_a_finished_job_reports_settled_rather_than_lost(
         self, db: psycopg.Connection[Any]
     ) -> None:
-        """A late touch after `complete` must not disturb a settled row."""
+        """A touch racing its own job's `complete` is not a duplicate run.
+
+        The window is one connect wide and a fleet will meet it. Calling it `LOST` would
+        put "the stage is running twice" into GlitchTip at ERROR about a job that ran once.
+        """
         jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
         db.commit()
         job = jobs.claim(db, Queue.INTEGRATE)
         assert job is not None
         jobs.complete(db, job.id)
 
-        assert jobs.touch(db, job.id, attempts=job.attempts) is False
+        assert jobs.touch(db, job.id, attempts=job.attempts) is jobs.LeaseTouch.SETTLED
         row = db.execute("SELECT state FROM jobs WHERE id = %s", (job.id,)).fetchone()
         assert row is not None and row["state"] == "done"
+
+        # A row that is gone entirely is settled too, not a lost lease.
+        db.execute("DELETE FROM jobs WHERE id = %s", (job.id,))
+        assert jobs.touch(db, job.id, attempts=job.attempts) is jobs.LeaseTouch.SETTLED
+
+    def test_the_keeper_stops_when_the_job_does(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`stop.set()` and the join are what keep a keeper from outliving its job.
+
+        Asserted on the thread rather than on the row, because the row cannot show it: a
+        keeper that ignored the Event would find the job `done`, get `SETTLED`, and change
+        nothing — while still holding a thread and reconnecting every interval, one per job
+        for the life of an always-on worker. What is wrong there is the thread, so that is
+        what this looks at.
+        """
+        monkeypatch.setattr(jobs, "LEASE_TOUCH_SECONDS", 0.02)
+        live: list[list[str]] = []
+
+        def body() -> None:
+            live.append([t.name for t in threading.enumerate() if t.name.startswith("lease-")])
+            time.sleep(0.2)
+
+        self._slow_job(db, _migrated, body, monkeypatch)
+
+        # One while the handler ran, and none once `drain` returned.
+        assert len(live[0]) == 1
+        assert [t.name for t in threading.enumerate() if t.name.startswith("lease-")] == []
+
+    def test_a_touch_that_cannot_reach_postgres_keeps_trying(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The `continue` in the keeper's exception arm, which is a decision.
+
+        `STALE_LEASE_SECONDS` is thirty touch intervals wide precisely so one unreachable
+        minute does not hand a healthy job to another worker. Returning there would.
+        """
+        monkeypatch.setattr(jobs, "LEASE_TOUCH_SECONDS", 0.05)
+        connect = repo.connect
+        attempts: list[int] = []
+
+        def flaky(*args: Any, **kwargs: Any) -> Any:
+            # Only the keeper's own connects fail: the test's helpers share this module
+            # attribute, and breaking those would fail the handler instead of the touch.
+            if not threading.current_thread().name.startswith("lease-"):
+                return connect(*args, **kwargs)
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise psycopg.OperationalError("connection refused")
+            return connect(*args, **kwargs)
+
+        seen: dict[str, Any] = {}
+
+        def body() -> None:
+            monkeypatch.setattr(loop.repo, "connect", flaky)
+            self._backdate(_migrated, jobs.STALE_LEASE_SECONDS + 60)
+            with connect(_migrated) as other:
+                other.autocommit = True
+                job_id = other.execute("SELECT id FROM jobs").fetchone()["id"]  # type: ignore[index]
+                deadline = time.monotonic() + 10
+                while self._lease_age_seconds(other, job_id) > 60:
+                    assert time.monotonic() < deadline, "the keeper gave up after one failure"
+                    time.sleep(0.02)
+                seen["recovered"] = True
+            monkeypatch.setattr(loop.repo, "connect", connect)
+
+        self._slow_job(db, _migrated, body, monkeypatch)
+
+        assert seen["recovered"] is True
+        assert len(attempts) >= 2
 
 
 class TestAFinishedScriptStageIsNotRerun:

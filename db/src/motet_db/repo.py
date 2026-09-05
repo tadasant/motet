@@ -87,9 +87,18 @@ INGESTION_MAX_ITEMS: Final = 200
 _Params = tuple[Any, ...] | Mapping[str, Any]
 
 
-def connect(database_url: str) -> psycopg.Connection[Any]:
-    """Open a connection with the row factory the rest of this module assumes."""
-    return psycopg.connect(database_url, row_factory=dict_row)
+def connect(database_url: str, *, connect_timeout: int | None = None) -> psycopg.Connection[Any]:
+    """Open a connection with the row factory the rest of this module assumes.
+
+    ``connect_timeout`` is off by default, which is libpq's own default and what every
+    long-lived caller wants. Pass one where a *stuck* connect is worse than a failed one:
+    the worker's lease keeper does, because it reconnects on a timer and a connect that
+    blocks for the OS TCP timeout would leave a thread and a socket behind on every job
+    for as long as Postgres is unreachable.
+    """
+    if connect_timeout is None:
+        return psycopg.connect(database_url, row_factory=dict_row)
+    return psycopg.connect(database_url, row_factory=dict_row, connect_timeout=connect_timeout)
 
 
 # --- source items ------------------------------------------------------------------

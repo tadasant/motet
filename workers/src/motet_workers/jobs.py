@@ -23,6 +23,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import psycopg
@@ -91,6 +92,12 @@ LEASE_TOUCH_SECONDS = 60
 #: run rather than a permanently stranded episode. Two hours is roughly three times the
 #: longest legitimate stage yet observed (the 43-minute script job of motet#53), so a
 #: healthy job never reaches it and reaching it is a signal rather than a routine event.
+#:
+#: **On a queue with a ``serialize_key`` the cap buys visibility rather than recovery**,
+#: and that is worth not mistaking. A wedged worker still holds its advisory lock, so the
+#: worker that reclaims the row finds the key busy and hands it to :func:`defer`, which
+#: does not count an attempt — round and round, until the wedged process dies. Unchanged by
+#: this constant and predates it; what the cap adds is the ERROR line saying which job.
 MAX_LEASE_EXTENSION_SECONDS = 7200
 
 #: The claim statement itself, hoisted out of :func:`claim` so that a test can ``EXPLAIN``
@@ -198,6 +205,23 @@ def claim(conn: psycopg.Connection[Any], queue: Queue) -> Job | None:
     )
 
 
+class LeaseTouch(Enum):
+    """What :func:`touch` found when it tried to extend a lease.
+
+    Three rather than two, because the two ways a touch can miss mean opposite things: one
+    is a duplicate run in progress and the other is this job having simply finished.
+    """
+
+    #: The lease was extended. This worker still holds the job.
+    HELD = "held"
+    #: The row is still ``running`` under a different claim — another worker has it, and
+    #: the stage is running twice. The one outcome worth an ERROR.
+    LOST = "lost"
+    #: The row is no longer ``running`` (or is gone): the job finished, failed, or was
+    #: rescheduled. Nothing to extend and nothing wrong.
+    SETTLED = "settled"
+
+
 def complete(conn: psycopg.Connection[Any], job_id: int) -> None:
     conn.execute(
         "UPDATE jobs SET state = 'done', last_error = NULL, updated_at = now() WHERE id = %s",
@@ -205,22 +229,38 @@ def complete(conn: psycopg.Connection[Any], job_id: int) -> None:
     )
 
 
-def touch(conn: psycopg.Connection[Any], job_id: int, *, attempts: int) -> bool:
-    """Push a running job's lease out. Returns False if this worker no longer holds it.
+def touch(conn: psycopg.Connection[Any], job_id: int, *, attempts: int) -> LeaseTouch:
+    """Push a running job's lease out, and say whether this worker still holds it.
 
     The counterpart to the reclaim arm of :data:`CLAIM_SQL`: that arm asks how long ago
     ``locked_at`` was written, and this rewrites it. A job that keeps saying it is alive is
     therefore never reclaimed for being slow, which is the whole of motet#53.
 
-    **``attempts`` is a fence, and it is free.** ``claim`` increments the counter, so the
-    value this worker was handed is one no other claim of the same row can carry. A worker
-    whose lease *did* expire — because it was wedged past
+    **``attempts`` is a fence, and it is free** — but its uniqueness has a precondition
+    worth stating, because ``claim`` incrementing the counter is not on its own enough.
+    ``defer`` *decrements* it, so ``claim`` → 1, ``defer`` → 0, ``claim`` → 1 is two claims
+    of one row carrying the same value. What makes the fence sound is that a deferred job
+    never starts a keeper: :func:`~motet_workers.loop.drain` defers and continues the loop
+    before ``_run_one``, so no worker is ever alive holding a value a later claim can
+    reproduce, and every claim after the one that actually ran leaves ``attempts`` strictly
+    higher. **A refactor that moved the serialization check inside the job's own execution
+    would break that**, silently, and this is the sentence that says so.
+
+    Given it, a worker whose lease *did* expire — because it was wedged past
     :data:`MAX_LEASE_EXTENSION_SECONDS`, or because it could not reach Postgres for half an
-    hour — therefore finds out, instead of quietly stamping ``locked_at`` on a row another
-    worker is now running and extending the duplicate it was meant to prevent. There is no
-    lease token column and this needs none: a stale worker cannot un-lose the race, but it
-    can know it lost, and a loud log line is the difference between motet#53 and motet#53
-    happening again in silence.
+    hour — finds out, instead of quietly stamping ``locked_at`` on a row another worker is
+    now running and extending the duplicate it was meant to prevent. There is no lease
+    token column and this needs none: a stale worker cannot un-lose the race, but it can
+    know it lost, and saying so is the difference between motet#53 and motet#53 happening
+    again in silence.
+
+    **:attr:`LeaseTouch.SETTLED` is why this returns three answers rather than a bool.** A
+    touch that misses is *usually* not a lost lease at all — it is a touch that was in
+    flight while its own job committed ``complete`` or ``fail``, which is a race with a
+    window the width of one connect and will happen across a fleet. Reporting that as "the
+    stage is running twice" would be a false alarm at ERROR, in GlitchTip, about a job that
+    ran exactly once. So the miss is classified rather than assumed, which costs one
+    ``SELECT`` on a path that is rare by construction.
 
     Deliberately **not** a fence on ``complete`` or ``fail``. Those record work that has
     already happened, and refusing to record it would strand the row rather than protect
@@ -234,7 +274,14 @@ def touch(conn: psycopg.Connection[Any], job_id: int, *, attempts: int) -> bool:
         """,
         (job_id, attempts),
     )
-    return cursor.rowcount == 1
+    if cursor.rowcount == 1:
+        return LeaseTouch.HELD
+
+    row = conn.execute("SELECT state FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    if row is None:
+        return LeaseTouch.SETTLED
+    state = row["state"] if isinstance(row, dict) else row[0]
+    return LeaseTouch.LOST if state == "running" else LeaseTouch.SETTLED
 
 
 def fail(

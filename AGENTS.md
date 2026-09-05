@@ -1015,13 +1015,30 @@ Four things about it are the decision:
   `MAX_LEASE_EXTENSION_SECONDS` the keeper stops, says so at ERROR, and the ordinary stale
   window takes over. **A wedged worker therefore costs one duplicated run — money, and
   visible — rather than a stranded episode, which costs the episode and is unrecoverable by
-  any sanctioned means.**
-- **`attempts` is the fence, and it needs no column.** `claim` increments it, so the value
-  a worker holds is one no other claim of that row carries. A worker whose lease did lapse
-  finds `touch` returning False and says so, instead of stamping `locked_at` onto a row
-  another worker is now running and extending the duplicate it exists to prevent. It is
+  any sanctioned means.** On a queue with a `serialize_key` — `integrate` and `poll` — that
+  is a *visibility* claim rather than a recovery one, and the difference is worth keeping:
+  the wedged worker still holds its advisory lock, so the reclaiming worker finds the key
+  busy and defers, indefinitely and without counting an attempt. That predates the lease
+  keeper and is unchanged by it; what the cap adds is a line naming the job.
+- **`attempts` is the fence, and it needs no column** — with a precondition that has to be
+  said out loud, because `claim` incrementing it is not on its own enough. `defer`
+  *decrements*, so `claim → 1, defer → 0, claim → 1` is two claims of one row carrying the
+  same value. What makes the fence sound is that a deferred job never starts a keeper —
+  `drain` defers and `continue`s before `_run_one` — so no live worker holds a value a
+  later claim can reproduce. **Moving the serialization check inside a job's own execution
+  would break that silently**, which is why `touch`'s docstring says so too. Given it, a
+  worker whose lease did lapse finds out instead of stamping `locked_at` onto a row another
+  worker is now running and extending the duplicate it exists to prevent. It is
   deliberately not applied to `complete` or `fail`: those record work that has already
   happened, and refusing to record it would strand the row rather than protect it.
+- **A missed touch is classified, not assumed.** `LeaseTouch` has three members because the
+  two ways a touch can miss mean opposite things: the row is still `running` under another
+  claim (a duplicate run, and the one outcome worth an ERROR), or it is not `running` at
+  all — this job finished while the touch was in flight, which is a race a fleet meets
+  routinely. Reporting the second as the first would put a false "the stage is running
+  twice" into GlitchTip about a job that ran once. `motet.jobs.lease{queue,outcome}` counts
+  all of them including `held`, because a series that exists only when something is wrong
+  cannot tell "no long jobs" from "the keeper never ran".
 
 **What this does not do is version the audio object.** Both renders wrote the same
 `audio_key` and the second replaced the first, which is the quieter half of motet#53 — but
