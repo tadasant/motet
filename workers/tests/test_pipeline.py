@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import signal
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -28,7 +29,7 @@ from motet_inference import (
 )
 from motet_inference.registry import fake_stages
 from motet_storage import LocalObjectStore
-from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, runner
+from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, loop, runner
 
 MORNING = (
     "Acme raises $20M Series A",
@@ -485,6 +486,178 @@ class CountingGroundingValidator:
     def validate(self, script: Script, sources: Mapping[str, SourceItem]) -> GroundingReport:
         self.calls += 1
         return self._inner.validate(script, sources)
+
+
+class TestASlowJobKeepsItsLease:
+    """motet#53: a job slower than the lease was reclaimed while its worker was alive.
+
+    A script job ran 2580 seconds against a full backlog — longer than
+    `STALE_LEASE_SECONDS`, which was set to be "longer than the slowest stage can
+    legitimately take" against a stage whose size is the user's backlog. A second worker
+    took the row and redid the whole thing: a 22k-token script completion, the entire
+    grounding cascade, and a complete Cartesia synthesis, all billed twice for one episode.
+
+    `TestAFinishedScriptStageIsNotRerun` is the neighbouring guard and does not cover this:
+    there the first run had *finished*, so the episode's state could say so. Here the first
+    worker has committed nothing and the episode is exactly where it should be, so no entry
+    guard can tell the two workers apart. The lease is the only thing that can.
+
+    These drive a handler that is slower than its own lease rather than sleeping for half an
+    hour: the handler backdates its `locked_at` to what forty-odd minutes of work would have
+    left, and then asks — from a second connection, as a second worker would — whether the
+    row can be claimed. An assertion inside a handler would be swallowed by `_execute` and
+    turn into a retry, so what each handler does is *record*, and the test asserts after.
+    """
+
+    def _backdate(self, url: str, seconds: int) -> None:
+        """Age every running job's lease, as a handler slower than the lease would."""
+        with repo.connect(url) as conn:
+            conn.execute(
+                "UPDATE jobs SET locked_at = now() - make_interval(secs => %s) "
+                "WHERE state = 'running'",
+                (seconds,),
+            )
+            conn.commit()
+
+    def _lease_age_seconds(self, conn: psycopg.Connection[Any], job_id: int) -> float:
+        row = conn.execute(
+            "SELECT extract(epoch FROM now() - locked_at) AS age FROM jobs WHERE id = %s",
+            (job_id,),
+        ).fetchone()
+        assert row is not None
+        return float(row["age"])
+
+    def _slow_job(
+        self, db: psycopg.Connection[Any], url: str, body: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Enqueue one job on `integrate` whose handler is `body`, and drain it."""
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_slow"})
+        db.commit()
+
+        def handler(_context: Any, _payload: Mapping[str, Any]) -> None:
+            body()
+
+        monkeypatch.setitem(loop.HANDLERS, Queue.INTEGRATE, handler)
+        assert drain(Queue.INTEGRATE, url) == 1
+
+    def test_a_handler_slower_than_the_lease_is_not_reclaimed(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fix. The keeper is touching, so a second worker finds nothing."""
+        monkeypatch.setattr(jobs, "LEASE_TOUCH_SECONDS", 0.05)
+        seen: dict[str, Any] = {}
+
+        def body() -> None:
+            self._backdate(_migrated, jobs.STALE_LEASE_SECONDS + 60)
+            with repo.connect(_migrated) as other:
+                other.autocommit = True
+                job_id = other.execute("SELECT id FROM jobs").fetchone()["id"]  # type: ignore[index]
+                # Wait for one touch to land, rather than for a wall-clock guess.
+                deadline = time.monotonic() + 10
+                while self._lease_age_seconds(other, job_id) > 60:
+                    assert time.monotonic() < deadline, "the lease was never extended"
+                    time.sleep(0.02)
+                seen["age_after_touch"] = self._lease_age_seconds(other, job_id)
+                seen["reclaimed"] = jobs.claim(other, Queue.INTEGRATE)
+
+        self._slow_job(db, _migrated, body, monkeypatch)
+
+        # Not "claim happened to find the row locked": the lease is demonstrably fresh.
+        assert seen["age_after_touch"] < 60
+        assert seen["reclaimed"] is None
+
+    def test_without_the_lease_touch_a_second_worker_claims_it(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The defect, reproduced: with nothing touching, the same scenario double-claims.
+
+        The touch interval is pushed past the length of the test rather than the code
+        being reverted, so what runs is the pre-fix behaviour — a `running` row that
+        nobody refreshes — through the post-fix code path.
+        """
+        monkeypatch.setattr(jobs, "LEASE_TOUCH_SECONDS", 3600)
+        seen: dict[str, Any] = {}
+
+        def body() -> None:
+            self._backdate(_migrated, jobs.STALE_LEASE_SECONDS + 60)
+            with repo.connect(_migrated) as other:
+                other.autocommit = True
+                seen["reclaimed"] = jobs.claim(other, Queue.INTEGRATE)
+
+        self._slow_job(db, _migrated, body, monkeypatch)
+
+        # Two workers, one job, and the second one is about to run the whole stage again.
+        assert seen["reclaimed"] is not None
+
+    def test_a_wedged_worker_stops_extending_and_its_row_comes_back(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other failure direction, bounded on purpose.
+
+        A heartbeat driven from inside the worker stops when the process does, so a crash
+        is already covered. What is not is a process that is alive and wedged — and a
+        keeper that touched forever would strand its row in `running` with hand-written
+        SQL against production as the only recovery, which invariant 10 forbids. Past
+        `MAX_LEASE_EXTENSION_SECONDS` the keeper gives up and the ordinary stale window
+        takes over.
+        """
+        monkeypatch.setattr(jobs, "LEASE_TOUCH_SECONDS", 0.05)
+        monkeypatch.setattr(jobs, "MAX_LEASE_EXTENSION_SECONDS", 0.2)
+        seen: dict[str, Any] = {}
+
+        def body() -> None:
+            # Long enough that the keeper has passed its cap and stopped.
+            time.sleep(1.0)
+            self._backdate(_migrated, jobs.STALE_LEASE_SECONDS + 60)
+            time.sleep(0.3)
+            with repo.connect(_migrated) as other:
+                other.autocommit = True
+                job_id = other.execute("SELECT id FROM jobs").fetchone()["id"]  # type: ignore[index]
+                seen["age"] = self._lease_age_seconds(other, job_id)
+                seen["reclaimed"] = jobs.claim(other, Queue.INTEGRATE)
+
+        self._slow_job(db, _migrated, body, monkeypatch)
+
+        # Nothing put the lease back, so the row is claimable again.
+        assert seen["age"] > jobs.STALE_LEASE_SECONDS
+        assert seen["reclaimed"] is not None
+
+    def test_a_worker_that_lost_its_lease_finds_out(self, db: psycopg.Connection[Any]) -> None:
+        """`attempts` is the fence, and it costs no column.
+
+        A worker whose lease did lapse must not stamp `locked_at` onto a row another worker
+        is now running: that would extend the duplicate rather than prevent it, silently.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+        first = jobs.claim(db, Queue.INTEGRATE)
+        assert first is not None
+
+        assert jobs.touch(db, first.id, attempts=first.attempts) is True
+
+        db.execute(
+            "UPDATE jobs SET locked_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (jobs.STALE_LEASE_SECONDS + 60, first.id),
+        )
+        second = jobs.claim(db, Queue.INTEGRATE)
+        assert second is not None and second.id == first.id
+
+        assert jobs.touch(db, first.id, attempts=first.attempts) is False
+        assert jobs.touch(db, second.id, attempts=second.attempts) is True
+
+    def test_a_finished_job_is_not_touched_back_to_running(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """A late touch after `complete` must not disturb a settled row."""
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+        job = jobs.claim(db, Queue.INTEGRATE)
+        assert job is not None
+        jobs.complete(db, job.id)
+
+        assert jobs.touch(db, job.id, attempts=job.attempts) is False
+        row = db.execute("SELECT state FROM jobs WHERE id = %s", (job.id,)).fetchone()
+        assert row is not None and row["state"] == "done"
 
 
 class TestAFinishedScriptStageIsNotRerun:
