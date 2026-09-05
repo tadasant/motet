@@ -16,6 +16,7 @@ import json
 
 import httpx
 import pytest
+from motet_inference import adapters
 from motet_inference.accounting import classify_grounding_reason
 from motet_inference.adapters import (
     GROUNDING_BUDGET_REASON,
@@ -440,13 +441,27 @@ class BudgetBoundClient:
 
     It is deliberately *not* a ``FakeLlmClient``: the fake is honest about prompts and
     knows nothing about budgets, and a budget is the whole subject here.
+
+    ``reasoning_flat`` is motet#52's addition: the part of a call's thinking that does not
+    scale with the claim count. It is zero here, which is the motet#42 shape, and non-zero
+    in :class:`StagingShapedClient` — a flat term is what makes halving a chunk take budget
+    away faster than it takes work away, so a model that has one cascades and a model that
+    does not never will.
     """
 
+    reasoning_flat = 0
     reasoning_per_claim = 700
     answer_per_claim = 40
 
     def __init__(self, *, exhaust_on: str | None = None, max_claims_answered: int = 10_000):
         self.calls: list[LlmRequest] = []
+        #: The claim count of every call that ran out of budget — motet#52's wasted calls.
+        self.exhausted: list[int] = []
+        #: Output tokens billed across every call, answered or not.
+        self.spent = 0
+        #: The part of ``spent`` that bought no verdict: a call that hit its ceiling is
+        #: billed for the whole of it and returns nothing. This is motet#52's waste.
+        self.wasted = 0
         self._exhaust_on = exhaust_on
         self._max_claims_answered = max_claims_answered
 
@@ -454,23 +469,76 @@ class BudgetBoundClient:
         self.calls.append(request)
         prompt = request.messages[-1].text
         claims = sum(1 for line in prompt.splitlines() if line.startswith("CLAIM "))
-        spent = (self.reasoning_per_claim + self.answer_per_claim) * claims
+        spent = self.reasoning_flat + (self.reasoning_per_claim + self.answer_per_claim) * claims
         starved = self._exhaust_on is not None and self._exhaust_on in prompt
         if spent > request.max_output_tokens or starved or claims > self._max_claims_answered:
+            self.exhausted.append(claims)
+            self.spent += request.max_output_tokens
+            self.wasted += request.max_output_tokens
             raise LlmBudgetExhaustedError(
                 f"budget exhausted: {claims} claims would spend {spent} of "
                 f"{request.max_output_tokens}"
             )
+        self.spent += spent
         text = json.dumps(
             {"verdicts": [{"index": i, "supported": True, "reason": ""} for i in range(claims)]}
         )
         return LlmResponse(
             text=text,
             model=request.model,
-            usage=Usage(output_tokens=spent, reasoning_tokens=self.reasoning_per_claim * claims),
+            usage=Usage(
+                output_tokens=spent,
+                reasoning_tokens=self.reasoning_flat + self.reasoning_per_claim * claims,
+            ),
             reasoning_applied=True,
             finish_reason="stop",
         )
+
+
+class StagingShapedClient(BudgetBoundClient):
+    """motet#52's staging run, fitted to ``demand(n) = 4000 + 1800n`` output tokens.
+
+    Three anchors came out of that run, and the fit is the only ``F + c*n`` that honours
+    all three at once with room to spare on none of them:
+
+    ====================  ===============  ==================  ==========
+    Observed on staging   Old ceiling      ``demand(n)``       Outcome
+    ====================  ===============  ==================  ==========
+    8 claims, exhausted   14,000           18,400              runs out
+    4 claims, exhausted   10,000           11,200              runs out
+    2 claims, answered    8,000            7,600               answers
+    ====================  ===============  ==================  ==========
+
+    The third row is an inference rather than a quoted log line: the issue's cascade stops
+    at two, and it reports no claim dropped for budget, which the floor of the halving
+    would have produced had a single claim run out. The two exhausting rows are quoted
+    verbatim from the issue, ceilings included.
+
+    That the fit also *reproduces the headline numbers* is the check on it. Five chunks of
+    eight cascading all the way down cost 5 x 7 = 35 calls and 5 x 3 = **15** exhaustions,
+    and burn 5 x (14,000 + 2 x 10,000) = **170,000** discarded output tokens; the issue
+    reports 15 exhaustions and "~180,000 output tokens produced and discarded" out of 58
+    calls, the remaining 23 being chunks the character bound had already made small enough
+    to answer first time.
+    """
+
+    reasoning_flat = 4_000
+    reasoning_per_claim = 1_760
+    answer_per_claim = 40
+
+
+class UnderestimatedClient(BudgetBoundClient):
+    """A model the *corrected* constants are still too small for: ``demand(n) = 4500 + 3000n``.
+
+    Four claims want 16,500 against a 16,000 ceiling, two want 10,500 against 10,500, and
+    one wants 7,500 against 7,750. So the first chunk of an episode runs out and its halves
+    do not — which is the only interesting case, because it is the one where the estimate is
+    wrong and the episode still has to be judged.
+    """
+
+    reasoning_flat = 4_500
+    reasoning_per_claim = 2_960
+    answer_per_claim = 40
 
 
 def a_backlog(news_items: int, claims_each: int = 3) -> tuple[Script, dict[str, SourceItem]]:
@@ -654,6 +722,159 @@ class TestGroundingAtRealisticScale:
         assert [failure.claim_text for failure in report.failures] == [poisoned]
         assert report.failures[0].reason == GROUNDING_BUDGET_REASON
         assert classify_grounding_reason(report.failures[0].reason) == "budget_exhausted"
+
+
+class TestGroundingSplitCascade:
+    """motet#52: the split that is discovered by burning a whole output budget.
+
+    The stage survived a full backlog (motet#46) at a price: fifteen calls on one staging
+    episode spent ``output_tokens == max_output_tokens`` with ``reasoning_tokens`` right
+    behind it and produced no verdict at all, and the work was then redone on two halves
+    that could exhaust in turn. Everything here is measured against
+    :class:`StagingShapedClient`, which is that run reduced to arithmetic.
+    """
+
+    def test_the_two_staging_ceilings_are_reproduced_exactly(self) -> None:
+        """The quoted log lines, executed: 8 claims at 14,000 and 4 at 10,000 both run out.
+
+        This is the calibration check on everything below it. If the fitted demand did not
+        exhaust at these two ceilings it would not be a model of the reported defect.
+        """
+        script, sources = a_backlog(4, claims_each=2)
+        client = StagingShapedClient()
+
+        for claims, ceiling in ((8, 14_000), (4, 10_000)):
+            with pytest.raises(LlmBudgetExhaustedError):
+                client.complete(_a_grounding_call(script, sources, claims, ceiling))
+
+        # And the floor the cascade stopped at, which is why no claim was dropped.
+        answered = client.complete(_a_grounding_call(script, sources, 2, 8_000))
+        assert answered.usage.output_tokens == 7_600
+
+    def test_the_corrected_ceiling_answers_a_chunk_the_old_one_could_not(self) -> None:
+        """Four claims: 10,000 was not enough for them and ``grounding_max_tokens(4)`` is.
+
+        The ceiling moved because the demand is per-claim dominated and the formula was
+        headroom dominated — not because the number was simply raised until it fit. 16,000
+        is the largest ``demand(4)`` consistent with all three staging observations, so
+        nothing inside that region can exhaust a first attempt.
+        """
+        script, sources = a_backlog(4, claims_each=2)
+        client = StagingShapedClient()
+
+        assert grounding_max_tokens(4) == 16_000
+        answered = client.complete(_a_grounding_call(script, sources, 4, grounding_max_tokens(4)))
+        assert answered.usage.output_tokens == 11_200
+        assert client.exhausted == []
+
+    def test_eight_claims_used_to_cost_seven_calls_and_now_cost_two(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One rung of the staging cascade, before and after, through the real validator.
+
+        Eight claims is exactly one chunk under the old constants and exactly two under the
+        new ones, so the whole difference is visible without any narrowing: with eight
+        claims there is never a *later* chunk for the narrowing to help.
+        """
+        script, sources = a_backlog(4, claims_each=2)
+
+        with monkeypatch.context() as old:
+            old.setattr(adapters, "GROUNDING_CLAIMS_PER_CALL", 8)
+            old.setattr(adapters, "GROUNDING_CHARS_PER_CALL", 12_000)
+            old.setattr(adapters, "GROUNDING_TOKENS_PER_CLAIM", 1_000)
+            old.setattr(adapters, "GROUNDING_REASONING_HEADROOM", 6_000)
+            before_client = StagingShapedClient()
+            before = ClaudeGroundingValidator(before_client).validate(script, sources)
+
+        after_client = StagingShapedClient()
+        after = ClaudeGroundingValidator(after_client).validate(script, sources)
+
+        assert before.ok and after.ok, "every claim is judged either way; this is about cost"
+        # 8 -> 4 -> 2, twice over: one call at 14,000 and two at 10,000 bought nothing.
+        assert _claims_per_call(before_client) == [8, 4, 2, 2, 4, 2, 2]
+        assert before_client.exhausted == [8, 4, 4]
+        assert (before_client.spent, before_client.wasted) == (64_400, 34_000)
+
+        assert _claims_per_call(after_client) == [4, 4]
+        assert after_client.exhausted == []
+        assert (after_client.spent, after_client.wasted) == (22_400, 0)
+
+    def test_a_full_backlog_makes_no_call_that_buys_nothing(self) -> None:
+        """The issue's own case: 21 news items, judged without one probe.
+
+        This is the sentence the issue asks for — grounding a full backlog no longer
+        discovers an undersized chunk by spending a whole output budget and receiving
+        nothing back — asserted rather than described.
+        """
+        script, sources = a_backlog(21)
+        client = StagingShapedClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        assert sum(_claims_per_call(client)) == 63
+        assert client.exhausted == []
+        assert client.wasted == 0
+        assert len(client.calls) == 16  # 63 claims, four to a call
+        assert client.spent == 15 * 11_200 + 9_400  # fifteen full calls and one of three
+
+    def test_an_underestimate_is_paid_once_an_episode_rather_than_once_a_chunk(self) -> None:
+        """The backstop, and the reason the corrected constants do not have to be right.
+
+        :class:`UnderestimatedClient` needs more than the new ceiling allows, so the first
+        chunk of the episode still runs out — that is unavoidable, and it is what the
+        halving is for. What must not happen is the next fifteen chunks each paying the
+        same probe, which is the whole of motet#52.
+        """
+        script, sources = a_backlog(21)
+        client = UnderestimatedClient()
+
+        report = ClaudeGroundingValidator(client).validate(script, sources)
+
+        assert report.ok, [failure.reason for failure in report.failures]
+        # 63 claims, and the one call that bought nothing carried four of them twice.
+        assert sum(_claims_per_call(client)) == 63 + 4
+        # One probe, at four claims, for the whole episode. Without the narrowing every one
+        # of the sixteen four-claim chunks would have bought its own.
+        assert client.exhausted == [4]
+        assert _claims_per_call(client)[:3] == [4, 2, 2]
+        assert set(_claims_per_call(client)[3:]) == {1, 2}
+        assert client.wasted == grounding_max_tokens(4)
+
+    def test_narrowing_does_not_survive_the_episode_it_was_learned_in(self) -> None:
+        """Per ``validate`` call, not per adapter: one bad episode must not shrink the next.
+
+        A limit that lived on the adapter would ratchet down over a process's lifetime and
+        never recover, quietly converting a single pathological claim into a permanently
+        more expensive stage.
+        """
+        script, sources = a_backlog(4, claims_each=2)
+        validator = ClaudeGroundingValidator(UnderestimatedClient())
+        validator.validate(script, sources)
+
+        second = StagingShapedClient()
+        ClaudeGroundingValidator(second).validate(script, sources)
+
+        assert _claims_per_call(second) == [4, 4]
+
+
+def _a_grounding_call(
+    script: Script, sources: dict[str, SourceItem], claims: int, ceiling: int
+) -> LlmRequest:
+    """One grounding request carrying ``claims`` real claims under an explicit ceiling."""
+    resolved = [
+        (index, claim.text, sources[claim.span.source_item_id].text)
+        for index, claim in enumerate(
+            claim for segment in script.segments for claim in segment.claims
+        )
+    ][:claims]
+    assert len(resolved) == claims
+    return build_request(
+        LlmStage.GROUNDING,
+        grounding_messages(resolved),
+        max_output_tokens=ceiling,
+        response_format=GROUNDING_SCHEMA,
+    )
 
 
 class TestLocateQuote:
