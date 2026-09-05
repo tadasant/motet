@@ -43,12 +43,26 @@ then set an attribute on the *function object* and patch nothing, silently.
 Squashing these into one transaction is the obvious simplification and it is wrong: a
 handler failure would roll back the attempt counter along with the work, and a poison job
 would then retry forever.
+
+**A fourth thing runs beside all three: the lease keeper** (:func:`_hold_lease`). The
+handler's transaction is open on the connection above for as long as the handler runs, so
+nothing written on it is visible to anyone until it commits — which means the one row that
+has to stay fresh while a job is slow, the job's own ``locked_at``, cannot be written from
+there. The keeper is therefore a thread with a connection of its own, and it lives here
+rather than in ``jobs`` because that module takes connections and never opens one.
+
+Being a thread *in this process* is the design rather than an implementation detail: the
+liveness it reports is the worker's own, so a SIGKILL, an OOM or a task timeout takes the
+heartbeat with the job and the ordinary stale window still recovers the row. See motet#53.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import psycopg
@@ -72,9 +86,17 @@ logger = logging.getLogger("motet.worker")
 _tracer = trace.get_tracer("motet.worker")
 _meter = metrics.get_meter("motet.worker")
 
-#: The worker's two numbers. Everything an operator wants to know about a queue — is it
+#: The worker's numbers. Everything an operator wants to know about a queue — is it
 #: draining, is it failing, is it slow — is one of these split by its attributes, which is
 #: why they are a counter and a histogram rather than a gauge per queue.
+#:
+#: :data:`_lease_events` is the third and it is not decoration. Every outcome the keeper
+#: can reach is currently a log line, and "how often does a worker lose its lease" is
+#: exactly the question motet#53 exists to make answerable in Grafana. ``held`` is counted
+#: as well as the three failures, because a series that only exists when something is
+#: wrong cannot tell "no long jobs" from "the keeper never ran" — the
+#: never-infer-"no errors"-from-"no data" trap in AGENTS.md. Cardinality is a queue times
+#: four outcomes, and the volume is one point per minute per job long enough to need one.
 _jobs_processed = _meter.create_counter(
     "motet.jobs.processed",
     unit="{job}",
@@ -86,9 +108,30 @@ _job_duration = _meter.create_histogram(
     description="Wall-clock time a job's handler took, by queue and outcome.",
 )
 
+_lease_events = _meter.create_counter(
+    "motet.jobs.lease",
+    unit="{event}",
+    description="Lease-keeper outcomes for a running job, by queue and outcome.",
+)
+
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
 #: alive indefinitely. Reaching it is not an error — the next scheduled run continues.
 MAX_JOBS_PER_RUN = 500
+
+#: How long to wait for the lease keeper's thread after a job finishes. Short: it is a
+#: daemon holding at most one connection, and a worker that blocked here would be delayed
+#: by the very bookkeeping meant to keep it running.
+_LEASE_JOIN_SECONDS = 5.0
+
+#: How long the keeper waits for a connection before giving up on this touch.
+#:
+#: libpq's default is the operating system's TCP timeout, which is minutes — long enough
+#: that a keeper stalled on an unreachable Postgres would outlive
+#: :data:`_LEASE_JOIN_SECONDS`, be abandoned, and leave a thread and a socket behind on
+#: *every* job for as long as the stall lasted. The always-on runner drains up to
+#: :data:`MAX_JOBS_PER_RUN` jobs a pass, forever, so nothing would bound the count. Failing
+#: fast is free here: the next touch is a minute away and the lease is thirty wide.
+_LEASE_CONNECT_TIMEOUT_SECONDS = 10
 
 
 def drain(
@@ -159,7 +202,7 @@ def drain(
                 continue
 
             try:
-                _run_one(conn, job, handler, stages, store, recorders)
+                _run_one(conn, database_url, job, handler, stages, store, recorders)
             finally:
                 if job.serialize_key is not None:
                     jobs.unlock(conn, job.serialize_key)
@@ -179,8 +222,112 @@ def drain(
     return processed
 
 
+@contextlib.contextmanager
+def _hold_lease(database_url: str, job: jobs.Job) -> Iterator[None]:
+    """Keep saying this worker is still on ``job``, for as long as its handler runs.
+
+    Without this, a job slower than :data:`~motet_workers.jobs.STALE_LEASE_SECONDS` became
+    claimable while the worker running it was perfectly healthy, and a second worker redid
+    the whole stage — motet#53. The lease reclaim is still the recovery for a worker that
+    *died*; this is what stops it firing on one that has not.
+
+    Three properties, and each is deliberate:
+
+    * **Its own connection**, opened per touch. The caller's is inside the handler's
+      transaction, where an ``UPDATE`` would be invisible until commit — which is the one
+      moment it is no longer needed. Per touch rather than held for the life of the job,
+      because a connection idle for forty minutes is one a proxy is entitled to drop, and
+      reconnecting each minute is the cheaper way to be sure.
+    * **It stops when the process does.** A daemon thread cannot outlive its worker, so the
+      liveness this reports is real and a killed worker's row still goes stale.
+    * **It gives up.** Past :data:`~motet_workers.jobs.MAX_LEASE_EXTENSION_SECONDS` a
+      wedged-but-alive handler stops being covered, and its row falls back to the ordinary
+      stale window. That is the failure this leans *toward*: a duplicated run, which costs
+      money and is visible, rather than a row stranded in ``running`` forever, which costs
+      an episode and is only fixable with SQL that invariant 10 forbids.
+
+    The constants are read here rather than captured as defaults so that a test can move
+    them without reaching inside this function.
+    """
+    interval = jobs.LEASE_TOUCH_SECONDS
+    deadline = time.monotonic() + jobs.MAX_LEASE_EXTENSION_SECONDS
+    attributes = {"motet.queue": job.queue.value}
+    stop = threading.Event()
+
+    def keep() -> None:
+        # `wait` returns True only when the handler has finished, so a job shorter than one
+        # interval — which is nearly all of them — touches nothing and costs one Event.
+        while not stop.wait(interval):
+            if time.monotonic() >= deadline:
+                _lease_events.add(1, {**attributes, "motet.lease.outcome": "cap_reached"})
+                logger.error(
+                    "job %d on %s has held its lease for %ds without finishing; no longer "
+                    "extending it, so another worker may reclaim it",
+                    job.id,
+                    job.queue.value,
+                    jobs.MAX_LEASE_EXTENSION_SECONDS,
+                )
+                return
+            try:
+                with repo.connect(
+                    database_url, connect_timeout=_LEASE_CONNECT_TIMEOUT_SECONDS
+                ) as touch_conn:
+                    touch_conn.autocommit = True
+                    result = jobs.touch(touch_conn, job.id, attempts=job.attempts)
+            except Exception:  # noqa: BLE001 — a keeper that dies quietly is the bug
+                # Not fatal and not the end of the keeper: `STALE_LEASE_SECONDS` is many
+                # intervals wide precisely so a blip does not cost a job. `continue`
+                # rather than `return` is the decision — one unreachable minute must not
+                # hand a healthy job to another worker.
+                _lease_events.add(1, {**attributes, "motet.lease.outcome": "touch_failed"})
+                logger.warning(
+                    "job %d on %s: could not extend the lease, will try again in %ss",
+                    job.id,
+                    job.queue.value,
+                    interval,
+                    exc_info=True,
+                )
+                continue
+
+            _lease_events.add(1, {**attributes, "motet.lease.outcome": result.value})
+            if result is jobs.LeaseTouch.HELD:
+                continue
+            if result is jobs.LeaseTouch.SETTLED or stop.is_set():
+                # The job finished while this touch was in flight. Ordinary, and the whole
+                # reason `touch` classifies a miss rather than assuming the worst.
+                return
+            logger.error(
+                "job %d on %s is no longer ours — another worker has claimed it while "
+                "this one is still running it, so the stage is running twice",
+                job.id,
+                job.queue.value,
+            )
+            return
+
+    thread = threading.Thread(target=keep, name=f"lease-{job.id}", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        # Thread or fd exhaustion. Running the job without a heartbeat is exactly the
+        # behaviour this replaced, and it was survivable; killing the worker outright —
+        # which is what letting this escape a context manager entered before `yield` would
+        # do — is not.
+        _lease_events.add(1, {**attributes, "motet.lease.outcome": "no_keeper"})
+        logger.exception("job %d on %s: could not start a lease keeper", job.id, job.queue.value)
+        yield
+        return
+    try:
+        yield
+    finally:
+        stop.set()
+        # Bounded: the thread may be mid-connect, and a worker must not be held up by its
+        # own bookkeeping. It is a daemon, so anything left cannot outlive the process.
+        thread.join(timeout=_LEASE_JOIN_SECONDS)
+
+
 def _run_one(
     conn: psycopg.Connection[Any],
+    database_url: str,
     job: jobs.Job,
     handler: Any,
     stages: Any,
@@ -196,9 +343,15 @@ def _run_one(
     """
     attributes = {"motet.queue": job.queue.value}
     started = time.perf_counter()
-    with _tracer.start_as_current_span(
-        f"job {job.queue.value}", attributes={**attributes, "motet.job.id": job.id}
-    ) as span:
+    with (
+        _tracer.start_as_current_span(
+            f"job {job.queue.value}", attributes={**attributes, "motet.job.id": job.id}
+        ) as span,
+        # Around `_execute` rather than around the handler, so the lease also covers
+        # recording the outcome: a job whose lease lapsed between finishing and being
+        # marked done is one another worker takes and runs again.
+        _hold_lease(database_url, job),
+    ):
         outcome = _execute(conn, job, handler, stages, store, recorders)
         span.set_attribute("motet.job.outcome", outcome)
         if outcome != "completed":

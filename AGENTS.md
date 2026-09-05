@@ -1029,7 +1029,76 @@ through the full stage, clearing the `last_error` on the way (motet#55); a *slow
 job reclaimed while the first worker is still running it produces two full renders, and
 there both workers read the episode in `scripting` (motet#53). Neither is closed by a
 state check, and neither should be papered over with a wider one — they want a fence on
-the job, or a lease that heartbeats.
+the job, or a lease that heartbeats. The second of those now has the lease, below; #55
+still has neither.
+
+### A lease is a claim about liveness, not a guess at how long the work takes
+
+`motet_workers.jobs.touch`, `motet_workers.loop._hold_lease`. `STALE_LEASE_SECONDS` was
+written to be "longer than the slowest stage can legitimately take" — but the slowest
+stage's size is the *user's backlog*, and no constant is longer than something unbounded.
+A script job ran 2580s against a full one, a second worker took the row while the first was
+still working it, and the whole stage ran twice: a 22k-token script completion, the entire
+grounding cascade, and a complete Cartesia synthesis, billed twice for one episode, with
+the second render silently overwriting the first at the same object key. That is motet#53.
+It only appeared once the always-on worker fleet landed — before that an expired lease was
+picked up by nobody rather than within seconds — so it is an interaction between two
+changes that were each right.
+
+**So the lease now measures silence rather than elapsed time.** A worker touches
+`locked_at` every `LEASE_TOUCH_SECONDS` from a thread of its own while its handler runs, and
+the reclaim arm still asks the same question it always did — it just gets a different
+answer for a worker that is alive. `STALE_LEASE_SECONDS` is unchanged and should not be
+raised to accommodate a slow stage: that is the shape that failed.
+
+Four things about it are the decision:
+
+- **A thread in the worker process, and that is the liveness argument.** The heartbeat can
+  only outlive the job by outliving the process, and it cannot — so a SIGKILL, an OOM, a
+  revision replacement and a task timeout all still leave a row that goes stale on schedule.
+  A separate reaper, or a `locked_until` the handler extends by guessing, would each have
+  reintroduced the guess this removes.
+- **It has its own connection, opened per touch.** The caller's is inside the handler's
+  transaction for the whole of a long job, where an `UPDATE` is invisible until the moment
+  it is no longer needed. Per touch rather than held, because a connection idle for forty
+  minutes is one a proxy may drop.
+- **The extension is bounded, and that is which failure direction this leans toward.** A
+  process that is alive but *wedged* — a handler blocked forever on a socket — would
+  otherwise be heartbeated forever, and its row would sit in `running` with hand-written
+  SQL against production as the only recovery, which invariant 10 forbids outright. Past
+  `MAX_LEASE_EXTENSION_SECONDS` the keeper stops, says so at ERROR, and the ordinary stale
+  window takes over. **A wedged worker therefore costs one duplicated run — money, and
+  visible — rather than a stranded episode, which costs the episode and is unrecoverable by
+  any sanctioned means.** On a queue with a `serialize_key` — `integrate` and `poll` — that
+  is a *visibility* claim rather than a recovery one, and the difference is worth keeping:
+  the wedged worker still holds its advisory lock, so the reclaiming worker finds the key
+  busy and defers, indefinitely and without counting an attempt. That predates the lease
+  keeper and is unchanged by it; what the cap adds is a line naming the job.
+- **`attempts` is the fence, and it needs no column** — with a precondition that has to be
+  said out loud, because `claim` incrementing it is not on its own enough. `defer`
+  *decrements*, so `claim → 1, defer → 0, claim → 1` is two claims of one row carrying the
+  same value. What makes the fence sound is that a deferred job never starts a keeper —
+  `drain` defers and `continue`s before `_run_one` — so no live worker holds a value a
+  later claim can reproduce. **Moving the serialization check inside a job's own execution
+  would break that silently**, which is why `touch`'s docstring says so too. Given it, a
+  worker whose lease did lapse finds out instead of stamping `locked_at` onto a row another
+  worker is now running and extending the duplicate it exists to prevent. It is
+  deliberately not applied to `complete` or `fail`: those record work that has already
+  happened, and refusing to record it would strand the row rather than protect it.
+- **A missed touch is classified, not assumed.** `LeaseTouch` has three members because the
+  two ways a touch can miss mean opposite things: the row is still `running` under another
+  claim (a duplicate run, and the one outcome worth an ERROR), or it is not `running` at
+  all — this job finished while the touch was in flight, which is a race a fleet meets
+  routinely. Reporting the second as the first would put a false "the stage is running
+  twice" into GlitchTip about a job that ran once. `motet.jobs.lease{queue,outcome}` counts
+  all of them including `held`, because a series that exists only when something is wrong
+  cannot tell "no long jobs" from "the keeper never ran".
+
+**What this does not do is version the audio object.** Both renders wrote the same
+`audio_key` and the second replaced the first, which is the quieter half of motet#53 — but
+it is a *symptom* of the double run and stops happening when the double run does. Changing
+how a private enclosure is keyed or signed is a different decision, near the signed-URL
+path, and belongs to a human rather than to the session that fixed the lease.
 
 ### The episode tab reflects server state, not this page's lifetime
 
