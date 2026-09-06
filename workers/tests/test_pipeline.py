@@ -20,6 +20,7 @@ import psycopg
 import pytest
 from motet_db import EpisodeState, SourceItemState, repo
 from motet_inference import (
+    Audio,
     GroundingReport,
     GroundingValidator,
     NewsItem,
@@ -110,6 +111,31 @@ class TestQueue:
         assert state is not None
         assert state["state"] == "failed"
         assert state["last_error"] == "boom"
+
+    def test_a_reclaimed_job_says_whether_its_work_already_landed(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The fence rides on the claim, so the runner never has to ask a second question.
+
+        `attempts` rather than a flag: the claim that ran is not the claim that recovers
+        the row, and a log line that cannot say which one applied the work is not worth
+        reading.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+        first = jobs.claim(db, Queue.INTEGRATE)
+        assert first is not None and first.work_committed_attempt is None
+
+        jobs.mark_work_committed(db, first.id, attempts=first.attempts)
+        db.execute(
+            "UPDATE jobs SET locked_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (jobs.STALE_LEASE_SECONDS + 60, first.id),
+        )
+
+        second = jobs.claim(db, Queue.INTEGRATE)
+        assert second is not None and second.id == first.id
+        assert second.attempts == first.attempts + 1
+        assert second.work_committed_attempt == first.attempts
 
     def test_deferring_does_not_burn_an_attempt(self, db: psycopg.Connection[Any]) -> None:
         """A busy serialization key is not a failure.
@@ -858,6 +884,248 @@ class TestAFinishedScriptStageIsNotRerun:
                 "SELECT id FROM jobs WHERE queue = %s AND state = 'ready'", (Queue.TTS.value,)
             ).fetchall()
         ]
+
+
+class BrokenSynthesizer:
+    """A synthesizer that is always down — a Cartesia outage, from the queue's side."""
+
+    def synthesize(self, text: str) -> Audio:
+        raise RuntimeError("Cartesia is unreachable")
+
+
+class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
+    """motet#55: a stale `script` row must not put a *failed* episode back through the stage.
+
+    The sequence is entirely inside existing behaviour. `_execute` commits the handler's
+    work and the job's outcome in two transactions — the failure arm has no choice, since
+    `jobs.fail` is written on a connection whose work transaction has just aborted — so a
+    worker that dies between them leaves the row `running` with the work durably applied.
+    Meanwhile the TTS job that work enqueued exhausts its retries and `_record_failure`
+    marks the episode `failed`. Half an hour later the lease expires, the `script` row is
+    claimable, and `failed` is a state `handle_script` is *deliberately* allowed to run
+    from — so the whole stage ran again: another billed script completion, another grounding
+    pass at `effort='max'`, a second TTS job, and `last_error` overwritten with NULL, which
+    is the answer to "why did this episode fail" gone.
+
+    `TestAFinishedScriptStageIsNotRerun` (motet#50) is the neighbouring guard and cannot
+    reach this: it reads the *episode*, and a replay and a re-script somebody asked for
+    arrive identically there. `TestASlowJobKeepsItsLease` (motet#53) cannot either — its
+    heartbeat is a thread inside the worker, so it dies with the worker and a genuinely
+    dead one still goes stale on schedule, which is exactly the window here.
+
+    So the fence is on the job row: the handler's own transaction writes
+    `work_committed_attempt`, and a claim that finds it set completes the job without
+    calling a handler. A deliberate re-script is a different row, with the column NULL, and
+    still runs — the second test is that half, because the quiet failure direction (an
+    episode stranded in `failed` with no TTS job and nothing alerting on it) is invisible
+    in both directions and is the reason this was not fixed with a wider state check.
+    """
+
+    def _expire_lease(self, conn: psycopg.Connection[Any], queue: Queue) -> None:
+        """Age the running job's lease, as thirty minutes of a dead worker would."""
+        conn.execute(
+            "UPDATE jobs SET locked_at = now() - make_interval(secs => %s) "
+            "WHERE queue = %s AND state = 'running'",
+            (jobs.STALE_LEASE_SECONDS + 60, queue.value),
+        )
+        conn.commit()
+
+    def _job_row(self, conn: psycopg.Connection[Any], queue: Queue) -> Mapping[str, Any]:
+        row = conn.execute(
+            "SELECT id, state, attempts, work_committed_attempt FROM jobs WHERE queue = %s",
+            (queue.value,),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def _tts_jobs(self, conn: psycopg.Connection[Any]) -> list[int]:
+        return [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM jobs WHERE queue = %s ORDER BY id", (Queue.TTS.value,)
+            ).fetchall()
+        ]
+
+    def _counting_stages(
+        self,
+    ) -> tuple[Stages, CountingScriptGenerator, CountingGroundingValidator]:
+        base = fake_stages()
+        script_generator = CountingScriptGenerator(base.script_generator)
+        grounding_validator = CountingGroundingValidator(base.grounding_validator)
+        return (
+            Stages(
+                integrator=base.integrator,
+                script_generator=script_generator,
+                grounding_validator=grounding_validator,
+                speech_synthesizer=base.speech_synthesizer,
+            ),
+            script_generator,
+            grounding_validator,
+        )
+
+    def _scripted_episode(self, db: psycopg.Connection[Any], url: str, stages: Stages) -> str:
+        paste(db, MORNING)
+        drain(Queue.INTEGRATE, url, stages=stages)
+        episode_id = enqueue_episode(db, user_id=USER, title="E", max_duration_ms=600_000)
+        db.commit()
+        drain(Queue.ASSEMBLE, url, stages=stages)
+        return episode_id
+
+    def _fail_the_tts_job(self, db: psycopg.Connection[Any], url: str, stages: Stages) -> None:
+        """Let the TTS job exhaust its ladder, which is what marks the episode failed."""
+        broken = Stages(
+            integrator=stages.integrator,
+            script_generator=stages.script_generator,
+            grounding_validator=stages.grounding_validator,
+            speech_synthesizer=BrokenSynthesizer(),
+        )
+        for _ in range(jobs.DEFAULT_MAX_ATTEMPTS):
+            # The backoff is real and the point here is the ceiling, not the wait.
+            db.execute(
+                "UPDATE jobs SET run_at = now() WHERE queue = %s AND state = 'ready'",
+                (Queue.TTS.value,),
+            )
+            db.commit()
+            drain(Queue.TTS, url, stages=broken)
+
+    def test_a_stale_script_job_does_not_resurrect_a_failed_episode(
+        self,
+        db: psycopg.Connection[Any],
+        _migrated: str,
+        object_store: LocalObjectStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The whole sequence, played out: die, fail, expire, reclaim."""
+        stages, script_generator, grounding_validator = self._counting_stages()
+        episode_id = self._scripted_episode(db, _migrated, stages)
+
+        # 1. The stage runs, and the worker dies between the two commits. `SystemExit`
+        #    rather than an exception, because `_execute` catches `Exception` and would
+        #    turn one into a retry — what is being reproduced is a process that stopped,
+        #    with its work already committed and nothing left to record the outcome.
+        def die(*_args: Any, **_kwargs: Any) -> None:
+            raise SystemExit("the worker died before it could mark the job done")
+
+        with pytest.MonkeyPatch.context() as killing:
+            killing.setattr(jobs, "complete", die)
+            with pytest.raises(SystemExit):
+                drain(Queue.SCRIPT, _migrated, stages=stages)
+
+        # The work landed — and the fence landed with it, in the same transaction.
+        assert repo.get_episode(db, episode_id).state is EpisodeState.RENDERING
+        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        queued = self._tts_jobs(db)
+        assert len(queued) == 1
+        script_row = self._job_row(db, Queue.SCRIPT)
+        assert script_row["state"] == "running"
+        assert script_row["work_committed_attempt"] == 1
+        segments = [(s.id, s.text) for s in repo.get_episode(db, episode_id).segments]
+
+        # 2. The TTS job downstream exhausts its retries, which is what marks the episode
+        #    failed and puts the reason on it.
+        self._fail_the_tts_job(db, _migrated, stages)
+        failed = repo.get_episode(db, episode_id)
+        assert failed.state is EpisodeState.FAILED
+        assert failed.last_error is not None
+        reason = failed.last_error
+
+        rewrites: list[str] = []
+        replace_segments = repo.replace_segments
+
+        def spy(
+            conn: psycopg.Connection[Any],
+            episode_id_: str,
+            specs: Sequence[repo.SegmentSpec],
+        ) -> None:
+            rewrites.append(episode_id_)
+            replace_segments(conn, episode_id_, specs)
+
+        monkeypatch.setattr(repo, "replace_segments", spy)
+
+        # 3. Thirty minutes pass and the stale row is claimed. It ran — the point is that
+        #    it ran and did nothing, not that the lease held it back.
+        self._expire_lease(db, Queue.SCRIPT)
+        assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
+
+        # Not a second script completion, and not a second grounding pass at `effort='max'`.
+        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        assert rewrites == []
+        # Not a second TTS job for an episode that already has one.
+        assert self._tts_jobs(db) == queued
+
+        # And the quiet half: the episode is still failed, and still says why.
+        episode = repo.get_episode(db, episode_id)
+        assert episode.state is EpisodeState.FAILED
+        assert episode.last_error == reason
+        assert [(s.id, s.text) for s in episode.segments] == segments
+        # The reclaimed row is settled rather than left running for the next sweep.
+        assert self._job_row(db, Queue.SCRIPT)["state"] == "done"
+
+    def test_a_deliberate_re_script_of_a_failed_episode_still_runs(
+        self,
+        db: psycopg.Connection[Any],
+        _migrated: str,
+        object_store: LocalObjectStore,
+    ) -> None:
+        """The other direction, and the one a wider state check would have broken.
+
+        An episode that genuinely needs re-scripting must not be short-circuited into
+        sitting in `failed` forever with no TTS job and nothing alerting on it. That
+        failure is invisible, which is why it is asserted rather than assumed: a *new*
+        `script` job carries no fence, so the stage runs in full.
+        """
+        stages, script_generator, grounding_validator = self._counting_stages()
+        episode_id = self._scripted_episode(db, _migrated, stages)
+        assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
+        self._fail_the_tts_job(db, _migrated, stages)
+        assert repo.get_episode(db, episode_id).state is EpisodeState.FAILED
+
+        db.execute("DELETE FROM jobs WHERE queue = %s", (Queue.TTS.value,))
+        db.commit()
+        jobs.enqueue(db, Queue.SCRIPT, {"episode_id": episode_id})
+        db.commit()
+        assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
+
+        # The stage ran, the episode moved on, and there is a TTS job to move it.
+        assert (script_generator.calls, grounding_validator.calls) == (2, 2)
+        episode = repo.get_episode(db, episode_id)
+        assert episode.state is EpisodeState.RENDERING
+        assert episode.last_error is None
+        assert len(self._tts_jobs(db)) == 1
+
+    def test_a_handler_that_raised_leaves_no_fence_and_the_retry_runs(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fence is written inside the work's transaction, so a rollback takes it too.
+
+        A fence that survived a failed attempt would be the stranding bug in its purest
+        form: the retry the ladder scheduled would arrive, be mistaken for a replay, and
+        mark the job done having done nothing at all.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+
+        calls: list[str] = []
+
+        def handler(_context: Any, payload: Mapping[str, Any]) -> None:
+            calls.append(str(payload["source_item_id"]))
+            if len(calls) == 1:
+                raise RuntimeError("the first attempt fell over")
+
+        monkeypatch.setitem(loop.HANDLERS, Queue.INTEGRATE, handler)
+        assert drain(Queue.INTEGRATE, _migrated) == 1
+
+        row = self._job_row(db, Queue.INTEGRATE)
+        assert row["state"] == "ready"
+        assert row["work_committed_attempt"] is None
+
+        db.execute("UPDATE jobs SET run_at = now() WHERE id = %s", (row["id"],))
+        db.commit()
+        assert drain(Queue.INTEGRATE, _migrated) == 1
+
+        # The retry actually ran, and only then was the job done.
+        assert calls == ["si_x", "si_x"]
+        assert self._job_row(db, Queue.INTEGRATE)["state"] == "done"
 
 
 class TestReadState:

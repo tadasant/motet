@@ -1,0 +1,33 @@
+-- Which attempt's work is durably applied — the fence that tells a stale job from a
+-- deliberate one (motet#55).
+--
+-- `_execute` commits the handler's work and the job's outcome in two transactions, on
+-- purpose: the failure path has to record `jobs.fail` on a connection whose work
+-- transaction has just aborted, and it cannot do that from inside it. The cost is a
+-- window. A worker that dies between the two leaves the row `running` with the work
+-- durably applied, and `STALE_LEASE_SECONDS` later another worker claims it and runs the
+-- whole stage again — the one thing the handlers' idempotence contract promises never
+-- happens twice.
+--
+-- Every handler guards itself against that by reading its own domain state, and for
+-- `script` that guard has a hole it cannot close from where it stands: a stale `script`
+-- row can outlive its own episode's failure — its TTS job downstream exhausts its retries
+-- and marks the episode `failed` — and `failed` is a state the stage is deliberately
+-- allowed to run from, because an episode that genuinely needs re-scripting must not be
+-- short-circuited into having no TTS job and nothing saying so. A state check cannot tell
+-- "somebody asked for this again" from "a row from half an hour ago is being replayed";
+-- both arrive as a `script` job against an episode in a state the stage may run from.
+--
+-- So the fence goes on the job rather than on the domain object, where the question is
+-- answerable: this column is written *inside* the handler's own transaction, so it is
+-- non-NULL exactly when that job's work is committed. A claim that finds it set is a
+-- replay of work that already landed, whatever any episode says — the runner records the
+-- outcome and re-runs nothing. A deliberate re-script is a *new* row with a NULL fence and
+-- is untouched by any of this, which is what keeps the quiet failure direction closed.
+--
+-- The attempt number rather than a boolean or a timestamp: `attempts` is what identifies a
+-- claim (it is incremented by the claim itself, and `touch` already fences the lease on
+-- it), so this says which claim's work is applied and not merely that some claim's was.
+-- That is what a log line needs to be worth reading. No index: it is only ever read
+-- through the row the claim just returned.
+ALTER TABLE jobs ADD COLUMN work_committed_attempt integer;

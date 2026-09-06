@@ -130,7 +130,7 @@ CLAIM_SQL = """
         FOR UPDATE SKIP LOCKED
         LIMIT 1
     )
-    RETURNING id, queue, payload, attempts, serialize_key
+    RETURNING id, queue, payload, attempts, serialize_key, work_committed_attempt
 """
 
 
@@ -141,6 +141,14 @@ class Job:
     payload: Mapping[str, Any]
     attempts: int
     serialize_key: str | None
+    #: Which earlier attempt's work is already committed, or None if none is.
+    #:
+    #: Set by :func:`mark_work_committed` inside the handler's own transaction, so a
+    #: non-NULL value here on a freshly claimed job means exactly one thing: this row's
+    #: work landed and the worker died before it could say so. The runner completes such a
+    #: job rather than running it again — see :func:`mark_work_committed` for why the fence
+    #: lives on the job rather than on the domain object it wrote.
+    work_committed_attempt: int | None
 
 
 def enqueue(
@@ -202,6 +210,7 @@ def claim(conn: psycopg.Connection[Any], queue: Queue) -> Job | None:
         payload=row["payload"],
         attempts=row["attempts"],
         serialize_key=row["serialize_key"],
+        work_committed_attempt=row["work_committed_attempt"],
     )
 
 
@@ -226,6 +235,50 @@ def complete(conn: psycopg.Connection[Any], job_id: int) -> None:
     conn.execute(
         "UPDATE jobs SET state = 'done', last_error = NULL, updated_at = now() WHERE id = %s",
         (job_id,),
+    )
+
+
+def mark_work_committed(conn: psycopg.Connection[Any], job_id: int, *, attempts: int) -> None:
+    """Record that this attempt's work is applied — **from inside the work's transaction**.
+
+    This is the fence of motet#55, and where it is called from is the whole of it. Written
+    in the same transaction as the handler's own writes, it is durable exactly when they
+    are: a row carrying it has done its work, and a row without it has not. Written
+    anywhere else it would be a second opinion about the same fact, which is what the
+    problem already was.
+
+    **The window it closes is the one :func:`complete` cannot.** ``_execute`` commits the
+    handler's work and the job's outcome separately, because the failure path has to record
+    ``jobs.fail`` on a connection whose work transaction has just aborted and cannot do that
+    from inside it. So a worker that dies between the two leaves the row ``running`` with
+    the work durably applied, and :data:`STALE_LEASE_SECONDS` later another worker claims
+    it. That reclaim is the recovery a killed worker depends on and must stay — what must
+    not happen is the stage running a second time, which for ``script`` means another billed
+    completion, another grounding pass at ``effort='max'``, and a ``failed`` episode
+    silently put back into ``rendering`` with the ``last_error`` that said why it failed
+    overwritten (motet#55).
+
+    **Why the fence is on the job and not on the episode.** Every handler already
+    short-circuits its own finished work by reading domain state, and for ``script`` that
+    guard cannot close this: the episode may legitimately be ``failed`` by the time the
+    stale row is claimed, and a re-script somebody *asked for* arrives looking exactly the
+    same. Widening the state check would trade this defect for its quiet twin — an episode
+    stranded in ``failed`` with no TTS job and nothing alerting on it. The job row is where
+    the two are distinguishable, because a deliberate re-script is a *different row*, with
+    this column NULL, and runs.
+
+    **Not a substitute for the handlers' own idempotence.** A concurrent double-run — a
+    worker wedged past :data:`MAX_LEASE_EXTENSION_SECONDS`, whose row is reclaimed while it
+    is still working — has two live claims, and neither can see the other's uncommitted
+    work. This is a fence against *replay*; the lease (motet#53) is what bounds concurrency,
+    and the state guards are what make a converging re-run harmless.
+
+    ``attempts`` rather than a flag, because it says *which* claim's work landed, which is
+    what makes the log line the runner writes worth reading.
+    """
+    conn.execute(
+        "UPDATE jobs SET work_committed_attempt = %s, updated_at = now() WHERE id = %s",
+        (attempts, job_id),
     )
 
 

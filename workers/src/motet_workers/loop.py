@@ -38,11 +38,24 @@ then set an attribute on the *function object* and patch nothing, silently.
 2. *The work itself*, committed as a unit. A handler writes a news item, its link row, and
    the source item's new state together — or writes none of them.
 3. *The outcome*, in its own transaction. Recording "this succeeded" must not be able to
-   fail because the work rolled back, and must not roll back because recording failed.
+   fail because the work rolled back, and must not roll back because recording failed —
+   and the failure arm has no choice at all, because ``jobs.fail`` is written on a
+   connection whose work transaction has just aborted.
 
 Squashing these into one transaction is the obvious simplification and it is wrong: a
 handler failure would roll back the attempt counter along with the work, and a poison job
 would then retry forever.
+
+**The cost of keeping 2 and 3 apart is a window, and the fence is what makes it safe.** A
+worker that dies between them leaves the row ``running`` with the work durably applied, and
+the lease reclaim — the recovery a killed worker depends on — hands it to somebody who
+would run the whole stage again. So the work's transaction now also records *that it
+committed*, in ``jobs.work_committed_attempt``: durable exactly when the work is, and read
+by :func:`_execute` on the next claim, which completes such a row instead of re-running it.
+That is motet#55, and the reason it is a column on the job rather than a wider state check
+in the handler is that the handler cannot tell a replay from a re-script somebody asked
+for — both arrive as a job against an episode in a state the stage may run from — while
+the job row can, because a re-script is a different row.
 
 **A fourth thing runs beside all three: the lease keeper** (:func:`_hold_lease`). The
 handler's transaction is open on the connection above for as long as the handler runs, so
@@ -373,12 +386,47 @@ def _execute(
     """Run one job's handler, then record the outcome in a separate transaction.
 
     Returns how it went, so the caller can put that on a span and a metric without the
-    telemetry having to re-derive it from the job row.
+    telemetry having to re-derive it from the job row. ``already_applied`` is one of those
+    outcomes rather than a silent early return: it is how often a worker died with its work
+    committed and unacknowledged, which is a number nobody could have asked for before.
+
+    The fence is checked here rather than in :func:`~motet_workers.jobs.claim`, because a
+    row whose work already landed still needs *completing* — leaving it in the queue for
+    the claim to keep skipping would strand it in ``running`` forever, which is the failure
+    the lease reclaim exists to prevent.
     """
+    if job.work_committed_attempt is not None:
+        # A replay, and the one thing a handler cannot recognise from where it stands. This
+        # row's work is committed — `mark_work_committed` is written inside the transaction
+        # that wrote it — and the worker that did it died before it could say so, so the
+        # lease expired and this claim is the recovery. Recovering the *row* is right;
+        # re-running the stage is not, and for `script` it is another billed completion, a
+        # second grounding pass at `effort='max'`, and a `failed` episode quietly put back
+        # into `rendering` with the reason it failed overwritten (motet#55).
+        #
+        # At WARNING because it is not routine: it means a worker died mid-job, which is
+        # worth seeing even though nothing was lost. The counter is what makes "how often"
+        # answerable — a log line answers "which one".
+        logger.warning(
+            "job %d on %s was already applied on attempt %d and never marked done; "
+            "completing it without running the stage again",
+            job.id,
+            job.queue.value,
+            job.work_committed_attempt,
+        )
+        with conn.transaction():
+            jobs.complete(conn, job.id)
+        return "already_applied"
+
     context = Context(conn=conn, stages=stages, store=store)
     try:
         with conn.transaction():
             handler(context, job.payload)
+            # Inside the handler's transaction, which is the entire point: this is durable
+            # exactly when the work is. Last, so that it is the final statement before the
+            # commit and holds its row lock — which the lease keeper also wants — for as
+            # little of a stage that may run for forty minutes as possible.
+            jobs.mark_work_committed(conn, job.id, attempts=job.attempts)
     except LlmBudgetExhaustedError as exc:
         # A stage that can subdivide its work has already caught this and sent less
         # (grounding does, motet#42). Reaching here means the stage cannot, and the same

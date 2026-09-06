@@ -1023,14 +1023,14 @@ and short-circuiting it would strand an episode that genuinely needs re-scriptin
 TTS job and nothing alerting on it — the quiet direction of the same bug, and the one a
 green test suite would never show.
 
-**A state check cannot tell a stale job from a deliberate retry, and that is the residue.**
-A stale `script` row can outlive its own episode's failure and replay a `failed` episode
-through the full stage, clearing the `last_error` on the way (motet#55); a *slow* script
-job reclaimed while the first worker is still running it produces two full renders, and
-there both workers read the episode in `scripting` (motet#53). Neither is closed by a
-state check, and neither should be papered over with a wider one — they want a fence on
-the job, or a lease that heartbeats. The second of those now has the lease, below; #55
-still has neither.
+**A state check cannot tell a stale job from a deliberate retry, and that was the
+residue.** A stale `script` row can outlive its own episode's failure and replay a
+`failed` episode through the full stage, clearing the `last_error` on the way (motet#55);
+a *slow* script job reclaimed while the first worker is still running it produces two full
+renders, and there both workers read the episode in `scripting` (motet#53). Neither is
+closed by a state check, and neither should be papered over with a wider one — they want a
+fence on the job, or a lease that heartbeats. Both are below: first the lease, then
+the fence.
 
 ### A lease is a claim about liveness, not a guess at how long the work takes
 
@@ -1099,6 +1099,39 @@ Four things about it are the decision:
 it is a *symptom* of the double run and stops happening when the double run does. Changing
 how a private enclosure is keyed or signed is a different decision, near the signed-URL
 path, and belongs to a human rather than to the session that fixed the lease.
+
+### A job says whether its own work already landed
+
+`jobs.work_committed_attempt`, written by `jobs.mark_work_committed` **from inside the
+handler's own transaction** and read by `_execute` off the row the claim returns. That
+placement is the entire mechanism: the column is durable exactly when the work is, so a
+freshly claimed job carrying it is a replay of work that already committed, and one
+without it is not — no inference from domain state, and no second opinion that can
+disagree with the first.
+
+**The window it closes is the price of the three transaction boundaries, not a bug in
+them.** `_execute` commits the handler's work and the job's outcome separately because the
+failure arm has no choice — `jobs.fail` is written on a connection whose work transaction
+has just aborted — so a worker that dies between them leaves the row `running` with the
+work durably applied. The lease reclaim then hands it to somebody, which is the recovery a
+killed worker depends on and must stay; what must not happen is that somebody running the
+stage again. Now they complete the row and call no handler, and the outcome is
+`already_applied` on `motet.jobs.processed` rather than a silent return, because "how often
+does a worker die with its work committed" is a question nothing could answer before.
+
+**It is on the job because on the episode the two cases are identical.** A replay and a
+re-script somebody asked for both arrive as a `script` job against an episode in a state
+the stage may run from — which is why #50's guard deliberately let `failed` through, and
+why widening it would have traded this defect for its quiet twin, an episode stranded in
+`failed` with no TTS job and nothing alerting on it. On the job row they are not identical
+at all: a deliberate re-script is a *different row*, with the column NULL, and it runs.
+
+**Not a substitute for the handlers' own idempotence, and not a concurrency control.** Two
+live claims of one row — a worker wedged past `MAX_LEASE_EXTENSION_SECONDS` while another
+reclaims it — cannot see each other's uncommitted work, so this says nothing about them.
+The lease above is what bounds concurrency; the state guards are what make a converging
+re-run harmless; this is a fence against *replay*, which is the one of the three that no
+amount of reading the domain object can catch.
 
 ### The episode tab reflects server state, not this page's lifetime
 
