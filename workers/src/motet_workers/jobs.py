@@ -275,6 +275,16 @@ def mark_work_committed(conn: psycopg.Connection[Any], job_id: int, *, attempts:
 
     ``attempts`` rather than a flag, because it says *which* claim's work landed, which is
     what makes the log line the runner writes worth reading.
+
+    **It also sets a lock order, and everything else has to keep to it: a domain row
+    first, then the job row.** This is the only write that takes the job's own row lock
+    from inside a handler's transaction, and it is deliberately the *last* statement — a
+    fence written at the top would hold that lock for the whole of a forty-minute stage
+    and block the lease keeper, which is motet#53 reintroduced. The consequence is that
+    ``_execute``'s failure arm, which touches both rows too, must take them in the same
+    order (it records the domain object, then calls :func:`fail`); the other way round two
+    workers on one row — the concurrent case the lease bounds but does not eliminate —
+    could deadlock, and the loser is whichever of them Postgres picks.
     """
     conn.execute(
         "UPDATE jobs SET work_committed_attempt = %s, updated_at = now() WHERE id = %s",
@@ -337,6 +347,17 @@ def touch(conn: psycopg.Connection[Any], job_id: int, *, attempts: int) -> Lease
     return LeaseTouch.LOST if state == "running" else LeaseTouch.SETTLED
 
 
+def will_retry(job: Job, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> bool:
+    """Whether :func:`fail` would reschedule this job rather than give up on it.
+
+    Exposed so that the runner can decide *before* calling ``fail`` whether the domain
+    object is about to be marked failed, and write it first. That ordering matters — see
+    the lock-order note in :func:`mark_work_committed` — and the predicate is here so that
+    the ceiling has one definition rather than two that can drift apart.
+    """
+    return job.attempts < max_attempts
+
+
 def fail(
     conn: psycopg.Connection[Any],
     job: Job,
@@ -350,7 +371,7 @@ def fail(
     modes, which is why they are separate queues on one table in the first place. A
     Cartesia 429 must not stall dedup, and a dedup retry must not re-synthesize audio.
     """
-    if job.attempts >= max_attempts:
+    if not will_retry(job, max_attempts=max_attempts):
         conn.execute(
             "UPDATE jobs SET state = 'failed', last_error = %s, updated_at = now() WHERE id = %s",
             (error[:2000], job.id),

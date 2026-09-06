@@ -367,7 +367,10 @@ def _run_one(
     ):
         outcome = _execute(conn, job, handler, stages, store, recorders)
         span.set_attribute("motet.job.outcome", outcome)
-        if outcome != "completed":
+        # `already_applied` is a success: the row was recovered and settled, and nothing
+        # about *this* job went wrong. That a worker died is carried by the WARNING and by
+        # the counter's own attribute, where it does not inflate a trace error rate.
+        if outcome not in ("completed", "already_applied"):
             span.set_status(Status(StatusCode.ERROR, outcome))
 
     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -435,8 +438,11 @@ def _execute(
         message = f"{type(exc).__name__}: {exc}"
         logger.exception("job %d on %s ran out of token budget", job.id, job.queue.value)
         with conn.transaction():
-            jobs.fail(conn, job, message, max_attempts=0)
+            # Domain row first, then the job row. Both this and the handler's transaction
+            # touch the two, and taking them in different orders is a deadlock between two
+            # workers on one job — see `jobs.mark_work_committed`.
             _record_failure(conn, job, recorders, message)
+            jobs.fail(conn, job, message, max_attempts=0)
         return "failed_permanently"
     except PermanentFailure as exc:
         # Retrying cannot help, so skip the backoff ladder entirely and surface it now.
@@ -447,17 +453,23 @@ def _execute(
         # will never be retried was also the one that reported nothing.
         logger.exception("job %d on %s failed permanently", job.id, job.queue.value)
         with conn.transaction():
-            jobs.fail(conn, job, message, max_attempts=0)
+            # Domain row first, then the job row. Both this and the handler's transaction
+            # touch the two, and taking them in different orders is a deadlock between two
+            # workers on one job — see `jobs.mark_work_committed`.
             _record_failure(conn, job, recorders, message)
+            jobs.fail(conn, job, message, max_attempts=0)
         return "failed_permanently"
     except Exception as exc:  # noqa: BLE001 — the queue's whole job is to survive these
         message = f"{type(exc).__name__}: {exc}"
         logger.exception("job %d on %s raised", job.id, job.queue.value)
         with conn.transaction():
-            will_retry = jobs.fail(conn, job, message)
-            if not will_retry:
+            # Same order, and the reason the ceiling is asked about before `fail` applies
+            # it rather than being read off its return value.
+            retrying = jobs.will_retry(job)
+            if not retrying:
                 _record_failure(conn, job, recorders, message)
-        return "retrying" if will_retry else "failed"
+            jobs.fail(conn, job, message)
+        return "retrying" if retrying else "failed"
 
     with conn.transaction():
         jobs.complete(conn, job.id)

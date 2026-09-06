@@ -1103,7 +1103,10 @@ path, and belongs to a human rather than to the session that fixed the lease.
 ### A job says whether its own work already landed
 
 `jobs.work_committed_attempt`, written by `jobs.mark_work_committed` **from inside the
-handler's own transaction** and read by `_execute` off the row the claim returns. That
+handler's own transaction** and read by `_execute` off the row the claim returns. Two
+different things are called a fence within one screen of each other and they are not the
+same: the **lease fence** above is `attempts`, and it answers "does this worker still hold
+this job"; the **work fence** here answers "has this job's work already landed". That
 placement is the entire mechanism: the column is durable exactly when the work is, so a
 freshly claimed job carrying it is a replay of work that already committed, and one
 without it is not — no inference from domain state, and no second opinion that can
@@ -1132,6 +1135,17 @@ reclaims it — cannot see each other's uncommitted work, so this says nothing a
 The lease above is what bounds concurrency; the state guards are what make a converging
 re-run harmless; this is a fence against *replay*, which is the one of the three that no
 amount of reading the domain object can catch.
+
+**It sets a lock order, and that is now a rule rather than an accident: a domain row
+first, then the job row.** The work fence is the only write that takes a job's own row
+lock from inside a handler's transaction, and it is the *last* statement in it — a fence
+written at the top would hold that lock for the whole of a forty-minute stage and block
+the lease keeper, which is motet#53 with a new cause. So `_execute`'s failure arm, the
+only other transaction that touches both rows, records the domain object *before* it calls
+`jobs.fail`, and asks `jobs.will_retry` for the ceiling rather than reading it off `fail`'s
+return value. Written the other way round, the two concurrent claims the lease bounds but
+does not eliminate can deadlock on one job, and the transaction Postgres picks is not the
+one you would choose.
 
 ### The episode tab reflects server state, not this page's lifetime
 

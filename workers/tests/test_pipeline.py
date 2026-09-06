@@ -14,6 +14,7 @@ import signal
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import psycopg
@@ -111,6 +112,29 @@ class TestQueue:
         assert state is not None
         assert state["state"] == "failed"
         assert state["last_error"] == "boom"
+
+    def test_the_retry_ceiling_has_one_definition(self, db: psycopg.Connection[Any]) -> None:
+        """`will_retry` is asked before `fail` applies it, so the two must not drift.
+
+        The runner needs the answer *before* the call, because it records the domain object
+        first — a lock order the work fence made load-bearing. Two copies of the ceiling is
+        the obvious way that goes wrong quietly.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+        for _ in range(jobs.DEFAULT_MAX_ATTEMPTS):
+            job = jobs.claim(db, Queue.INTEGRATE)
+            assert job is not None
+            predicted = jobs.will_retry(job)
+            assert jobs.fail(db, job, "boom") is predicted
+            db.execute("UPDATE jobs SET run_at = now() WHERE id = %s", (job.id,))
+
+        assert self._job_row_by_queue(db, Queue.INTEGRATE)["state"] == "failed"
+
+    def _job_row_by_queue(self, conn: psycopg.Connection[Any], queue: Queue) -> Mapping[str, Any]:
+        row = conn.execute("SELECT state FROM jobs WHERE queue = %s", (queue.value,)).fetchone()
+        assert row is not None
+        return dict(row)
 
     def test_a_reclaimed_job_says_whether_its_work_already_landed(
         self, db: psycopg.Connection[Any]
@@ -1060,6 +1084,35 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
         assert [(s.id, s.text) for s in episode.segments] == segments
         # The reclaimed row is settled rather than left running for the next sweep.
         assert self._job_row(db, Queue.SCRIPT)["state"] == "done"
+
+    def test_the_fence_reports_itself_rather_than_returning_silently(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """`already_applied` is an outcome on `motet.jobs.processed`, not an early return.
+
+        "How often does a worker die with its work committed" is a question nothing could
+        answer before, and a refactor that returned `completed` here would pass every other
+        test in this class while deleting it.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"})
+        db.commit()
+        job = jobs.claim(db, Queue.INTEGRATE)
+        assert job is not None
+        jobs.mark_work_committed(db, job.id, attempts=job.attempts)
+        db.commit()
+
+        claimed = replace(job, work_committed_attempt=job.attempts)
+
+        def handler(_context: Any, _payload: Mapping[str, Any]) -> None:
+            raise AssertionError("the stage must not run again")
+
+        db.autocommit = True
+        try:
+            outcome = loop._execute(db, claimed, handler, None, None, {})
+        finally:
+            db.autocommit = False
+        assert outcome == "already_applied"
+        assert self._job_row(db, Queue.INTEGRATE)["state"] == "done"
 
     def test_a_deliberate_re_script_of_a_failed_episode_still_runs(
         self,
