@@ -706,7 +706,27 @@ not have.
 what an operator splits cost by and `LlmRequest` deliberately does not carry one. The
 consequence to remember: a run on the deterministic **stage** fakes calls no model and
 therefore reports no cost, correctly — so a test that asserts cost has to run the real
-adapters over `FakeLlmClient`, which is what `workers/tests/test_accounting.py` does.
+adapters over `FakeLlmClient`, which is what `inference/tests/test_accounting.py` does.
+
+**The voice conversational turn records itself, in `voice/`, and that is the same rule
+rather than an exception to it** (motet#58). The load-bearing half of "recording lives in
+the stage adapters" is *the object that owns the call and names the stage is the object
+that records it* — and for `LlmStage.VOICE` that object is
+`LlmConversationModel.reply()`, which is not a pipeline stage and does not live in
+`inference/`. Moving the leg across the package boundary to make it look like the other
+three would drag voice's own `TurnRequest` and system prompt into `motet-inference` and
+point the dependency arrow backwards. Until it recorded, a real voice session's completions
+were billed and appeared in no metric and no log line, so a Grafana panel split by `stage`
+showed three series where the enum has four — a voice fleet spending money and a voice
+fleet nobody has used looked identical.
+
+**A voice session's "what did that one cost" line is keyed by session id, and the block is
+per turn.** `collect_usage()` is a `ContextVar`, so it holds across the awaits of one turn
+in one task; a session is a socket's lifetime across many tasks and a block around it would
+not reliably see anything. `VoiceSession` therefore opens one per turn, logs that turn's
+total beside the session id, sums the entries onto `VoiceSession.spend`, and reports
+`llm_completions` and `llm_tokens` in the summary logged on close. Same mechanism as an
+episode's, one scope smaller.
 
 **Every usage field is logged even at zero.** A field that vanishes when it is zero is a
 field a log query cannot aggregate, and `cache_read=0` is precisely the observation the

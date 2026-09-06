@@ -25,6 +25,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from motet_inference.accounting import Ledger, collect_usage
+
 from . import obs
 from .audio import DEFAULT_FRAME_MS, TARGET_SAMPLE_RATE, iter_frames
 from .bargein import BargeInDecision, BargeInPolicy, TurnDetector
@@ -101,6 +103,10 @@ class VoiceSession:
     #: Verdicts on this session's replies, in order. Read by :meth:`summary`, and what a
     #: test asserts on without having to reach into the metrics pipeline.
     verdicts: list[GroundingVerdict] = field(default_factory=list)
+    #: What this session's turns spent, accumulated across turns — the voice answer to
+    #: "what did *that one* cost". See :meth:`respond_to_text` for why it is filled a turn
+    #: at a time rather than by one block around the session.
+    spend: Ledger = field(default_factory=Ledger)
     #: Events produced *after* the turn that caused them — today only the advisory
     #: grounding verdict. The socket drains this; see :mod:`motet_voice.app`.
     outbox: asyncio.Queue[SessionEvent] = field(default_factory=asyncio.Queue)
@@ -111,6 +117,10 @@ class VoiceSession:
     #: window, a decision's ``at_ms``, the snippet a reviewer listens to — is an offset into
     #: the session rather than into whichever packet happened to carry the frame.
     _frames_seen: int = field(default=0, init=False)
+    #: Turns handed to the arm in this session, so a cost line can say which one it is.
+    #: Counted rather than derived from :attr:`history`: a turn that produces no assistant
+    #: text appends one entry instead of two, and arithmetic over that would drift.
+    _turns_seen: int = field(default=0, init=False)
 
     @classmethod
     def create(
@@ -224,12 +234,38 @@ class VoiceSession:
             history=list(self.history),
             tools=self.tools.describe(),
         )
-        try:
-            turn = await self.arm.respond(request)
-        except ArmDormant as exc:
-            return [
-                ErrorEvent(at_ms=self.clock.spoken_through_ms, code="arm_dormant", message=str(exc))
-            ]
+        # One block per *turn*, not one per session, and the identifier is what forces that
+        # (motet#58). `collect_usage` is a `ContextVar` ledger: it holds for the duration of
+        # a `with` in one task, and a voice session is a socket's lifetime spanning many
+        # tasks, so a block around the session would not reliably see a turn's completions.
+        # A turn is also the unit a person waits on and the unit a conversational minute
+        # would be priced by. The per-session total is these turns summed — see
+        # :attr:`spend`.
+        #
+        # The block is around the arm and nothing else on purpose: the advisory grounding
+        # check is *scheduled* below and would inherit this context, so a model-backed
+        # checker dropped in later would otherwise record into a ledger that had already
+        # been reported. The mirror of that is worth saying out loud before somebody
+        # "fixes" it: such a checker's spend would then be on `motet.llm.tokens` and in no
+        # session cost line at all. Neither is right — a check is not part of the turn's
+        # price and is not free either, so it wants a scope of its own rather than this
+        # one widened.
+        with collect_usage() as turn_spend:
+            try:
+                turn = await self.arm.respond(request)
+            except ArmDormant as exc:
+                return [
+                    ErrorEvent(
+                        at_ms=self.clock.spoken_through_ms, code="arm_dormant", message=str(exc)
+                    )
+                ]
+            finally:
+                # In a `finally` because a turn that failed *after* its completion arrived
+                # was still billed for it, and dropping that from the session total would
+                # be motet#58's own defect one scope smaller. The metric is already safe —
+                # it is written where the call is made — but this line is the only place
+                # the session id meets the number.
+                self._record_turn_spend(turn_spend)
 
         events: list[SessionEvent] = [
             TranscriptEvent(at_ms=self.clock.spoken_through_ms, speaker="user", text=text)
@@ -303,6 +339,34 @@ class VoiceSession:
                 ),
             )
         return events
+
+    # -- cost, per turn and per session --------------------------------------------------
+
+    def _record_turn_spend(self, turn_spend: Ledger) -> None:
+        """Fold one turn's completions into the session's running total, and log the turn.
+
+        Silent for an arm with no LLM leg — the realtime arm speaks to a provider through
+        its own socket and the fake arm calls no model at all — which is the right answer
+        rather than a gap: a ledger with no entries means nothing went through the LLM seam,
+        and that is exactly what happened. The turn is still counted, so the numbering in
+        the lines that do get logged is the conversation's rather than the bill's.
+
+        The entries are kept rather than only their totals, so ``stage`` survives into the
+        session's own record. Today every one of them is ``LlmStage.VOICE``; a turn that one
+        day reached a second stage would show up here instead of being silently added in.
+        """
+        self._turns_seen += 1
+        if not turn_spend.requests:
+            return
+        self.spend.entries.extend(turn_spend.entries)
+        logger.info(
+            "voice turn cost %d completion(s): session=%s arm=%s turn=%d %s",
+            turn_spend.requests,
+            self.session_id,
+            self.arm.name,
+            self._turns_seen,
+            turn_spend.summary(),
+        )
 
     # -- grounding, advisory ------------------------------------------------------------
 
@@ -394,6 +458,22 @@ class VoiceSession:
             # half; this is what makes one walk's transcript self-describing.
             "replies_checked": len(self.verdicts),
             "replies_ungrounded": sum(1 for verdict in self.verdicts if not verdict.grounded),
+            # The cost half of the same split (motet#58). `motet.llm.tokens{stage="voice"}`
+            # is the fleet-wide number and carries no session id, because a time series per
+            # session is a time series per session forever; this is the line that has the
+            # id in it. Rendered through `Ledger.summary` so a voice session's totals read
+            # in the same field order as an episode's, and every field is present even at
+            # zero for the reason `describe_usage` gives.
+            #
+            # **These two count the LLM *seam*, and a zero here is not a claim that the
+            # session was free.** The realtime arm bills through its own provider socket and
+            # never goes through `motet_inference.llm`, so its spend is not in this number
+            # and is not on `motet.llm.tokens` either — recording it means reading the
+            # `usage` off the provider's `response.done`, which is a separate piece of work.
+            # Do not read `llm_completions: 0` on a realtime session as "nothing was spent";
+            # read it as "nothing went through the seam this measures".
+            "llm_completions": self.spend.requests,
+            "llm_tokens": self.spend.summary(),
         }
 
     async def aclose(self) -> None:

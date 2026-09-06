@@ -33,8 +33,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
+from motet_inference.accounting import record_budget_exhausted, record_usage
 from motet_inference.interfaces import SpeechSynthesizer
-from motet_inference.llm import LlmClient, LlmConfig, LlmStage, Message, build_request
+from motet_inference.llm import (
+    LlmBudgetExhaustedError,
+    LlmClient,
+    LlmConfig,
+    LlmStage,
+    Message,
+    build_request,
+)
 from motet_inference.types import Audio
 
 from ..bargein import BargeInPolicy, TurnDetector, VadTurnDetector
@@ -136,6 +144,23 @@ class LlmConversationModel:
     The config is resolved **once**, when the arm is built, and held. Resolving it per
     turn would put an environment read and a catalogue validation inside the latency
     budget this whole arm exists to measure.
+
+    **What the turn spent is recorded here, and this is the placement decision (motet#58).**
+    AGENTS.md puts recording in the stage adapters rather than in the OpenRouter client
+    because *stage* is what an operator splits cost by and an ``LlmRequest`` deliberately
+    does not carry one. The load-bearing half of that is "the object that owns the call and
+    names the stage is the object that records it" — and for ``LlmStage.VOICE`` that object
+    is this one. Moving the leg into ``inference/`` to make it look like the other three
+    would have to drag :class:`~motet_voice.realtime.interfaces.TurnRequest` and
+    :func:`_system_prompt` — voice's own contract, and a prompt whose containment argument
+    is invariant 3's conversational half — across the package boundary, and would point the
+    dependency arrow the wrong way: ``motet-inference`` knows nothing about ``motet-voice``
+    and must not start.
+
+    Without this, a real voice session's completions were billed by OpenRouter and appeared
+    in no metric and no log line — and a Grafana panel split by ``stage`` showed three
+    series where the enum has four, so a voice fleet spending money and a voice fleet
+    nobody has used looked identical.
     """
 
     client: LlmClient
@@ -156,26 +181,41 @@ class LlmConversationModel:
             if role in ("user", "assistant"):
                 messages.append(Message.of(role, turn.get("text", "")))  # type: ignore[arg-type]
         messages.append(Message.of("user", user_text))
-        response = self.client.complete(
-            build_request(
-                LlmStage.VOICE,
-                messages,
-                max_output_tokens=MAX_REPLY_TOKENS,
-                # The one path where the dropped-reasoning guard costs more than it buys.
-                # It fires *after* a complete, billed answer has arrived, and raising here
-                # would throw that answer away and propagate out of the turn — nothing
-                # between this and :meth:`VoiceSession.respond_to_text` catches it, so the
-                # listener gets silence and an error instead of the sentence that was
-                # already generated. On a batch stage a lost completion is a retry; here it
-                # is the turn. The adapter still logs the warning unconditionally, so the
-                # quality drop is recorded rather than hidden — which is the half that
-                # matters, and the same advisory-not-a-gate shape invariant 3 uses on this
-                # path. Unreachable while voice defaults to ``off``; it stops being
-                # unreachable the moment anyone sets ``MOTET_LLM_EFFORT_VOICE``.
-                require_reasoning_evidence=False,
-                config=self.config,
-            )
+        llm_request = build_request(
+            LlmStage.VOICE,
+            messages,
+            max_output_tokens=MAX_REPLY_TOKENS,
+            # The one path where the dropped-reasoning guard costs more than it buys.
+            # It fires *after* a complete, billed answer has arrived, and raising here
+            # would throw that answer away and propagate out of the turn — nothing
+            # between this and :meth:`VoiceSession.respond_to_text` catches it, so the
+            # listener gets silence and an error instead of the sentence that was
+            # already generated. On a batch stage a lost completion is a retry; here it
+            # is the turn. The adapter still logs the warning unconditionally, so the
+            # quality drop is recorded rather than hidden — which is the half that
+            # matters, and the same advisory-not-a-gate shape invariant 3 uses on this
+            # path. Unreachable while voice defaults to ``off``; it stops being
+            # unreachable the moment anyone sets ``MOTET_LLM_EFFORT_VOICE``.
+            require_reasoning_evidence=False,
+            config=self.config,
         )
+        try:
+            response = self.client.complete(llm_request)
+        except LlmBudgetExhaustedError as exc:
+            # Billed and useless is still billed (motet#58). A voice turn sends no
+            # ``response_format``, so this is the narrow case where reasoning ate the whole
+            # of ``MAX_REPLY_TOKENS`` before the first word — reachable only once somebody
+            # sets ``MOTET_LLM_EFFORT_VOICE``, and the most expensive turn there is. The
+            # error still propagates: the turn genuinely failed, and swallowing it here
+            # would hand :meth:`VoiceSession.respond_to_text` an empty reply to speak.
+            record_budget_exhausted(LlmStage.VOICE, exc)
+            raise
+        # The one text call in the system a person waits on in real time, and until
+        # motet#58 the only one that spent money without leaving a number behind. Recorded
+        # here rather than inside the OpenRouter client for the reason the stage adapters
+        # record where they do: *stage* is what an operator splits cost by, and this is the
+        # object that owns the call and knows which stage it is.
+        record_usage(LlmStage.VOICE, response)
         return response.text
 
 
