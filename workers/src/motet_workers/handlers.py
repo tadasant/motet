@@ -337,13 +337,17 @@ def _rule_for(
 #: short-circuiting it would strand the episode in ``failed`` with no TTS job and nothing
 #: to say so, which is the quiet direction of this same bug.
 #:
-#: ``failed`` is not free of the problem above, and saying it is would be wrong. A
+#: ``failed`` is not free of the problem above, and it is not this guard that closes it. A
 #: *stale* script job can outlive its own episode's failure — its row sits ``running``
-#: while the TTS job downstream exhausts its retries and marks the episode ``failed`` —
-#: so a reclaim can still put a failed episode back through the full stage, re-billing it
-#: and clearing the ``last_error`` that said what went wrong. That path predates this
-#: change and is not closed by it; it is motet#55, because closing it wants a way to tell
-#: a stale job from a deliberate retry rather than a wider state check.
+#: while the TTS job downstream exhausts its retries and marks the episode ``failed`` — so
+#: a reclaim could put a failed episode back through the full stage, re-billing it and
+#: clearing the ``last_error`` that said what went wrong. That is motet#55, and it is
+#: closed one layer down, on the job row: the handler's own transaction records
+#: ``jobs.work_committed_attempt``, and a claim that finds it set completes the job without
+#: calling a handler at all. The fence is there rather than here precisely because *here*
+#: the two are indistinguishable — a replay and a re-script somebody asked for both arrive
+#: as a ``script`` job against a ``failed`` episode, and only the job row knows that one of
+#: them is a different row.
 SCRIPTED_STATES = frozenset({EpisodeState.RENDERING, EpisodeState.READY})
 
 
