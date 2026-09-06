@@ -408,21 +408,30 @@ def test_a_failed_tool_call_is_not_material() -> None:
 # -- the signal an operator actually reads ----------------------------------------------
 
 
-def test_an_ungrounded_reply_increments_the_counter_an_operator_queries() -> None:
+def test_an_ungrounded_reply_increments_the_counter_an_operator_queries(metrics: Any) -> None:
     """The metric is the answer to "how often does Motet say something it cannot source?".
 
     Read back through a real in-memory reader rather than by asserting that a function was
     called: the claim being made is that a point with these attributes leaves the process,
     and a mock would pass for a counter that was never wired to a meter at all.
+
+    ``metrics`` is the session-scoped ``MetricSink`` from ``conftest``, annotated ``Any``
+    because a conftest type is not importable by name. It is shared rather than installed
+    here: OpenTelemetry's provider may be set once per process, so a second installer would
+    read a reader nothing writes to.
     """
-    reader = _install_in_memory_reader()
-    if reader is None:
-        pytest.skip("a MeterProvider is already installed in this process")
+    # Touch the module so its counters exist even if no other test imported it first.
+    assert obs.SERVICE_NAME == "motet-voice"
+    # The reader is cumulative for the whole test session, so the claim is about the
+    # *increment* this turn caused. Asserting an absolute value would make this test a
+    # function of how many replies every other test happened to make first.
+    before = _ungrounded_replies(metrics)
+    kinds_before = _specific_counts(metrics)
 
     session = _session("Sequoia led the 900 million round.")
     asyncio.run(_one_turn(session, "who led it"))
 
-    points = _points(reader, "motet.voice.conversational_replies")
+    points = metrics.points("motet.voice.conversational_replies")
     assert points, "nothing was exported; the counter is not attached to a meter"
     ungrounded = [
         point
@@ -432,46 +441,34 @@ def test_an_ungrounded_reply_increments_the_counter_an_operator_queries() -> Non
     assert ungrounded, "an ungrounded reply must be countable on its own"
     assert ungrounded[0].attributes is not None
     assert ungrounded[0].attributes["arm"] == "composed"
-    assert ungrounded[0].value == 1
+    assert _ungrounded_replies(metrics) == before + 1
 
-    kinds = {
-        point.attributes["kind"]
-        for point in _points(reader, "motet.voice.unsupported_specifics")
-        if point.attributes
-    }
-    assert kinds == {"name", "number"}
+    # Which kinds *went up*, for the same reason the count above is a delta: nothing in
+    # these points' attributes distinguishes this test's from any other voice test's, so an
+    # absolute set would be a claim about everything that happened to run first.
+    after = _specific_counts(metrics)
+    grew = {kind for kind, value in after.items() if value > kinds_before.get(kind, 0)}
+    assert grew == {"name", "number"}
 
 
-def _install_in_memory_reader() -> Any:
-    """A real SDK MeterProvider for this process, or ``None`` if one is already set.
+def _ungrounded_replies(metrics: Any) -> int:
+    return sum(
+        point.value
+        for point in metrics.points("motet.voice.conversational_replies")
+        if point.attributes and point.attributes.get("grounded") == "false"
+    )
 
-    OpenTelemetry's provider is process-global and may be set once. Nothing else in the
-    voice tests sets one — ``motet_obs.configure`` installs nothing without an OTLP
-    endpoint — so in practice this succeeds; the guard is there so that a future test that
-    does install one turns this into a skip rather than a confusing failure.
+
+def _specific_counts(metrics: Any) -> dict[str, int]:
+    """Points summed per kind, across every ``checker``/``arm`` they were split by.
+
+    Summed rather than keyed on ``kind`` alone: one attribute set per series, so a second
+    arm or checker would otherwise mean two points with the same kind and the later one
+    silently replacing the earlier in the dict.
     """
-    from opentelemetry import metrics
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-
-    reader = InMemoryMetricReader()
-    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
-    if metrics.get_meter_provider().__class__ is not MeterProvider:
-        return None
-    # Touch the module so its counters exist even if no other test imported it first.
-    assert obs.SERVICE_NAME == "motet-voice"
-    return reader
-
-
-def _points(reader: Any, metric_name: str) -> list[Any]:
-    collected = reader.get_metrics_data()
-    if collected is None:
-        return []
-    return [
-        point
-        for resource in collected.resource_metrics
-        for scope in resource.scope_metrics
-        for metric in scope.metrics
-        if metric.name == metric_name
-        for point in metric.data.data_points
-    ]
+    counts: dict[str, int] = {}
+    for point in metrics.points("motet.voice.unsupported_specifics"):
+        if point.attributes:
+            kind = point.attributes["kind"]
+            counts[kind] = counts.get(kind, 0) + point.value
+    return counts
