@@ -34,6 +34,8 @@ from motet_inference.llm import (
     LlmRequest,
     LlmResponse,
     LlmStage,
+    LlmTransportError,
+    ReasoningNotAppliedError,
     Usage,
     build_request,
 )
@@ -412,6 +414,78 @@ class TestTheSecondLook:
             ("unrelated", "new"),
             ("same_event", "merged"),
         ]
+
+    def test_a_transport_failure_leaves_the_story_separate(self) -> None:
+        """The third of the three failure modes, so all of them are covered.
+
+        A socket that dies mid-call is the one that will actually happen, and it must land
+        on the same side as the other two: not merged, not raised.
+        """
+
+        class Broken:
+            def __init__(self) -> None:
+                self.calls: list[LlmRequest] = []
+                self._inner = FakeLlmClient(
+                    responses={
+                        "deduplication stage": json.dumps(
+                            {
+                                "closest_news_item_id": "ni_1",
+                                "relation": "related",
+                                "reason": "r",
+                                "title": "t",
+                                "summary": "s",
+                            }
+                        )
+                    }
+                )
+
+            def complete(self, request: LlmRequest) -> LlmResponse:
+                self.calls.append(request)
+                if len(self.calls) == 1:
+                    return self._inner.complete(request)
+                raise LlmTransportError("connection reset")
+
+        client = Broken()
+        result = ClaudeIntegrator(client).integrate(EVENING, [STORY])
+
+        assert not result.merged
+        assert len(client.calls) == 2
+
+    def test_a_stage_fault_is_not_swallowed_as_a_failed_second_look(self) -> None:
+        """The one thing that must *not* answer "no".
+
+        ``ReasoningNotAppliedError`` reports that a stage ran without thinking, and
+        ``LlmConfigError`` reports that it is pointed at a model that cannot do what it
+        asks. Catching either would leave the second look permanently disabled behind a
+        warning line indistinguishable from a network blip — which is exactly the "never
+        switch the reasoning guard off" rule in AGENTS.md, wearing a different hat.
+        """
+
+        class Unthinking:
+            def __init__(self) -> None:
+                self.calls: list[LlmRequest] = []
+                self._inner = FakeLlmClient(
+                    responses={
+                        "deduplication stage": json.dumps(
+                            {
+                                "closest_news_item_id": "ni_1",
+                                "relation": "related",
+                                "reason": "r",
+                                "title": "t",
+                                "summary": "s",
+                            }
+                        )
+                    }
+                )
+
+            def complete(self, request: LlmRequest) -> LlmResponse:
+                self.calls.append(request)
+                if len(self.calls) == 1:
+                    return self._inner.complete(request)
+                raise ReasoningNotAppliedError("no reasoning tokens")
+
+        with pytest.raises(ReasoningNotAppliedError):
+            ClaudeIntegrator(Unthinking()).integrate(EVENING, [STORY])
 
     def test_a_relation_the_schema_forbids_is_asked_again_rather_than_guessed(self) -> None:
         """The one value that decides nothing on its own is the safe place to land.

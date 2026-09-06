@@ -9,7 +9,9 @@ Skips without ``DATABASE_URL`` so a quick local run needs no Postgres; CI always
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import signal
 import threading
 import time
@@ -28,6 +30,7 @@ from motet_inference import (
     SourceItem,
     Stages,
 )
+from motet_inference.llm import FakeLlmClient
 from motet_inference.registry import fake_stages
 from motet_storage import LocalObjectStore
 from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, loop, runner
@@ -1372,11 +1375,6 @@ class _ScriptedModel:
         self.calls: list[str] = []
 
     def complete(self, request: Any) -> Any:
-        import json
-        import re
-
-        from motet_inference.llm import FakeLlmClient
-
         rendered = "\n".join(part.text for m in request.messages for part in m.parts)
         if _SECOND_LOOK in rendered:
             self.calls.append("second_look")

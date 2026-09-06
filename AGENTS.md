@@ -1027,6 +1027,23 @@ the extra spend the accuracy is bought with. Without it, "the band never fires" 
 fires on everything" look identical from outside — which is the never-infer-"no
 errors"-from-"no data" trap, on the stage whose failures are the least visible.
 
+**The band's size is unbounded until a real run measures it, and that is the honest state
+of it.** "Rare by construction" is what the prompt asks for — it tells the model to prefer
+`same_event` or `unrelated` wherever the texts allow a decision — and not something the code
+enforces: there is no cap, no circuit breaker and no cheap pre-filter. A model that hedged on
+most items would roughly double dedup's call count at a higher effort, which is why the
+metric above is a prerequisite of the design rather than decoration, and why
+`MOTET_LLM_EFFORT_DEDUP_CONFIRM` and `MOTET_LLM_MODEL_DEDUP_CONFIRM` exist. Second-look calls
+carry no window, so each one is a fraction of a first-pass call's input.
+
+**The second look may merge into an already-*read* window item, and that is decided rather
+than overlooked.** The rule one section up is that a *model-driven* merge gets that reach —
+it is what the window is for — and a string match does not, because it is not a judgement
+about two texts. This is a judgement about two texts, made on one pair at more depth than the
+pass that produced the uncertain answer, so it sits on the permitted side of exactly that
+line. It is also the only side the seam admits: `NewsItem` carries no `read_at`, and giving
+the inference layer a read-state opinion would put episode policy in the wrong layer.
+
 **What no test in this repo can tell you is whether a real model answers `related` rather
 than `unrelated` on the AP piece.** Invariant 7 keeps vendors out of CI, so what is pinned
 offline is the decision procedure — the real adapter over a scripted `FakeLlmClient`, in

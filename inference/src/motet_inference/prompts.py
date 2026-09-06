@@ -51,10 +51,10 @@ Work in this order.
      framing, length, quoted sources and level of detail may differ completely: two
      outlets writing up one announcement is one story, and so is a wire update that
      re-reports the same event with more detail, more reaction, or a revised figure.
-   - "related" — connected, but you are not sure it is the same event: the same actors or
-     the same running topic, a possible follow-up, a consequence, a reaction piece. Use
-     this whenever you are genuinely unsure which side of the line it falls on. A
-     "related" answer is looked at again, so an honest one costs nothing.
+   - "related" — connected, but you cannot tell from these two texts whether it is the
+     same event: the same actors or the same running topic, a possible follow-up, a
+     consequence, a reaction piece. Prefer "same_event" or "unrelated" whenever the texts
+     let you decide; reach for this only when they genuinely do not.
    - "unrelated" — a different story.
 3. Say why in one short sentence, as "reason".
 4. Write "title" and "summary". For "same_event", write them to reflect what BOTH sources
@@ -374,8 +374,8 @@ class PromptResponseError(ValueError):
     """The model answered with something the schema said it could not.
 
     Raised rather than defaulted, because every field these stages read is load-bearing:
-    a missing ``decision`` is not "probably new", and a missing verdict is not "probably
-    supported".
+    a missing ``relation`` is not "probably unrelated", and a missing verdict is not
+    "probably supported".
     """
 
 

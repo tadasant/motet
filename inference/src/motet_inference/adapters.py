@@ -36,8 +36,8 @@ from .interfaces import IntegrationResult
 from .llm import (
     LlmBudgetExhaustedError,
     LlmClient,
-    LlmError,
     LlmStage,
+    LlmTransportError,
     build_client,
     build_request,
 )
@@ -83,8 +83,15 @@ def _proposed_news_item_id() -> str:
     return f"ni_{secrets.token_hex(6)}"
 
 
-#: Dedup answers with a title, a summary, and a decision. It is the volume stage, so the
-#: ceiling is set to what the answer needs rather than to what the model allows.
+#: Dedup answers with a candidate id, a relation, a one-sentence reason, a title and a
+#: summary. It is the volume stage, so the ceiling is set to what the answer needs rather
+#: than to what the model allows.
+#:
+#: Unchanged by motet#41's second half, and rechecked rather than assumed: the answer grew
+#: by an id, an enum and one sentence — tens of tokens against a ceiling that is already an
+#: order of magnitude above the prose. Worth rechecking at all because a first-pass
+#: ``LlmBudgetExhaustedError`` is not caught: the runner fails such a job permanently, and
+#: the pasted item would never reach the backlog.
 INTEGRATE_MAX_TOKENS = 2_000
 
 #: The second look's ceiling. Its answer is a boolean and a sentence; almost all of this is
@@ -262,6 +269,16 @@ class ClaudeIntegrator:
                 return self._merged(
                     item, candidate, candidate.title, candidate.summary, relation=relation
                 )
+        elif relation == RELATED:
+            # Symmetric with the `same_event` warning above: "related to what?" is a model
+            # error too, and without a line here it is indistinguishable in the metric from
+            # a second look that ran and said no.
+            logger.warning(
+                "dedup called source %s related to unknown news item %r; "
+                "there is nothing to look at again",
+                item.id,
+                candidate_id,
+            )
 
         record_dedup_decision(relation=relation, outcome="new")
         return IntegrationResult(
@@ -306,16 +323,40 @@ class ClaudeIntegrator:
         story where the first pass put it. That is also why this swallows rather than
         raises: the first pass already succeeded, and turning its answer into a retried job
         would re-run the volume call and re-bill it to discover the same thing.
+
+        **What it does not swallow is a fault in the stage itself.** The caught set is
+        ``LlmTransportError`` and the parse errors below — a call that reached a vendor and
+        came back unusable. A ``LlmConfigError`` (this stage pointed at a model that cannot
+        honour the request) and a ``ReasoningNotAppliedError`` (the effort was dropped and
+        the model did not think) are both ``LlmError`` and are both *deliberately* outside
+        it: catching them would turn "the second look is misconfigured" and "the second
+        look ran without thinking" into a permanently disabled feature whose only trace is
+        a warning that reads like a network blip. AGENTS.md says the reasoning guard is
+        reporting a real fault and must not be switched off; this is the shape of switching
+        it off.
+
+        **Merging into an already-*read* window item is in scope here, and that is
+        decided rather than overlooked.** ``repo.news_item_window`` carries recently read
+        stories as well as unread ones, and folding a fresh source item into one the
+        listener has already heard means assembly never speaks it. AGENTS.md permits that
+        for the *model-driven* merge — it is what the window is for — and denies it to
+        ``_merge_target``'s string match, because a string match is not a judgement about
+        two texts. This is a judgement about two texts, made on one pair at more depth than
+        the pass that produced the uncertain answer, so it sits on the permitted side. The
+        adapter also cannot see ``read_at``: ``NewsItem`` does not carry it, and giving the
+        inference seam a read-state opinion would put episode policy in the wrong layer.
         """
+        # Built outside the `try`, deliberately. `build_request` raises `LlmConfigError`
+        # for a stage pointed at a model that cannot honour what it asks for, and that is
+        # a misconfiguration every other stage crashes on rather than degrades through.
+        request = build_request(
+            self.confirm_stage,
+            second_look_messages(item, candidate),
+            max_output_tokens=CONFIRM_MAX_TOKENS,
+            response_format=SECOND_LOOK_SCHEMA,
+        )
         try:
-            response = self._client.complete(
-                build_request(
-                    self.confirm_stage,
-                    second_look_messages(item, candidate),
-                    max_output_tokens=CONFIRM_MAX_TOKENS,
-                    response_format=SECOND_LOOK_SCHEMA,
-                )
-            )
+            response = self._client.complete(request)
         except LlmBudgetExhaustedError as exc:
             record_budget_exhausted(self.confirm_stage, exc)
             logger.warning(
@@ -323,9 +364,9 @@ class ClaudeIntegrator:
                 item.id,
             )
             return False
-        except LlmError:
+        except LlmTransportError:
             logger.warning(
-                "dedup second look for source %s failed; leaving it separate",
+                "dedup second look for source %s failed in transport; leaving it separate",
                 item.id,
                 exc_info=True,
             )
