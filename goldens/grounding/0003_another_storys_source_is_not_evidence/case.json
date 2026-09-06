@@ -1,0 +1,13 @@
+{
+  "why": "The widening stops at the source item. 185 is stated plainly by a second source in the same episode and by nothing in the source this claim cites, so the claim is a fabrication as far as its own citation is concerned — and the second source must not even reach the prompt, because a block a claim did not cite is a block it could be grounded in by accident.",
+  "claims": [
+    {
+      "spoken": "The board certified the count on Thursday after reviewing 185 flagged provisional ballots.",
+      "cited": "The board voted to certify the count on Thursday evening",
+      "source": "01_warren_county",
+      "expected": "unsupported"
+    }
+  ],
+  "evidence_excludes": ["Lakeside", "185"],
+  "source_blocks": 1
+}

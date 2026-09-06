@@ -1,0 +1,12 @@
+{
+  "why": "The half of motet#45 that must not move. Widening the evidence to the source item is only safe if a figure the source never states anywhere is still refused — 402 appears in no paragraph of this newsletter, and the gate has to say so as loudly after the change as before it.",
+  "claims": [
+    {
+      "spoken": "The board certified the count on Thursday after reviewing 402 flagged provisional ballots.",
+      "cited": "The board voted to certify the count on Thursday evening",
+      "expected": "unsupported"
+    }
+  ],
+  "evidence_excludes": ["402"],
+  "source_blocks": 1
+}

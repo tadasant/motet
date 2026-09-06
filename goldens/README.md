@@ -3,13 +3,14 @@
 Newsletters in, expected output out — the regression test for the parts of Motet that have
 no single right answer and that fail *quietly*.
 
-Three corpora, one per stage with that property:
+Four corpora, one per stage with that property:
 
 | Corpus | Directory | What it defends |
 |---|---|---|
 | **Dedup and script** | `fixtures/` | two newsletters about one funding round become one news item, and every claim resolves to a real span |
 | **Gmail extraction** | `gmail/` | a newsletter's prose survives and its machinery does not — preheaders, footers, tracking pixels, encoding lies |
 | **Smart-episode selection** | `episodes/` | which stories a rule picks, and in what order |
+| **Grounding evidence** | `grounding/` | what the gate is shown when it judges a claim, and what it does with it |
 
 Each runs against the fakes and a real Postgres where the stage needs one. No corpus calls
 a vendor.
@@ -67,6 +68,8 @@ of which implementation is behind the seam:
 - the script matches the one the case considers good, where the case declares one
 - the pipeline is deterministic
 - validated copy synthesizes to audio with a duration
+- the grounding gate is shown the source item behind a claim's citation, is shown no other
+  source item, and still refuses a claim the source does not support
 
 ## What the corpus covers
 
@@ -142,6 +145,78 @@ machinery did not.
 | A forward wrapping the newsletter, with a `text/*` attachment | `0004` |
 | Not a newsletter at all — refused rather than ingested | `0005` |
 | "Unsubscribe" in the masthead, where cutting would eat the body | `0006` |
+
+## Adding a grounding case
+
+Make a directory under `grounding/` holding the source items and the claims to put in
+front of the gate:
+
+```
+grounding/0006_short_name/
+├── sources/
+│   └── 01_whatever.md      # a source item, verbatim; its id is the file stem
+└── case.json
+```
+
+```json
+{
+  "why": "One sentence on what this case is defending.",
+  "claims": [
+    {
+      "spoken": "what the briefing would say",
+      "cited": "a span copied verbatim out of the source",
+      "source": "01_whatever",
+      "expected": "supported"
+    }
+  ],
+  "evidence_contains": ["185"],
+  "evidence_excludes": ["Lakeside"],
+  "source_blocks": 1
+}
+```
+
+`source` is optional and defaults to the first file. `cited` is located with the pipeline's
+own `locate_quote`, so a quotation that has drifted from its source fails the case rather
+than becoming a different span — and it must be **one line**, because the harness reads the
+prompt back a line at a time.
+
+The last three fields are optional and are what a case says *beyond* the verdict:
+
+- **`evidence_contains` / `evidence_excludes`** are checked against the `SOURCE` blocks
+  only — never the whole prompt, because a claim's own spoken text contains the very
+  figure a case is asking about. The excludes are the load-bearing half: they are how a
+  case states a **bound** on the evidence, which no verdict can express.
+- **`source_blocks`** pins how many distinct blocks the prompt carried. It is the cost
+  half, and it is the half that fails quietly — sending one newsletter once per claim
+  would change no verdict and would triple the input to the most expensive stage there is.
+
+### How it is judged, and why that is honest
+
+The stand-in model (`NumericJudge` in `grounding_harness.py`) answers exactly one question,
+from exactly what the prompt showed it: *does every number in the spoken text appear in the
+`SOURCE` block this claim names?* That is the first entry in the grounding prompt's own
+list of what is not supported, and it is the failure motet#45's staging false positive was
+misread as. It reads the source out of the prompt and out of nothing the harness knows, so
+a verdict here is a statement about the evidence the validator **assembled**. A claim whose
+block it cannot find is unsupported — fail closed, the same rule the validator follows for
+a claim it got no verdict for.
+
+It judges numbers, not entailment, so this corpus says nothing about whether a real model
+reads a paraphrase correctly. That is the same separate, slower job the other corpora defer.
+
+### What this corpus covers
+
+| Shape | Cases |
+|---|---|
+| Support a paragraph outside the cited span — motet#45's own instance | `0001` |
+| A figure the source states nowhere, still refused | `0002` |
+| A figure another source item states, still refused — the widening stops at one item | `0003` |
+| Support further away than the evidence window, still refused — the bound, pinned | `0004` |
+| Three claims of one story travelling as one source block — the cost property | `0005` |
+
+**The refusing cases are not optional.** A validator that got weaker fails silently, so a
+corpus carrying only `0001` would pass just as well against a gate that had stopped
+checking anything.
 
 ## Adding a smart-episode case
 

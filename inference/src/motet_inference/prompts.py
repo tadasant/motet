@@ -18,7 +18,9 @@ out of that, and both are why invariant 3 is enforceable at all:
 
 The spoken text and the evidence are therefore separate fields: ``text`` is narration and
 may paraphrase, ``quote`` is the verbatim thing it is answerable to. Grounding validation
-judges the first against the second.
+judges the first against the source the second was taken from — see
+:func:`grounding_messages` for why the quote is the *citation* rather than the whole of
+the evidence.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .llm import CacheControl, JsonSchemaFormat, LlmResponse, Message, TextPart
@@ -311,20 +314,33 @@ def script_messages(
 GROUNDING_SYSTEM = """\
 You are the grounding gate of a news briefing pipeline. Nothing you reject is spoken.
 
-You receive numbered claims. Each has SPOKEN text and the EVIDENCE it cites — a verbatim
-span already confirmed to exist in the source. Your only job is to judge whether the
-evidence supports the spoken text.
+You receive numbered SOURCE blocks and numbered claims. A SOURCE block is verbatim text
+from one source item — often the whole of it, and for a long one an excerpt around the
+part being quoted. Each claim names the SOURCE it is drawn from, gives the SPOKEN text the
+briefing would say, and gives the CITED span: the exact words the briefing quotes, which
+always appear verbatim inside that SOURCE block.
 
-Supported means: a careful reader of the evidence alone would agree the spoken sentence is
+Judge each claim against its own SOURCE block, and against nothing else. Support may sit
+anywhere in that block — a figure introduced a sentence or a paragraph away from the CITED
+span is still something the source states, and a claim that uses it is supported. Another
+claim's SOURCE block is not evidence for this one, and neither is anything you happen to
+know about the world.
+
+Supported means: a careful reader of that SOURCE block would agree the spoken sentence is
 true and not misleading. Paraphrase is fine. Compression is fine. Reasonable rewording for
 speech is fine.
 
 NOT supported, and these are the failures that matter:
-- a number, name, date, or quantity in the spoken text that the evidence does not state
-- a causal or comparative claim ("because", "the largest", "the first") the evidence does
-  not make
-- an inference about consequences or intent that the evidence does not state
-- a hedge in the evidence ("reportedly", "expects to") dropped in the spoken text
+- a number, name, date, or quantity in the spoken text that the SOURCE block does not state
+  anywhere
+- a causal or comparative claim ("because", "the largest", "the first") the source does not
+  make
+- an inference about consequences or intent that the source does not state
+- a hedge in the source ("reportedly", "expects to") dropped in the spoken text
+- a CITED span that is about a different matter altogether — the citation is what a reader
+  is shown and what a listener is told the claim rests on, so a claim pointing somewhere
+  unrelated is not properly sourced even when the block supports it elsewhere. Being on the
+  same subject is enough; the span does not have to contain the whole claim.
 
 Be strict. A false positive here is a fabricated fact reaching a listener's ears, which is
 the failure this whole system is built to prevent. When genuinely uncertain, mark it
@@ -355,16 +371,125 @@ GROUNDING_SCHEMA = JsonSchemaFormat(
 )
 
 
-def grounding_messages(claims: Sequence[tuple[int, str, str]]) -> tuple[Message, ...]:
-    """``claims`` is ``(index, spoken_text, evidence_text)``, already span-resolved."""
-    blocks = [
-        f"CLAIM {index}\nSPOKEN: {spoken}\nEVIDENCE: {evidence}"
-        for index, spoken, evidence in claims
-    ]
+@dataclass(frozen=True)
+class GroundingClaim:
+    """One claim as the grounding prompt shows it to the model.
+
+    ``cited`` is the span the briefing quotes — the thing the SPA highlights, the show
+    notes print, and a highlight anchors to. ``context`` is the source's own text around
+    it, and it is what support is judged against.
+
+    **The two used to be one field, and that was motet#45.** Only the resolved span went
+    into the prompt, so a claim whose supporting number sat one sentence outside its quote
+    was indistinguishable, to the gate, from a number the model had invented — and it was
+    dropped as a fabrication. Widening the *quote* to satisfy the checker was the tempting
+    non-fix: the script stage picks the tightest verbatim span it can locate precisely
+    because that is what makes ``locate_quote`` reliable and what makes a citation worth
+    showing. So the citation stays tight and the evidence gets wide.
+    """
+
+    index: int
+    spoken: str
+    cited: str
+    context: str
+
+
+def grounding_messages(claims: Sequence[GroundingClaim]) -> tuple[Message, ...]:
+    """The SOURCE blocks first, then the claims that cite them.
+
+    A block is emitted **once** per distinct context and referenced by number, which is
+    what keeps the widening from multiplying the prompt by the number of claims: the
+    claims of one story cite one source item, and a source item short enough to travel
+    whole gives every one of them a byte-identical block. Numbered locally, like the claim
+    indices and for the same reason — nothing in the prompt is a database id, so nothing
+    can be mis-mapped onto one.
+    """
+    sources: list[str] = []
+    numbers: dict[str, int] = {}
+    blocks: list[str] = []
+    for claim in claims:
+        number = numbers.get(claim.context)
+        if number is None:
+            number = len(sources) + 1
+            numbers[claim.context] = number
+            sources.append(f"SOURCE {number}\n{claim.context}")
+        blocks.append(
+            f"CLAIM {claim.index}\nSPOKEN: {claim.spoken}\nSOURCE: {number}\nCITED: {claim.cited}"
+        )
     return (
         Message.of("system", GROUNDING_SYSTEM, cache=CacheControl()),
-        Message.of("user", "\n\n".join(blocks)),
+        Message.of("user", "\n\n".join([*sources, *blocks])),
     )
+
+
+#: A paragraph break: a newline, optionally blank-ish, then another newline.
+_PARAGRAPH = re.compile(r"\n[ \t]*\n")
+
+
+def excerpt_around(text: str, start: int, end: int, budget: int) -> str:
+    """The source's own words around ``text[start:end]``, at most ``budget`` characters.
+
+    The whole source item when it fits — which is the common case for a pasted item or a
+    newsletter body, and the case worth optimising for, because every claim citing that
+    item then gets a byte-identical block that :func:`grounding_messages` emits once.
+
+    When it does not fit, a window centred on the span and then **snapped inward** to
+    paragraph boundaries: the leading partial paragraph is dropped and the trailing one
+    is cut, so the model reads whole paragraphs rather than sentences beginning mid-word.
+    Inward rather than outward because outward has no bound — one unbroken paragraph the
+    length of an article would take the excerpt back to the whole text, which is the thing
+    the budget exists to prevent. A window that would run off either end is shifted rather
+    than truncated, so a span in the opening line still gets a full budget of context
+    after it.
+
+    A span larger than the budget is returned as itself. The budget bounds the *context*,
+    not the citation: a claim quoting more than the budget already costs what it costs,
+    and returning less than the span would mean judging a claim against part of its own
+    quotation.
+    """
+    if len(text) <= budget:
+        return text
+    if end - start >= budget:
+        return text[start:end]
+
+    room = budget - (end - start)
+    lo = start - room // 2
+    hi = end + (room - room // 2)
+    if lo < 0:
+        hi -= lo
+        lo = 0
+    if hi > len(text):
+        lo = max(0, lo - (hi - len(text)))
+        hi = len(text)
+    return text[_snap_start(text, lo, start) : _snap_end(text, end, hi)]
+
+
+def _snap_start(text: str, lo: int, start: int) -> int:
+    """Move ``lo`` forward past the partial paragraph — failing that, word — it opens on."""
+    if lo <= 0:
+        return 0
+    head = text[lo:start]
+    paragraph = _PARAGRAPH.search(head)
+    if paragraph is not None:
+        return lo + paragraph.end()
+    word = re.search(r"\s", head)
+    return lo + word.end() if word is not None else lo
+
+
+def _snap_end(text: str, end: int, hi: int) -> int:
+    """Move ``hi`` back to the last paragraph break after the span — failing that, a word one.
+
+    The *last* break rather than the first, so every whole paragraph that fits is kept
+    rather than only the one the span sits in.
+    """
+    if hi >= len(text):
+        return len(text)
+    tail = text[end:hi]
+    breaks = list(_PARAGRAPH.finditer(tail))
+    if breaks:
+        return end + breaks[-1].start()
+    spaces = list(re.finditer(r"\s", tail))
+    return end + spaces[-1].start() if spaces else hi
 
 
 # --- parsing -------------------------------------------------------------------------

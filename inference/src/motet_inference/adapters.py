@@ -49,7 +49,9 @@ from .prompts import (
     SCRIPT_SCHEMA,
     SECOND_LOOK_SCHEMA,
     UNRELATED,
+    GroundingClaim,
     PromptResponseError,
+    excerpt_around,
     grounding_messages,
     integrate_messages,
     locate_quote,
@@ -132,6 +134,26 @@ GROUNDING_CLAIMS_PER_CALL = 4
 #: rather than with the count. Halved alongside the claim bound above, so that the
 #: characters a chunk may carry *per claim* are unchanged.
 GROUNDING_CHARS_PER_CALL = 6_000
+
+#: How much of a source item travels with a claim as the evidence support is judged
+#: against — the whole item when it is no longer than this, and a window around the cited
+#: span when it is.
+#:
+#: **This is the whole of motet#45.** The gate used to see the resolved span and nothing
+#: else, so a claim whose supporting figure sat one sentence outside its quotation was
+#: indistinguishable from an invented figure and was dropped as one — a staging episode
+#: refused a claim about 185 voter IDs with ``185`` sitting a paragraph away in the same
+#: source item. The citation is deliberately the tightest verbatim span the script stage
+#: can locate; the evidence has no reason to be.
+#:
+#: 2,500 characters is roughly 600 tokens: several paragraphs either side of a
+#: sentence-sized span, which is where "a paragraph away" lives, and small enough that two
+#: whole blocks plus the claims citing them still fit inside ``GROUNDING_CHARS_PER_CALL``.
+#: That bound is unchanged, and deliberately so — it is the proxy for how much text one
+#: call has to chew through, and the per-claim token constants above were fitted against
+#: it. Widening the evidence therefore costs *calls*, which is visible and bounded, rather
+#: than costing headroom inside a call, which is what exhausts a budget.
+GROUNDING_CONTEXT_CHARS = 2_500
 
 #: Per claim: one verdict — an index, a boolean and one short sentence — plus the thinking
 #: that produces it.
@@ -503,11 +525,18 @@ class ClaudeScriptGenerator:
 
 @dataclass(frozen=True)
 class _Judgeable:
-    """One claim that survived the mechanical check, with the evidence it cites."""
+    """One claim that survived the mechanical check, with the evidence it is judged on.
+
+    ``evidence`` is the resolved span — the citation. ``context`` is the source text it
+    was taken from, bounded by :data:`GROUNDING_CONTEXT_CHARS`, and is what the model
+    weighs support against. Both are sent: the first is what the briefing quotes and the
+    second is what the source says.
+    """
 
     news_item_id: str
     claim_text: str
     evidence: str
+    context: str
 
 
 @dataclass(frozen=True)
@@ -542,13 +571,24 @@ def _next_chunk(items: Sequence[_Judgeable], start: int, limit: int) -> int:
     through an episode — see :meth:`ClaudeGroundingValidator.validate`. A claim whose
     evidence is on its own larger than the whole character budget still goes, alone: the
     bound is a bound on chunks, not a promise about any single claim.
+
+    A context shared with a claim already in the chunk is **counted once**, because
+    :func:`~motet_inference.prompts.grounding_messages` sends it once. Counting it per
+    claim would shrink every chunk of a multi-claim story for text the call does not
+    carry — the cost this bound exists to measure is what the model reads, not what the
+    caller assembled.
     """
     end = start
     size = 0
+    counted: set[str] = set()
     while end < len(items):
-        cost = len(items[end].claim_text) + len(items[end].evidence)
+        item = items[end]
+        cost = len(item.claim_text) + len(item.evidence)
+        if item.context not in counted:
+            cost += len(item.context)
         if end > start and (end - start >= limit or size + cost > GROUNDING_CHARS_PER_CALL):
             break
+        counted.add(item.context)
         size += cost
         end += 1
     return end
@@ -564,6 +604,16 @@ class ClaudeGroundingValidator:
     all — which needs no model and catches a corrupted or stale span. Then a model call
     per **chunk** of surviving claims, asking whether the evidence actually supports what
     would be said.
+
+    **The claim cites a span and is judged against its source item: motet#45.** Only the
+    resolved span used to reach the model, so support one sentence outside the quotation
+    was indistinguishable from a fabrication and was dropped as one. The span is still the
+    citation — still verbatim, still resolved before anything else happens, still what the
+    SPA highlights — and it is still sent, as ``CITED``; what widened is the *evidence*
+    beside it, to :data:`GROUNDING_CONTEXT_CHARS` of the source item the span came from.
+    The gate did not get looser in the direction that matters: a claim is judged against
+    **one** source item, never the episode's other sources and never the model's own
+    knowledge, and a citation pointing at an unrelated part of that item is still refused.
 
     **Chunked rather than batched, and that is motet#42.** Batching every claim into one
     call was deliberate once — verdicts are independent, so isolating them buys nothing,
@@ -609,9 +659,10 @@ class ClaudeGroundingValidator:
         failures: list[GroundingFailure] = []
         judgeable: list[_Judgeable] = []
 
+        by_id = dict(sources)
         for segment in script.segments:
             for claim in segment.claims:
-                resolved = claim.span.resolve(dict(sources))
+                resolved = claim.span.resolve(by_id)
                 if resolved is None:
                     failures.append(
                         GroundingFailure(
@@ -621,11 +672,16 @@ class ClaudeGroundingValidator:
                         )
                     )
                     continue
+                # A resolved span means the source item is present, so this cannot fail.
+                item = by_id[claim.span.source_item_id]
                 judgeable.append(
                     _Judgeable(
                         news_item_id=segment.news_item_id,
                         claim_text=claim.text,
                         evidence=resolved,
+                        context=excerpt_around(
+                            item.text, claim.span.start, claim.span.end, GROUNDING_CONTEXT_CHARS
+                        ),
                     )
                 )
 
@@ -737,7 +793,15 @@ class ClaudeGroundingValidator:
             build_request(
                 self.stage,
                 grounding_messages(
-                    [(index, item.claim_text, item.evidence) for index, item in enumerate(chunk)]
+                    [
+                        GroundingClaim(
+                            index=index,
+                            spoken=item.claim_text,
+                            cited=item.evidence,
+                            context=item.context,
+                        )
+                        for index, item in enumerate(chunk)
+                    ]
                 ),
                 max_output_tokens=grounding_max_tokens(len(chunk)),
                 response_format=GROUNDING_SCHEMA,
