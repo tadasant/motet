@@ -5,6 +5,9 @@ callers have genuinely different cost and correctness profiles:
 
 * **dedup/integrate** runs once per source item against the whole window of news items.
   It is the volume line and the reason prompt caching matters at all.
+* **dedup/confirm** is the second look at a *single* pair, made only when the first pass
+  answered ``related`` — the uncertain band motet#41 fell into. It is rare by
+  construction, so it can afford the thinking the volume line cannot.
 * **script** is a handful of calls per episode, and quality is user-visible prose.
 * **grounding** decides whether a claim is allowed to be spoken. Invariant 3 lives here,
   so it gets the most thinking and, when it matters, the strongest model.
@@ -75,6 +78,7 @@ class LlmStage(StrEnum):
     """
 
     DEDUP = "dedup"
+    DEDUP_CONFIRM = "dedup_confirm"
     SCRIPT = "script"
     GROUNDING = "grounding"
     VOICE = "voice"
@@ -209,6 +213,11 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
 #: pavement waiting for it, so a second of thinking is a second of silence.
 DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort | None]] = {
     LlmStage.DEDUP: "low",
+    # Deeper than the pass it second-guesses, and that asymmetry is the whole cost
+    # argument: the volume line stays cheap, and depth is spent only on the pairs the
+    # volume line said it was unsure about. motet#41 is a story that was compared against
+    # a whole backlog, at `low`, while also being asked to write a headline and a summary.
+    LlmStage.DEDUP_CONFIRM: "medium",
     LlmStage.SCRIPT: "high",
     LlmStage.GROUNDING: "max",
     LlmStage.VOICE: None,

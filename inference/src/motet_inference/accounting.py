@@ -48,6 +48,7 @@ __all__ = [
     "collect_usage",
     "describe_usage",
     "record_budget_exhausted",
+    "record_dedup_decision",
     "record_grounding",
     "record_script_drop",
     "record_tts_characters",
@@ -83,6 +84,17 @@ _budget_exhausted = _meter.create_counter(
         "Completions that hit max_output_tokens before finishing an answer, by stage and "
         "model. On grounding this is also the chunk-amplification signal: each one is a "
         "chunk that will be split and re-sent, so it rises before any claim is dropped."
+    ),
+)
+_dedup_decisions = _meter.create_counter(
+    "motet.dedup.decisions",
+    unit="{decision}",
+    description=(
+        "Dedup decisions, by the relation the first pass reported and what the stage "
+        "finally did with it. This is the instrument motet#41 was missing: a false merge "
+        "and a false split both look like a working pipeline from outside, and without a "
+        "count of the `related` band nobody can tell whether the second look is firing "
+        "often, never, or on everything."
     ),
 )
 _characters = _meter.create_counter(
@@ -255,6 +267,24 @@ def record_script_drop(reason: str) -> None:
     ``reason`` is one of a small fixed set chosen at the call site, never model text.
     """
     _script_drops.add(1, {"reason": reason})
+
+
+def record_dedup_decision(*, relation: str, outcome: str) -> None:
+    """One dedup answer, by what the first pass said and what the stage did about it.
+
+    Both labels are drawn from small fixed sets chosen at the call site — the three
+    ``relation`` values the schema allows, and ``merged``/``new`` — so this stays a handful
+    of series rather than one per story. The model's free-text ``reason`` never comes near
+    a label; it goes in the log line beside it, which is where an unbounded sentence
+    belongs.
+
+    **The pair is the point, not either half.** ``related`` split by outcome is the only
+    view that says whether the second look is doing anything: all ``new`` means it is
+    agreeing with the first pass every time and is pure cost, all ``merged`` means the
+    first pass has stopped committing to ``same_event`` at all, and the ``related`` rate
+    itself is the extra spend this design buys the accuracy with.
+    """
+    _dedup_decisions.add(1, {"relation": relation, "outcome": outcome})
 
 
 def record_grounding(*, kept: int, dropped: int, reasons: Sequence[str]) -> None:

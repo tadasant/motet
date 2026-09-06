@@ -1,4 +1,4 @@
-"""What the three text stages actually say to a model, and how they read the answer back.
+"""What the text stages actually say to a model, and how they read the answer back.
 
 Kept apart from ``adapters.py`` so that the adapters stay readable as *wiring* — build a
 request, send it, parse it, return a value type — and so that a prompt can be diffed
@@ -37,19 +37,43 @@ INTEGRATE_SYSTEM = """\
 You are the deduplication stage of a personal news briefing pipeline.
 
 You receive a WINDOW of news items the reader already has, and ONE new source item just
-ingested. Decide whether the new source item is *the same story* as one of the existing
-news items, or a new story.
+ingested. Every unread news item is narrated in the reader's next briefing, so two news
+items covering one event means the same story is read aloud twice, back to back, under two
+headlines that mean the same thing. That is the failure you exist to prevent.
 
-Same story means the same underlying event or announcement, even when the wording,
-framing, and detail differ — two newsletters covering one funding round are one story.
-Different stories about the same company are NOT the same story. A follow-up that reports
-genuinely new developments is NOT the same story as the original announcement.
+Work in this order.
 
-Return:
-- decision "merge" with the id of the existing news item, when it is the same story. Give
-  an updated title and summary that reflect what BOTH sources now say.
-- decision "new" with news_item_id null, when it is a new story. Give a title and summary
-  for it.
+1. Find the ONE news item in the window whose underlying event is closest to the new
+   source item's, and give its id as "closest_news_item_id". Give null only when the
+   window is empty or nothing in it is even loosely connected.
+2. Say how that item relates to the new source item, as "relation":
+   - "same_event" — they report the SAME underlying event or announcement. Wording,
+     framing, length, quoted sources and level of detail may differ completely: two
+     outlets writing up one announcement is one story, and so is a wire update that
+     re-reports the same event with more detail, more reaction, or a revised figure.
+   - "related" — connected, but you are not sure it is the same event: the same actors or
+     the same running topic, a possible follow-up, a consequence, a reaction piece. Use
+     this whenever you are genuinely unsure which side of the line it falls on. A
+     "related" answer is looked at again, so an honest one costs nothing.
+   - "unrelated" — a different story.
+3. Say why in one short sentence, as "reason".
+4. Write "title" and "summary". For "same_event", write them to reflect what BOTH sources
+   now say. Otherwise write them for the new source item alone.
+
+Three rules decide the hard cases.
+
+- Additional detail is not a new story. More quotes, more reaction, more context, an
+  updated figure, a different outlet's angle, or a later filing of the same wire story are
+  all the SAME event as the first write-up of it.
+- A genuinely distinct SUBSEQUENT event is a new story: a court blocking a policy days
+  after it was announced, a counter-move by another party, a second funding round. The
+  test is whether a listener would hear two different things happening — not whether the
+  new article contains sentences the earlier one did not.
+- Different stories about the same company, country or topic are NOT the same event.
+
+And one consistency check on your own answer: if the headline you are about to write is
+interchangeable with an existing item's headline, the relation is "same_event". It is
+never "unrelated".
 
 Titles are a short headline, under 100 characters, no trailing punctuation. Summaries are
 one or two sentences describing what happened. Both are read by a human skimming a
@@ -58,18 +82,74 @@ and factual. Never invent detail that is not in the sources."""
 
 INTEGRATE_SCHEMA = JsonSchemaFormat(
     name="integration_decision",
+    # The comparison fields come before the copy, deliberately: a model writing a headline
+    # first has already committed to a framing before it judges whether the story is
+    # already in the backlog. Property order is a nudge rather than a guarantee — no
+    # provider promises to generate in schema order — but it costs nothing and the
+    # instructions above ask for the same order in words, which does bind.
     schema={
         "type": "object",
         "additionalProperties": False,
-        "required": ["decision", "news_item_id", "title", "summary"],
+        "required": ["closest_news_item_id", "relation", "reason", "title", "summary"],
         "properties": {
-            "decision": {"type": "string", "enum": ["merge", "new"]},
-            "news_item_id": {
+            "closest_news_item_id": {
                 "type": ["string", "null"],
-                "description": "Id of the existing news item, when decision is 'merge'.",
+                "description": (
+                    "Id of the window news item whose underlying event is closest to the "
+                    "new source item, or null when nothing in the window is connected."
+                ),
+            },
+            "relation": {
+                "type": "string",
+                "enum": ["same_event", "related", "unrelated"],
+            },
+            "reason": {
+                "type": "string",
+                "description": "One short sentence saying why, in either direction.",
             },
             "title": {"type": "string"},
             "summary": {"type": "string"},
+        },
+    },
+)
+
+#: The three answers :data:`INTEGRATE_SCHEMA` allows, in decreasing order of confidence
+#: that the story is already in the backlog. ``related`` is the band motet#41 sat in.
+SAME_EVENT = "same_event"
+RELATED = "related"
+UNRELATED = "unrelated"
+
+SECOND_LOOK_SYSTEM = """\
+You are the second look of a news briefing's deduplication stage.
+
+An earlier pass compared one new source item against the reader's whole backlog and said
+it is *related* to one existing story without being sure it is the same one. You are being
+shown only that pair, and you have exactly one question to answer.
+
+Do the new source item and the existing story report the SAME underlying event?
+
+Yes, "same_event": true, when they are two accounts of one announcement, decision, filing,
+incident or result — however differently written, however much more detail one carries,
+whichever outlet filed later. More reaction, more quotes, more context or a revised figure
+about the same event is still the same event.
+
+No, "same_event": false, when the new source item reports a genuinely distinct subsequent
+event — a response, a reversal, a court ruling, a second round — or a different story that
+merely shares actors or a topic.
+
+The listener hears every unread story read aloud. Answering "true" merges two accounts of
+one event into one story; answering "false" for two accounts of one event has that story
+narrated twice under two headlines. Give one short sentence of reasoning."""
+
+SECOND_LOOK_SCHEMA = JsonSchemaFormat(
+    name="same_event_decision",
+    schema={
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["same_event", "reason"],
+        "properties": {
+            "same_event": {"type": "boolean"},
+            "reason": {"type": "string"},
         },
     },
 )
@@ -112,6 +192,31 @@ def integrate_messages(item: SourceItem, window: Sequence[NewsItem]) -> tuple[Me
                 TextPart(text=render_source_item(item)),
             ),
         ),
+    )
+
+
+def second_look_messages(item: SourceItem, candidate: NewsItem) -> tuple[Message, ...]:
+    """The focused pairwise re-ask for a ``related`` answer — motet#41's second half.
+
+    One pair, one question, no window to scan and no copy to write. That is the whole
+    difference from :func:`integrate_messages`, and it is the point: the first pass judges
+    the new item against the entire backlog *and* writes a headline and a summary, at the
+    shallowest thinking depth in the system because it is the volume line. This call does
+    one thing, at ``LlmStage.DEDUP_CONFIRM``'s depth.
+
+    **No cache breakpoint**, deliberately. The only stable prefix here is the instructions,
+    which are a few hundred tokens — well under any provider's minimum cacheable prefix —
+    and everything after them is a pair that changes on every call. A breakpoint would buy
+    nothing and would still cost the write. Caching is the first pass's argument, where the
+    window really is large and stable across an ingestion run.
+    """
+    existing = (
+        f"EXISTING STORY:\nid: {candidate.id}\n"
+        f"title: {candidate.title}\nsummary: {candidate.summary}"
+    )
+    return (
+        Message.of("system", SECOND_LOOK_SYSTEM),
+        Message.of("user", f"{existing}\n\n{render_source_item(item)}"),
     )
 
 
@@ -290,6 +395,18 @@ def require_str(obj: Mapping[str, Any], key: str, *, what: str) -> str:
     value = obj.get(key)
     if not isinstance(value, str):
         raise PromptResponseError(f"{what}: {key!r} must be a string, got {value!r}")
+    return value
+
+
+def require_bool(obj: Mapping[str, Any], key: str, *, what: str) -> bool:
+    """The boolean twin of :func:`require_str`, for an answer that is only a judgement.
+
+    ``isinstance`` rather than truthiness: a model that answered ``"false"`` as a string
+    is saying something this must not read as ``True``.
+    """
+    value = obj.get(key)
+    if not isinstance(value, bool):
+        raise PromptResponseError(f"{what}: {key!r} must be a boolean, got {value!r}")
     return value
 
 

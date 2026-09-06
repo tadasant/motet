@@ -443,6 +443,31 @@ def test_the_startup_summary_carries_no_secret() -> None:
     assert DEFAULT_MODEL in summary
 
 
+def test_the_second_look_thinks_harder_than_the_pass_it_second_guesses() -> None:
+    """motet#41: depth is spent on the uncertain band, not on the volume line.
+
+    ``dedup`` runs once per source item against the whole window and stays at ``low``;
+    ``dedup_confirm`` runs only when that pass said it was unsure, so it can afford more.
+    Both are still one variable away from a deployment's own answer.
+    """
+    default = load_config({})
+    assert default.for_stage(LlmStage.DEDUP).effort == "low"
+    assert default.for_stage(LlmStage.DEDUP_CONFIRM).effort == "medium"
+
+    assert LlmStage.DEDUP_CONFIRM.model_env == "MOTET_LLM_MODEL_DEDUP_CONFIRM"
+    assert LlmStage.DEDUP_CONFIRM.effort_env == "MOTET_LLM_EFFORT_DEDUP_CONFIRM"
+
+    cheap = load_config(
+        {
+            "MOTET_LLM_MODEL_DEDUP_CONFIRM": "anthropic/claude-haiku-4.5",
+            "MOTET_LLM_EFFORT_DEDUP_CONFIRM": "off",
+        }
+    )
+    assert cheap.for_stage(LlmStage.DEDUP_CONFIRM).model == "anthropic/claude-haiku-4.5"
+    assert cheap.for_stage(LlmStage.DEDUP_CONFIRM).effort is None
+    assert cheap.for_stage(LlmStage.DEDUP).model == DEFAULT_MODEL
+
+
 def test_the_startup_summary_names_every_stage_and_its_effort() -> None:
     """A stage the log line omits is one nobody can see the configuration of at boot.
 

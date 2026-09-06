@@ -49,7 +49,15 @@ def canned(payload: object) -> FakeLlmClient:
 class TestUsageSurvivesTheStage:
     def test_dedup_usage_reaches_a_collecting_caller(self) -> None:
         """motet#25 in one assertion: the number was always there, nobody caught it."""
-        client = canned({"decision": "new", "title": "Acme", "summary": "Acme raised money."})
+        client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "The backlog is empty.",
+                "title": "Acme",
+                "summary": "Acme raised money.",
+            }
+        )
 
         with collect_usage() as spend:
             ClaudeIntegrator(client).integrate(MORNING, [])
@@ -103,7 +111,15 @@ class TestUsageSurvivesTheStage:
         A stage reached from anywhere else must still leave the line behind, or the seam
         has a hole in it exactly where nobody is looking.
         """
-        client = canned({"decision": "new", "title": "Acme", "summary": "Acme raised money."})
+        client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "The backlog is empty.",
+                "title": "Acme",
+                "summary": "Acme raised money.",
+            }
+        )
 
         with caplog.at_level(logging.INFO, logger="motet.inference.cost"):
             ClaudeIntegrator(client).integrate(MORNING, [])
@@ -113,7 +129,15 @@ class TestUsageSurvivesTheStage:
         assert "cache_read=" in line
 
     def test_nested_blocks_do_not_double_count(self) -> None:
-        client = canned({"decision": "new", "title": "Acme", "summary": "Acme raised money."})
+        client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "The backlog is empty.",
+                "title": "Acme",
+                "summary": "Acme raised money.",
+            }
+        )
 
         with collect_usage() as outer:
             with collect_usage() as inner:

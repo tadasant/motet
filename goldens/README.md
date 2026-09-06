@@ -91,7 +91,11 @@ job, run deliberately.
 
 Note that the fake deduper collapses titles that differ only in case, punctuation, and word
 order. Seeing through genuinely different *wording* is the real adapter's job, so a fixture
-that needs it belongs with that adapter, not here.
+that needs it belongs with that adapter, not here — which is where motet#41's second half
+lives: `inference/tests/test_adapters.py::TestTheSecondLook` and, end to end through a real
+Postgres, `workers/tests/test_pipeline.py::TestThreeWriteUpsOfOneStory`. Both drive the real
+`ClaudeIntegrator` over a scripted `FakeLlmClient`. Adding a fixture here whose sources need
+semantic matching would only test the fake's title normalizer.
 
 ## Adding a Gmail extraction case
 

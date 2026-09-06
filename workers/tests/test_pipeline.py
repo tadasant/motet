@@ -1324,6 +1324,205 @@ class TestIdenticalTitles:
         assert len(repo.list_news_items(db, USER)) == 2
 
 
+#: Three genuinely independent write-ups of one event, in the arrival order they had on
+#: staging. No two share a headline and no two share a sentence — which is the whole point:
+#: the identical-title backstop cannot reach this case, and only a judgement about the two
+#: texts can.
+TARIFFS_NPR = (
+    "Canada to impose $20 billion in retaliatory tariffs",
+    "Canada to impose $20 billion in retaliatory tariffs. Prime Minister Mark Carney said "
+    "Ottawa will place tariffs on $20 billion of American goods beginning Friday, "
+    "responding to the levies Washington imposed this week.",
+)
+TARIFFS_FT = (
+    "Ottawa hits back at Washington with sweeping duties",
+    "Ottawa hits back at Washington with sweeping duties. Canada will apply duties worth "
+    "C$27bn to US imports from Friday, Carney told reporters, in what officials described "
+    "as a measured first response.",
+)
+TARIFFS_AP = (
+    "Canadian officials detail the goods facing new charges",
+    "Canadian officials detail the goods facing new charges. The Canadian government "
+    "published a list on Thursday of American products that will face new charges from "
+    "Friday, and said further measures would follow if Washington does not back down.",
+)
+
+#: A phrase that appears only in ``prompts.SECOND_LOOK_SYSTEM``. The first pass's prompt
+#: carries the source item too, so keying the two calls apart has to be done on the part
+#: that differs — the instructions.
+_SECOND_LOOK = "second look of a news briefing"
+
+
+class _ScriptedModel:
+    """A model that answers each dedup prompt from a script, and counts its calls.
+
+    Not a stub *integrator*: the real :class:`~motet_inference.adapters.ClaudeIntegrator`
+    runs on top of this, so what the test exercises is the production decision procedure —
+    prompt construction, the three-way relation, the second look and everything it does
+    with a failure. Only the model is fake, which is the same arrangement
+    ``inference/tests/test_adapters.py`` and ``workers/tests/test_accounting.py`` use.
+
+    The window ids are not knowable in advance — Postgres assigns them — so a scripted
+    answer names its candidate by reading the window back out of the rendered prompt.
+    """
+
+    def __init__(self, first_pass: Sequence[Mapping[str, Any]], second_look: Mapping[str, Any]):
+        self._first_pass = list(first_pass)
+        self._second_look = second_look
+        self.calls: list[str] = []
+
+    def complete(self, request: Any) -> Any:
+        import json
+        import re
+
+        from motet_inference.llm import FakeLlmClient
+
+        rendered = "\n".join(part.text for m in request.messages for part in m.parts)
+        if _SECOND_LOOK in rendered:
+            self.calls.append("second_look")
+            answer: Mapping[str, Any] = self._second_look
+        else:
+            self.calls.append("first_pass")
+            answer = dict(self._first_pass.pop(0))
+            if answer.get("closest_news_item_id") == "@newest":
+                window = re.findall(r"^- id: (\S+)", rendered, re.M)
+                answer["closest_news_item_id"] = window[-1] if window else None
+        return FakeLlmClient(responses={"": json.dumps(answer)}).complete(request)
+
+
+def _integrate_with(
+    db: psycopg.Connection[Any],
+    model: _ScriptedModel,
+    entries: Sequence[tuple[str, str]],
+) -> None:
+    """Paste each entry and integrate it, one at a time, through the real adapter."""
+    from motet_inference.adapters import ClaudeIntegrator
+    from motet_workers import handlers
+
+    context = handlers.Context(conn=db, stages=_stages_with(ClaudeIntegrator(model)), store=None)
+    for entry in entries:
+        source_item_id = paste(db, entry)
+        handlers.handle_integrate(context, {"source_item_id": source_item_id})
+        db.commit()
+
+
+def _first_pass(relation: str, title: str, *, closest: str | None = "@newest") -> dict[str, Any]:
+    return {
+        "closest_news_item_id": closest,
+        "relation": relation,
+        "reason": "scripted",
+        "title": title,
+        "summary": "Canada answered the US tariffs.",
+    }
+
+
+class TestThreeWriteUpsOfOneStory:
+    """motet#41's remaining half, end to end.
+
+    Three write-ups of the Canada tariff story were pasted on staging. Dedup merged two and
+    returned the third as its own news item — so the backlog listed one event twice and an
+    episode would have narrated it twice. The identical-title backstop (``TestIdenticalTitles``)
+    catches that only when the model happens to write the same headline twice; here it
+    writes a different one, which is the case nothing caught.
+
+    **What these tests pin is the decision procedure, not a model's behaviour.** Whether a
+    real Claude answers ``related`` rather than ``unrelated`` on the AP piece is not
+    something an offline test can assert — invariant 7 keeps every vendor out of CI. What
+    *is* asserted is that an unsure first pass is asked again, that a confirming second look
+    collapses the story, and that a rejecting one leaves it split.
+    """
+
+    def test_an_unsure_third_write_up_is_asked_again_and_collapses(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        from motet_workers.handlers import _normalize_title
+
+        # A different headline for the same event: the exact case the string backstop
+        # cannot see.
+        ap_headline = "Ottawa lists the American goods facing new charges"
+        model = _ScriptedModel(
+            first_pass=[
+                _first_pass(
+                    "unrelated", "Canada to impose $20bn in retaliatory tariffs", closest=None
+                ),
+                _first_pass("same_event", "Canada answers US tariffs with $20bn of duties"),
+                _first_pass("related", ap_headline),
+            ],
+            second_look={"same_event": True, "reason": "One announcement, three write-ups."},
+        )
+
+        _integrate_with(db, model, [TARIFFS_NPR, TARIFFS_FT])
+        before = repo.list_news_items(db, USER)
+        assert len(before) == 1
+        # Checked before the third arrives, because a merge writes the proposed headline
+        # onto the row: after it, the two titles agree *because* of the merge.
+        assert _normalize_title(before[0].title) != _normalize_title(ap_headline), (
+            "the identical-title backstop must not be what saved this case"
+        )
+
+        _integrate_with(db, model, [TARIFFS_AP])
+
+        items = repo.list_news_items(db, USER)
+        assert len(items) == 1, "three accounts of one event are one story"
+        assert len(items[0].source_item_ids) == 3
+        assert model.calls == ["first_pass", "first_pass", "first_pass", "second_look"], (
+            "the second look fires once, on the one answer that was unsure"
+        )
+        assert items[0].title == before[0].title, (
+            "a second-look merge keeps the stored headline: the one the first pass wrote "
+            "was written for this source item alone"
+        )
+
+    def test_the_same_three_split_when_the_second_look_says_no(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The failure as it was, and the false-split direction in one test.
+
+        Identical input to the case above, with the second look answering "no" — which is
+        both what the pipeline did before this change and what has to keep happening when
+        two accounts really are of different events. A second look buys a *question*, never
+        a merge: nothing here can fold two stories together without an affirmative answer.
+        """
+        model = _ScriptedModel(
+            first_pass=[
+                _first_pass(
+                    "unrelated", "Canada to impose $20bn in retaliatory tariffs", closest=None
+                ),
+                _first_pass("same_event", "Canada answers US tariffs with $20bn of duties"),
+                _first_pass("related", "Ottawa lists the American goods facing new charges"),
+            ],
+            second_look={"same_event": False, "reason": "A later step, not the announcement."},
+        )
+        _integrate_with(db, model, [TARIFFS_NPR, TARIFFS_FT, TARIFFS_AP])
+
+        items = repo.list_news_items(db, USER)
+        assert len(items) == 2
+        assert sorted(len(item.source_item_ids) for item in items) == [1, 2]
+
+    def test_a_confident_split_never_reaches_the_second_look(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The cost bound, measured rather than asserted in a comment.
+
+        Dedup is the volume line. A design that re-asked about every source item would
+        double the most-made call in the system; this one spends a second completion only
+        on the band the first pass says it is unsure about.
+        """
+        model = _ScriptedModel(
+            first_pass=[
+                _first_pass(
+                    "unrelated", "Canada to impose $20bn in retaliatory tariffs", closest=None
+                ),
+                _first_pass("unrelated", "Regulator opens inquiry"),
+            ],
+            second_look={"same_event": True, "reason": "never asked"},
+        )
+        _integrate_with(db, model, [TARIFFS_NPR, INQUIRY])
+
+        assert len(repo.list_news_items(db, USER)) == 2
+        assert model.calls == ["first_pass", "first_pass"]
+
+
 def _stages_with(integrator: Any) -> Any:
     """The deterministic stage set with dedup swapped out for a stub."""
     from dataclasses import replace
