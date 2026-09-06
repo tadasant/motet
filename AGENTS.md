@@ -858,7 +858,7 @@ highlight anchors to. Loosening it trades a precise citation for a vague one to 
 checker. So the citation stays tight and the **evidence** widens: the prompt carries the
 source item as a `SOURCE` block and the span beside it as `CITED`.
 
-Four things bound that, and each is the answer to "did the gate get weaker":
+Five things bound that, and each is the answer to "did the gate get weaker":
 
 - **One source item, never the episode's others.** Only the sources the chunk's claims
   actually cite are sent, so a claim can never be grounded in a *different* story's
@@ -867,15 +867,45 @@ Four things bound that, and each is the answer to "did the gate get weaker":
   it fits, and a paragraph-snapped window around the span when it does not. Unbounded, one
   long article would fill a call on its own and put every claim of that story on a call of
   its own. Support further away than that is still refused, deliberately, and the golden
-  set pins the case.
+  set pins the case — on both sides of the citation, because a window that kept only the
+  span's own paragraph would be the same defect facing forwards.
+- **The block is fenced, and the fence marker is derived from the request's own text.** A
+  source item is prose a stranger wrote, and the gate now carries up to 2,500 characters
+  of it rather than one script-chosen sentence — so an unfenced block could splice its own
+  `CLAIM`/`SPOKEN` lines into the prompt's grammar, or address the one stage in this system
+  whose whole job is to be un-bypassable. Deriving the marker from the content means a
+  source item cannot close its own block, and the evidence still travels verbatim rather
+  than escaped or truncated. The system prompt carries the other half: everything below it
+  is data, never instruction.
 - **A block is sent once per distinct context**, however many claims cite it, and
   `_next_chunk` counts it once for the same reason. The claims of one story share one
-  newsletter; paying for it per claim would change no verdict and triple the input.
-- **`GROUNDING_CHARS_PER_CALL` is unchanged at 6,000**, and that is what keeps motet#52's
-  output-budget arithmetic honest: no call reads more text than it did before. Widening
-  costs *calls* — visible, bounded, instrumented — rather than headroom inside a call,
-  which is what exhausts a budget. Measured on a 21-item backlog: unchanged at 16 calls
-  where the sources are short enough to travel whole, and 16 → 21 where they are not.
+  newsletter; paying for it per claim would change no verdict and triple the input. **This
+  is real sharing only while the item fits the budget** — past that, two claims quoting
+  different parts of one article get two windows and two blocks, which is where the cost
+  below comes from.
+- **`GROUNDING_CHARS_PER_CALL` is unchanged at 6,000**, so no call reads more than the
+  bound the per-claim token constants were fitted against — what each call reads *within*
+  that bound did go up. Widening therefore costs *calls*, which is visible, bounded and
+  instrumented, rather than headroom inside a call, which is what exhausts a budget.
+
+**The cost, measured rather than asserted**, on a 21-item backlog of 63 claims at several
+source-item sizes, before and after. "Fitted output" is `demand(n) = 4000 + 1800n`, the
+staging-fitted model `inference/tests` already uses:
+
+| Source item | Calls, before → after | Fitted output tokens |
+|---|---|---|
+| 334 chars | 16 → 16 | 177,400 → 177,400 |
+| 1,264 | 16 → 16 | 177,400 → 177,400 |
+| 2,194 | 16 → 16 | 177,400 → 177,400 |
+| 4,054 | 16 → **21** | 177,400 → 197,400 |
+| 7,774 | 16 → **32** | 177,400 → 241,400 |
+
+So the number that matters is the source length, and a real newsletter body is usually
+past 2,500 characters. The worst shape is one call per claim; the pessimistic row above is
++16 calls and +36% output on a full backlog. **Clustering a story's spans into one shared
+window was considered and rejected**: a claim at the edge of a cluster would get less
+context on its far side than a window centred on its own citation, which is the same
+evidence starvation this change exists to remove, traded for cost.
 
 **The script prompt was deliberately left alone.** It still tells the script stage not to
 speak a number its quote does not contain, which is now stricter than the gate. That is the
@@ -1552,9 +1582,10 @@ question motet#45 is about — **what does the gate get to see?** — so the cor
 real `ClaudeGroundingValidator` over a stand-in client that judges one deterministic thing
 (a number in the spoken text the source does not state) using only the prompt it was
 handed. That makes a verdict a statement about the evidence the validator assembled. The
-cases come in pairs on purpose: one that must now be *accepted* and three that must still
-be *refused*, because widening what counts as support is the one direction in which this
-stage fails silently.
+cases come in pairs on purpose: three that must now be *accepted* and three that must
+still be *refused*, because widening what counts as support is the one direction in which
+this stage fails silently. A refusing case pins the *reason* as well as the verdict, since
+the gate fails closed in several other ways that would satisfy a naive "was it refused".
 
 ---
 

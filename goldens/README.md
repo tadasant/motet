@@ -213,10 +213,19 @@ reads a paraphrase correctly. That is the same separate, slower job the other co
 | A figure another source item states, still refused — the widening stops at one item | `0003` |
 | Support further away than the evidence window, still refused — the bound, pinned | `0004` |
 | Three claims of one story travelling as one source block — the cost property | `0005` |
+| Support a few paragraphs *after* the cited span, in an item too long to travel whole | `0006` |
+
+`0006` is `0001` facing the other way, and it is there because the window has two edges: a
+forward cut at the first paragraph break after the span, rather than the last one that
+fits, would throw away context the budget had already paid for and would look exactly like
+the defect this corpus was built for.
 
 **The refusing cases are not optional.** A validator that got weaker fails silently, so a
 corpus carrying only `0001` would pass just as well against a gate that had stopped
-checking anything.
+checking anything. And a refusing case pins the *reason*, not only the verdict: the gate
+fails closed for several correct reasons — a verdict that never arrived, a chunk that ran
+out of budget, a source block the judge could not find — and every one of them would
+satisfy a naive "was it refused" while the evidence assembly under test was broken.
 
 ## Adding a smart-episode case
 

@@ -45,6 +45,21 @@ recount outright. In a county this size the sample is a few thousand ballots and
 takes an afternoon. It has not widened here in six years, which the clerk offers less as
 a boast than as an explanation of why nobody outside the building has heard of it.
 
+Two further pieces of context are worth having, because they are the ones the office
+fields most often. The first is why a canvass cannot simply be published as it stands and
+amended later, which is the certification question above. The second is why the review
+takes days rather than hours, and the answer there is that almost every question resolves
+against a record held somewhere else — a registrar in another county, a housing authority,
+a university term calendar. Each of those is a person answering a query rather than a form
+being processed, and the office has no way to make any of them go faster.
+
+Neither of those is new this cycle, and neither is specific to Warren County. What is
+specific is the map: several blocks changed precinct without anybody moving house, which
+produced a run of ballots cast in good faith at the wrong table. Those are the easiest to
+resolve and the most tedious to count, because each one has to be matched against the old
+boundary as well as the new one, and the two maps disagree in ways that are obvious on
+paper and invisible in the roll.
+
 Reviewers cleared the backlog over four days. The clerk's office said the pace was steady
 and that no ballot was set aside for want of time.
 

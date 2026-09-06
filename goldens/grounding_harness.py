@@ -145,6 +145,19 @@ class NumericJudge:
     back as "supported".
     """
 
+    #: What this judge says when it has read the evidence and refused the claim on it. A
+    #: case asserts on this exact string, so that a refusal it expected cannot be satisfied
+    #: by the gate failing closed for some *other* reason — a verdict that never arrived, a
+    #: chunk that ran out of budget, or :data:`NO_BLOCK` below. Every one of those is
+    #: correct behaviour, and none of them is what a refusing case is testing.
+    REFUSED = "a number in the spoken text is not stated by the source"
+
+    #: What it says when it could not find the block the claim named. Distinct from
+    #: :data:`REFUSED` deliberately: they are the difference between "the evidence does not
+    #: support this" and "I never saw the evidence", and a corpus that could not tell them
+    #: apart would score every refusing case green against a prompt nobody could read.
+    NO_BLOCK = "this claim names no source block"
+
     def __init__(self) -> None:
         #: Every user prompt this judge was sent, in order — what a case asserts against.
         self.prompts: list[str] = []
@@ -153,15 +166,19 @@ class NumericJudge:
         prompt = request.messages[-1].text
         self.prompts.append(prompt)
         blocks, claims = parse_grounding_prompt(prompt)
-        verdicts = [
-            {
-                "index": claim.index,
-                "supported": claim.source in blocks
-                and _numbers(claim.spoken) <= _numbers(blocks[claim.source]),
-                "reason": "a number in the spoken text is not stated by the source",
-            }
-            for claim in claims
-        ]
+        verdicts = []
+        for claim in claims:
+            if claim.source not in blocks:
+                verdicts.append({"index": claim.index, "supported": False, "reason": self.NO_BLOCK})
+                continue
+            supported = _numbers(claim.spoken) <= _numbers(blocks[claim.source])
+            verdicts.append(
+                {
+                    "index": claim.index,
+                    "supported": supported,
+                    "reason": "" if supported else self.REFUSED,
+                }
+            )
         return LlmResponse(
             text=json.dumps({"verdicts": verdicts}),
             model=request.model,

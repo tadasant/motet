@@ -595,7 +595,7 @@ def _next_chunk(items: Sequence[_Judgeable], start: int, limit: int) -> int:
 
 
 class ClaudeGroundingValidator:
-    """Judge whether each claim is supported by the span it cites, paraphrase included.
+    """Judge whether each claim is supported by the source item it cites, paraphrase included.
 
     **Invariant 3.** This runs before synthesis, never after, and a claim whose evidence
     does not support it is not spoken.
@@ -611,9 +611,17 @@ class ClaudeGroundingValidator:
     citation — still verbatim, still resolved before anything else happens, still what the
     SPA highlights — and it is still sent, as ``CITED``; what widened is the *evidence*
     beside it, to :data:`GROUNDING_CONTEXT_CHARS` of the source item the span came from.
-    The gate did not get looser in the direction that matters: a claim is judged against
-    **one** source item, never the episode's other sources and never the model's own
-    knowledge, and a citation pointing at an unrelated part of that item is still refused.
+    The gate did not get looser in the direction that matters, and the two halves of that
+    are worth keeping apart. **Mechanically**, a claim is judged against exactly one source
+    item — only the sources a chunk's claims actually cite are assembled, so the episode's
+    other articles are not in the prompt to be grounded in — and the block is bounded, so
+    support beyond it is still refused. **By instruction**, the prompt asks for a citation
+    that is at least on the subject of its claim, and tells the model that everything below
+    the system message is data rather than direction. Those two are asked for rather than
+    enforced, and the residue is worth naming: a digest newsletter is one source item
+    covering several stories, so within one item a figure about story B is now in view when
+    judging a claim about story A. That is inherited from dedup mapping one source item to
+    one news item rather than introduced here, and it is the reach the bound above limits.
 
     **Chunked rather than batched, and that is motet#42.** Batching every claim into one
     call was deliberate once — verdicts are independent, so isolating them buys nothing,
@@ -777,7 +785,7 @@ class ClaudeGroundingValidator:
                     GroundingFailure(
                         news_item_id=item.news_item_id,
                         claim_text=item.claim_text,
-                        reason=reason or "the cited span does not support this claim",
+                        reason=reason or "the source item does not support this claim",
                     )
                 )
         return _Judgement(failures=failures, answered=len(chunk), cascaded=False)

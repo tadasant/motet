@@ -23,7 +23,6 @@ from motet_inference.adapters import (
     GROUNDING_BUDGET_REASON,
     GROUNDING_CLAIMS_PER_CALL,
     GROUNDING_CONTEXT_CHARS,
-    GROUNDING_CONTEXT_CHARS,
     ClaudeGroundingValidator,
     ClaudeIntegrator,
     ClaudeScriptGenerator,
@@ -1370,7 +1369,6 @@ class TestGroundingEvidence:
         assert "SOURCE 2" not in prompt
         assert prompt.count("CITED: ") == 3
 
-
     def test_a_source_item_cannot_splice_a_claim_into_the_prompt(self) -> None:
         """A source item is text a stranger wrote, and the gate now carries a lot of it.
 
@@ -1442,9 +1440,9 @@ class TestGroundingChunkAccounting:
     """
 
     @staticmethod
-    def _claims(sources_count: int, claims_each: int, item_chars: int) -> tuple[
-        Script, dict[str, SourceItem]
-    ]:
+    def _claims(
+        sources_count: int, claims_each: int, item_chars: int
+    ) -> tuple[Script, dict[str, SourceItem]]:
         """Source items just inside ``GROUNDING_CONTEXT_CHARS``, so each travels whole."""
         assert item_chars <= GROUNDING_CONTEXT_CHARS
         sources: dict[str, SourceItem] = {}

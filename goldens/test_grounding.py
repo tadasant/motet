@@ -56,16 +56,26 @@ def test_the_corpus_is_not_empty() -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=str)
 def test_each_claim_gets_the_verdict_the_case_expects(case: GroundingCase) -> None:
-    """The whole corpus in one assertion: accepted where support exists, refused where not."""
+    """The whole corpus in one assertion: accepted where support exists, refused where not.
+
+    A refusal also has to be *the judge's* refusal. The gate fails closed in several other
+    ways — a claim it got no verdict for, a chunk that ran out of budget — and every one of
+    them is correct behaviour that would satisfy a naive "was it refused" assertion while
+    the evidence assembly under test was broken. Pinning the reason is what stops a
+    refusing case passing for a reason it is not about.
+    """
     script, sources = _build(case)
     judge = NumericJudge()
 
     report = ClaudeGroundingValidator(judge).validate(script, sources)
 
-    refused = {failure.claim_text for failure in report.failures}
+    refused = {failure.claim_text: failure.reason for failure in report.failures}
     assert [claim.spoken not in refused for claim in case.claims] == [
         claim.supported for claim in case.claims
     ], case.why
+    for claim in case.claims:
+        if not claim.supported:
+            assert refused[claim.spoken] == NumericJudge.REFUSED, case.why
 
 
 @pytest.mark.parametrize(
