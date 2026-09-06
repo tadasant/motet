@@ -25,20 +25,39 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from .accounting import record_budget_exhausted, record_script_drop, record_usage
+from .accounting import (
+    record_budget_exhausted,
+    record_dedup_decision,
+    record_script_drop,
+    record_usage,
+)
 from .cartesia import CartesiaSpeechSynthesizer
 from .interfaces import IntegrationResult
-from .llm import LlmBudgetExhaustedError, LlmClient, LlmStage, build_client, build_request
+from .llm import (
+    LlmBudgetExhaustedError,
+    LlmClient,
+    LlmStage,
+    LlmTransportError,
+    build_client,
+    build_request,
+)
 from .prompts import (
     GROUNDING_SCHEMA,
     INTEGRATE_SCHEMA,
+    RELATED,
+    SAME_EVENT,
     SCRIPT_SCHEMA,
+    SECOND_LOOK_SCHEMA,
+    UNRELATED,
+    PromptResponseError,
     grounding_messages,
     integrate_messages,
     locate_quote,
     parse_json_object,
+    require_bool,
     require_str,
     script_messages,
+    second_look_messages,
 )
 from .types import (
     Claim,
@@ -64,9 +83,27 @@ def _proposed_news_item_id() -> str:
     return f"ni_{secrets.token_hex(6)}"
 
 
-#: Dedup answers with a title, a summary, and a decision. It is the volume stage, so the
-#: ceiling is set to what the answer needs rather than to what the model allows.
+#: Dedup answers with a candidate id, a relation, a one-sentence reason, a title and a
+#: summary. It is the volume stage, so the ceiling is set to what the answer needs rather
+#: than to what the model allows.
+#:
+#: Unchanged by motet#41's second half, and rechecked rather than assumed: the answer grew
+#: by an id, an enum and one sentence — tens of tokens against a ceiling that is already an
+#: order of magnitude above the prose. Worth rechecking at all because a first-pass
+#: ``LlmBudgetExhaustedError`` is not caught: the runner fails such a job permanently, and
+#: the pasted item would never reach the backlog.
 INTEGRATE_MAX_TOKENS = 2_000
+
+#: The second look's ceiling. Its answer is a boolean and a sentence; almost all of this is
+#: room to think about one pair at ``medium`` effort.
+#:
+#: **A constant is legitimate here and was not for grounding**, which is the distinction
+#: motet#42 turned on. That stage's required output grew with the backlog, so every constant
+#: was a backlog size beyond which it could not finish. This call always judges exactly one
+#: pair against one summary, so its work does not grow with anything — and if it exhausts
+#: anyway, :meth:`ClaudeIntegrator._is_same_event` treats that as "not the same event",
+#: which costs a duplicate story rather than a stalled episode.
+CONFIRM_MAX_TOKENS = 4_000
 
 #: A script for a duration-capped episode. Generous, because truncation here costs a
 #: whole episode's worth of upstream work.
@@ -147,9 +184,25 @@ class ClaudeIntegrator:
     roughly 4.5k tokens, which is why there is no vector store (see the AGENTS.md
     tripwires). The window is the stable cache prefix and the source item is not, which is
     why ``integrate_messages`` puts the breakpoint between them.
+
+    **Two passes, and the second one is motet#41's other half.** The first pass answers a
+    three-way ``relation`` against the single window item it says is closest, rather than a
+    yes/no over the whole backlog. ``same_event`` merges, ``unrelated`` does not, and
+    ``related`` — the band where the first pass says it is unsure — buys one focused
+    pairwise re-ask at :attr:`confirm_stage`'s depth before the story is allowed to become
+    a second news item.
+
+    **This does not move a threshold, and that is the design.** Moving one would trade
+    false merges for false splits, and both of those fail silently. What changes is that
+    the uncertain band gets looked at *again*, and a merge still needs an affirmative
+    judgement to happen: a second look that says "no" leaves the story separate, exactly as
+    before. The cost is bounded at one extra completion per source item, only in the band,
+    and :func:`record_dedup_decision` is what makes the band's size and the second look's
+    hit rate visible instead of a thing to guess at.
     """
 
     stage: ClassVar[LlmStage] = LlmStage.DEDUP
+    confirm_stage: ClassVar[LlmStage] = LlmStage.DEDUP_CONFIRM
 
     def __init__(self, client: LlmClient | None = None) -> None:
         self._client = client if client is not None else build_client()
@@ -167,37 +220,72 @@ class ClaudeIntegrator:
         # it is where a missed cache breakpoint costs the most and shows up the soonest.
         record_usage(self.stage, response)
         data = parse_json_object(response, what="dedup/integrate")
-        decision = require_str(data, "decision", what="dedup/integrate")
+        relation = require_str(data, "relation", what="dedup/integrate")
         title = require_str(data, "title", what="dedup/integrate").strip()
         summary = require_str(data, "summary", what="dedup/integrate").strip()
+        reason = str(data.get("reason", "")).strip()
 
-        if decision == "merge":
-            target_id = data.get("news_item_id")
-            existing = next((n for n in window if n.id == target_id), None)
-            if existing is not None:
-                return IntegrationResult(
-                    news_item=NewsItem(
-                        id=existing.id,
-                        title=title or existing.title,
-                        summary=summary or existing.summary,
-                        source_item_ids=(*existing.source_item_ids, item.id),
-                    ),
-                    merged=True,
-                )
-            # Merging into a story that is not in the window is a model error. Degrade to
-            # "new" rather than raising: the cost of under-merging is one duplicate story
-            # in a briefing, and the cost of raising is that ingestion stops entirely.
+        candidate_id = data.get("closest_news_item_id")
+        candidate = next((n for n in window if n.id == candidate_id), None)
+
+        if relation not in (SAME_EVENT, RELATED, UNRELATED):
+            # The schema constrains this, so reaching here means a provider that did not
+            # enforce it. Treated as `related` rather than as either answer: it is the one
+            # value that decides nothing on its own, so the cost of a garbled answer is one
+            # extra completion instead of a wrong merge or a wrong split.
             logger.warning(
-                "dedup asked to merge source %s into unknown news item %r; treating as new",
+                "dedup returned relation %r for source %s, which the schema does not "
+                "allow; treating it as %r",
+                relation,
                 item.id,
-                target_id,
+                RELATED,
+            )
+            relation = RELATED
+
+        if relation == SAME_EVENT:
+            if candidate is not None:
+                return self._merged(item, candidate, title, summary, relation=relation)
+            # Naming a story that is not in the window is a model error. Degrade to "new"
+            # rather than raising: the cost of under-merging is one duplicate story in a
+            # briefing, and the cost of raising is that ingestion stops entirely.
+            logger.warning(
+                "dedup called source %s the same event as unknown news item %r; treating as new",
+                item.id,
+                candidate_id,
+            )
+        elif relation == RELATED and candidate is not None:
+            logger.info(
+                "dedup is unsure whether source %s is news item %s (%s); looking again",
+                item.id,
+                candidate.id,
+                reason or "no reason given",
+            )
+            if self._is_same_event(item, candidate):
+                # The stored copy travels, not the copy the first pass wrote. It wrote a
+                # headline and a summary for this source item *alone*, because it had not
+                # decided the story was already in the backlog — the same reason
+                # ``_merge_target``'s title backstop keeps the stored title. Only a
+                # ``same_event`` answer is asked for copy that reflects both sources.
+                return self._merged(
+                    item, candidate, candidate.title, candidate.summary, relation=relation
+                )
+        elif relation == RELATED:
+            # Symmetric with the `same_event` warning above: "related to what?" is a model
+            # error too, and without a line here it is indistinguishable in the metric from
+            # a second look that ran and said no.
+            logger.warning(
+                "dedup called source %s related to unknown news item %r; "
+                "there is nothing to look at again",
+                item.id,
+                candidate_id,
             )
 
+        record_dedup_decision(relation=relation, outcome="new")
         return IntegrationResult(
             news_item=NewsItem(
                 # A proposal, not an identity. The persistence layer assigns the real id
-                # when it inserts the row; only the `merged=True` branch above returns an
-                # id that already means something.
+                # when it inserts the row; only the merged branch returns an id that
+                # already means something.
                 id=_proposed_news_item_id(),
                 title=title or item.title,
                 summary=summary or item.title,
@@ -205,6 +293,105 @@ class ClaudeIntegrator:
             ),
             merged=False,
         )
+
+    def _merged(
+        self,
+        item: SourceItem,
+        existing: NewsItem,
+        title: str,
+        summary: str,
+        *,
+        relation: str,
+    ) -> IntegrationResult:
+        record_dedup_decision(relation=relation, outcome="merged")
+        return IntegrationResult(
+            news_item=NewsItem(
+                id=existing.id,
+                title=title or existing.title,
+                summary=summary or existing.summary,
+                source_item_ids=(*existing.source_item_ids, item.id),
+            ),
+            merged=True,
+        )
+
+    def _is_same_event(self, item: SourceItem, candidate: NewsItem) -> bool:
+        """The second look: one pair, one question, one short answer.
+
+        **Every failure here answers "no".** A merge is the side that cannot be undone from
+        the outside — a story folded into another leaves a log line and nothing a re-paste
+        would reverse — so an unreadable, truncated or refused second look must leave the
+        story where the first pass put it. That is also why this swallows rather than
+        raises: the first pass already succeeded, and turning its answer into a retried job
+        would re-run the volume call and re-bill it to discover the same thing.
+
+        **What it does not swallow is a fault in the stage itself.** The caught set is
+        ``LlmTransportError`` and the parse errors below — a call that reached a vendor and
+        came back unusable. A ``LlmConfigError`` (this stage pointed at a model that cannot
+        honour the request) and a ``ReasoningNotAppliedError`` (the effort was dropped and
+        the model did not think) are both ``LlmError`` and are both *deliberately* outside
+        it: catching them would turn "the second look is misconfigured" and "the second
+        look ran without thinking" into a permanently disabled feature whose only trace is
+        a warning that reads like a network blip. AGENTS.md says the reasoning guard is
+        reporting a real fault and must not be switched off; this is the shape of switching
+        it off.
+
+        **Merging into an already-*read* window item is in scope here, and that is
+        decided rather than overlooked.** ``repo.news_item_window`` carries recently read
+        stories as well as unread ones, and folding a fresh source item into one the
+        listener has already heard means assembly never speaks it. AGENTS.md permits that
+        for the *model-driven* merge — it is what the window is for — and denies it to
+        ``_merge_target``'s string match, because a string match is not a judgement about
+        two texts. This is a judgement about two texts, made on one pair at more depth than
+        the pass that produced the uncertain answer, so it sits on the permitted side. The
+        adapter also cannot see ``read_at``: ``NewsItem`` does not carry it, and giving the
+        inference seam a read-state opinion would put episode policy in the wrong layer.
+        """
+        # Built outside the `try`, deliberately. `build_request` raises `LlmConfigError`
+        # for a stage pointed at a model that cannot honour what it asks for, and that is
+        # a misconfiguration every other stage crashes on rather than degrades through.
+        request = build_request(
+            self.confirm_stage,
+            second_look_messages(item, candidate),
+            max_output_tokens=CONFIRM_MAX_TOKENS,
+            response_format=SECOND_LOOK_SCHEMA,
+        )
+        try:
+            response = self._client.complete(request)
+        except LlmBudgetExhaustedError as exc:
+            record_budget_exhausted(self.confirm_stage, exc)
+            logger.warning(
+                "dedup second look for source %s ran out of budget; leaving it separate",
+                item.id,
+            )
+            return False
+        except LlmTransportError:
+            logger.warning(
+                "dedup second look for source %s failed in transport; leaving it separate",
+                item.id,
+                exc_info=True,
+            )
+            return False
+
+        record_usage(self.confirm_stage, response)
+        try:
+            data = parse_json_object(response, what="dedup/confirm")
+            same = require_bool(data, "same_event", what="dedup/confirm")
+        except PromptResponseError:
+            logger.warning(
+                "dedup second look for source %s was unreadable; leaving it separate",
+                item.id,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "dedup second look: source %s %s news item %s (%s)",
+            item.id,
+            "is" if same else "is not",
+            candidate.id,
+            str(data.get("reason", "")).strip() or "no reason given",
+        )
+        return same
 
 
 class ClaudeScriptGenerator:

@@ -77,7 +77,15 @@ def install_real_adapters(
     base = fake_stages()
     stages = Stages(
         integrator=ClaudeIntegrator(
-            canned({"decision": "new", "title": NEWSLETTER[0], "summary": "Acme raised money."})
+            canned(
+                {
+                    "closest_news_item_id": None,
+                    "relation": "unrelated",
+                    "reason": "The backlog is empty.",
+                    "title": NEWSLETTER[0],
+                    "summary": "Acme raised money.",
+                }
+            )
         ),
         script_generator=ClaudeScriptGenerator(canned(script_payload)),
         grounding_validator=ClaudeGroundingValidator(canned(grounding_payload)),

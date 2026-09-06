@@ -47,9 +47,51 @@ def canned(payload: object) -> FakeLlmClient:
 
 
 class TestUsageSurvivesTheStage:
+    def test_the_second_look_bills_under_its_own_stage(self) -> None:
+        """A billed call with no accounting is exactly what motet#25 was.
+
+        dedup's second look is a new completion, so it needs its own row in the ledger —
+        and under ``dedup_confirm`` rather than ``dedup``, because *stage* is what an
+        operator splits cost by and the two have deliberately different profiles.
+        """
+        client = FakeLlmClient(
+            responses={
+                "deduplication stage of a personal news briefing": json.dumps(
+                    {
+                        "closest_news_item_id": "ni_1",
+                        "relation": "related",
+                        "reason": "Unsure.",
+                        "title": "Acme",
+                        "summary": "Acme raised money.",
+                    }
+                ),
+                "second look of a news briefing": json.dumps(
+                    {"same_event": True, "reason": "One round."}
+                ),
+            }
+        )
+
+        with collect_usage() as spend:
+            ClaudeIntegrator(client).integrate(MORNING, [STORY])
+
+        assert spend.requests == 2
+        assert [entry.stage for entry in spend.entries] == [
+            LlmStage.DEDUP,
+            LlmStage.DEDUP_CONFIRM,
+        ]
+        assert all(entry.usage.output_tokens > 0 for entry in spend.entries)
+
     def test_dedup_usage_reaches_a_collecting_caller(self) -> None:
         """motet#25 in one assertion: the number was always there, nobody caught it."""
-        client = canned({"decision": "new", "title": "Acme", "summary": "Acme raised money."})
+        client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "The backlog is empty.",
+                "title": "Acme",
+                "summary": "Acme raised money.",
+            }
+        )
 
         with collect_usage() as spend:
             ClaudeIntegrator(client).integrate(MORNING, [])
@@ -103,7 +145,15 @@ class TestUsageSurvivesTheStage:
         A stage reached from anywhere else must still leave the line behind, or the seam
         has a hole in it exactly where nobody is looking.
         """
-        client = canned({"decision": "new", "title": "Acme", "summary": "Acme raised money."})
+        client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "The backlog is empty.",
+                "title": "Acme",
+                "summary": "Acme raised money.",
+            }
+        )
 
         with caplog.at_level(logging.INFO, logger="motet.inference.cost"):
             ClaudeIntegrator(client).integrate(MORNING, [])
@@ -113,7 +163,15 @@ class TestUsageSurvivesTheStage:
         assert "cache_read=" in line
 
     def test_nested_blocks_do_not_double_count(self) -> None:
-        client = canned({"decision": "new", "title": "Acme", "summary": "Acme raised money."})
+        client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "The backlog is empty.",
+                "title": "Acme",
+                "summary": "Acme raised money.",
+            }
+        )
 
         with collect_usage() as outer:
             with collect_usage() as inner:

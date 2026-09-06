@@ -167,10 +167,13 @@ def _merge_target(
     byte-identical headline — so the backlog listed the same sentence twice and an episode
     would have read the story out twice under one heading.
 
-    It is a backstop rather than the fix. Whether the threshold holds up on genuinely
-    independent prose about one event is a question about the dedup prompt and window, and
-    it stays open. What is *not* a judgement call is this: dedup writes the titles, so two
-    items carrying the same one is dedup contradicting itself.
+    It is a backstop rather than the fix. What is *not* a judgement call is this: dedup
+    writes the titles, so two items carrying the same one is dedup contradicting itself.
+    Whether the *threshold* holds up on genuinely independent prose about one event is a
+    different question, and it is answered a layer down rather than here — see
+    ``ClaudeIntegrator._is_same_event``, where an answer the first pass is unsure about
+    buys one focused pairwise re-ask. This rule stays because it is the one that needs no
+    model at all: it holds for any ``Integrator``, including the fakes.
 
     **Unread items only, and that bound is what keeps the cost argument true.** The window
     also carries anything *read* within ``WINDOW_DAYS``, and a backstop merge into one of

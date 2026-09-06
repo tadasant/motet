@@ -572,12 +572,15 @@ chosen. `MOTET_INFERENCE_MODE=fake` therefore guarantees no test can spend money
 it does for the stage registry.
 
 **The default is `anthropic/claude-sonnet-5`, and switching is a variable, not a commit.**
-`MOTET_LLM_MODEL` moves every stage; `MOTET_LLM_MODEL_{DEDUP,SCRIPT,GROUNDING,VOICE}` moves
-one. Effort works the same way, defaulting per stage: dedup `low` (the volume line), script
-`high`, grounding `max`, voice `off`.
+`MOTET_LLM_MODEL` moves every stage;
+`MOTET_LLM_MODEL_{DEDUP,DEDUP_CONFIRM,SCRIPT,GROUNDING,VOICE}` moves one. Effort works the
+same way, defaulting per stage: dedup `low` (the volume line), dedup_confirm `medium`,
+script `high`, grounding `max`, voice `off`.
 
 **A "stage" is a caller with its own cost profile, not a step in the pipeline**, which is
-what lets the voice service's conversational turn be one of them (motet#6). It used to
+what lets the voice service's conversational turn be one of them (motet#6) — and what lets
+dedup's second look be another, one call in the pipeline further on than dedup itself and
+made a fraction as often (see "dedup contradicting itself" below). It used to
 resolve its own slug from a `MOTET_VOICE_LLM_MODEL` of the voice module's own, and the cost
 of that was not the duplication — it was that the *one* text call in the system a person
 waits on in real time was also the one whose slug nothing checked against the catalogue
@@ -983,11 +986,70 @@ matching here would be a similarity threshold of its own, in the one place meant
 no opinion. An empty title matches nothing — two items that both failed to get one are not
 evidence of anything.
 
-**This is a backstop and not the fix, and the difference is the thing to keep.** Why the
-threshold missed on genuinely independent prose about one event is a question about the
-dedup prompt and window, and it is still open. What is not a judgement call is the narrow
-case here: dedup *writes* the titles, so two items carrying the same one is one stage
-disagreeing with itself.
+**This is a backstop and not the fix, and the difference is the thing to keep.** What is
+not a judgement call is the narrow case here: dedup *writes* the titles, so two items
+carrying the same one is one stage disagreeing with itself. Why the threshold missed on
+genuinely independent prose about one event is a different question, and the section below
+is its answer.
+
+#### The band where dedup says it is unsure gets a second look
+
+`motet_inference.prompts.INTEGRATE_SCHEMA`, `ClaudeIntegrator._is_same_event`. The other
+half of motet#41, and the observation it turns on is that the model *recognised* the story
+— it wrote a byte-identical headline for it — and said "new" anyway. That is a decision
+rule failing, not a similarity judgement failing, so the fix is in what dedup is asked
+rather than in how hard it is asked.
+
+**The first pass answers a three-way relation about one named candidate, not a yes/no about
+the whole backlog.** It returns `closest_news_item_id`, a `relation` of `same_event` /
+`related` / `unrelated`, and a one-sentence `reason` — the comparison, before the headline
+it used to write first. `same_event` merges and `unrelated` does not. `related` is the
+uncertain band, and it is the one motet#41 sat in.
+
+**A `related` answer buys one focused pairwise re-ask, at `LlmStage.DEDUP_CONFIRM`'s depth.**
+The first pass scans the whole window *and* writes a title and a summary at the shallowest
+effort in the system, because it is the volume line; the second look is handed one pair and
+one question. Being rare by construction is what lets it afford the thinking — and
+`dedup_confirm` is a stage in exactly the sense above, a caller with its own cost profile.
+
+**This does not move a threshold, and that is the design.** Moving one trades false merges
+for false splits and both fail silently. What changes is that the uncertain band is looked
+at again, and a merge still requires an affirmative answer: a second look that says no
+leaves the story exactly where the first pass put it. Every failure of the second look — an
+unreadable answer, an exhausted budget, a transport error — is also a "no", because a merge
+is the side nothing outside the pipeline can undo. None of them raises: the first pass has
+already succeeded, and a retried job would re-bill the volume call to learn the same thing.
+
+**`motet.dedup.decisions{relation,outcome}` is what makes the design falsifiable.** The pair
+is the instrument rather than either half: `related`+`merged` is the second look flipping an
+answer, all-`new` says it is agreeing every time and is pure cost, and the `related` rate is
+the extra spend the accuracy is bought with. Without it, "the band never fires" and "the band
+fires on everything" look identical from outside — which is the never-infer-"no
+errors"-from-"no data" trap, on the stage whose failures are the least visible.
+
+**The band's size is unbounded until a real run measures it, and that is the honest state
+of it.** "Rare by construction" is what the prompt asks for — it tells the model to prefer
+`same_event` or `unrelated` wherever the texts allow a decision — and not something the code
+enforces: there is no cap, no circuit breaker and no cheap pre-filter. A model that hedged on
+most items would roughly double dedup's call count at a higher effort, which is why the
+metric above is a prerequisite of the design rather than decoration, and why
+`MOTET_LLM_EFFORT_DEDUP_CONFIRM` and `MOTET_LLM_MODEL_DEDUP_CONFIRM` exist. Second-look calls
+carry no window, so each one is a fraction of a first-pass call's input.
+
+**The second look may merge into an already-*read* window item, and that is decided rather
+than overlooked.** The rule one section up is that a *model-driven* merge gets that reach —
+it is what the window is for — and a string match does not, because it is not a judgement
+about two texts. This is a judgement about two texts, made on one pair at more depth than the
+pass that produced the uncertain answer, so it sits on the permitted side of exactly that
+line. It is also the only side the seam admits: `NewsItem` carries no `read_at`, and giving
+the inference layer a read-state opinion would put episode policy in the wrong layer.
+
+**What no test in this repo can tell you is whether a real model answers `related` rather
+than `unrelated` on the AP piece.** Invariant 7 keeps vendors out of CI, so what is pinned
+offline is the decision procedure — the real adapter over a scripted `FakeLlmClient`, in
+`inference/tests/test_adapters.py::TestTheSecondLook` and end to end through a real Postgres
+in `workers/tests/test_pipeline.py::TestThreeWriteUpsOfOneStory`. The prompt half is
+argued rather than measured, and a real staging run is the evidence that should revise it.
 
 **The backstop is scoped to *unread* twins, and that bound is what keeps its cost argument
 true.** The window also carries recently-read items, and folding a fresh story into one the
