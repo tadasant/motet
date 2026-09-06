@@ -229,21 +229,28 @@ class TestThePerSessionHalf:
         assert voice_session.spend.requests == 1
         assert voice_session.spend.entries[0].stage is LlmStage.VOICE
 
-    def test_the_grounding_check_scheduled_by_a_turn_cannot_write_into_its_ledger(
+    def test_a_check_that_spends_lands_on_the_metric_and_not_in_the_turns_total(
         self, metrics: Any
     ) -> None:
-        """The block is around the arm, and only the arm.
+        """The advisory check is not part of what the turn cost.
 
-        The advisory check is *scheduled* after the block exits, so it inherits a context
-        in which the ledger is already reset. Widen the block over the rest of the turn and
-        a model-backed checker — the named upgrade to
-        :class:`~motet_voice.grounding.ConversationGroundingChecker` — would record into a
-        ledger that had already been logged and summed.
+        A model-backed entailment check is the named upgrade to
+        :class:`~motet_voice.grounding.ConversationGroundingChecker`, and it would spend.
+        Its completion must reach ``motet.llm.tokens`` — every completion does — and must
+        not be added to the turn a listener was waiting on, whose price is the thing being
+        measured.
 
-        Driven with a checker that *does* record, because the shipped one is local and
-        deterministic and records nothing: against that, this assertion holds whatever the
-        block wraps, which is a test of nothing. The counter is the control — the check's
-        own completion must reach ``motet.llm.tokens`` and must not reach the session.
+        **What this actually falsifies**, so nobody over-reads it: awaiting the check
+        inside the turn instead of scheduling it behind the reply makes this fail with
+        ``4 != 2``. Merely widening the ``collect_usage`` block does not, because
+        ``_record_turn_spend`` copies the entries out before the scheduled task can run —
+        which is a fact about the fold-in, not about the block, and the comment there says
+        so. The inline-await *is* the refactor worth catching: it is the ordering that
+        makes grounding advisory here (motet#10).
+
+        Driven with a checker that records, because the shipped one is local and
+        deterministic and spends nothing — against that, every assertion below holds
+        trivially and the test would be a test of nothing.
         """
         before = _voice_requests(metrics)
         voice_session = VoiceSession.create(

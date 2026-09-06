@@ -460,8 +460,15 @@ def _ungrounded_replies(metrics: Any) -> int:
 
 
 def _specific_counts(metrics: Any) -> dict[str, int]:
-    return {
-        point.attributes["kind"]: point.value
-        for point in metrics.points("motet.voice.unsupported_specifics")
-        if point.attributes
-    }
+    """Points summed per kind, across every ``checker``/``arm`` they were split by.
+
+    Summed rather than keyed on ``kind`` alone: one attribute set per series, so a second
+    arm or checker would otherwise mean two points with the same kind and the later one
+    silently replacing the earlier in the dict.
+    """
+    counts: dict[str, int] = {}
+    for point in metrics.points("motet.voice.unsupported_specifics"):
+        if point.attributes:
+            kind = point.attributes["kind"]
+            counts[kind] = counts.get(kind, 0) + point.value
+    return counts

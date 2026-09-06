@@ -242,14 +242,18 @@ class VoiceSession:
         # would be priced by. The per-session total is these turns summed — see
         # :attr:`spend`.
         #
-        # The block is around the arm and nothing else on purpose: the advisory grounding
-        # check is *scheduled* below and would inherit this context, so a model-backed
-        # checker dropped in later would otherwise record into a ledger that had already
-        # been reported. The mirror of that is worth saying out loud before somebody
-        # "fixes" it: such a checker's spend would then be on `motet.llm.tokens` and in no
-        # session cost line at all. Neither is right — a check is not part of the turn's
-        # price and is not free either, so it wants a scope of its own rather than this
-        # one widened.
+        # The block is around the arm and nothing else, but be precise about what that
+        # buys: what actually keeps a *scheduled* advisory check out of this turn's total
+        # is that `_record_turn_spend` copies the entries out synchronously, before the
+        # task it schedules below has run. Widening the block would not change that. The
+        # narrowness matters for the case that would: **awaiting** the check inside the
+        # turn — which is the refactor to refuse anyway, since it is the ordering that
+        # makes grounding advisory here (motet#10).
+        #
+        # The mirror is worth saying out loud before somebody "fixes" either: a
+        # model-backed checker's spend lands on `motet.llm.tokens` and in no session cost
+        # line at all. That is not right either — a check is not part of the turn's price
+        # and is not free — so it wants a scope of its own rather than this one widened.
         with collect_usage() as turn_spend:
             try:
                 turn = await self.arm.respond(request)
@@ -466,12 +470,13 @@ class VoiceSession:
             # zero for the reason `describe_usage` gives.
             #
             # **These two count the LLM *seam*, and a zero here is not a claim that the
-            # session was free.** The realtime arm bills through its own provider socket and
-            # never goes through `motet_inference.llm`, so its spend is not in this number
-            # and is not on `motet.llm.tokens` either — recording it means reading the
-            # `usage` off the provider's `response.done`, which is a separate piece of work.
-            # Do not read `llm_completions: 0` on a realtime session as "nothing was spent";
-            # read it as "nothing went through the seam this measures".
+            # session was free.** Two other vendor bills a session can run up are outside
+            # it: the realtime arm bills through its own provider socket and never touches
+            # `motet_inference.llm` (recording it means reading the `usage` off the
+            # provider's `response.done`), and the composed arm's Cartesia synthesis is
+            # billed per character, which `record_tts_characters` counts on the narration
+            # path and nothing counts here. So read `llm_completions: 0` as "nothing went
+            # through the seam this measures", never as "nothing was spent".
             "llm_completions": self.spend.requests,
             "llm_tokens": self.spend.summary(),
         }

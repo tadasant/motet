@@ -23,11 +23,12 @@ timestamp. That is motet#25.
 **The id is not always an episode's.** The voice service's conversational turn is a
 :class:`~.llm.LlmStage` like the other three (motet#6), and it is billed the same way — but
 the thing an operator attributes its cost to is a *session*, and a session is a socket's
-lifetime spanning many tasks rather than one call inside one. So
-:class:`~motet_voice.session.VoiceSession` opens a block per **turn** — a `ContextVar` holds
-for a ``with`` in one task, and a turn is also the unit a person waits on — and sums the
-turns onto the session, whose totals go in the line logged on close. Same mechanism, one
-scope smaller; see ``voice/src/motet_voice/session.py``.
+lifetime spanning many tasks rather than one call inside one. So the voice service opens a
+block per **turn** — a `ContextVar` holds for a ``with`` in one task, and a turn is also the
+unit a person waits on — and sums the turns onto the session, whose totals go in the line
+logged on close. Same mechanism, one scope smaller; ``voice/src/motet_voice/session.py`` is
+where it lives, named as a path rather than as a cross-reference because ``motet-inference``
+knows nothing about ``motet-voice`` and must not start.
 
 The ledger is a :class:`~contextvars.ContextVar` rather than a parameter, and that is the
 whole reason this is cheap: threading a cost accumulator through
