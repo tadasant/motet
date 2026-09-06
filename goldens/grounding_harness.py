@@ -171,7 +171,7 @@ class NumericJudge:
         )
 
 
-_SOURCE_HEADING = re.compile(r"^SOURCE (\d+)$")
+_BEGIN_SOURCE = re.compile(r"^BEGIN SOURCE (\d+) ([0-9a-f]+)$")
 _CLAIM_HEADING = re.compile(r"^CLAIM (\d+)$")
 
 
@@ -183,28 +183,40 @@ def parse_grounding_prompt(prompt: str) -> tuple[dict[int, str], list[_PromptCla
     is the harness's way of asserting that the prompt says what the validator meant, and it
     breaks loudly if the format changes — which is what a corpus guarding a prompt should
     do.
+
+    **Inside a fence, nothing is a heading**, and the closing line has to carry the marker
+    the opening line did. That is the same rule the model is given, so a source item that
+    contains its own ``CLAIM 0`` lines is read here exactly as the model is told to read it
+    — as prose. A harness that fell for the splice would score a case against a prompt
+    nobody sent.
     """
     blocks: dict[int, list[str]] = {}
     claims: list[_PromptClaim] = []
-    current: int | None = None
+    open_block: tuple[int, str] | None = None
     for line in prompt.splitlines():
-        source_heading = _SOURCE_HEADING.match(line)
-        if source_heading is not None:
-            current = int(source_heading.group(1))
-            blocks[current] = []
+        if open_block is not None:
+            number, marker = open_block
+            if line == f"END SOURCE {number} {marker}":
+                open_block = None
+            else:
+                blocks[number].append(line)
+            continue
+        begin = _BEGIN_SOURCE.match(line)
+        if begin is not None:
+            open_block = (int(begin.group(1)), begin.group(2))
+            blocks[open_block[0]] = []
             continue
         claim_heading = _CLAIM_HEADING.match(line)
         if claim_heading is not None:
-            current = None
             claims.append(_PromptClaim(index=int(claim_heading.group(1))))
             continue
-        if current is not None:
-            blocks[current].append(line)
-        elif claims:
+        if claims:
             if line.startswith("SPOKEN: "):
                 claims[-1].spoken = line.removeprefix("SPOKEN: ")
             elif line.startswith("SOURCE: "):
                 claims[-1].source = int(line.removeprefix("SOURCE: "))
+    if open_block is not None:
+        raise ValueError(f"grounding prompt: SOURCE {open_block[0]} was never closed")
     return {number: "\n".join(lines).strip() for number, lines in blocks.items()}, claims
 
 
