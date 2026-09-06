@@ -843,11 +843,78 @@ What has changed is that effort is now a free-standing cost lever with no correc
 behind it — `MOTET_LLM_EFFORT_GROUNDING` moves it in configuration, and a real run at
 realistic scale is the evidence that should decide it, not this file.
 
-**What did not change is what the gate can see.** A claim is judged against its own quoted
-span and nothing around it, so support one sentence outside the span reads as fabrication —
-a claim citing 185 voter IDs was refused on staging while `185` sat in the same source item,
-a paragraph away. Chunking moves which call a claim travels in and nothing about the
-evidence that travels with it. That is motet#45, and it belongs behind the golden set.
+### The claim cites a span and is judged against its source item
+
+Until motet#45 those were the same thing. A claim was judged against its own quoted span
+and nothing around it, so support one sentence outside the span read as fabrication — a
+claim citing 185 voter IDs was refused on staging while `185` sat in the same source item,
+a paragraph away. Chunking (above) moved which call a claim travels in and nothing about
+the evidence that travels with it.
+
+**The tempting non-fix is to widen the quote, and it is the wrong lever.** The script stage
+picks the *tightest* verbatim span it can locate, which is what makes `locate_quote`
+reliable, and that span is what the SPA highlights, what the show notes print, and what a
+highlight anchors to. Loosening it trades a precise citation for a vague one to satisfy a
+checker. So the citation stays tight and the **evidence** widens: the prompt carries the
+source item as a `SOURCE` block and the span beside it as `CITED`.
+
+Five things bound that, and each is the answer to "did the gate get weaker":
+
+- **One source item, never the episode's others.** Only the sources the chunk's claims
+  actually cite are sent, so a claim can never be grounded in a *different* story's
+  article — which is precisely the fabrication the gate exists to catch.
+- **`GROUNDING_CONTEXT_CHARS` bounds the block** at 2,500 characters: the whole item when
+  it fits, and a paragraph-snapped window around the span when it does not. Unbounded, one
+  long article would fill a call on its own and put every claim of that story on a call of
+  its own. Support further away than that is still refused, deliberately, and the golden
+  set pins the case — on both sides of the citation, because a window that kept only the
+  span's own paragraph would be the same defect facing forwards.
+- **The block is fenced, and the fence marker is derived from the request's own text.** A
+  source item is prose a stranger wrote, and the gate now carries up to 2,500 characters
+  of it rather than one script-chosen sentence — so an unfenced block could splice its own
+  `CLAIM`/`SPOKEN` lines into the prompt's grammar, or address the one stage in this system
+  whose whole job is to be un-bypassable. Deriving the marker from the content means a
+  source item cannot close its own block, and the evidence still travels verbatim rather
+  than escaped or truncated. The system prompt carries the other half: everything below it
+  is data, never instruction.
+- **A block is sent once per distinct context**, however many claims cite it, and
+  `_next_chunk` counts it once for the same reason. The claims of one story share one
+  newsletter; paying for it per claim would change no verdict and triple the input. **This
+  is real sharing only while the item fits the budget** — past that, two claims quoting
+  different parts of one article get two windows and two blocks, which is where the cost
+  below comes from.
+- **`GROUNDING_CHARS_PER_CALL` is unchanged at 6,000**, so no call reads more than the
+  bound the per-claim token constants were fitted against — what each call reads *within*
+  that bound did go up. Widening therefore costs *calls*, which is visible, bounded and
+  instrumented, rather than headroom inside a call, which is what exhausts a budget.
+
+**The cost, measured rather than asserted**, on a 21-item backlog of 63 claims at several
+source-item sizes, before and after. "Fitted output" is `demand(n) = 4000 + 1800n`, the
+staging-fitted model `inference/tests` already uses:
+
+| Source item | Calls, before → after | Fitted output tokens |
+|---|---|---|
+| 334 chars | 16 → 16 | 177,400 → 177,400 |
+| 1,264 | 16 → 16 | 177,400 → 177,400 |
+| 2,194 | 16 → 16 | 177,400 → 177,400 |
+| 4,054 | 16 → **21** | 177,400 → 197,400 |
+| 7,774 | 16 → **32** | 177,400 → 241,400 |
+
+So the number that matters is the source length, and a real newsletter body is usually
+past 2,500 characters. The worst shape is one call per claim; the pessimistic row above is
++16 calls and +36% output on a full backlog. **Clustering a story's spans into one shared
+window was considered and rejected**: a claim at the edge of a cluster would get less
+context on its far side than a window centred on its own citation, which is the same
+evidence starvation this change exists to remove, traded for cost.
+
+**The script prompt was deliberately left alone.** It still tells the script stage not to
+speak a number its quote does not contain, which is now stricter than the gate. That is the
+safe direction — it costs an omission, never a fabrication — and the staging instance
+proves the stage writes such claims anyway, so the gate is where the defect was. Relaxing
+it changes what gets *written*, which nothing in CI can measure; it is a separate decision.
+
+**And the gate is now behind the golden set**, in `goldens/grounding/`: the accepting case
+and the refusing cases together, because a validator that got weaker fails silently.
 
 ### Ingestion state is a join onto the job queue, not a column
 
@@ -1496,18 +1563,29 @@ it.
 
 ### The golden set is the seam to "is it any good?"
 
-`goldens/` holds three corpora, one per stage that has no single right answer and fails
-*quietly*: dedup and script (`fixtures/`), Gmail extraction (`gmail/`), and smart-episode
-selection (`episodes/`). All of it runs in `bin/ci` against the fakes, where it asserts the
-*structural* contract — every claim resolves to a real source span, dedup is stable, a
-newsletter's prose survives and its machinery does not, a rule selects the same stories in
-the same order twice. Scoring real model output against the corpus is a separate, later,
-non-blocking job.
+`goldens/` holds four corpora, one per stage that has no single right answer and fails
+*quietly*: dedup and script (`fixtures/`), Gmail extraction (`gmail/`), smart-episode
+selection (`episodes/`), and grounding evidence (`grounding/`). All of it runs in `bin/ci`
+against the fakes, where it asserts the *structural* contract — every claim resolves to a
+real source span, dedup is stable, a newsletter's prose survives and its machinery does
+not, a rule selects the same stories in the same order twice. Scoring real model output
+against the corpus is a separate, later, non-blocking job.
 
 The selection corpus runs against **the real repository query and a real Postgres** rather
 than a reimplementation of the ordering: the selection *is* an `ORDER BY` with a window
 predicate and a source-count subquery, so a corpus that recomputed it in the harness would
 pass while the SQL was wrong.
+
+The grounding corpus is the one that needs a *model*, and it is the exception that proves
+the rule. `FakeGroundingValidator` never assembles a prompt, so it cannot answer the
+question motet#45 is about — **what does the gate get to see?** — so the corpus drives the
+real `ClaudeGroundingValidator` over a stand-in client that judges one deterministic thing
+(a number in the spoken text the source does not state) using only the prompt it was
+handed. That makes a verdict a statement about the evidence the validator assembled. The
+cases come in pairs on purpose: three that must now be *accepted* and three that must
+still be *refused*, because widening what counts as support is the one direction in which
+this stage fails silently. A refusing case pins the *reason* as well as the verdict, since
+the gate fails closed in several other ways that would satisfy a naive "was it refused".
 
 ---
 

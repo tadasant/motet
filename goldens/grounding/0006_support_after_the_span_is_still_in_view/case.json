@@ -1,0 +1,17 @@
+{
+  "why": "motet#45 mirrored onto the other side of the citation, which is where it would fail silently. The item is longer than the evidence budget, so a real window is computed; the cited span opens the newsletter and the supporting figure appears several paragraphs LATER. A window that kept only the span's own paragraph, or that cut at the FIRST paragraph break after the span rather than the last one that fits, would refuse this claim for exactly the reason the fix exists to remove.",
+  "claims": [
+    {
+      "spoken": "The board certified the count on Thursday after reviewing 185 flagged provisional ballots.",
+      "cited": "The board voted to certify the count on Thursday evening",
+      "expected": "supported"
+    }
+  ],
+  "evidence_contains": [
+    "Staff flagged 185 provisional ballots"
+  ],
+  "evidence_excludes": [
+    "nobody outside the building has heard of it"
+  ],
+  "source_blocks": 1
+}
