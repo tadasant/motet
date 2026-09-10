@@ -11,11 +11,25 @@ the time anything here runs, and the Cloud Scheduler drain stays in place as a b
 so a failed invoke costs *latency* and nothing else. That is why :meth:`DrainTrigger.fire`
 swallows everything: a paste must not 500 because the drain trigger could not fire.
 
-**Off unless an environment names a job.** ``MOTET_WORKER_JOB`` carries the Cloud Run v2
-resource name of the worker job, which is exactly the string Terraform's
-``google_cloud_run_v2_job`` resource already has — one variable, so there is no way to be
-half-configured. Unset means inert, which is the right answer on a laptop, in CI, and in
-any environment whose ``roles/run.invoker`` grant has not been applied yet.
+**Off unless an environment opts in.** ``MOTET_DRAIN_TRIGGER`` is the switch, and it is off
+by default — the same shape as the Cloud Scheduler drain, which is off unless an
+environment names a cadence. The infrastructure gates the ``roles/run.invoker`` grant per
+environment (``api_can_trigger_worker`` in the private repo: on in staging, off in
+production), and this switch is meant to be set *from that same flag*, so the call is only
+attempted where it is permitted. Where the two disagree anyway, Cloud Run answers 403, and
+that is an expected "not enabled here" — a WARNING and ``outcome="denied"``, never an ERROR.
+
+**No name this process has not been handed.** The project is ``GOOGLE_CLOUD_PROJECT``,
+which deployed environments already inject. The job name defaults to ``motet-worker``, the
+name this repo already builds the image under. The region has **no** default: it is a
+fact about the private estate, and AGENTS.md keeps topology out of this public repo, so an
+environment that opts in says ``MOTET_WORKER_REGION`` too.
+
+**In the API's request path, never in the shared ``enqueue_*`` helpers.** ``handle_poll``
+re-arms a poll from inside the worker, so a trigger living in ``enqueue_source_poll``
+would fire from worker code — an execution starting another execution — rather than only
+because a person did something. The routes arm it; the helpers know nothing about it, and
+``motet-workers`` cannot import this module at all.
 
 **No request body, ever.** The Cloud Scheduler version of this call sent
 ``{"overrides":{"containerOverrides":[{"args":["all"]}]}}`` — mirroring
@@ -25,7 +39,9 @@ that, so the job existed, every plan showed no drift, and every tick produced no
 execution, no container and no log line anywhere; it took four applies to bisect. The
 worker job declares ``args = ["all"]`` in its own definition, so an unmodified execution
 already drains every queue. Keep it that way: :meth:`CloudRunJobTrigger.fire` posts with
-no content at all, and ``api/tests/test_drain.py`` asserts the bytes on the wire.
+no content at all, and ``api/tests/test_drain.py`` asserts the bytes on the wire. It is a
+permission question as well as a validation one: ``roles/run.invoker`` carries
+``run.jobs.run`` and not ``run.jobs.runWithOverrides``, so a body would be refused outright.
 
 The **regional** host (``{region}-run.googleapis.com``) rather than the global one is a
 prefer-the-proven-shape choice: it is byte-for-byte what ``gcloud run jobs execute`` uses
@@ -37,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -50,13 +67,25 @@ from .config import ConfigError
 
 logger = logging.getLogger("motet.api")
 
-#: The Cloud Run v2 resource name of the worker job:
-#: ``projects/{project}/locations/{region}/jobs/{job}``. Unset means the trigger is off.
-#:
-#: One variable rather than three, because three can be half-set. It is also the value the
-#: infrastructure repo already has to hand — a ``google_cloud_run_v2_job``'s ``id`` is
-#: this string — so wiring it up is an assignment rather than a template.
-WORKER_JOB_ENV: Final = "MOTET_WORKER_JOB"
+#: The opt-in. Off unless it says ``true``; see the module docstring for what it should be
+#: set from. Anything that is not recognisably a boolean is refused at startup rather than
+#: guessed at, because a guess in either direction is silent.
+ENABLED_ENV: Final = "MOTET_DRAIN_TRIGGER"
+#: Read, not introduced: deployed environments already inject it.
+PROJECT_ENV: Final = "GOOGLE_CLOUD_PROJECT"
+#: Required once the switch is on. No default, deliberately — see the module docstring.
+REGION_ENV: Final = "MOTET_WORKER_REGION"
+#: Optional; the image this repo builds is ``motet-worker``, and so is the job.
+JOB_NAME_ENV: Final = "MOTET_WORKER_JOB_NAME"
+DEFAULT_JOB_NAME: Final = "motet-worker"
+
+_TRUE: Final = frozenset({"1", "true", "yes", "on"})
+_FALSE: Final = frozenset({"", "0", "false", "no", "off"})
+
+#: What a project id, a region and a Cloud Run job name are all spelled with. Anything else
+#: — a ``/`` above all — would splice itself into the ``:run`` URL's path, and the 404 that
+#: came back would land inside a call whose every failure is swallowed.
+_SEGMENT: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 #: The scope Cloud Run's admin API wants. `run.invoker` is checked on the job itself; the
 #: scope is what the ambient service-account credential is minted for.
@@ -72,7 +101,7 @@ CLOUD_PLATFORM_SCOPE: Final = "https://www.googleapis.com/auth/cloud-platform"
 #: connect/read/write, not as a total). It does **not** bound the credential refresh in
 #: :class:`AdcAccessToken`, which on Cloud Run is a metadata-server read measured in
 #: milliseconds and on a machine off GCP is google-auth's own, much longer, timeout — a
-#: case that only arises with ``MOTET_WORKER_JOB`` set on a laptop, which nothing does.
+#: case that only arises with ``MOTET_DRAIN_TRIGGER`` on, on a laptop, which nothing does.
 DEFAULT_TIMEOUT_SECONDS: Final = 5.0
 
 #: How much of a rejection body to keep. Google's errors put the useful sentence first;
@@ -150,16 +179,16 @@ class NullDrainTrigger:
     def fire(self, reason: DrainReason) -> None:
         _drain_triggers.add(1, {"reason": reason.value, "outcome": "disabled"})
         logger.debug(
-            "not triggering a drain for %s: %s is unset or unusable, so the worker runs "
+            "not triggering a drain for %s: %s is off or unusable, so the worker runs "
             "on its schedule",
             reason.value,
-            WORKER_JOB_ENV,
+            ENABLED_ENV,
         )
 
 
 @dataclass(frozen=True)
 class WorkerJob:
-    """Where the worker job lives, parsed out of its Cloud Run v2 resource name."""
+    """Where the worker job lives, resolved from the environment by :func:`resolve_job`."""
 
     project: str
     region: str
@@ -175,23 +204,41 @@ class WorkerJob:
         return f"https://{self.region}-run.googleapis.com/v2/{self.resource}:run"
 
 
-def parse_job(value: str) -> WorkerJob:
-    """Read a Cloud Run v2 job resource name, or say precisely what is wrong with it.
+def resolve_job(environ: Mapping[str, str]) -> WorkerJob | None:
+    """Where to send the ``:run``, or ``None`` when this environment has not opted in.
 
-    Strict rather than lenient: a resource name that half-parses would produce a URL that
-    404s at request time, in a call whose every failure is swallowed — so the wrong shape
-    would be invisible forever. Refusing it at startup puts the mistake in the log line
-    an operator reads once, next to the variable's name.
+    Strict rather than lenient, and for the reason every choice in this module shares: a
+    value that half-resolves would build a URL that 404s at request time, inside a call
+    whose every failure is swallowed — so the wrong shape would be invisible forever.
+    Refusing it here puts the mistake in the startup log, next to the variable's name.
+
+    Raises :class:`~motet_api.config.ConfigError` when the switch is on and the rest cannot
+    be resolved, or when the switch itself is not a boolean.
     """
-    parts = value.strip().strip("/").split("/")
-    if len(parts) != 6 or parts[0] != "projects" or parts[2] != "locations" or parts[4] != "jobs":
+    raw = (environ.get(ENABLED_ENV) or "").strip()
+    if raw.lower() in _FALSE:
+        return None
+    if raw.lower() not in _TRUE:
+        raise ConfigError(f"{ENABLED_ENV}={raw!r} is not a boolean; set it to true or false.")
+    return WorkerJob(
+        project=_segment(environ, PROJECT_ENV, default=None),
+        region=_segment(environ, REGION_ENV, default=None),
+        name=_segment(environ, JOB_NAME_ENV, default=DEFAULT_JOB_NAME),
+    )
+
+
+def _segment(environ: Mapping[str, str], variable: str, *, default: str | None) -> str:
+    value = (environ.get(variable) or "").strip() or default
+    if value is None:
         raise ConfigError(
-            f"{WORKER_JOB_ENV}={value!r} is not a Cloud Run v2 job resource name. "
-            "Expected projects/{project}/locations/{region}/jobs/{job}."
+            f"{ENABLED_ENV} is on but {variable} is unset, so there is no job to run."
         )
-    if not all(parts[i] for i in (1, 3, 5)):
-        raise ConfigError(f"{WORKER_JOB_ENV}={value!r} has an empty project, location or job name.")
-    return WorkerJob(project=parts[1], region=parts[3], name=parts[5])
+    if not _SEGMENT.fullmatch(value):
+        raise ConfigError(
+            f"{variable}={value!r} is not a usable path segment: letters, digits, '.', '_', "
+            "':' and '-' only."
+        )
+    return value
 
 
 class AdcAccessToken:
@@ -290,6 +337,22 @@ class CloudRunJobTrigger:
             _drain_triggers.add(1, {"reason": reason.value, "outcome": "failed"})
             return
 
+        if response.status_code == 403:
+            # Expected wherever the invoker grant is off — production, until a human flips
+            # it — so it must not read as an outage. WARNING, not ERROR: only ERROR becomes
+            # a GlitchTip event, and a page per paste for a decision somebody made on
+            # purpose is how an error channel stops being read. Still counted, and still
+            # carrying Google's own sentence, so a grant that *should* be there is findable.
+            logger.warning(
+                "not triggering a drain after %s: this environment's API may not run the "
+                "worker job (HTTP 403) — expected where the run.invoker grant is off; the "
+                "scheduled sweep drains instead. %s",
+                reason.value,
+                response.text[:_ERROR_BODY_CHARS],
+            )
+            _drain_triggers.add(1, {"reason": reason.value, "outcome": "denied"})
+            return
+
         if response.status_code >= 400:
             logger.error(
                 "Cloud Run refused to run the worker job after %s: HTTP %d %s. The work "
@@ -306,34 +369,35 @@ class CloudRunJobTrigger:
 
 
 def build_trigger(env: Mapping[str, str] | None = None) -> DrainTrigger:
-    """Resolve the trigger from the environment. Off unless a job is named.
+    """Resolve the trigger from the environment. Off unless the environment opts in.
 
     Nothing here raises. Three different states collapse to the same inert trigger, and
     only the first one is silent — the other two say so at ERROR, because a deployment
     that *meant* to nudge and cannot is a different thing from a laptop:
 
-    * ``MOTET_WORKER_JOB`` unset — a laptop, CI, or an environment that has not opted in.
-    * A value that is not a Cloud Run v2 job resource name.
+    * ``MOTET_DRAIN_TRIGGER`` off or unset — a laptop, CI, or an environment that has not
+      opted in. ``GOOGLE_CLOUD_PROJECT`` alone opts nothing in; every deployment has it.
+    * On, but the job cannot be resolved — no region, or a value that is not a path
+      segment.
     * ``google-auth`` missing from the image, which is the shape of the Gmail-connect
       outage AGENTS.md documents: an SDK behind an extra nobody depended on, discovered
       inside a request months later.
     """
     environ: Mapping[str, str] = os.environ if env is None else env
-    raw = (environ.get(WORKER_JOB_ENV) or "").strip()
-    if not raw:
-        return NullDrainTrigger()
     try:
-        job = parse_job(raw)
+        job = resolve_job(environ)
     except ConfigError as exc:
         logger.error("no drain will be triggered: %s", exc)
+        return NullDrainTrigger()
+    if job is None:
         return NullDrainTrigger()
     try:
         return CloudRunJobTrigger(job)
     except Exception:
         logger.exception(
-            "no drain will be triggered: %s names %s but this process cannot build a "
-            "credential for it",
-            WORKER_JOB_ENV,
+            "no drain will be triggered: %s is on but this process cannot build a "
+            "credential to run %s",
+            ENABLED_ENV,
             job.resource,
         )
         return NullDrainTrigger()

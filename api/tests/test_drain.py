@@ -14,7 +14,7 @@ The second half goes through ``TestClient`` against a real Postgres, and asserts
 enqueuing arms exactly one invoke, that it happens **after** the transaction commits, and
 that every way the invoke can fail still leaves the user with their 201.
 
-Nothing here reaches Google. ``MOTET_WORKER_JOB`` is unset in CI, so the shipped default
+Nothing here reaches Google. ``MOTET_DRAIN_TRIGGER`` is off in CI, so the shipped default
 is the inert trigger, and the enabled cases inject their own transport and token.
 """
 
@@ -24,7 +24,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -35,22 +37,31 @@ from motet_api import app
 from motet_api.config import ConfigError
 from motet_api.deps import drain_trigger, reset_drain_trigger, reset_store
 from motet_api.drain import (
-    WORKER_JOB_ENV,
+    ENABLED_ENV,
+    JOB_NAME_ENV,
+    PROJECT_ENV,
+    REGION_ENV,
     CloudRunJobTrigger,
     DrainNudge,
     DrainReason,
     DrainTrigger,
     NullDrainTrigger,
+    WorkerJob,
     build_trigger,
-    parse_job,
+    resolve_job,
 )
 from motet_api.main import HEALTH_PATH
 from motet_db import SourceKind, phase2, repo
+from motet_sources import FakeMailClient
+from motet_workers import Queue, drain
 
 TOKEN = "test-api-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
-JOB = "projects/motet-smoke/locations/europe-west4/jobs/motet-worker"
+#: A made-up project and a region the estate does not use, on purpose: the real ones are
+#: topology, and this repo is public.
+ENV = {ENABLED_ENV: "true", PROJECT_ENV: "motet-smoke", REGION_ENV: "europe-west4"}
+JOB = WorkerJob(project="motet-smoke", region="europe-west4", name="motet-worker")
 RUN_URL = (
     "https://europe-west4-run.googleapis.com/v2/"
     "projects/motet-smoke/locations/europe-west4/jobs/motet-worker:run"
@@ -95,44 +106,44 @@ def enabled_trigger(
     seen: list[httpx.Request], *, status_code: int = 200, body: Any = OPERATION
 ) -> CloudRunJobTrigger:
     return CloudRunJobTrigger(
-        parse_job(JOB),
+        JOB,
         token=lambda: "ya29.fake-token",
         transport=recording_transport(seen, status_code=status_code, body=body),
     )
 
 
-class TestResourceNames:
-    def test_parses_a_cloud_run_v2_job_name(self) -> None:
-        job = parse_job(JOB)
-        assert (job.project, job.region, job.name) == (
-            "motet-smoke",
-            "europe-west4",
-            "motet-worker",
-        )
-        assert job.resource == JOB
+class TestWhereTheJobIs:
+    def test_resolves_from_the_environment(self) -> None:
+        """Project from `GOOGLE_CLOUD_PROJECT`, region from its own variable, name defaulted."""
+        assert resolve_job(ENV) == JOB
+
+    def test_the_job_name_can_be_overridden(self) -> None:
+        job = resolve_job({**ENV, JOB_NAME_ENV: "motet-worker-canary"})
+        assert job is not None and job.name == "motet-worker-canary"
 
     def test_builds_the_regional_run_endpoint(self) -> None:
         """The regional host, not the global one — the shape gcloud has always used."""
-        assert parse_job(JOB).run_url == RUN_URL
+        assert JOB.run_url == RUN_URL
 
     @pytest.mark.parametrize(
-        "value",
+        "env",
         [
-            "motet-worker",
-            "projects/p/jobs/motet-worker",
-            "projects/p/locations/r/services/motet-worker",
-            "projects/p/locations//jobs/motet-worker",
-            "projects/p/locations/r/jobs/motet-worker/executions/x",
+            pytest.param({ENABLED_ENV: "maybe"}, id="switch-not-a-boolean"),
+            pytest.param({ENABLED_ENV: "true", REGION_ENV: "r"}, id="no-project"),
+            pytest.param({ENABLED_ENV: "true", PROJECT_ENV: "p"}, id="no-region"),
+            pytest.param({**ENV, REGION_ENV: "r/../x"}, id="region-splices-a-path"),
+            pytest.param({**ENV, PROJECT_ENV: "p q"}, id="project-with-a-space"),
+            pytest.param({**ENV, JOB_NAME_ENV: "jobs/x"}, id="job-name-splices-a-path"),
         ],
     )
-    def test_refuses_anything_that_is_not_one(self, value: str) -> None:
+    def test_refuses_anything_it_cannot_put_in_a_url(self, env: dict[str, str]) -> None:
         """Strict, because every failure downstream of here is swallowed.
 
-        A half-parsed name would build a URL that 404s inside a call that never raises,
-        so the mistake would be invisible for as long as nobody read the metric.
+        A half-resolved location would build a URL that 404s inside a call that never
+        raises, so the mistake would be invisible for as long as nobody read the metric.
         """
         with pytest.raises(ConfigError):
-            parse_job(value)
+            resolve_job(env)
 
 
 class TestTheInvoke:
@@ -164,19 +175,40 @@ class TestTheInvoke:
         enabled_trigger(seen).fire(DrainReason.SOURCE_POLL)
         assert seen[0].headers["authorization"] == "Bearer ya29.fake-token"
 
-    def test_a_rejection_is_logged_and_swallowed(self, caplog: pytest.LogCaptureFixture) -> None:
-        """A 403 is what an environment without the invoker grant gets. It must not raise."""
+    def test_a_403_reads_as_not_enabled_here_rather_than_an_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """What production answers until its grant is flipped on: expected, so not alarming.
+
+        A WARNING rather than an ERROR, because ERROR is what becomes a GlitchTip event and
+        a page per paste for a decision somebody made on purpose is noise. Google's own
+        sentence still survives into the line, so a grant that *should* be there is findable.
+        """
         seen: list[httpx.Request] = []
         trigger = enabled_trigger(
             seen,
             status_code=403,
             body={"error": {"message": "Permission 'run.jobs.run' denied"}},
         )
-        with caplog.at_level(logging.ERROR, logger="motet.api"):
+        with caplog.at_level(logging.DEBUG, logger="motet.api"):
             trigger.fire(DrainReason.PASTE)
         assert len(seen) == 1
-        assert "403" in caplog.text
-        assert "run.jobs.run" in caplog.text, "the reason has to survive into the log line"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "403" in warnings[0].getMessage()
+        assert "run.jobs.run" in warnings[0].getMessage(), "the reason has to survive"
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_any_other_rejection_is_an_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A 500 is not a decision anybody made, so it does page — and still never raises."""
+        seen: list[httpx.Request] = []
+        trigger = enabled_trigger(
+            seen, status_code=500, body={"error": {"message": "backend unavailable"}}
+        )
+        with caplog.at_level(logging.ERROR, logger="motet.api"):
+            trigger.fire(DrainReason.PASTE)
+        assert "500" in caplog.text
+        assert "backend unavailable" in caplog.text
 
     def test_a_transport_failure_is_logged_and_swallowed(
         self, caplog: pytest.LogCaptureFixture
@@ -185,7 +217,7 @@ class TestTheInvoke:
             raise httpx.ConnectTimeout("no route to the admin API")
 
         trigger = CloudRunJobTrigger(
-            parse_job(JOB),
+            JOB,
             token=lambda: "ya29.fake-token",
             transport=httpx.MockTransport(explode),
         )
@@ -202,9 +234,7 @@ class TestTheInvoke:
         def no_token() -> str:
             raise RuntimeError("ambient credentials produced no access token")
 
-        trigger = CloudRunJobTrigger(
-            parse_job(JOB), token=no_token, transport=recording_transport(seen)
-        )
+        trigger = CloudRunJobTrigger(JOB, token=no_token, transport=recording_transport(seen))
         with caplog.at_level(logging.ERROR, logger="motet.api"):
             trigger.fire(DrainReason.PASTE)
         assert seen == [], "no request should be attempted without a token"
@@ -218,24 +248,30 @@ class TestTheGate:
         assert build_trigger({}).enabled is False
         assert isinstance(build_trigger({}), NullDrainTrigger)
 
-    def test_blank_means_off(self) -> None:
+    @pytest.mark.parametrize("value", ["", "   ", "false", "0", "off", "No"])
+    def test_anything_falsy_means_off(self, value: str) -> None:
         """Unset and empty are the same thing in a Cloud Run service definition."""
-        assert build_trigger({WORKER_JOB_ENV: "   "}).enabled is False
+        assert build_trigger({**ENV, ENABLED_ENV: value}).enabled is False
 
-    def test_a_named_job_turns_it_on(self) -> None:
-        trigger = build_trigger({WORKER_JOB_ENV: JOB})
+    def test_a_project_alone_opts_nothing_in(self) -> None:
+        """Every deployment has `GOOGLE_CLOUD_PROJECT`; production must still stay off."""
+        env = {PROJECT_ENV: "motet-smoke", REGION_ENV: "europe-west4"}
+        assert build_trigger(env).enabled is False
+
+    def test_opting_in_turns_it_on(self) -> None:
+        trigger = build_trigger(ENV)
         assert trigger.enabled is True
         assert isinstance(trigger, CloudRunJobTrigger)
         assert trigger.job.run_url == RUN_URL
 
-    def test_an_unusable_value_is_loud_and_still_off(
+    def test_opting_in_without_a_region_is_loud_and_still_off(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Off, but never quietly: a deployment that meant to nudge is not a laptop."""
         with caplog.at_level(logging.ERROR, logger="motet.api"):
-            trigger = build_trigger({WORKER_JOB_ENV: "motet-worker"})
+            trigger = build_trigger({ENABLED_ENV: "true", PROJECT_ENV: "motet-smoke"})
         assert trigger.enabled is False
-        assert WORKER_JOB_ENV in caplog.text
+        assert REGION_ENV in caplog.text
 
     def test_the_off_trigger_does_nothing_and_does_not_raise(self) -> None:
         NullDrainTrigger().fire(DrainReason.PASTE)
@@ -385,6 +421,75 @@ class TestTheRoutesThatArmIt:
         db.commit()
         assert api.post(f"/v1/sources/{source.id}/poll", headers=AUTH).status_code == 409
         assert recorder.fired == []
+
+
+class TestOnlyAUsersRequestFiresIt:
+    """The trigger lives in the API's request path, never in the shared enqueue helpers.
+
+    `handle_poll` re-arms a poll from inside the worker. A trigger placed in
+    `enqueue_source_poll` would therefore fire from worker code — an execution starting
+    another — and "a Cloud Run execution exists because a user did something" would stop
+    being true. These pin both halves: behaviourally, and structurally.
+    """
+
+    def test_a_worker_side_poll_re_arm_does_not_fire_it(
+        self,
+        api: TestClient,
+        recorder: Recorder,
+        db: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MOTET_VAULT_BACKEND", "local")
+        started = api.post(
+            "/v1/sources/connect",
+            json={
+                "provider": "gmail",
+                "name": "Gmail",
+                "redirect_uri": "https://app.example.invalid/oauth/callback",
+            },
+            headers=AUTH,
+        )
+        assert started.status_code == 201, started.text
+        done = api.post(
+            "/v1/sources/callback",
+            json={"state": started.json()["state"], "code": "fake-auth-code"},
+            headers=AUTH,
+        )
+        assert done.status_code == 200, done.text
+        assert recorder.fired == [DrainReason.SOURCE_POLL], "the user's action fires once"
+
+        # A cursor the fake mailbox will declare expired, so the worker takes the branch
+        # that re-enqueues a poll on its own.
+        phase2.set_source_sync_state(db, started.json()["source_id"], {"cursor": "999"})
+        db.commit()
+        monkeypatch.setattr(
+            "motet_workers.ingest.build_mail_client",
+            lambda token, env=None: FakeMailClient(expire_cursor=True),
+        )
+
+        assert drain(Queue.POLL, os.environ["DATABASE_URL"]) == 1
+        with psycopg.connect(os.environ["DATABASE_URL"]) as other:
+            polls = other.execute(
+                "SELECT count(*), count(*) FILTER (WHERE state = 'ready') "
+                "FROM jobs WHERE queue = 'poll'"
+            ).fetchone()
+        assert polls is not None and (polls[0], polls[1]) == (2, 1), "the worker re-armed"
+        assert recorder.fired == [DrainReason.SOURCE_POLL], "and nothing more fired"
+
+    def test_the_worker_package_cannot_reach_the_trigger(self) -> None:
+        """Structural half: `motet-workers` never imports `motet_api`, so it cannot fire it.
+
+        Imports, not mentions — a comment naming the API is fine; a dependency on it would
+        also be a cycle, since `motet-api` already depends on `motet-workers`.
+        """
+        importing = re.compile(r"^\s*(?:from|import)\s+motet_api\b", re.MULTILINE)
+        workers_src = Path(__file__).resolve().parents[2] / "workers" / "src"
+        offenders = [
+            str(path.relative_to(workers_src))
+            for path in workers_src.rglob("*.py")
+            if importing.search(path.read_text())
+        ]
+        assert offenders == []
 
 
 class TestItNeverFailsTheRequest:
@@ -547,7 +652,7 @@ class TestItNeverFailsTheRequest:
 
 class TestHealthReportsIt:
     def test_off_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(WORKER_JOB_ENV, raising=False)
+        monkeypatch.delenv(ENABLED_ENV, raising=False)
         reset_drain_trigger()
         try:
             body = TestClient(app).get(HEALTH_PATH).json()
@@ -555,8 +660,9 @@ class TestHealthReportsIt:
             reset_drain_trigger()
         assert body["drain_trigger"] is False
 
-    def test_on_when_a_job_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(WORKER_JOB_ENV, JOB)
+    def test_on_when_the_environment_opts_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name, value in ENV.items():
+            monkeypatch.setenv(name, value)
         reset_drain_trigger()
         try:
             body = TestClient(app).get(HEALTH_PATH).json()
@@ -564,13 +670,14 @@ class TestHealthReportsIt:
             reset_drain_trigger()
         assert body["drain_trigger"] is True
 
-    def test_never_publishes_the_job_resource_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_never_publishes_where_the_job_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """This route is unauthenticated. A project id and a region are topology.
 
         Same argument `revision` makes one field along: the boolean answers the question,
-        and the string would answer a question nobody asked on a public URL.
+        and the location would answer a question nobody asked on a public URL.
         """
-        monkeypatch.setenv(WORKER_JOB_ENV, JOB)
+        for name, value in ENV.items():
+            monkeypatch.setenv(name, value)
         reset_drain_trigger()
         try:
             body = TestClient(app).get(HEALTH_PATH).text

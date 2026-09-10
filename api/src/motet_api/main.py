@@ -86,7 +86,7 @@ from .deps import (
     settings,
     store,
 )
-from .drain import WORKER_JOB_ENV, DrainNudge, DrainReason, DrainTrigger
+from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
 from .feed import FeedMetadata, feed_url, render_feed
 from .schemas import (
     ClaimModel,
@@ -142,7 +142,7 @@ Store = Annotated[ObjectStore, Depends(store)]
 #: account has no `useToDecrypt` — the type is the reminder, IAM is the control.
 Wrapper = Annotated[DekWrapper, Depends(dek_wrapper)]
 #: Whether this deployment starts a worker execution when it enqueues work. Reported on
-#: ``/internal/health``; off unless ``MOTET_WORKER_JOB`` names a job.
+#: ``/internal/health``; off unless ``MOTET_DRAIN_TRIGGER`` opts in.
 Trigger = Annotated[DrainTrigger, Depends(drain_trigger)]
 #: This request's intent to nudge the worker. A route **arms** it beside its enqueue and
 #: `deps.connection` fires it after the commit — see `DrainNudge` for why the two are
@@ -217,9 +217,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         obs.logger.info("drain: enqueuing work will start a worker execution immediately")
     else:
         obs.logger.info(
-            "drain: %s is unset or unusable, so enqueued work waits for the scheduled "
+            "drain: %s is off or unusable, so enqueued work waits for the scheduled "
             "sweep rather than starting a worker immediately",
-            WORKER_JOB_ENV,
+            ENABLED_ENV,
         )
     try:
         yield

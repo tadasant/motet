@@ -273,13 +273,13 @@ def pytest_unconfigure() -> None:
 def _never_call_a_vendor() -> None:
     """Invariant 7, enforced rather than assumed.
 
-    ``MOTET_WORKER_JOB`` goes too, for the same reason ``MOTET_INFERENCE_MODE`` is pinned:
+    ``MOTET_DRAIN_TRIGGER`` goes too, for the same reason ``MOTET_INFERENCE_MODE`` is pinned:
     a developer who sourced a staging environment and ran ``bin/ci`` would otherwise have
     every paste and episode in the suite start a real Cloud Run execution under their own
     gcloud login. The drain tests that need it set it themselves, with ``monkeypatch``.
     """
     os.environ["MOTET_INFERENCE_MODE"] = "fake"
-    os.environ.pop("MOTET_WORKER_JOB", None)
+    os.environ.pop("MOTET_DRAIN_TRIGGER", None)
 
 
 @pytest.fixture(scope="session")

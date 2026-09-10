@@ -85,9 +85,9 @@ class HealthResponse(BaseModel):
     drain_trigger: bool = Field(
         description=(
             "Whether enqueuing work here starts a worker execution immediately, rather "
-            "than leaving it for the next scheduled sweep. False means MOTET_WORKER_JOB "
-            "is unset — the deployment has not opted in, or its run.invoker grant has "
-            "not landed — or that what was set could not be used, which the process says "
+            "than leaving it for the next scheduled sweep. False means MOTET_DRAIN_TRIGGER "
+            "is off — the deployment has not opted in, which is the default — or that it "
+            "is on and the job could not be resolved, which the process says "
             "at ERROR on startup. Reported for the same reason as 'vault_ready': the "
             "trigger is inert by default and best-effort by design, so a deployment "
             "where it never fires looks exactly like one nobody has pasted into. The "

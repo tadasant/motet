@@ -1108,6 +1108,14 @@ was started by a standing Cloud Scheduler sweep that fired whether or not any wo
 existed: roughly 21,900 executions a month per environment, essentially all of which found
 nothing.
 
+**It lives in the API's request path, never in the shared `enqueue_*` helpers**, and that
+is the placement rather than a detail of it. `handle_poll` re-arms a poll from inside the
+worker, so a trigger inside `enqueue_source_poll` would fire from worker code — an
+execution starting another — and "an execution exists because a user did something"
+would stop being true. The routes arm a per-request nudge; the helpers know nothing about
+it, and `motet-workers` cannot import `motet_api` at all. A test drains the poll queue
+through a worker-side re-arm and asserts nothing fired.
+
 **Be precise about which win this is, because the obvious one is not real.** Cloud Run's
 *job scheduling latency* — the gap between an execution being created and the task
 actually starting — was measured at 90–165 seconds in staging, and every trigger pays it
@@ -1132,19 +1140,26 @@ Five things are settled, and each is a different failure this shape avoids:
   only available evidence. The worker job declares `args = ["all"]` in its own definition,
   so an unmodified execution already drains every queue. `api/tests/test_drain.py` drives
   the real adapter over `httpx.MockTransport` and asserts the bytes, because this is a
-  claim about a socket rather than about a fake's bookkeeping.
-- **The trigger is inert unless an environment names a job.** `MOTET_WORKER_JOB` carries
-  the Cloud Run v2 resource name, which is the string a `google_cloud_run_v2_job` already
-  has — one variable, so there is no half-configured state — and `roles/run.invoker` lives
-  in the private repo and may land later. Unset is a laptop, CI, and an environment that
-  has not opted in. **So `/internal/health` reports `drain_trigger`**, for exactly
-  `vault_ready`'s reason: an inert trigger and a working one look identical from outside.
-  The job's name is *not* reported — that is a project id and a region on a public,
-  unauthenticated route.
+  claim about a socket rather than about a fake's bookkeeping. It is a permission fact as
+  well as a validation one: `roles/run.invoker` carries `run.jobs.run` and not
+  `run.jobs.runWithOverrides`, so a body is refused outright.
+- **The trigger is inert unless an environment opts in, and it names nothing it was not
+  handed.** `MOTET_DRAIN_TRIGGER` is off by default, like the scheduler drain that is off
+  unless an environment names a cadence. The grant is per-environment in the private repo
+  (`api_can_trigger_worker`: staging on, production off until a human flips it), and the
+  switch is meant to be set *from that same flag*. The project is `GOOGLE_CLOUD_PROJECT`,
+  already injected; the job name defaults to `motet-worker`; the region has **no** default,
+  because it is a fact about the private estate and this repo is public. **So
+  `/internal/health` reports `drain_trigger`**, for exactly `vault_ready`'s reason: an
+  inert trigger and a working one look identical from outside. The job's location is *not*
+  reported — a project id and a region on a public, unauthenticated route.
 - **It never fails the request.** The job row is committed inside the API's own
   transaction before anything is asked to drain, so a permission error, a quota error or a
   timeout costs latency and nothing else. `fire` swallows everything and records it; a
-  paste must not 500 because the drain trigger could not fire.
+  paste must not 500 because the drain trigger could not fire. **A 403 is expected, not
+  alarming** — it is what any environment without the grant answers — so it is a WARNING
+  and `outcome="denied"`, never an ERROR: only ERROR reaches GlitchTip, and a page per
+  paste for a decision somebody made on purpose is how an error channel stops being read.
 - **The route arms it and the transaction fires it**, in `deps.connection`, after
   `conn.commit()`. A nudge for work no other process can see yet is a nudge for nothing,
   and a request that fails on its way to the response fires nothing at all. Deliberately
@@ -1173,7 +1188,12 @@ Five things are settled, and each is a different failure this shape avoids:
   coalescing would be a Postgres row and a lock on the one path whose whole contract is
   that it never fails. `motet.api.drain_triggers{reason,outcome}` is what would say the
   burst rate had outgrown the decision, and a row keyed per environment is where it would
-  go if it had.
+  go if it had. **Invariant 6 holds on the claiming side, which is where it always had to:**
+  a triggered execution and a scheduled one running at once is two drains, and `integrate`
+  and `poll` are claimed under a `serialize_key` (the user, and the source) held as a
+  Postgres advisory lock — so the second finds the key busy and defers without spending an
+  attempt. `workers/tests/test_pipeline.py::TestSerialization` pins it on two real
+  connections.
 
 **A lazy import is a statement about when, never about whether** — the `motet-vault[kms]`
 lesson, one seam along. `google-auth[requests]` is declared on `motet-api` rather than
