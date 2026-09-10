@@ -132,6 +132,7 @@ smoke_api() {
   docker run -d --name "$name" -P \
     -e MOTET_VAULT_BACKEND=kms \
     -e MOTET_VAULT_KMS_KEY=projects/smoke/locations/smoke/keyRings/smoke/cryptoKeys/smoke \
+    -e MOTET_WORKER_JOB=projects/smoke/locations/smoke/jobs/motet-worker \
     -e "OTEL_RESOURCE_ATTRIBUTES=service.name=motet-api,service.version=${REVISION}" \
     "motet-api:${TAG}" >/dev/null
   port="$(host_port "$name")"
@@ -146,6 +147,17 @@ smoke_api() {
   case "$body" in
     *'"vault_ready":true'*) ;;
     *) echo "smoke: the image cannot seal a credential — google-cloud-kms is missing" >&2
+       return 1 ;;
+  esac
+  # Same lesson, one seam along. Nudging the worker when the API enqueues work needs
+  # `google-auth` in the *image*, and the trigger imports it when it is built rather than
+  # inside the invoke — precisely so that a missing one is visible here and on
+  # /internal/health, instead of being swallowed by a call whose whole contract is that it
+  # never raises. The job above does not exist and nothing calls Cloud Run: what is on
+  # trial is that the image can build a trigger at all.
+  case "$body" in
+    *'"drain_trigger":true'*) ;;
+    *) echo "smoke: the image cannot trigger a worker drain — google-auth is missing" >&2
        return 1 ;;
   esac
   # Non-empty AND equal to the SHA this run built. Non-empty alone would pass on a null

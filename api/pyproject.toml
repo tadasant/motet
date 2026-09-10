@@ -5,6 +5,16 @@ description = "Motet HTTP API (FastAPI, Cloud Run)"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
+    # Ambient credentials for the Cloud Run job invoke `motet_api.drain` makes: the API
+    # already runs as its own service account, so there is no key to mount. `[requests]`
+    # because `google.auth.transport.requests` is the transport the refresh goes over, and
+    # it lives behind that extra — declared explicitly rather than inherited through
+    # `motet-storage`'s `google-cloud-storage`, which is the same "an extra nobody
+    # depended on" shape that shipped every image without `google-cloud-kms`. The SDK is
+    # imported at trigger-construction rather than inside the call, so a missing one is an
+    # ERROR at startup and `drain_trigger: false` on /internal/health instead of silence
+    # inside a best-effort call; `bin/build-images` puts that to a real container.
+    "google-auth[requests]>=2.38",
     # The API talks to Google's token endpoint directly — for a sign-in, and for the Gmail
     # code exchange the OAuth callback performs. `motet-sources` declares httpx as an
     # optional extra because a *worker* in fake mode needs no HTTP client; the API's

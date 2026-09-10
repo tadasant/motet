@@ -234,6 +234,16 @@ components:
             \ who can reach it \u2014 legitimate on a laptop, a mistake anywhere else."
           title: Authenticated
           type: boolean
+        drain_trigger:
+          description: "Whether enqueuing work here starts a worker execution immediately, rather than\
+            \ leaving it for the next scheduled sweep. False means MOTET_WORKER_JOB is unset \u2014 the\
+            \ deployment has not opted in, or its run.invoker grant has not landed \u2014 or that what\
+            \ was set could not be used, which the process says at ERROR on startup. Reported for the\
+            \ same reason as 'vault_ready': the trigger is inert by default and best-effort by design,\
+            \ so a deployment where it never fires looks exactly like one nobody has pasted into. The\
+            \ job's resource name is deliberately not reported; it is topology, and this route is public."
+          title: Drain Trigger
+          type: boolean
         errors_configured:
           description: Whether error reporting is configured. False means errors go nowhere.
           title: Errors Configured
@@ -305,6 +315,7 @@ components:
       - login_configured
       - vault_backend
       - vault_ready
+      - drain_trigger
       - inference_mode
       title: HealthResponse
       type: object

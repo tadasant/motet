@@ -77,6 +77,8 @@ from .deps import (
     Caller,
     connection,
     dek_wrapper,
+    drain_nudge,
+    drain_trigger,
     public_base_url,
     require_api_token,
     require_caller,
@@ -84,6 +86,7 @@ from .deps import (
     settings,
     store,
 )
+from .drain import WORKER_JOB_ENV, DrainNudge, DrainReason, DrainTrigger
 from .feed import FeedMetadata, feed_url, render_feed
 from .schemas import (
     ClaimModel,
@@ -135,6 +138,13 @@ Store = Annotated[ObjectStore, Depends(store)]
 #: unseal one (invariant 8). `DekWrapper` has no `unwrap`, and the deployed service
 #: account has no `useToDecrypt` — the type is the reminder, IAM is the control.
 Wrapper = Annotated[DekWrapper, Depends(dek_wrapper)]
+#: Whether this deployment starts a worker execution when it enqueues work. Reported on
+#: ``/internal/health``; off unless ``MOTET_WORKER_JOB`` names a job.
+Trigger = Annotated[DrainTrigger, Depends(drain_trigger)]
+#: This request's intent to nudge the worker. A route **arms** it beside its enqueue and
+#: `deps.connection` fires it after the commit — see `DrainNudge` for why the two are
+#: split. Every route taking this also takes `Conn`, which is what guarantees a fire.
+Nudge = Annotated[DrainNudge, Depends(drain_nudge)]
 
 
 @asynccontextmanager
@@ -194,6 +204,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             "provider has already issued a token: %s",
             vault.backend,
             vault.detail,
+        )
+    # Built here rather than on the first paste, for the same reason as the vault line
+    # above: an inert trigger and a working one are indistinguishable from outside, and a
+    # value that will not parse — or an image missing `google-auth` — should be said once,
+    # loudly, at startup rather than swallowed inside the best-effort call it breaks.
+    # `build_trigger` logs its own ERROR for those two; this line covers the quiet case.
+    if drain_trigger().enabled:
+        obs.logger.info("drain: enqueuing work will start a worker execution immediately")
+    else:
+        obs.logger.info(
+            "drain: %s is unset or unusable, so enqueued work waits for the scheduled "
+            "sweep rather than starting a worker immediately",
+            WORKER_JOB_ENV,
         )
     try:
         yield
@@ -409,7 +432,7 @@ def publishable_revision(service_version: str | None) -> str | None:
 
 
 @app.get(HEALTH_PATH, response_model=HealthResponse, tags=["ops"])
-def health(config: Config) -> HealthResponse:
+def health(config: Config, trigger: Trigger) -> HealthResponse:
     """Liveness, plus whether telemetry and authentication are actually wired.
 
     The flags are not decoration. Exporters no-op silently when unconfigured, so without
@@ -443,6 +466,12 @@ def health(config: Config) -> HealthResponse:
         login_configured=config.login_configured,
         vault_backend=vault.backend,
         vault_ready=vault.ready,
+        # Not the job's resource name: that is a project id and a region, which is
+        # topology, and this route is public. The boolean is the whole question — "does
+        # enqueuing start a worker here" — and it is `vault_ready`'s argument again, since
+        # a deployment whose invoker grant never landed looks exactly like one nobody has
+        # pasted into.
+        drain_trigger=trigger.enabled,
         inference_mode=config.inference_mode,
     )
 
@@ -654,7 +683,7 @@ def logout_everywhere(conn: Conn, caller: Who) -> RevokedResponse:
     status_code=status.HTTP_201_CREATED,
     tags=["ingestion"],
 )
-def paste_source(body: PasteRequest, conn: Conn, user_id: User) -> SourceItemResponse:
+def paste_source(body: PasteRequest, conn: Conn, user_id: User, nudge: Nudge) -> SourceItemResponse:
     """Ingest pasted text as a source item.
 
     Enqueues rather than processes: ingestion is serialized per user (invariant 6), so the
@@ -663,6 +692,7 @@ def paste_source(body: PasteRequest, conn: Conn, user_id: User) -> SourceItemRes
     window where the source item exists and nothing will ever pick it up.
     """
     stored = enqueue_paste(conn, user_id=user_id, title=body.title.strip(), text=body.text)
+    nudge.arm(DrainReason.PASTE)
     return SourceItemResponse(id=stored.id, title=stored.title, state=stored.state.value)
 
 
@@ -741,7 +771,9 @@ def set_news_item_read(
     status_code=status.HTTP_201_CREATED,
     tags=["episodes"],
 )
-def create_episode(body: CreateEpisodeRequest, conn: Conn, user_id: User) -> EpisodeResponse:
+def create_episode(
+    body: CreateEpisodeRequest, conn: Conn, user_id: User, nudge: Nudge
+) -> EpisodeResponse:
     """Assemble a manual episode from unread news items, capped by duration.
 
     Returns immediately, in ``pending``. Assembly, scripting, grounding validation, and TTS
@@ -752,6 +784,7 @@ def create_episode(body: CreateEpisodeRequest, conn: Conn, user_id: User) -> Epi
     episode_id = enqueue_episode(
         conn, user_id=user_id, title=body.title.strip(), max_duration_ms=body.max_duration_ms
     )
+    nudge.arm(DrainReason.EPISODE)
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     assert episode is not None
     return _episode(conn, episode)
@@ -1091,7 +1124,7 @@ def connect_source(body: ConnectSourceRequest, conn: Conn, user_id: User) -> Con
 
 @app.post("/v1/sources/callback", response_model=SourceResponse, tags=["sources"])
 def oauth_callback(
-    body: OAuthCallbackRequest, conn: Conn, user_id: User, wrapper: Wrapper
+    body: OAuthCallbackRequest, conn: Conn, user_id: User, wrapper: Wrapper, nudge: Nudge
 ) -> SourceResponse:
     """Complete consent: exchange the code, seal the tokens, and start polling.
 
@@ -1172,6 +1205,7 @@ def oauth_callback(
 
     phase2.set_source_active(conn, source.id, active=True)
     enqueue_source_poll(conn, source.id)
+    nudge.arm(DrainReason.SOURCE_POLL)
 
     return SourceResponse(
         id=source.id,
@@ -1187,7 +1221,9 @@ def oauth_callback(
 
 
 @app.post("/v1/sources/{source_id}/poll", response_model=SourceResponse, tags=["sources"])
-def poll_source(conn: Conn, user_id: User, source_id: Annotated[str, Path()]) -> SourceResponse:
+def poll_source(
+    conn: Conn, user_id: User, source_id: Annotated[str, Path()], nudge: Nudge
+) -> SourceResponse:
     """Queue a poll now, rather than waiting for the scheduler.
 
     Enqueues; it does not fetch. Polling is serialized per source, so asking twice in a row
@@ -1199,6 +1235,7 @@ def poll_source(conn: Conn, user_id: User, source_id: Annotated[str, Path()]) ->
     if not source.active:
         raise HTTPException(status.HTTP_409_CONFLICT, "This source is paused or not connected yet.")
     enqueue_source_poll(conn, source.id)
+    nudge.arm(DrainReason.SOURCE_POLL)
     credential = phase2.get_source_credential(
         conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
     )
@@ -1245,7 +1282,7 @@ def disconnect_source(conn: Conn, user_id: User, source_id: Annotated[str, Path(
     tags=["episodes"],
 )
 def create_smart_episode(
-    body: CreateSmartEpisodeRequest, conn: Conn, user_id: User
+    body: CreateSmartEpisodeRequest, conn: Conn, user_id: User, nudge: Nudge
 ) -> EpisodeResponse:
     """Assemble an episode by rule rather than by "everything unread".
 
@@ -1265,6 +1302,7 @@ def create_smart_episode(
         max_duration_ms=body.max_duration_ms,
         rule=rule,
     )
+    nudge.arm(DrainReason.SMART_EPISODE)
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     assert episode is not None
     return _episode(conn, episode)

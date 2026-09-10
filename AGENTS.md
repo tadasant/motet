@@ -1099,6 +1099,81 @@ worth knowing is which item has been waiting twenty minutes. And the episode scr
 the same split, because "Working… this page polls" is the identical promise one stage later
 and several vendor calls more expensive.
 
+### Enqueuing is an event, so the API starts the worker rather than waiting for a clock
+
+`motet_api.drain`. Every enqueue in this API traces to a person doing something — pasting
+text, asking for an episode, connecting a mailbox — so the API knows the exact moment
+there is something to drain, and it used to do nothing with that. The `motet-worker` job
+was started by a standing Cloud Scheduler sweep that fired whether or not any work
+existed: roughly 21,900 executions a month per environment, essentially all of which found
+nothing.
+
+**Be precise about which win this is, because the obvious one is not real.** Cloud Run's
+*job scheduling latency* — the gap between an execution being created and the task
+actually starting — was measured at 90–165 seconds in staging, and every trigger pays it
+whether a schedule or a paste caused it. So this saves at most the poll interval out of a
+three-to-five-minute total; it does not make draining feel instant and no copy anywhere
+should say it does. The two arguments that do land are that idle cost goes to zero, and
+that a Cloud Run execution then exists **because a user did something** rather than
+because a clock fired.
+
+**The Cloud Scheduler drain stays.** It is the backstop that makes every failure below
+cost latency instead of work, and retiring it is a separate decision for a human once the
+event path has been watched in staging. The cost argument only fully lands once it goes.
+
+Five things are settled, and each is a different failure this shape avoids:
+
+- **No request body, ever.** The scheduler version of this call sent
+  `{"overrides":{"containerOverrides":[{"args":["all"]}]}}`, mirroring `gcloud run jobs
+  execute --args=all`. Cloud Run rejected it and reported the rejection **only to GCP
+  Cloud Logging**, which invariant 11 means nothing in this estate can read — so the job
+  was created cleanly, every Terraform plan showed no drift, and every tick produced no
+  execution, no container and no log line anywhere. It took four applies to bisect by the
+  only available evidence. The worker job declares `args = ["all"]` in its own definition,
+  so an unmodified execution already drains every queue. `api/tests/test_drain.py` drives
+  the real adapter over `httpx.MockTransport` and asserts the bytes, because this is a
+  claim about a socket rather than about a fake's bookkeeping.
+- **The trigger is inert unless an environment names a job.** `MOTET_WORKER_JOB` carries
+  the Cloud Run v2 resource name, which is the string a `google_cloud_run_v2_job` already
+  has — one variable, so there is no half-configured state — and `roles/run.invoker` lives
+  in the private repo and may land later. Unset is a laptop, CI, and an environment that
+  has not opted in. **So `/internal/health` reports `drain_trigger`**, for exactly
+  `vault_ready`'s reason: an inert trigger and a working one look identical from outside.
+  The job's name is *not* reported — that is a project id and a region on a public,
+  unauthenticated route.
+- **It never fails the request.** The job row is committed inside the API's own
+  transaction before anything is asked to drain, so a permission error, a quota error or a
+  timeout costs latency and nothing else. `fire` swallows everything and records it; a
+  paste must not 500 because the drain trigger could not fire.
+- **The route arms it and the transaction fires it**, in `deps.connection`, after
+  `conn.commit()`. A nudge for work no other process can see yet is a nudge for nothing,
+  and a request that fails on its way to the response fires nothing at all. Deliberately
+  **not** a background task, which is where a best-effort call would otherwise belong:
+  Cloud Run throttles a container's CPU between requests unless the service asks
+  otherwise, so a task scheduled after the response may not run until the next request
+  arrives — and a nudge that fires unpredictably is worse than none, because the scheduled
+  sweep is what it would then be silently relying on.
+- **A burst of enqueues starts a burst of executions, and that is accepted rather than
+  overlooked.** Concurrency is already handled and already load-bearing — `SKIP LOCKED`,
+  the per-user `serialize_key`, the lease keeper, the work fence — and the always-on
+  fleet plus the scheduler already produce concurrent executions, so this adds no new
+  class of it. Coalescing would trade that for a cost saving worth fractions of a cent on
+  a product with one user, and it would rest on the scheduling-latency figure above: an
+  in-process debounce is only correct while the *pending* execution is guaranteed to start
+  after the enqueue it suppressed, and a measurement is not a guarantee. In-process state
+  is also only partly effective, since Cloud Run runs several API instances; real
+  coalescing would be a Postgres row and a lock on the one path whose whole contract is
+  that it never fails. `motet.api.drain_triggers{reason,outcome}` is what would say the
+  burst rate had outgrown the decision, and a row keyed per environment is where it would
+  go if it had.
+
+**A lazy import is a statement about when, never about whether** — the `motet-vault[kms]`
+lesson, one seam along. `google-auth[requests]` is declared on `motet-api` rather than
+inherited through `motet-storage`, and `AdcAccessToken` imports it at *construction*, so a
+missing SDK is an ERROR at startup and `drain_trigger: false` rather than silence inside a
+call that by contract never raises. `bin/build-images` puts that question to a real
+container, next to the `vault_ready` assertion that exists for the same reason.
+
 ### Two news items with one headline is dedup contradicting itself
 
 `motet_workers.handlers._merge_target`. Three write-ups of one story were pasted; dedup

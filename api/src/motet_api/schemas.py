@@ -82,6 +82,19 @@ class HealthResponse(BaseModel):
             "billed vendor call per request would be a free way to spend money."
         )
     )
+    drain_trigger: bool = Field(
+        description=(
+            "Whether enqueuing work here starts a worker execution immediately, rather "
+            "than leaving it for the next scheduled sweep. False means MOTET_WORKER_JOB "
+            "is unset — the deployment has not opted in, or its run.invoker grant has "
+            "not landed — or that what was set could not be used, which the process says "
+            "at ERROR on startup. Reported for the same reason as 'vault_ready': the "
+            "trigger is inert by default and best-effort by design, so a deployment "
+            "where it never fires looks exactly like one nobody has pasted into. The "
+            "job's resource name is deliberately not reported; it is topology, and this "
+            "route is public."
+        )
+    )
     inference_mode: str = Field(
         description="'fake' or 'real'. 'fake' means no vendor is ever called."
     )

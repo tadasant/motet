@@ -210,6 +210,7 @@ public struct HTTPValidationError: Codable, Hashable, Sendable {
 /// Liveness plus enough wiring detail to tell 'quiet' from 'unmonitored'.
 public struct HealthResponse: Codable, Hashable, Sendable {
     public var authenticated: Bool
+    public var drainTrigger: Bool
     public var errorsConfigured: Bool
     public var inferenceMode: String
     public var loginConfigured: Bool
@@ -223,6 +224,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
 
     public init(
         authenticated: Bool,
+        drainTrigger: Bool,
         errorsConfigured: Bool,
         inferenceMode: String,
         loginConfigured: Bool,
@@ -235,6 +237,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         vaultReady: Bool
     ) {
         self.authenticated = authenticated
+        self.drainTrigger = drainTrigger
         self.errorsConfigured = errorsConfigured
         self.inferenceMode = inferenceMode
         self.loginConfigured = loginConfigured
@@ -249,6 +252,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case authenticated
+        case drainTrigger = "drain_trigger"
         case errorsConfigured = "errors_configured"
         case inferenceMode = "inference_mode"
         case loginConfigured = "login_configured"
