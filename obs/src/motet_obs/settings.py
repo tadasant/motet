@@ -57,6 +57,14 @@ class ObsStatus:
     service_name: str
     otlp_configured: bool
     errors_configured: bool
+    #: The build this process is — ``service.version``, which the deploy sets to the
+    #: commit SHA the image was built from. ``None`` when nothing set it, which is a
+    #: laptop or a bare ``docker run`` rather than a deployment.
+    #:
+    #: Resolved here rather than at each caller for the same reason ``service_name`` is:
+    #: the label the spans carry and the label a health route reports must be the one
+    #: string, resolved once.
+    service_version: str | None = None
     #: Names of the signals actually being exported: any of ``traces``, ``metrics``,
     #: ``logs``, ``errors``. Empty until :func:`motet_obs.configure` installs them.
     exporters: tuple[str, ...] = field(default=())
@@ -195,5 +203,6 @@ def status(
         service_name=_get(environ, SERVICE_NAME_ENV) or default_service_name,
         otlp_configured=bool(endpoint) and resolve_otlp_headers(environ) is not None,
         errors_configured=resolve_error_dsn(environ) is not None,
+        service_version=resolve_service_version(environ),
         exporters=exporters,
     )

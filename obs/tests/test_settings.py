@@ -154,3 +154,23 @@ class TestStatus:
         assert status({SERVICE_NAME_ENV: " "}, default_service_name="motet-api").service_name == (
             "motet-api"
         )
+
+    def test_the_build_is_reported(self) -> None:
+        """`service.version` is the commit SHA the deploy built the image from."""
+        env = {RESOURCE_ATTRIBUTES_ENV: "service.namespace=motet,service.version=abc123"}
+        assert status(env).service_version == "abc123"
+
+    def test_an_unnamed_build_is_none(self) -> None:
+        """A laptop sets no resource attributes, and must not claim a build it is not."""
+        assert status({}).service_version is None
+
+    def test_the_build_is_reported_without_any_telemetry_wiring(self) -> None:
+        """Which build is serving is not a question about whether exporting works.
+
+        A revision with a broken ingest token is the case where "which build am I asking?"
+        matters most, so tying the answer to `otlp_configured` would withhold it exactly
+        then.
+        """
+        current = status({RESOURCE_ATTRIBUTES_ENV: "service.version=abc123"})
+        assert current.otlp_configured is False
+        assert current.service_version == "abc123"

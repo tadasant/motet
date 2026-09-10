@@ -21,6 +21,18 @@ class HealthResponse(BaseModel):
 
     status: str = Field(description="'ok' when the process is serving")
     service: str = Field(description="OTel service name this process reports as")
+    revision: str | None = Field(
+        description=(
+            "The tadasant/motet commit SHA this build was made from — the deploy's "
+            "image tag, read back out of the OTel 'service.version' resource attribute. "
+            "Not a Cloud Run revision name. null means nothing set it, which is a laptop "
+            "or a bare 'docker run' rather than a deployment. Reported because 'is the "
+            "pin bump actually live' is the first question asked after a deploy, and "
+            "until now the only answers were diffing the served OpenAPI document — which "
+            "cannot see a commit that changed only behaviour — or querying the obs stack "
+            "for a log line this service does not emit per request."
+        ),
+    )
     telemetry_configured: bool = Field(
         description="Whether OTLP export is configured. False means telemetry is a no-op."
     )

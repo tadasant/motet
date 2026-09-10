@@ -914,6 +914,9 @@ describe('the generated contract', () => {
     const health: HealthResponse = {
       status: 'ok',
       service: 'motet-api',
+      // Required and nullable, like `worker_last_seen_at`: the field is always
+      // present, and null is the answer when nothing named the build.
+      revision: null,
       telemetry_configured: false,
       telemetry_exporting: false,
       errors_configured: false,

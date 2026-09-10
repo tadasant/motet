@@ -26,6 +26,7 @@ from motet_api.obs import (
     OTLP_ENDPOINT_ENV,
     OTLP_HEADERS_ENV,
     OTLP_TOKEN_ENV,
+    RESOURCE_ATTRIBUTES_ENV,
 )
 from motet_db import SourceKind, phase2, repo
 from motet_inference.llm import LlmConfigError
@@ -77,6 +78,52 @@ class TestHealth:
         response = client.get(HEALTH_PATH)
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
+
+    def test_reports_which_build_is_serving(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The question a deploy leaves behind: is the pin bump actually live?
+
+        The deploy already puts the commit SHA in `service.version`, so this reads back
+        the one value the deploy set rather than inventing a second way to know. The two
+        workarounds it replaces both fail on the commit that matters most — a bugfix pin
+        bump changes no route, so diffing the served OpenAPI document cannot see it, and
+        `motet-api` does no per-request logging, so the obs stack has nothing recent to
+        read the label off.
+        """
+        monkeypatch.setenv(
+            RESOURCE_ATTRIBUTES_ENV,
+            "service.name=motet-api,service.version=d1177570148f58d30657015ab972d63892700519",
+        )
+        body = client.get(HEALTH_PATH).json()
+        assert body["revision"] == "d1177570148f58d30657015ab972d63892700519"
+
+    def test_an_unnamed_build_reports_null_rather_than_a_guess(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A laptop and a bare `docker run` set no resource attributes.
+
+        Null is the honest answer and the field has to keep it available: a placeholder
+        string would be a build label that matches no commit, which is worse than no
+        label at all because it looks like one.
+        """
+        monkeypatch.delenv(RESOURCE_ATTRIBUTES_ENV, raising=False)
+        body = client.get(HEALTH_PATH).json()
+        assert "revision" in body
+        assert body["revision"] is None
+
+    def test_the_build_is_reported_even_when_telemetry_is_not_wired(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A revision whose telemetry is broken is exactly when the build label matters.
+
+        It is read out of the resource attributes, not off the exporter, so a missing
+        ingest token cannot also take away the answer to "which build am I asking?".
+        """
+        for name in (OTLP_ENDPOINT_ENV, OTLP_HEADERS_ENV, OTLP_TOKEN_ENV):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(RESOURCE_ATTRIBUTES_ENV, "service.version=abc123")
+        body = client.get(HEALTH_PATH).json()
+        assert body["telemetry_configured"] is False
+        assert body["revision"] == "abc123"
 
     def test_reports_unconfigured_telemetry_as_unconfigured(
         self, monkeypatch: pytest.MonkeyPatch

@@ -385,6 +385,12 @@ def health(config: Config) -> HealthResponse:
     return HealthResponse(
         status="ok",
         service=current.service_name,
+        # Which build is serving. Public, and deliberately so: a commit SHA discloses
+        # nothing `git log` on this public repo does not, and it is not topology — no
+        # project id, no bucket, no hostname, no service-account address. It is
+        # `vault_backend`'s argument again: "this deployment is on the wrong revision" is
+        # exactly the misconfiguration the field exists to surface.
+        revision=current.service_version,
         telemetry_configured=current.otlp_configured,
         telemetry_exporting=current.exporting,
         errors_configured=current.errors_configured,

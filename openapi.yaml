@@ -241,6 +241,18 @@ components:
             \ silently looks exactly like one nobody has tried."
           title: Login Configured
           type: boolean
+        revision:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: "The tadasant/motet commit SHA this build was made from \u2014 the deploy's image\
+            \ tag, read back out of the OTel 'service.version' resource attribute. Not a Cloud Run revision\
+            \ name. null means nothing set it, which is a laptop or a bare 'docker run' rather than a\
+            \ deployment. Reported because 'is the pin bump actually live' is the first question asked\
+            \ after a deploy, and until now the only answers were diffing the served OpenAPI document\
+            \ \u2014 which cannot see a commit that changed only behaviour \u2014 or querying the obs\
+            \ stack for a log line this service does not emit per request."
+          title: Revision
         service:
           description: OTel service name this process reports as
           title: Service
@@ -276,6 +288,7 @@ components:
       required:
       - status
       - service
+      - revision
       - telemetry_configured
       - telemetry_exporting
       - errors_configured

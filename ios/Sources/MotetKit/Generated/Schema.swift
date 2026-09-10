@@ -209,6 +209,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var errorsConfigured: Bool
     public var inferenceMode: String
     public var loginConfigured: Bool
+    public var revision: String?
     public var service: String
     public var status: String
     public var telemetryConfigured: Bool
@@ -221,6 +222,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         errorsConfigured: Bool,
         inferenceMode: String,
         loginConfigured: Bool,
+        revision: String? = nil,
         service: String,
         status: String,
         telemetryConfigured: Bool,
@@ -232,6 +234,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.errorsConfigured = errorsConfigured
         self.inferenceMode = inferenceMode
         self.loginConfigured = loginConfigured
+        self.revision = revision
         self.service = service
         self.status = status
         self.telemetryConfigured = telemetryConfigured
@@ -245,6 +248,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case errorsConfigured = "errors_configured"
         case inferenceMode = "inference_mode"
         case loginConfigured = "login_configured"
+        case revision
         case service
         case status
         case telemetryConfigured = "telemetry_configured"
