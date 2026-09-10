@@ -233,7 +233,11 @@ def configure_cors(target: FastAPI, config: Settings) -> None:
         # `Authorization` is a non-simple header, so every request the SPA makes is
         # preflighted and this list is what makes the preflight pass.
         allow_headers=["Authorization", "Content-Type"],
-        allow_methods=["GET", "POST", "OPTIONS"],
+        # Every verb any `/v1` route declares, and `test_deploy_wiring` walks the route
+        # table to prove it. A route reachable from the SPA's own generated client but
+        # missing from this list fails only in a browser, only cross-origin, and only as
+        # a preflight nobody sees — which is the least diagnosable shape a bug has here.
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         # Deliberately NOT `allow_credentials=True`. The client never sets
         # `credentials: 'include'` — it carries its token in `Authorization`, which is not
         # a credential in the CORS sense — so allowing them buys nothing, and it would
@@ -1222,6 +1226,12 @@ def create_smart_episode(
 # --- Phase 2: read state from the audio side -----------------------------------------
 
 
+# The explicit `summary` is load-bearing rather than cosmetic: FastAPI derives one from
+# the handler's name, so two routes on one handler would carry the same summary — and the
+# Swift generator names its endpoint function from the summary, so both would emit
+# `MotetEndpoints.reportListenProgress` and the enum would not compile. The generator
+# refuses on a collision now, so a future stack fails at `bin/ci` rather than at the one
+# job in this project that has a Swift compiler.
 @app.put(
     "/v1/episodes/{episode_id}/position",
     response_model=ListenProgressResponse,

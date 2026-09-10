@@ -377,9 +377,12 @@ position is ours" reaching past the device that did the listening. `PUT
 /v1/episodes/{id}/position` is the write a syncing player wants, and it is **the same handler
 as `POST /v1/episodes/{id}/progress`**, two decorators on one function rather than two write
 paths: a second path would be a second definition of one fact, which is exactly what
-invariant 5 forbids. `POST .../progress` stays because it is what every generated client
-already calls, and because breaking it would be a contract change an additive feature has no
-business making.
+invariant 5 forbids. `POST .../progress` stays because it is the shipped contract in both
+deployed environments and every generated client already carries it — removing a route is a
+breaking change an additive feature has no business making — not because anything is known to
+call it today. The explicit `summary=` on the `PUT` decorator is load-bearing: the Swift
+generator names its endpoint function from the summary, and FastAPI would derive the same one
+for both routes.
 
 **The value is monotonic, so it is the *furthest* point rather than the playhead**, and the
 distinction is the one thing to get right when wiring a client to it. The iOS store keeps

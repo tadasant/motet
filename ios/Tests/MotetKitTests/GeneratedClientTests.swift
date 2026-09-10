@@ -11,6 +11,7 @@ final class GeneratedClientTests: XCTestCase {
           "duration_ms": 300000, "max_duration_ms": 600000,
           "audio_bytes": 4820000, "audio_media_type": "audio/mpeg", "last_error": null,
           "created_at": "2026-08-24T04:00:00.123456Z", "published_at": null,
+          "listened_through_ms": 42000,
           "segments": [{
             "news_item_id": "news-a", "news_item_title": "Alpha", "text": "…",
             "start_ms": 0, "duration_ms": 60000,
@@ -28,6 +29,7 @@ final class GeneratedClientTests: XCTestCase {
 
         XCTAssertEqual(episode.episodeState, .ready)
         XCTAssertEqual(episode.audioBytes, 4_820_000)
+        XCTAssertEqual(episode.listenedThroughMs, 42_000, "motet#11: position comes back")
         XCTAssertNil(episode.publishedAt)
         XCTAssertEqual(episode.segments.first?.claims.first?.span.start, 20)
         XCTAssertEqual(episode.newsItemIds, ["news-a"])

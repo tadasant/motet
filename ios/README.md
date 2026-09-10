@@ -187,6 +187,13 @@ this store's `furthestSpokenMs` and not its `spokenThroughMs`. Sending the playh
 let a seek backwards, or a stale outbox entry replayed after a walk, rewind the position for
 every other device. Where the listener scrubbed back to is device-local on purpose.
 
+**And one ordering constraint**, which is the same one every required response field carries:
+`listened_through_ms` is not optional, and the generated types decode strictly, so a build
+that expects it cannot read an episode from an API revision that predates it — not a missing
+field, an empty episodes list. The API image pin lags `main` by however long the last bump
+was ago, so ship the API first and check `/internal/health` before shipping a build that
+depends on it.
+
 **Wiring it up is deliberately not in this change.** It is a behaviour change, not a
 rebase, and it wants its own tests: `ListeningPositionStore` gains a remote sink, the outbox
 gains a third entry kind, and resume has to decide what to do when the device and the server

@@ -444,7 +444,9 @@ class ListenProgressRequest(BaseModel):
         ge=0,
         description=(
             "Monotonic on the server: seeking backwards is reviewing, not un-listening, "
-            "so a smaller value never lowers the recorded position or un-marks a story."
+            "so a smaller value never lowers the recorded position or un-marks a story. "
+            "Send the furthest point reached rather than the playhead — the response "
+            "carries the value that was actually stored, which is what to resume from."
         ),
     )
 
