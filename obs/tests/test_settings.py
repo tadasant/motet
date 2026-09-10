@@ -160,10 +160,6 @@ class TestStatus:
         env = {RESOURCE_ATTRIBUTES_ENV: "service.namespace=motet,service.version=abc123"}
         assert status(env).service_version == "abc123"
 
-    def test_an_unnamed_build_is_none(self) -> None:
-        """A laptop sets no resource attributes, and must not claim a build it is not."""
-        assert status({}).service_version is None
-
     def test_the_build_is_reported_without_any_telemetry_wiring(self) -> None:
         """Which build is serving is not a question about whether exporting works.
 

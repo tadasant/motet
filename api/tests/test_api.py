@@ -110,6 +110,40 @@ class TestHealth:
         assert "revision" in body
         assert body["revision"] is None
 
+    def test_a_build_label_that_is_not_a_commit_sha_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The disclosure argument, made structural instead of asserted.
+
+        Nothing in this repo can see what the private infrastructure repo puts in
+        `service.version`, and this route is unauthenticated and this repo is public. The
+        realistic accident is the full image reference — which carries a project id and a
+        registry host — so the route repeats a build label only when it has the shape of
+        one. Same reasoning as `vault_ready`'s `detail`, one field along.
+        """
+        monkeypatch.setenv(
+            RESOURCE_ATTRIBUTES_ENV,
+            "service.version=europe-west1-docker.pkg.dev/a-project/motet/api:abc123",
+        )
+        body = client.get(HEALTH_PATH).json()
+        assert body["revision"] is None
+        assert "a-project" not in json.dumps(body)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "d1177570148f58d30657015ab972d63892700519",  # the deploy's usual value
+            "bootstrap",  # the deploy's own sentinel, before any image was built
+            "abc1234",  # a short SHA
+        ],
+    )
+    def test_a_build_label_shaped_like_one_is_published(
+        self, value: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal above must not be so tight that it eats the real values."""
+        monkeypatch.setenv(RESOURCE_ATTRIBUTES_ENV, f"service.version={value}")
+        assert client.get(HEALTH_PATH).json()["revision"] == value
+
     def test_the_build_is_reported_even_when_telemetry_is_not_wired(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

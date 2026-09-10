@@ -141,6 +141,13 @@ how you tell a staging deployment that is missing a variable from one that is br
 unauthenticated on purpose; `/healthz` does not exist and never will, because Cloud Run's
 frontend eats that path.
 
+**It also reports `revision`, and that is the answer to "am I testing the change I think I
+am".** The image pin lags this repo's `main`, so a route or a fix merged here is not
+necessarily serving there; `revision` is the commit the running image was built from, and
+comparing it against `git log` settles it in one call. Do that before concluding anything
+about a fix from what staging does. `null` means nothing named the build, which on a
+deployed environment is itself the finding.
+
 `GET /v1/auth/session` answers `how` — `session` for a session token, whether it came from
 Google or from the mint; `token` for the shared `MOTET_API_TOKEN`; and `open` for a
 deployment with no `MOTET_API_TOKEN` set at all. That is the cheapest way to confirm what
