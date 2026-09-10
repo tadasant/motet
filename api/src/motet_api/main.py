@@ -124,7 +124,10 @@ from .shownotes import chapters_json, transcript_vtt
 
 logger = logging.getLogger("motet.api")
 
-Conn = Annotated[psycopg.Connection[Any], Depends(connection)]
+#: ``scope="function"`` is load-bearing: it commits — and fires the drain nudge — before the
+#: response starts rather than after it is sent. See ``deps.connection``; every
+#: ``Depends(connection)`` must say the same, or a request gets two connections.
+Conn = Annotated[psycopg.Connection[Any], Depends(connection, scope="function")]
 User = Annotated[str, Depends(require_api_token)]
 #: The caller *and how they proved it* — a signed-in browser, the shared API token, or an
 #: unlocked deployment. Only the sign-in routes need the distinction; every other route

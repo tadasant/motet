@@ -20,6 +20,7 @@ is the inert trigger, and the enabled cases inject their own transport and token
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -371,10 +372,11 @@ class TestTheRoutesThatArmIt:
     def test_a_refused_poll_nudges_nothing(
         self, api: TestClient, recorder: Recorder, db: psycopg.Connection[Any]
     ) -> None:
-        """A route that raises after arming rolls back, so it must not nudge either.
+        """A route refused before it enqueues has nothing to nudge for.
 
-        An inactive source is refused with a 409 *before* the enqueue, which is the same
-        end state by a shorter road: nothing was queued, so nothing is asked to drain.
+        An inactive source is a 409 before `enqueue_source_poll` runs, so `arm` is never
+        reached. The harder case — armed, *then* failed — is
+        `TestItNeverFailsTheRequest::test_a_request_that_fails_after_arming_nudges_nothing`.
         """
         source = phase2.create_source(
             db, user_id=repo.OWNER_USER_ID, kind=SourceKind.GMAIL, name="Inbox"
@@ -410,6 +412,87 @@ class TestItNeverFailsTheRequest:
         assert "the trigger itself is broken" in caplog.text
         pending = api.get("/v1/ingestion", headers=AUTH).json()
         assert [item["id"] for item in pending] == [response.json()["id"]]
+
+    def test_a_request_that_fails_after_arming_nudges_nothing(
+        self,
+        api: TestClient,
+        recorder: Recorder,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Armed, then failed: the rollback path re-raises, so the fire never happens.
+
+        `create_episode` arms the nudge beside its enqueue and then reads the episode back;
+        failing that read is a request that got past the enqueue and still did not commit.
+        Asking a worker to drain on its behalf would be a nudge for a job row that does not
+        exist — and the row is checked on a separate connection to prove it does not.
+        """
+
+        def unreadable(*_: Any, **__: Any) -> None:
+            raise RuntimeError("failed after the enqueue")
+
+        monkeypatch.setattr(repo, "get_episode", unreadable)
+        with caplog.at_level(logging.ERROR, logger="motet.api"):
+            response = api.post(
+                "/v1/episodes", json={"title": "Morning", "max_duration_ms": 600_000}, headers=AUTH
+            )
+        assert response.status_code == 500
+        assert recorder.fired == []
+        with psycopg.connect(os.environ["DATABASE_URL"]) as other:
+            row = other.execute("SELECT count(*) FROM jobs WHERE queue = 'assemble'").fetchone()
+        assert row is not None and row[0] == 0, "the enqueue was rolled back"
+
+    def test_the_nudge_fires_before_the_response_starts(self, api: TestClient) -> None:
+        """The ordering the whole placement argument rests on, pinned on a raw ASGI `send`.
+
+        FastAPI tears a default-scoped `yield` dependency down *after* the response is
+        sent, which on Cloud Run is the CPU-throttled window a background task would also
+        have landed in. `connection` is `scope="function"` so the commit and the nudge run
+        before `http.response.start`. `TestClient` cannot see this — it hands back a
+        response only once the whole exchange is over — so this drives the app directly.
+        """
+        events: list[str] = []
+
+        class Ordering:
+            enabled = True
+
+            def fire(self, reason: DrainReason) -> None:
+                events.append("fire")
+
+        body = json.dumps({"title": "Acme raises $20M", "text": "Acme raises $20M."}).encode()
+        scope: dict[str, Any] = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/sources/paste",
+            "raw_path": b"/v1/sources/paste",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"authorization", f"Bearer {TOKEN}".encode()),
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                events.append(f"start {message['status']}")
+
+        app.dependency_overrides[drain_trigger] = Ordering
+        try:
+            asyncio.run(app(scope, receive, send))
+        finally:
+            app.dependency_overrides.pop(drain_trigger, None)
+        assert events == ["fire", "start 201"]
 
     def test_a_403_from_cloud_run_still_returns_201_and_keeps_the_work(
         self, api: TestClient

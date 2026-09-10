@@ -1152,7 +1152,15 @@ Five things are settled, and each is a different failure this shape avoids:
   Cloud Run throttles a container's CPU between requests unless the service asks
   otherwise, so a task scheduled after the response may not run until the next request
   arrives — and a nudge that fires unpredictably is worse than none, because the scheduled
-  sweep is what it would then be silently relying on.
+  sweep is what it would then be silently relying on. **"Before the response" is bought
+  by `scope="function"` on every `Depends(connection)`, and it was not true before this
+  change.** FastAPI's default scope tears a `yield` dependency down *after* the response
+  is sent, so the commit had always run post-response — a failed commit was a 201 the
+  client already held — and a nudge placed beside it would have landed in exactly the
+  throttled window this bullet rules out. The scope is part of FastAPI's dependency cache
+  key, so all three sites must agree or a request gets two connections;
+  `test_the_nudge_fires_before_the_response_starts` pins the order on a raw ASGI `send`,
+  which is the one place it is observable.
 - **A burst of enqueues starts a burst of executions, and that is accepted rather than
   overlooked.** Concurrency is already handled and already load-bearing — `SKIP LOCKED`,
   the per-user `serialize_key`, the lease keeper, the work fence — and the always-on

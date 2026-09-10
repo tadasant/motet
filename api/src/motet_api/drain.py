@@ -67,6 +67,12 @@ CLOUD_PLATFORM_SCOPE: Final = "https://www.googleapis.com/auth/cloud-platform"
 #: is latency a human is waiting through. A control-plane call that has not answered in
 #: five seconds is not going to make the difference between this drain and the backstop
 #: sweep, and giving up is cheaper than making somebody watch a spinner.
+#:
+#: What it bounds, precisely: each phase of the ``:run`` POST (httpx applies it per
+#: connect/read/write, not as a total). It does **not** bound the credential refresh in
+#: :class:`AdcAccessToken`, which on Cloud Run is a metadata-server read measured in
+#: milliseconds and on a machine off GCP is google-auth's own, much longer, timeout — a
+#: case that only arises with ``MOTET_WORKER_JOB`` set on a laptop, which nothing does.
 DEFAULT_TIMEOUT_SECONDS: Final = 5.0
 
 #: How much of a rejection body to keep. Google's errors put the useful sentence first;
@@ -78,7 +84,9 @@ class DrainReason(StrEnum):
     """Which user action asked for the drain.
 
     A metric label, so the set is closed and small by construction: one member per
-    enqueue site in the API, and there are four of them.
+    enqueue *helper* the API calls. There are four helpers and five routes, because
+    ``enqueue_source_poll`` is reached both by completing mailbox consent and by asking a
+    source to poll — and those are the same user intent, so they share a label.
     """
 
     PASTE = "paste"

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,6 +45,7 @@ logger = logging.getLogger("motet.api")
 
 _store: ObjectStore | None = None
 _trigger: DrainTrigger | None = None
+_trigger_lock = threading.Lock()
 
 
 def settings() -> Settings:
@@ -58,9 +60,15 @@ def drain_trigger() -> DrainTrigger:
     the metadata server on every paste.
     """
     global _trigger
-    if _trigger is None:
-        _trigger = build_trigger()
-    return _trigger
+    trigger = _trigger
+    if trigger is None:
+        # Locked because sync routes run in a threadpool: two first requests arriving
+        # together would otherwise each build a trigger and leak one HTTP client.
+        with _trigger_lock:
+            if _trigger is None:
+                _trigger = build_trigger()
+            trigger = _trigger
+    return trigger
 
 
 def reset_drain_trigger() -> None:
@@ -151,6 +159,16 @@ def connection(
     than no nudge, because the scheduled sweep is the thing it would be silently relying
     on. The cost is the invoke's latency inside the request, bounded by
     :data:`~motet_api.drain.DEFAULT_TIMEOUT_SECONDS`.
+
+    **"Inside the request" is only true because every ``Depends(connection)`` says
+    ``scope="function"``.** FastAPI's default scope for a ``yield`` dependency is
+    ``"request"``, whose teardown runs *after* the response has been sent — so before this
+    the commit itself ran post-response, a failed commit was a 201 the client had already
+    received, and the nudge would have landed in exactly the throttled window the paragraph
+    above rules out. ``"function"`` tears down when the route returns, before the response
+    starts. All three sites must agree: the scope is part of FastAPI's dependency cache
+    key, so a mismatch would open two connections per request.
+    ``api/tests/test_drain.py`` pins the order against a raw ASGI ``send``.
     """
     if not config.database_url:
         raise HTTPException(
@@ -195,7 +213,7 @@ class Caller:
 
 def require_caller(
     config: Annotated[Settings, Depends(settings)],
-    conn: Annotated[psycopg.Connection[Any], Depends(connection)],
+    conn: Annotated[psycopg.Connection[Any], Depends(connection, scope="function")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> Caller:
     """Authorize a ``/v1`` request, by shared token or by browser session.
@@ -278,7 +296,7 @@ def require_api_token(caller: Annotated[Caller, Depends(require_caller)]) -> str
 
 
 def require_feed_token(
-    conn: Annotated[psycopg.Connection[Any], Depends(connection)],
+    conn: Annotated[psycopg.Connection[Any], Depends(connection, scope="function")],
     token: Annotated[str, Query(description="The feed's secret, from GET /v1/feed.")] = "",
 ) -> str:
     """Resolve a feed token to its owner, or refuse.
