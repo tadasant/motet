@@ -242,6 +242,25 @@ def _parameters(operation: dict[str, Any], path_item: dict[str, Any]) -> list[di
     return list(path_item.get("parameters", [])) + list(operation.get("parameters", []))
 
 
+def endpoint_name(path: str, method: str, operation: dict[str, Any]) -> str:
+    """The Swift function name for an operation, which is derived from its summary.
+
+    **Two operations with the same summary emit two functions with the same name**, and
+    the enum will not compile — which is a real possibility, because one FastAPI handler
+    may serve two routes (``PUT .../position`` and ``POST .../progress`` are one handler,
+    motet#11) and FastAPI derives both summaries from the function's name. :func:`generate`
+    refuses rather than writing a file that fails to build several minutes later on the one
+    machine in this project that has a Swift compiler.
+    """
+    # FastAPI suffixes every operationId with its route and verb
+    # (`get_episode_v1_episodes__episode_id__get`). Keep the leading summary words only —
+    # the rest is the path, which is right there in the returned endpoint.
+    summary = operation.get("summary")
+    if summary:
+        return camel_case(summary)
+    return camel_case(operation.get("operationId") or f"{method}_{path}")
+
+
 def render_endpoint(
     path: str, method: str, operation: dict[str, Any], shared: dict[str, Any]
 ) -> str:
@@ -249,13 +268,8 @@ def render_endpoint(
     path_params = [p for p in params if p.get("in") == "path"]
     query_params = [p for p in params if p.get("in") == "query"]
 
-    func_name = camel_case(operation.get("operationId") or f"{method}_{path}")
-    # FastAPI suffixes every operationId with its route and verb
-    # (`get_episode_v1_episodes__episode_id__get`). Keep the leading summary words only —
-    # the rest is the path, which is right there in the returned endpoint.
+    func_name = endpoint_name(path, method, operation)
     summary = operation.get("summary")
-    if summary:
-        func_name = camel_case(summary)
 
     args: list[str] = []
     swift_path = path
@@ -312,12 +326,24 @@ def generate(spec: dict[str, Any]) -> str:
         "public enum MotetEndpoints {"
     )
     endpoints: list[str] = []
+    seen: dict[str, str] = {}
     paths: dict[str, Any] = spec.get("paths", {})
     for path in sorted(paths):
         path_item = paths[path]
         for method in HTTP_METHODS:
-            if method in path_item:
-                endpoints.append(render_endpoint(path, method, path_item[method], path_item))
+            if method not in path_item:
+                continue
+            operation = path_item[method]
+            name = endpoint_name(path, method, operation)
+            where = f"{method.upper()} {path}"
+            if name in seen:
+                raise SystemExit(
+                    f"two operations would emit `MotetEndpoints.{name}`: "
+                    f"{seen[name]} and {where}. Give one of them a distinct `summary=` on "
+                    f"its FastAPI decorator — a duplicate here does not compile."
+                )
+            seen[name] = where
+            endpoints.append(render_endpoint(path, method, operation, path_item))
     chunks.append("\n\n".join(endpoints))
     chunks.append("}\n")
 

@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from motet_api.config import APP_BASE_URL_ENV, ConfigError, Settings
-from motet_api.main import UnhandledErrorMiddleware, configure_cors
+from motet_api.main import UnhandledErrorMiddleware, app, configure_cors
 from motet_api.obs import (
     ERROR_DSN_ENV,
     GLITCHTIP_DSN_ENV,
@@ -211,6 +211,35 @@ class TestCorsMiddleware:
     def test_no_configured_origin_means_no_cors_headers(self) -> None:
         response = self._client(None).get("/v1/news-items", headers={"Origin": APP_ORIGIN})
         assert "access-control-allow-origin" not in response.headers
+
+    def test_every_verb_the_api_declares_survives_a_preflight(self) -> None:
+        """The allow-methods list is walked out of the real route table, not retyped.
+
+        A verb missing from it fails only in a browser, only cross-origin, and only as a
+        preflight nobody looks at — the route works perfectly from ``curl`` and from every
+        test in this suite. ``PUT`` was the first one that could have gone missing
+        (motet#11); ``DELETE`` had already been sitting in the route table and out of the
+        list for two routes.
+        """
+        client = self._client(APP_ORIGIN)
+        declared = {
+            method
+            for route in app.routes
+            for method in getattr(route, "methods", set()) or set()
+            if getattr(route, "path", "").startswith("/v1")
+        }
+        assert {"GET", "POST", "PUT", "DELETE"} <= declared, "the API grew or lost a verb"
+        for method in sorted(declared - {"HEAD", "OPTIONS"}):
+            response = client.options(
+                "/v1/news-items",
+                headers={
+                    "Origin": APP_ORIGIN,
+                    "Access-Control-Request-Method": method,
+                    "Access-Control-Request-Headers": "authorization",
+                },
+            )
+            allowed = response.headers.get("access-control-allow-methods", "")
+            assert method in allowed, f"{method} is declared on a /v1 route but not allowed"
 
 
 class TestOtlpHeaderResolution:
