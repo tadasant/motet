@@ -236,6 +236,19 @@ job, and `GLITCHTIP_DSN` is the same story without the formatting:
 | `OTEL_INGEST_TOKEN` (raw bearer) | `OTEL_EXPORTER_OTLP_HEADERS` | Terraform cannot build the header string |
 | `GLITCHTIP_DSN` | `SENTRY_DSN_BACKEND` | it is the name the secret was placed under |
 
+**`/internal/health` reports `revision`, and it is a read of a value the deploy already
+sets rather than new plumbing.** `service.version` in `OTEL_RESOURCE_ATTRIBUTES` is the
+commit the image was built from; `motet_obs` has always resolved it, because GlitchTip
+takes it as the release. `ObsStatus` carries it so that the label the spans wear and the
+label the route reports are one string resolved once — the same argument the service name
+already makes. **The route does not repeat it verbatim**: it is unauthenticated and this
+repo is public, so `motet_api.main.REVISION_PATTERN` admits a commit SHA and the deploy's
+`bootstrap` sentinel and refuses anything carrying `/`, `:`, `.` or `@`. That is the
+difference between a disclosure argument that is a property of this repo and one that is a
+promise about a variable in the other one — and it is `vault_ready`'s `detail` being
+withheld, one field along, for the same reason. A refused value reports `null` and says so
+at ERROR on startup.
+
 **An endpoint without a credential is not "configured."** obs rejects an unauthenticated
 export, so that combination buys a 401 per export rather than data — which reads as an obs
 fault. `/internal/health` reports `telemetry_configured: false` for it deliberately, and
@@ -296,8 +309,12 @@ service returned Google's `hello` sample, because the infrastructure was stood u
 second of Cartesia audio — so everything downstream of the fakes is still unproven, and
 being deployed does not change that. The image pin lags this repo's `main` by however long
 the last bump was ago: a route merged here is not a route serving there, and
-`/internal/health` plus the served OpenAPI document are how you tell. Pushing the image and
-the runtime environment the services get are tracked in the private infrastructure repo.
+`/internal/health` is how you tell — it reports `revision`, the commit the serving image
+was built from. **The served OpenAPI document is the weaker instrument and was the only one
+for a while**, which is motet#37: a document diff bounds the build to a *range*, and only
+when consecutive commits happen to differ in their route table, so a bugfix bump — which
+usually changes only behaviour — is invisible to it. Pushing the image and the runtime
+environment the services get are tracked in the private infrastructure repo.
 
 **Phase 1's real deliverable is the factory, not the feature.** The question it answers is
 *"does the factory work?"* — not *"is the briefing good?"*. That is what the scaffolding in

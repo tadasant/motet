@@ -15,6 +15,7 @@ the blast radius for no functional gain.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -154,7 +155,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """
     # First, so that everything below is logged through the configured handler rather
     # than through whatever `logging` falls back to.
-    obs.configure()
+    telemetry = obs.configure()
+    if telemetry.service_version and publishable_revision(telemetry.service_version) is None:
+        obs.logger.error(
+            "obs: service.version is not a shape %s may repeat, so it reports "
+            "revision=null. It must be letters, digits, '_' and '-' — a commit SHA, or "
+            "the deploy's bootstrap sentinel. An image reference or a hostname is "
+            "refused because that route is unauthenticated and this repo is public.",
+            HEALTH_PATH,
+        )
     config = load_llm_config()
     obs.logger.info("llm: %s", config.describe())
     current = Settings.from_env()
@@ -366,6 +375,38 @@ HEALTH_PATH = "/internal/health"
 #: same claim against a real container. Keep all three in step.
 PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
 
+#: The shape ``revision`` insists on before this route will repeat it.
+#:
+#: The value arrives from the deploy, as OTel's ``service.version``, and nothing in this
+#: repo can see what the private infrastructure repo puts there. This route is
+#: unauthenticated and this repo is public, so relaying an infrastructure-controlled
+#: string verbatim would make the field's whole disclosure argument — *a commit SHA
+#: discloses nothing ``git log`` does not* — a promise about a variable in the other repo
+#: rather than a property of this one. ``vault_ready`` sets the precedent one field along:
+#: its ``detail`` is withheld because a KMS refusal quotes the key resource path.
+#:
+#: A commit SHA is letters, digits, ``_`` and ``-``, and so is the deploy's own
+#: ``bootstrap`` sentinel. An image reference, a hostname, a bucket path and a
+#: service-account address all carry ``/``, ``:``, ``.`` or ``@`` — so refusing those
+#: characters refuses every topology shape AGENTS.md names, structurally rather than by
+#: asking the other repo to be careful. Setting ``service.version`` to the full image
+#: reference is the realistic accident, and it would publish a project id and a registry
+#: host to anyone on the internet.
+REVISION_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def publishable_revision(service_version: str | None) -> str | None:
+    """The build label, when it is one a public route may repeat.
+
+    A refused value reports as ``None``, which is the same answer as "nothing set it" —
+    deliberately, because a second public field to distinguish them would be a second
+    public field. The lifespan logs the difference instead, at ERROR, which is where an
+    operator who knows the deploy sets it will look.
+    """
+    if service_version is None:
+        return None
+    return service_version if REVISION_PATTERN.fullmatch(service_version) else None
+
 
 @app.get(HEALTH_PATH, response_model=HealthResponse, tags=["ops"])
 def health(config: Config) -> HealthResponse:
@@ -389,6 +430,12 @@ def health(config: Config) -> HealthResponse:
     return HealthResponse(
         status="ok",
         service=current.service_name,
+        # Which build is serving. Public, and deliberately so: a commit SHA discloses
+        # nothing `git log` on this public repo does not, and it is not topology — no
+        # project id, no bucket, no hostname, no service-account address. It is
+        # `vault_backend`'s argument again: "this deployment is on the wrong revision" is
+        # exactly the misconfiguration the field exists to surface.
+        revision=publishable_revision(current.service_version),
         telemetry_configured=current.otlp_configured,
         telemetry_exporting=current.exporting,
         errors_configured=current.errors_configured,

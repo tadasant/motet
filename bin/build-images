@@ -13,6 +13,7 @@
 #     bin/build-images              # build and smoke-test all three
 #     bin/build-images api web      # a subset
 #     TAG=v1 bin/build-images       # pin the tag instead of the per-run default
+#     REVISION=<sha> bin/build-images   # name the build when git cannot be read
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,6 +22,19 @@ cd "$(dirname "$0")/.."
 # concurrency by ref, so a PR run and a push-to-main run overlap freely on one box —
 # a fixed tag means one run retags the image another is about to smoke-test.
 TAG="${TAG:-local-$$}"
+
+# The commit these images are built from, which a deployed revision reports on
+# /internal/health as `revision`. The deploy passes this same value as the image tag.
+#
+# The smoke test both supplies it to the container and asserts the container reports it
+# back, so what is on trial is the *round trip* — that the image resolves the deploy's
+# variable and publishes it — rather than the value. Reading it from git anyway makes the
+# printed line say something true about the artifact, and the fallback exists because a
+# checkout with no git history (a tarball, an odd container) must still be able to build:
+# a sentinel keeps every assertion exactly as strong without requiring a toolchain this
+# script does not otherwise need. It has to satisfy `main.REVISION_PATTERN`, or health
+# would refuse to publish it.
+REVISION="${REVISION:-$(git rev-parse HEAD 2>/dev/null || echo smoke-no-git)}"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
@@ -105,9 +119,20 @@ smoke_api() {
   # request. The key path is a throwaway string; nothing here calls Cloud KMS. What is on
   # trial is whether the SDK is in the *image*, which is the one claim the workspace's own
   # venv cannot make on the image's behalf. Same lesson as motet#16.
+  #
+  # OTEL_RESOURCE_ATTRIBUTES carries the build label, and it is set here for the same
+  # kind of reason: `service.version` is how the deploy names the commit an image was
+  # built from, and /internal/health reads it back so that "is the pin bump live?" has an
+  # answer. Passing it as an environment variable is not a stand-in for the deploy — it
+  # IS the deploy's mechanism, and the private infrastructure repo composes this same
+  # variable — so what is on trial is that the built image resolves it and reports it,
+  # which is the half this repo owns. `service.name=` rides along, inert, so that what
+  # the container is handed is a *list* of attributes like the deploy's rather than the
+  # single pair that would never exercise the parse.
   docker run -d --name "$name" -P \
     -e MOTET_VAULT_BACKEND=kms \
     -e MOTET_VAULT_KMS_KEY=projects/smoke/locations/smoke/keyRings/smoke/cryptoKeys/smoke \
+    -e "OTEL_RESOURCE_ATTRIBUTES=service.name=motet-api,service.version=${REVISION}" \
     "motet-api:${TAG}" >/dev/null
   port="$(host_port "$name")"
 
@@ -121,6 +146,15 @@ smoke_api() {
   case "$body" in
     *'"vault_ready":true'*) ;;
     *) echo "smoke: the image cannot seal a credential — google-cloud-kms is missing" >&2
+       return 1 ;;
+  esac
+  # Non-empty AND equal to the SHA this run built. Non-empty alone would pass on a null
+  # the JSON encoder wrote as the string "null", and on a field that reported some other
+  # constant — neither of which answers the question the field exists for.
+  case "$body" in
+    *"\"revision\":\"${REVISION}\""*)
+      echo "    revision -> ${REVISION} (the build this image was made from)" ;;
+    *) echo "smoke: ${API_HEALTH_PATH} did not report the build's revision (${REVISION})" >&2
        return 1 ;;
   esac
 
