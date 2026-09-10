@@ -273,6 +273,15 @@ class EpisodeResponse(BaseModel):
     last_error: str | None
     created_at: datetime
     published_at: datetime | None
+    listened_through_ms: int = Field(
+        description=(
+            "How far the listener has been reported through this episode, in "
+            "milliseconds. Served back so a device that has never played the episode can "
+            "still resume where another one got to (invariant 4: the position is ours). "
+            "Monotonic, so this is the furthest point reached rather than wherever a "
+            "player happens to be parked right now."
+        )
+    )
     segments: list[SegmentResponse]
 
 
@@ -424,6 +433,11 @@ class ListenProgressRequest(BaseModel):
     record, never a value read back out of a vendor SDK. Invariant 5 is what it does: a
     story whose segment has been passed is marked read, which is the same fact the backlog
     screen's toggle writes.
+
+    The body of both ``PUT /v1/episodes/{id}/position`` and
+    ``POST /v1/episodes/{id}/progress``, because they are one write. The name is the
+    server's: ``spoken_through_ms`` is the voice session contract's word for a position
+    that moves backwards when a listener seeks back, and this value deliberately does not.
     """
 
     listened_through_ms: int = Field(

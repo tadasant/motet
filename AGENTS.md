@@ -370,6 +370,27 @@ ticking it off on the backlog screen stay one fact. Deliberately **not** named
 session's work, and the voice service should call this same repository function rather than
 growing a second column.
 
+**It is also served back, and that read is what makes the position cross-device** (motet#11).
+`EpisodeResponse.listened_through_ms` carries it on every episode a client loads, so a phone
+that has never played an episode can still resume where a laptop got to — invariant 4's "the
+position is ours" reaching past the device that did the listening. `PUT
+/v1/episodes/{id}/position` is the write a syncing player wants, and it is **the same handler
+as `POST /v1/episodes/{id}/progress`**, two decorators on one function rather than two write
+paths: a second path would be a second definition of one fact, which is exactly what
+invariant 5 forbids. `POST .../progress` stays because it is what every generated client
+already calls, and because breaking it would be a contract change an additive feature has no
+business making.
+
+**The value is monotonic, so it is the *furthest* point rather than the playhead**, and the
+distinction is the one thing to get right when wiring a client to it. The iOS store keeps
+both — `spokenThroughMs`, which moves backwards when the listener seeks back, and
+`furthestSpokenMs`, which does not — and the server's column is the second of those. That is
+why the API does not spell this field `spoken_through_ms` however much a client would like it
+to: the same name for two different quantities across the client boundary is worse than two
+names for one. A last-write-wins playhead would also be the wrong thing to sync, because a
+durable offline outbox replays *stale* writes, and last-write-wins on a stale write rewinds a
+walk. Where the listener scrubbed back to stays on the device, deliberately.
+
 **Claim timings are apportioned, not measured.** Narration is synthesized per *segment*, so
 segment boundaries are exact and claims within a segment are proportioned by length. Going
 per-claim would give exact timings at the cost of three to four times the request count and

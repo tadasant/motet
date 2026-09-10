@@ -133,6 +133,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
     public var durationMs: Int
     public var id: String
     public var lastError: String?
+    public var listenedThroughMs: Int
     public var maxDurationMs: Int
     public var publishedAt: Date?
     public var segments: [SegmentResponse]
@@ -146,6 +147,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
         durationMs: Int,
         id: String,
         lastError: String? = nil,
+        listenedThroughMs: Int,
         maxDurationMs: Int,
         publishedAt: Date? = nil,
         segments: [SegmentResponse],
@@ -158,6 +160,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
         self.durationMs = durationMs
         self.id = id
         self.lastError = lastError
+        self.listenedThroughMs = listenedThroughMs
         self.maxDurationMs = maxDurationMs
         self.publishedAt = publishedAt
         self.segments = segments
@@ -172,6 +175,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
         case durationMs = "duration_ms"
         case id
         case lastError = "last_error"
+        case listenedThroughMs = "listened_through_ms"
         case maxDurationMs = "max_duration_ms"
         case publishedAt = "published_at"
         case segments
@@ -385,6 +389,11 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
 /// record, never a value read back out of a vendor SDK. Invariant 5 is what it does: a
 /// story whose segment has been passed is marked read, which is the same fact the backlog
 /// screen's toggle writes.
+///
+/// The body of both ``PUT /v1/episodes/{id}/position`` and
+/// ``POST /v1/episodes/{id}/progress``, because they are one write. The name is the
+/// server's: ``spoken_through_ms`` is the voice session contract's word for a position
+/// that moves backwards when a listener seeks back, and this value deliberately does not.
 public struct ListenProgressRequest: Codable, Hashable, Sendable {
     public var listenedThroughMs: Int
 
@@ -926,6 +935,11 @@ public enum MotetEndpoints {
     /// `POST /v1/episodes/{episode_id}/listened` — Mark Episode Listened
     public static func markEpisodeListened(episodeId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/episodes/\(MotetPathComponent(episodeId))/listened")
+    }
+
+    /// `PUT /v1/episodes/{episode_id}/position` — Set Playback Position
+    public static func setPlaybackPosition(episodeId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "PUT", path: "/v1/episodes/\(MotetPathComponent(episodeId))/position")
     }
 
     /// `POST /v1/episodes/{episode_id}/progress` — Report Listen Progress

@@ -931,6 +931,7 @@ def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeRe
         last_error=episode.last_error,
         created_at=episode.created_at,
         published_at=episode.published_at,
+        listened_through_ms=episode.listened_through_ms,
         segments=segments,
     )
 
@@ -1221,6 +1222,12 @@ def create_smart_episode(
 # --- Phase 2: read state from the audio side -----------------------------------------
 
 
+@app.put(
+    "/v1/episodes/{episode_id}/position",
+    response_model=ListenProgressResponse,
+    summary="Set Playback Position",
+    tags=["episodes"],
+)
 @app.post(
     "/v1/episodes/{episode_id}/progress",
     response_model=ListenProgressResponse,
@@ -1242,6 +1249,15 @@ def report_listen_progress(
     Position is monotonic on the server (invariant 4: we own it). A client that seeks
     backwards is reviewing, not un-listening, so a lower report never lowers the recorded
     position and never un-marks a story.
+
+    **Two paths, one handler, and the stacked decorators are the point** (motet#11).
+    ``PUT /v1/episodes/{id}/position`` is the position resource a syncing player wants: an
+    idempotent write of one integer, whose current value comes back on every
+    ``EpisodeResponse`` so a device that has never played the episode can still resume.
+    ``POST /v1/episodes/{id}/progress`` is the same write under the name the shipped
+    clients already generate against. A *second* write path would be a second definition
+    of one fact, which is the failure invariant 5 exists to prevent — so there is one
+    function, one column, and one monotonicity rule, reachable by two spellings.
     """
     try:
         position, marked = phase2.record_listen_progress(

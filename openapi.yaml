@@ -157,6 +157,13 @@ components:
           - type: string
           - type: 'null'
           title: Last Error
+        listened_through_ms:
+          description: 'How far the listener has been reported through this episode, in milliseconds.
+            Served back so a device that has never played the episode can still resume where another one
+            got to (invariant 4: the position is ours). Monotonic, so this is the furthest point reached
+            rather than wherever a player happens to be parked right now.'
+          title: Listened Through Ms
+          type: integer
         max_duration_ms:
           title: Max Duration Ms
           type: integer
@@ -189,6 +196,7 @@ components:
       - last_error
       - created_at
       - published_at
+      - listened_through_ms
       - segments
       title: EpisodeResponse
       type: object
@@ -430,7 +438,16 @@ components:
 
         story whose segment has been passed is marked read, which is the same fact the backlog
 
-        screen''s toggle writes.'
+        screen''s toggle writes.
+
+
+        The body of both ``PUT /v1/episodes/{id}/position`` and
+
+        ``POST /v1/episodes/{id}/progress``, because they are one write. The name is the
+
+        server''s: ``spoken_through_ms`` is the voice session contract''s word for a position
+
+        that moves backwards when a listener seeks back, and this value deliberately does not.'
       properties:
         listened_through_ms:
           description: 'Monotonic on the server: seeking backwards is reviewing, not un-listening, so
@@ -1432,6 +1449,60 @@ paths:
       summary: Mark Episode Listened
       tags:
       - episodes
+  /v1/episodes/{episode_id}/position:
+    put:
+      description: "Record how far the listener has got, and mark what they have passed as read.\n\n**This\
+        \ is how the audio surface participates in invariant 5.** Phase 1 only had the\nvisual side plus\
+        \ an all-or-nothing \"mark listened\"; this makes partial listening count.\nA story is read once\
+        \ its segment has been *passed* \u2014 the comparison is against the end\nof the segment, because\
+        \ marking at the start would tick a story off on its first word.\n\nPosition is monotonic on the\
+        \ server (invariant 4: we own it). A client that seeks\nbackwards is reviewing, not un-listening,\
+        \ so a lower report never lowers the recorded\nposition and never un-marks a story.\n\n**Two paths,\
+        \ one handler, and the stacked decorators are the point** (motet#11).\n``PUT /v1/episodes/{id}/position``\
+        \ is the position resource a syncing player wants: an\nidempotent write of one integer, whose\
+        \ current value comes back on every\n``EpisodeResponse`` so a device that has never played the\
+        \ episode can still resume.\n``POST /v1/episodes/{id}/progress`` is the same write under the name\
+        \ the shipped\nclients already generate against. A *second* write path would be a second definition\n\
+        of one fact, which is the failure invariant 5 exists to prevent \u2014 so there is one\nfunction,\
+        \ one column, and one monotonicity rule, reachable by two spellings."
+      operationId: report_listen_progress_v1_episodes__episode_id__position_put
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListenProgressRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListenProgressResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Set Playback Position
+      tags:
+      - episodes
   /v1/episodes/{episode_id}/progress:
     post:
       description: "Record how far the listener has got, and mark what they have passed as read.\n\n**This\
@@ -1440,7 +1511,14 @@ paths:
         \ its segment has been *passed* \u2014 the comparison is against the end\nof the segment, because\
         \ marking at the start would tick a story off on its first word.\n\nPosition is monotonic on the\
         \ server (invariant 4: we own it). A client that seeks\nbackwards is reviewing, not un-listening,\
-        \ so a lower report never lowers the recorded\nposition and never un-marks a story."
+        \ so a lower report never lowers the recorded\nposition and never un-marks a story.\n\n**Two paths,\
+        \ one handler, and the stacked decorators are the point** (motet#11).\n``PUT /v1/episodes/{id}/position``\
+        \ is the position resource a syncing player wants: an\nidempotent write of one integer, whose\
+        \ current value comes back on every\n``EpisodeResponse`` so a device that has never played the\
+        \ episode can still resume.\n``POST /v1/episodes/{id}/progress`` is the same write under the name\
+        \ the shipped\nclients already generate against. A *second* write path would be a second definition\n\
+        of one fact, which is the failure invariant 5 exists to prevent \u2014 so there is one\nfunction,\
+        \ one column, and one monotonicity rule, reachable by two spellings."
       operationId: report_listen_progress_v1_episodes__episode_id__progress_post
       parameters:
       - in: path

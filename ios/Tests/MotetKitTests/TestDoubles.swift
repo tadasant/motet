@@ -55,7 +55,8 @@ actor FakeAPI: MotetAPI {
         try check("createEpisode", title)
         return EpisodeResponse(
             audioBytes: nil, audioMediaType: nil, createdAt: Date(), durationMs: 0,
-            id: "new", lastError: nil, maxDurationMs: maxDurationMs, publishedAt: nil,
+            id: "new", lastError: nil, listenedThroughMs: 0, maxDurationMs: maxDurationMs,
+            publishedAt: nil,
             segments: [], state: "pending", title: title
         )
     }
@@ -270,6 +271,7 @@ enum Fixture {
             durationMs: durationMs,
             id: id,
             lastError: nil,
+            listenedThroughMs: 0,
             maxDurationMs: 600_000,
             publishedAt: createdAt,
             segments: [

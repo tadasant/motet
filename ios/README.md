@@ -174,10 +174,18 @@ That part is done, and it is what invariant 5 asks for.
 `spoken_through_ms` is a different fact, and it is still kept **on the device only**, so a
 second device does not know where you got to. When this app was written the contract had
 nowhere to put it, which is why it was filed as
-[issue #11](https://github.com/tadasant/motet/issues/11). The backend has since answered:
-`POST /v1/episodes/{id}/listen-progress` arrived with the Phase 2 backend, and the
-generated client already carries `reportListenProgress` because the generator picks up
-whatever `openapi.yaml` says.
+[issue #11](https://github.com/tadasant/motet/issues/11). **The backend has since answered
+both halves of it.** The write is `PUT /v1/episodes/{id}/position` (or
+`POST /v1/episodes/{id}/progress`, the same handler under the older name), and the *read* is
+`listened_through_ms` on every `EpisodeResponse` — which is the part that was missing, and
+the part cross-device resume actually needs. The generated client already carries
+`setPlaybackPosition`, `reportListenProgress` and the new field, because the generator picks
+up whatever `openapi.yaml` says.
+
+**One thing to get right when wiring it up:** the server's value is **monotonic**, so it is
+this store's `furthestSpokenMs` and not its `spokenThroughMs`. Sending the playhead would
+let a seek backwards, or a stale outbox entry replayed after a walk, rewind the position for
+every other device. Where the listener scrubbed back to is device-local on purpose.
 
 **Wiring it up is deliberately not in this change.** It is a behaviour change, not a
 rebase, and it wants its own tests: `ListeningPositionStore` gains a remote sink, the outbox

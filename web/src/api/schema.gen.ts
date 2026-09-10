@@ -343,6 +343,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/episodes/{episode_id}/position": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Playback Position
+         * @description Record how far the listener has got, and mark what they have passed as read.
+         *
+         *     **This is how the audio surface participates in invariant 5.** Phase 1 only had the
+         *     visual side plus an all-or-nothing "mark listened"; this makes partial listening count.
+         *     A story is read once its segment has been *passed* — the comparison is against the end
+         *     of the segment, because marking at the start would tick a story off on its first word.
+         *
+         *     Position is monotonic on the server (invariant 4: we own it). A client that seeks
+         *     backwards is reviewing, not un-listening, so a lower report never lowers the recorded
+         *     position and never un-marks a story.
+         *
+         *     **Two paths, one handler, and the stacked decorators are the point** (motet#11).
+         *     ``PUT /v1/episodes/{id}/position`` is the position resource a syncing player wants: an
+         *     idempotent write of one integer, whose current value comes back on every
+         *     ``EpisodeResponse`` so a device that has never played the episode can still resume.
+         *     ``POST /v1/episodes/{id}/progress`` is the same write under the name the shipped
+         *     clients already generate against. A *second* write path would be a second definition
+         *     of one fact, which is the failure invariant 5 exists to prevent — so there is one
+         *     function, one column, and one monotonicity rule, reachable by two spellings.
+         */
+        put: operations["report_listen_progress_v1_episodes__episode_id__position_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes/{episode_id}/progress": {
         parameters: {
             query?: never;
@@ -364,6 +402,15 @@ export interface paths {
          *     Position is monotonic on the server (invariant 4: we own it). A client that seeks
          *     backwards is reviewing, not un-listening, so a lower report never lowers the recorded
          *     position and never un-marks a story.
+         *
+         *     **Two paths, one handler, and the stacked decorators are the point** (motet#11).
+         *     ``PUT /v1/episodes/{id}/position`` is the position resource a syncing player wants: an
+         *     idempotent write of one integer, whose current value comes back on every
+         *     ``EpisodeResponse`` so a device that has never played the episode can still resume.
+         *     ``POST /v1/episodes/{id}/progress`` is the same write under the name the shipped
+         *     clients already generate against. A *second* write path would be a second definition
+         *     of one fact, which is the failure invariant 5 exists to prevent — so there is one
+         *     function, one column, and one monotonicity rule, reachable by two spellings.
          */
         post: operations["report_listen_progress_v1_episodes__episode_id__progress_post"];
         delete?: never;
@@ -870,6 +917,11 @@ export interface components {
             id: string;
             /** Last Error */
             last_error: string | null;
+            /**
+             * Listened Through Ms
+             * @description How far the listener has been reported through this episode, in milliseconds. Served back so a device that has never played the episode can still resume where another one got to (invariant 4: the position is ours). Monotonic, so this is the furthest point reached rather than wherever a player happens to be parked right now.
+             */
+            listened_through_ms: number;
             /** Max Duration Ms */
             max_duration_ms: number;
             /** Published At */
@@ -1072,6 +1124,11 @@ export interface components {
          *     record, never a value read back out of a vendor SDK. Invariant 5 is what it does: a
          *     story whose segment has been passed is marked read, which is the same fact the backlog
          *     screen's toggle writes.
+         *
+         *     The body of both ``PUT /v1/episodes/{id}/position`` and
+         *     ``POST /v1/episodes/{id}/progress``, because they are one write. The name is the
+         *     server's: ``spoken_through_ms`` is the voice session contract's word for a position
+         *     that moves backwards when a listener seeks back, and this value deliberately does not.
          */
         ListenProgressRequest: {
             /**
@@ -1890,6 +1947,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarkListenedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_listen_progress_v1_episodes__episode_id__position_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ListenProgressRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListenProgressResponse"];
                 };
             };
             /** @description Validation Error */

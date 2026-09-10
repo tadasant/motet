@@ -356,6 +356,7 @@ def test_the_phase_2_routes_require_authentication(api: TestClient) -> None:
         ("post", "/v1/highlights", {}),
         ("post", "/v1/episodes/smart", {"title": "t", "max_duration_ms": 1}),
         ("post", "/v1/episodes/ep_x/progress", {"listened_through_ms": 0}),
+        ("put", "/v1/episodes/ep_x/position", {"listened_through_ms": 0}),
     ):
         response = (
             getattr(api, method)(path, json=body)
@@ -473,6 +474,100 @@ def test_progress_does_not_go_backwards_over_http(api: TestClient, _migrated: st
     ).json()
     assert rewound["listened_through_ms"] == episode["duration_ms"]
     assert rewound["news_items_marked_read"] == 0
+
+
+# --- the position resource (motet#11) -------------------------------------------------
+
+
+def test_the_position_is_served_back_on_the_episode(api: TestClient, _migrated: str) -> None:
+    """motet#11: a device that never played the episode can still resume.
+
+    The write half already existed as ``POST .../progress``; nothing read it back, so the
+    position lived on whichever device did the listening. This is the read half.
+    """
+    episode = paste_and_render(api, _migrated)
+    assert episode["listened_through_ms"] == 0, "a fresh episode starts at the beginning"
+
+    stored = api.put(
+        f"/v1/episodes/{episode['id']}/position",
+        json={"listened_through_ms": 12_000},
+        headers=AUTH,
+    )
+    assert stored.status_code == 200
+    assert stored.json()["listened_through_ms"] == 12_000
+
+    fetched = api.get(f"/v1/episodes/{episode['id']}", headers=AUTH).json()
+    assert fetched["listened_through_ms"] == 12_000, "a second device can resume from here"
+
+    listed = api.get("/v1/episodes", headers=AUTH).json()
+    assert [item["listened_through_ms"] for item in listed if item["id"] == episode["id"]] == [
+        12_000
+    ], "the list a client loads on mount carries it too"
+
+
+def test_the_position_resource_is_the_same_write_as_progress(
+    api: TestClient, _migrated: str
+) -> None:
+    """One column, two spellings — so the two routes can never disagree."""
+    episode = paste_and_render(api, _migrated)
+    first_end = episode["segments"][0]["start_ms"] + episode["segments"][0]["duration_ms"]
+
+    put = api.put(
+        f"/v1/episodes/{episode['id']}/position",
+        json={"listened_through_ms": first_end},
+        headers=AUTH,
+    ).json()
+    assert put["episode_id"] == episode["id"]
+    assert put["news_items_marked_read"] == 1, "invariant 5 still runs off this write"
+
+    posted = api.post(
+        f"/v1/episodes/{episode['id']}/progress",
+        json={"listened_through_ms": first_end},
+        headers=AUTH,
+    ).json()
+    assert posted["listened_through_ms"] == put["listened_through_ms"]
+    assert posted["news_items_marked_read"] == 0, "idempotent: nothing left to mark"
+
+
+def test_the_position_does_not_go_backwards(api: TestClient, _migrated: str) -> None:
+    """Invariant 4: we own the position, so a stale outbox write cannot rewind a walk."""
+    episode = paste_and_render(api, _migrated)
+    api.put(
+        f"/v1/episodes/{episode['id']}/position",
+        json={"listened_through_ms": episode["duration_ms"]},
+        headers=AUTH,
+    )
+    rewound = api.put(
+        f"/v1/episodes/{episode['id']}/position",
+        json={"listened_through_ms": 0},
+        headers=AUTH,
+    ).json()
+    assert rewound["listened_through_ms"] == episode["duration_ms"]
+
+    fetched = api.get(f"/v1/episodes/{episode['id']}", headers=AUTH).json()
+    assert fetched["listened_through_ms"] == episode["duration_ms"]
+
+
+def test_setting_a_position_on_an_unknown_episode_is_a_404(api: TestClient) -> None:
+    assert (
+        api.put(
+            "/v1/episodes/ep_nope/position",
+            json={"listened_through_ms": 1},
+            headers=AUTH,
+        ).status_code
+        == 404
+    )
+
+
+def test_a_negative_position_is_refused_by_the_position_route_too(api: TestClient) -> None:
+    assert (
+        api.put(
+            "/v1/episodes/ep_x/position",
+            json={"listened_through_ms": -1},
+            headers=AUTH,
+        ).status_code
+        == 422
+    )
 
 
 def test_progress_on_an_unknown_episode_is_a_404(api: TestClient) -> None:
