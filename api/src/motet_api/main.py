@@ -217,8 +217,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         obs.logger.info("drain: enqueuing work will start a worker execution immediately")
     else:
         obs.logger.info(
-            "drain: %s is off or unusable, so enqueued work waits for the scheduled "
-            "sweep rather than starting a worker immediately",
+            "drain: %s is off or unusable, so enqueued work waits for the next worker "
+            "run rather than starting one immediately",
             ENABLED_ENV,
         )
     try:

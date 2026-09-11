@@ -1113,8 +1113,9 @@ is the placement rather than a detail of it. `handle_poll` re-arms a poll from i
 worker, so a trigger inside `enqueue_source_poll` would fire from worker code — an
 execution starting another — and "an execution exists because a user did something"
 would stop being true. The routes arm a per-request nudge; the helpers know nothing about
-it, and `motet-workers` cannot import `motet_api` at all. A test drains the poll queue
-through a worker-side re-arm and asserts nothing fired.
+it, and `motet-workers` does not import `motet_api` — it could not without a dependency
+cycle. A test drains the poll queue through a worker-side re-arm with every trigger in the
+process spied on, and asserts nothing fired.
 
 **Be precise about which win this is, because the obvious one is not real.** Cloud Run's
 *job scheduling latency* — the gap between an execution being created and the task

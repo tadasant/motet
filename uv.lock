@@ -837,7 +837,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "fastapi", specifier = ">=0.121" },
     { name = "google-auth", extras = ["requests"], specifier = ">=2.38" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "motet-db", editable = "db" },

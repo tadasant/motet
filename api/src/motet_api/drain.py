@@ -29,7 +29,7 @@ environment that opts in says ``MOTET_WORKER_REGION`` too.
 re-arms a poll from inside the worker, so a trigger living in ``enqueue_source_poll``
 would fire from worker code — an execution starting another execution — rather than only
 because a person did something. The routes arm it; the helpers know nothing about it, and
-``motet-workers`` cannot import this module at all.
+``motet-workers`` does not import this module, and could not without a dependency cycle.
 
 **No request body, ever.** The Cloud Scheduler version of this call sent
 ``{"overrides":{"containerOverrides":[{"args":["all"]}]}}`` — mirroring
@@ -82,10 +82,16 @@ DEFAULT_JOB_NAME: Final = "motet-worker"
 _TRUE: Final = frozenset({"1", "true", "yes", "on"})
 _FALSE: Final = frozenset({"", "0", "false", "no", "off"})
 
-#: What a project id, a region and a Cloud Run job name are all spelled with. Anything else
-#: — a ``/`` above all — would splice itself into the ``:run`` URL's path, and the 404 that
-#: came back would land inside a call whose every failure is swallowed.
-_SEGMENT: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+#: What each value may be spelled with. Anything else — a ``/`` above all — would splice
+#: itself into the ``:run`` URL, and the error that came back would land inside a call whose
+#: every failure is swallowed. One pattern per value rather than one for all three, because
+#: a ``:`` or a ``.`` is only legal in a (legacy, domain-scoped) project id: in a region it
+#: would become part of the *host* and fail on every paste instead of once, at startup.
+_PATTERNS: Final[Mapping[str, re.Pattern[str]]] = {
+    PROJECT_ENV: re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"),
+    REGION_ENV: re.compile(r"[a-z]+-[a-z]+[0-9]+"),
+    JOB_NAME_ENV: re.compile(r"[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?"),
+}
 
 #: The scope Cloud Run's admin API wants. `run.invoker` is checked on the job itself; the
 #: scope is what the ambient service-account credential is minted for.
@@ -132,7 +138,7 @@ _meter = metrics.get_meter("motet.api")
 #: never-infer-"no errors"-from-"no data" rule AGENTS.md states: a series that only exists
 #: once an environment has opted in cannot tell "nothing has been enqueued" from "this
 #: deployment never got the invoker grant". It is also the instrument that would answer
-#: the fan-out question — one execution per enqueue is deliberate (see the PR), and
+#: the fan-out question — one execution per enqueue is deliberate (AGENTS.md says why), and
 #: ``fired`` divided by wall-clock is what would say the burst rate had outgrown it.
 _drain_triggers = _meter.create_counter(
     "motet.api.drain_triggers",
@@ -150,11 +156,13 @@ class DrainTrigger(Protocol):
 
     @property
     def enabled(self) -> bool:
-        """Whether firing would actually reach Cloud Run.
+        """Whether this process is configured to ask Cloud Run — not whether it will say yes.
 
         Reported on ``/internal/health``, because an inert trigger and a working one look
         identical from outside — the same reason ``login_configured`` and ``vault_ready``
-        are reported.
+        are reported. Whether the asks *succeed* is the other question, the one AGENTS.md
+        separates for telemetry as "configured" and "exporting": that is
+        ``motet.api.drain_triggers{outcome}``'s to answer, not this flag's.
         """
         ...
 
@@ -233,10 +241,10 @@ def _segment(environ: Mapping[str, str], variable: str, *, default: str | None) 
         raise ConfigError(
             f"{ENABLED_ENV} is on but {variable} is unset, so there is no job to run."
         )
-    if not _SEGMENT.fullmatch(value):
+    if not _PATTERNS[variable].fullmatch(value):
         raise ConfigError(
-            f"{variable}={value!r} is not a usable path segment: letters, digits, '.', '_', "
-            "':' and '-' only."
+            f"{variable}={value!r} is not a valid value for it, so it cannot go in the "
+            "job's :run URL."
         )
     return value
 
@@ -314,7 +322,7 @@ class CloudRunJobTrigger:
     def fire(self, reason: DrainReason) -> None:
         """Ask Cloud Run to run the job once. Best-effort, and never raises.
 
-        The work is already committed and the scheduled sweep is still there, so every
+        The work is already committed and a later worker run will still take it, so every
         failure below costs latency and nothing else. Requirement one of the issue this
         implements: a paste must not 500 because the drain trigger could not fire.
         """
@@ -331,7 +339,7 @@ class CloudRunJobTrigger:
             # traceback they arrive in GlitchTip looking identical.
             logger.exception(
                 "could not ask Cloud Run to drain after %s; the work is queued and the "
-                "scheduled sweep will still take it",
+                "next worker run will still take it",
                 reason.value,
             )
             _drain_triggers.add(1, {"reason": reason.value, "outcome": "failed"})
@@ -346,7 +354,7 @@ class CloudRunJobTrigger:
             logger.warning(
                 "not triggering a drain after %s: this environment's API may not run the "
                 "worker job (HTTP 403) — expected where the run.invoker grant is off; the "
-                "scheduled sweep drains instead. %s",
+                "next worker run drains it instead. %s",
                 reason.value,
                 response.text[:_ERROR_BODY_CHARS],
             )
@@ -356,7 +364,7 @@ class CloudRunJobTrigger:
         if response.status_code >= 400:
             logger.error(
                 "Cloud Run refused to run the worker job after %s: HTTP %d %s. The work "
-                "is queued and the scheduled sweep will still take it.",
+                "is queued and the next worker run will still take it.",
                 reason.value,
                 response.status_code,
                 response.text[:_ERROR_BODY_CHARS],
@@ -395,8 +403,8 @@ def build_trigger(env: Mapping[str, str] | None = None) -> DrainTrigger:
         return CloudRunJobTrigger(job)
     except Exception:
         logger.exception(
-            "no drain will be triggered: %s is on but this process cannot build a "
-            "credential to run %s",
+            "no drain will be triggered: %s is on but google-auth could not be imported, "
+            "so this process cannot ask Cloud Run to run %s",
             ENABLED_ENV,
             job.resource,
         )
@@ -438,7 +446,7 @@ class DrainNudge:
         except Exception:
             logger.exception(
                 "the drain trigger raised after %s; the work is committed and the "
-                "scheduled sweep will still take it",
+                "next worker run will still take it",
                 reason.value,
             )
             _drain_triggers.add(1, {"reason": reason.value, "outcome": "failed"})

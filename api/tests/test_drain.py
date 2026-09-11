@@ -34,6 +34,8 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
+from motet_api import deps as api_deps
+from motet_api import drain as api_drain
 from motet_api.config import ConfigError
 from motet_api.deps import drain_trigger, reset_drain_trigger, reset_store
 from motet_api.drain import (
@@ -91,6 +93,27 @@ class Recorder:
             raise self._boom
 
 
+class MetricSpy:
+    """Stands in for ``motet.api.drain_triggers``: every trigger records through it."""
+
+    def __init__(self) -> None:
+        self.adds: list[dict[str, str]] = []
+
+    def add(self, amount: int, attributes: dict[str, str] | None = None) -> None:
+        self.adds.append(dict(attributes or {}))
+
+    @property
+    def outcomes(self) -> list[str]:
+        return [a["outcome"] for a in self.adds]
+
+
+@pytest.fixture
+def metric(monkeypatch: pytest.MonkeyPatch) -> MetricSpy:
+    spy = MetricSpy()
+    monkeypatch.setattr(api_drain, "_drain_triggers", spy)
+    return spy
+
+
 def recording_transport(
     seen: list[httpx.Request], *, status_code: int = 200, body: Any = OPERATION
 ) -> httpx.MockTransport:
@@ -134,6 +157,9 @@ class TestWhereTheJobIs:
             pytest.param({**ENV, REGION_ENV: "r/../x"}, id="region-splices-a-path"),
             pytest.param({**ENV, PROJECT_ENV: "p q"}, id="project-with-a-space"),
             pytest.param({**ENV, JOB_NAME_ENV: "jobs/x"}, id="job-name-splices-a-path"),
+            pytest.param({**ENV, REGION_ENV: "a:b"}, id="region-with-a-colon"),
+            pytest.param({**ENV, REGION_ENV: "x.y"}, id="region-with-a-dot"),
+            pytest.param({**ENV, JOB_NAME_ENV: "Motet_Worker"}, id="job-name-not-a-cloud-run-name"),
         ],
     )
     def test_refuses_anything_it_cannot_put_in_a_url(self, env: dict[str, str]) -> None:
@@ -239,6 +265,43 @@ class TestTheInvoke:
             trigger.fire(DrainReason.PASTE)
         assert seen == [], "no request should be attempted without a token"
         assert "ambient credentials" in caplog.text
+
+
+class TestTheMetric:
+    """``motet.api.drain_triggers{outcome}`` is how anyone learns whether asks succeed."""
+
+    def test_an_accepted_ask_is_fired(self, metric: MetricSpy) -> None:
+        enabled_trigger([]).fire(DrainReason.PASTE)
+        assert metric.adds == [{"reason": "paste", "outcome": "fired"}]
+
+    def test_a_403_is_denied(self, metric: MetricSpy) -> None:
+        enabled_trigger([], status_code=403, body={"error": {}}).fire(DrainReason.EPISODE)
+        assert metric.adds == [{"reason": "episode", "outcome": "denied"}]
+
+    def test_any_other_rejection_is_failed(self, metric: MetricSpy) -> None:
+        enabled_trigger([], status_code=500, body={"error": {}}).fire(DrainReason.SOURCE_POLL)
+        assert metric.adds == [{"reason": "source_poll", "outcome": "failed"}]
+
+    def test_a_transport_failure_is_failed(self, metric: MetricSpy) -> None:
+        def explode(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("no route")
+
+        trigger = CloudRunJobTrigger(
+            JOB, token=lambda: "ya29.fake-token", transport=httpx.MockTransport(explode)
+        )
+        trigger.fire(DrainReason.PASTE)
+        assert metric.outcomes == ["failed"]
+
+    def test_the_off_switch_is_counted_as_disabled(self, metric: MetricSpy) -> None:
+        """So "nothing enqueued" and "nothing nudging" are different series."""
+        NullDrainTrigger().fire(DrainReason.SMART_EPISODE)
+        assert metric.adds == [{"reason": "smart_episode", "outcome": "disabled"}]
+
+    def test_a_trigger_that_raises_is_counted_as_failed(self, metric: MetricSpy) -> None:
+        nudge = DrainNudge(Recorder(boom=RuntimeError("broken")))
+        nudge.arm(DrainReason.PASTE)
+        nudge.fire()
+        assert metric.adds == [{"reason": "paste", "outcome": "failed"}]
 
 
 class TestTheGate:
@@ -438,7 +501,17 @@ class TestOnlyAUsersRequestFiresIt:
         recorder: Recorder,
         db: psycopg.Connection[Any],
         monkeypatch: pytest.MonkeyPatch,
+        metric: MetricSpy,
     ) -> None:
+        """Watched two ways, because the override alone cannot see the regression.
+
+        `dependency_overrides` only applies where FastAPI resolves a route's dependencies,
+        and worker code never does — a trigger wired into `enqueue_source_poll` would call
+        `drain_trigger()` directly. So the process-wide trigger *is* the recorder too, and
+        the counter every real trigger records through is spied on: nothing the worker
+        could reach goes unwatched.
+        """
+        monkeypatch.setattr(api_deps, "_trigger", recorder)
         monkeypatch.setenv("MOTET_VAULT_BACKEND", "local")
         started = api.post(
             "/v1/sources/connect",
@@ -475,6 +548,7 @@ class TestOnlyAUsersRequestFiresIt:
             ).fetchone()
         assert polls is not None and (polls[0], polls[1]) == (2, 1), "the worker re-armed"
         assert recorder.fired == [DrainReason.SOURCE_POLL], "and nothing more fired"
+        assert metric.adds == [], "no trigger implementation recorded anything either"
 
     def test_the_worker_package_cannot_reach_the_trigger(self) -> None:
         """Structural half: `motet-workers` never imports `motet_api`, so it cannot fire it.

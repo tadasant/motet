@@ -132,7 +132,7 @@ smoke_api() {
   docker run -d --name "$name" -P \
     -e MOTET_VAULT_BACKEND=kms \
     -e MOTET_VAULT_KMS_KEY=projects/smoke/locations/smoke/keyRings/smoke/cryptoKeys/smoke \
-    -e MOTET_DRAIN_TRIGGER=true -e GOOGLE_CLOUD_PROJECT=smoke -e MOTET_WORKER_REGION=smoke \
+    -e MOTET_DRAIN_TRIGGER=true -e GOOGLE_CLOUD_PROJECT=smoke -e MOTET_WORKER_REGION=smoke-smoke1 \
     -e "OTEL_RESOURCE_ATTRIBUTES=service.name=motet-api,service.version=${REVISION}" \
     "motet-api:${TAG}" >/dev/null
   port="$(host_port "$name")"

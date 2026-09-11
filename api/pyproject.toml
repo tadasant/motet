@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Motet HTTP API (FastAPI, Cloud Run)"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.115",
+    # 0.121 is where `Depends(..., scope=...)` arrived, and `motet_api.deps.connection` is
+    # `scope="function"` on purpose: it commits, and nudges the worker, before the
+    # response starts rather than after it is sent.
+    "fastapi>=0.121",
     # Ambient credentials for the Cloud Run job invoke `motet_api.drain` makes: the API
     # already runs as its own service account, so there is no key to mount. `[requests]`
     # because `google.auth.transport.requests` is the transport the refresh goes over, and
