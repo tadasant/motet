@@ -1,4 +1,5 @@
-"""Request-scoped dependencies: a database connection, a store, and who is asking.
+"""Request-scoped dependencies: a database connection, a store, a drain nudge, and who is
+asking.
 
 Authentication paths, deliberately different, because they serve different clients:
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,14 +39,52 @@ from motet_vault import DekWrapper, VaultConfigError, build_dek_wrapper
 
 from .auth import ALLOWED_EMAILS_ENV, is_allowed
 from .config import Settings
+from .drain import DrainNudge, DrainTrigger, build_trigger
 
 logger = logging.getLogger("motet.api")
 
 _store: ObjectStore | None = None
+_trigger: DrainTrigger | None = None
+_trigger_lock = threading.Lock()
 
 
 def settings() -> Settings:
     return Settings.from_env()
+
+
+def drain_trigger() -> DrainTrigger:
+    """One trigger per process, resolved from the environment on first use.
+
+    Cached like ``store`` and for the same reasons: it holds an HTTP client and an ambient
+    credential that is refreshed roughly hourly, and rebuilding it per request would hit
+    the metadata server on every paste.
+    """
+    global _trigger
+    trigger = _trigger
+    if trigger is None:
+        # Locked because sync routes run in a threadpool: two first requests arriving
+        # together would otherwise each build a trigger and leak one HTTP client.
+        with _trigger_lock:
+            if _trigger is None:
+                _trigger = build_trigger()
+            trigger = _trigger
+    return trigger
+
+
+def reset_drain_trigger() -> None:
+    """Drop the cached trigger. For tests that change the environment between cases."""
+    global _trigger
+    _trigger = None
+
+
+def drain_nudge(trigger: Annotated[DrainTrigger, Depends(drain_trigger)]) -> DrainNudge:
+    """This request's intent to nudge the worker, armed by a route and fired by commit.
+
+    FastAPI caches a dependency per request, so the object a route arms is the object
+    ``connection`` fires — which is the whole mechanism, and the reason this is a
+    dependency rather than something hung off ``Request.state``.
+    """
+    return DrainNudge(trigger)
 
 
 def store() -> ObjectStore:
@@ -96,6 +136,7 @@ def dek_wrapper() -> DekWrapper:
 
 def connection(
     config: Annotated[Settings, Depends(settings)],
+    nudge: Annotated[DrainNudge, Depends(drain_nudge)],
 ) -> Iterator[psycopg.Connection[Any]]:
     """A connection per request, committed on success and rolled back on failure.
 
@@ -103,6 +144,31 @@ def connection(
     already bounds concurrency; a pool here would be tuning for load that does not exist.
     The transaction boundary is the *request*, so a route that writes two rows either
     writes both or neither.
+
+    **It is also where a drain gets nudged**, which is why the transaction and the trigger
+    meet here rather than in a route. A route that enqueued and then asked Cloud Run to
+    drain would be asking on behalf of a job row no other process can see yet, and would
+    still be asking on behalf of a request that goes on to fail — the rollback path below
+    re-raises, so the fire never happens. Firing here, after the commit, makes "there is
+    work" and "start a worker" the same event.
+
+    Deliberately **not** a background task, which is where a best-effort call belongs on
+    most runtimes. Cloud Run throttles a container's CPU between requests unless the
+    service asks otherwise, so a task scheduled after the response is a task that may not
+    run until the next request arrives — and a nudge that fires unpredictably is worse
+    than no nudge, because the scheduled sweep is the thing it would be silently relying
+    on. The cost is the invoke's latency inside the request, bounded by
+    :data:`~motet_api.drain.DEFAULT_TIMEOUT_SECONDS`.
+
+    **"Inside the request" is only true because every ``Depends(connection)`` says
+    ``scope="function"``.** FastAPI's default scope for a ``yield`` dependency is
+    ``"request"``, whose teardown runs *after* the response has been sent — so before this
+    the commit itself ran post-response, a failed commit was a 201 the client had already
+    received, and the nudge would have landed in exactly the throttled window the paragraph
+    above rules out. ``"function"`` tears down when the route returns, before the response
+    starts. All three sites must agree: the scope is part of FastAPI's dependency cache
+    key, so a mismatch would open two connections per request.
+    ``api/tests/test_drain.py`` pins the order against a raw ASGI ``send``.
     """
     if not config.database_url:
         raise HTTPException(
@@ -118,6 +184,10 @@ def connection(
         raise
     finally:
         conn.close()
+    # Reached only when the transaction committed: every other path above re-raises, and
+    # a raise here would skip this line rather than nudge for work that was rolled back.
+    # `fire` swallows everything it can go wrong with, so this cannot fail the request.
+    nudge.fire()
 
 
 @dataclass(frozen=True)
@@ -143,7 +213,7 @@ class Caller:
 
 def require_caller(
     config: Annotated[Settings, Depends(settings)],
-    conn: Annotated[psycopg.Connection[Any], Depends(connection)],
+    conn: Annotated[psycopg.Connection[Any], Depends(connection, scope="function")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> Caller:
     """Authorize a ``/v1`` request, by shared token or by browser session.
@@ -226,7 +296,7 @@ def require_api_token(caller: Annotated[Caller, Depends(require_caller)]) -> str
 
 
 def require_feed_token(
-    conn: Annotated[psycopg.Connection[Any], Depends(connection)],
+    conn: Annotated[psycopg.Connection[Any], Depends(connection, scope="function")],
     token: Annotated[str, Query(description="The feed's secret, from GET /v1/feed.")] = "",
 ) -> str:
     """Resolve a feed token to its owner, or refuse.

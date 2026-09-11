@@ -234,6 +234,18 @@ components:
             \ who can reach it \u2014 legitimate on a laptop, a mistake anywhere else."
           title: Authenticated
           type: boolean
+        drain_trigger:
+          description: "Whether this process is configured to ask Cloud Run to start a worker execution\
+            \ when a request enqueues work, rather than leaving it for the next worker run. Configured,\
+            \ not proven: where the environment has no run.invoker grant every ask is refused, and motet.api.drain_triggers{outcome}\
+            \ on the obs stack is what says whether asks succeed. False means MOTET_DRAIN_TRIGGER is off\
+            \ \u2014 the default \u2014 or that it is on and the job could not be resolved or google-auth\
+            \ is missing from the image, both of which the process says at ERROR on startup. Reported\
+            \ for the same reason as 'vault_ready': an inert trigger and a working one look identical\
+            \ from outside. Where the job lives is deliberately not reported; it is topology, and this\
+            \ route is public."
+          title: Drain Trigger
+          type: boolean
         errors_configured:
           description: Whether error reporting is configured. False means errors go nowhere.
           title: Errors Configured
@@ -305,6 +317,7 @@ components:
       - login_configured
       - vault_backend
       - vault_ready
+      - drain_trigger
       - inference_mode
       title: HealthResponse
       type: object

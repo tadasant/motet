@@ -82,6 +82,20 @@ class HealthResponse(BaseModel):
             "billed vendor call per request would be a free way to spend money."
         )
     )
+    drain_trigger: bool = Field(
+        description=(
+            "Whether this process is configured to ask Cloud Run to start a worker "
+            "execution when a request enqueues work, rather than leaving it for the next "
+            "worker run. Configured, not proven: where the environment has no run.invoker "
+            "grant every ask is refused, and motet.api.drain_triggers{outcome} on the obs "
+            "stack is what says whether asks succeed. False means MOTET_DRAIN_TRIGGER is "
+            "off — the default — or that it is on and the job could not be resolved or "
+            "google-auth is missing from the image, both of which the process says at "
+            "ERROR on startup. Reported for the same reason as 'vault_ready': an inert "
+            "trigger and a working one look identical from outside. Where the job lives is "
+            "deliberately not reported; it is topology, and this route is public."
+        )
+    )
     inference_mode: str = Field(
         description="'fake' or 'real'. 'fake' means no vendor is ever called."
     )

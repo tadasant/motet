@@ -925,6 +925,7 @@ describe('the generated contract', () => {
       login_configured: true,
       vault_backend: 'kms',
       vault_ready: true,
+      drain_trigger: true,
       inference_mode: 'fake',
     }
     expect(health.status).toBe('ok')
