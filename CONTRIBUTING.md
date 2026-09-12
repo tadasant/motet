@@ -144,6 +144,108 @@ reports `how: "open"`, and the SPA skips the sign-in screen and just works. Reac
 at `localhost` rather than `127.0.0.1` if you are testing either OAuth flow — Google
 matches a redirect URI as an exact string, and only one of those two is registered.
 
+## Local development, real mode
+
+Everything above runs against the fakes. **Real mode on a laptop needs exactly one thing
+that is not a public tool: a service account key** with read access to the local-dev
+secrets. Minting that key is a one-time human step (invariant 9, AGENTS.md) — everything
+after it is `bin/local-env`.
+
+> **This spends real money.** Real mode calls OpenRouter and Cartesia for real, against
+> **staging's keys and staging's spend caps, shared with staging**. A full backlog is
+> several dollars of grounding alone (see the grounding section in AGENTS.md), and a
+> laptop draining a queue in a loop spends exactly like a deployed worker does. Run it
+> deliberately, and go back to `MOTET_INFERENCE_MODE=fake` when you are done.
+
+### Prerequisites
+
+The dev setup above, plus:
+
+- The key at `~/.config/motet/local-dev.json` (or anywhere — the path is yours). It is
+  minted by a human, once, per the manual-setup runbook in the private infrastructure
+  repo. **Do not try to mint one from a session**; that is the boundary, not a gap.
+- A `motet_dev` database on the local Postgres, which is what the generated `DATABASE_URL`
+  points at — `motet_test` is pytest's, and a real-mode run should not share it:
+
+  ```bash
+  docker exec motet-pg createdb -U postgres motet_dev
+  ```
+
+### The one export, then the script
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=~/.config/motet/local-dev.json   # the one thing
+bin/local-env                                                          # writes .env
+export UV_ENV_FILE=.env                                                # uv reads it per-run
+```
+
+`bin/local-env` takes the project id from the key file's own `project_id` field — nothing
+in this repo names a project — lists every Secret Manager secret in it labelled
+`motet-local=true`, and writes `NAME=value` for each, followed by the localhost overrides
+(`MOTET_INFERENCE_MODE=real`, `MOTET_VAULT_BACKEND=kms`, local storage, `localhost` URLs).
+It **never prints a value**, refuses to overwrite an existing `.env` without `--force`, and
+writes the file `0600`. Re-run it with `--force` after a rotation or a roster change.
+
+**`export UV_ENV_FILE=.env` is not optional.** `uv run` does not read `.env` on its own;
+that variable is what makes every `uv run` below pick the file up. Set it once per shell,
+or pass `--env-file .env` to each command.
+
+### The loop
+
+```bash
+uv run python -m motet_db.migrate                             # against motet_dev
+uv run uvicorn motet_api:app --reload                         # the API
+uv run python -m motet_workers.runner all --poll-seconds 2    # ...and a worker
+npm --prefix web run dev                                      # the SPA
+```
+
+Then open **`http://localhost:5173`** — `localhost`, never `127.0.0.1`, because Google
+matches a redirect URI as an exact string — sign in, and paste something.
+
+> **Verify, do not assume, that `http://localhost:5173/oauth/callback` is a registered
+> redirect URI** on the OAuth client the secrets belong to. Three URIs are registered, one
+> per environment, and whether a dev one is among them is a fact about the private repo
+> that nothing here can check. If it is not, sign-in and Gmail connect both fail at
+> Google's consent screen with `redirect_uri_mismatch`; adding one is a human step on the
+> OAuth client.
+
+### Checking it took
+
+```bash
+curl -s localhost:8000/internal/health | python3 -m json.tool
+```
+
+Three fields are the answer:
+
+| Field | Wanted | If it is wrong |
+|---|---|---|
+| `inference_mode` | `real` | the `.env` is not loaded — `UV_ENV_FILE` |
+| `vault_ready` | `true` | the key cannot reach the KEK, or `MOTET_VAULT_KMS_KEY` is not in the roster |
+| `telemetry_exporting` | `true` | `OTEL_EXPORTER_OTLP_ENDPOINT` or the ingest token is not in the roster |
+
+`revision` reads `local` rather than a commit, and `service` reads `motet-local`, which is
+what keeps a laptop's spans out of the staging panels.
+
+**Two things prove the pipeline actually ran, and neither is a flag:**
+
+1. **A news item a model wrote.** Paste two write-ups of one story. The fakes dedup by a
+   deterministic rule; a real model merges them and writes a headline neither text
+   contains.
+2. **Audio bytes on disk.** `ls -lh .motet-storage/` after an episode renders. The fake TTS
+   writes silent WAV whose length tracks the text; Cartesia writes an MP3 that plays.
+
+**If a worker refuses to start naming a variable** — `MOTET_TTS_VOICE_ID` and
+`OPENROUTER_API_KEY` are the two that fail closed at boot — that variable is missing from
+the roster rather than from this repo. Which secrets carry `motet-local=true` is the
+private infrastructure repo's decision (tadasant-internal#2804), which is exactly what
+keeps the roster out of a public repo.
+
+### Going back
+
+Delete `.env` (or `unset UV_ENV_FILE`). `bin/ci` never reads it: it pins
+`MOTET_INFERENCE_MODE=fake` itself and needs no key, so the offline, free, deterministic
+path is untouched by any of this.
+
 ## Testing against staging
 
 Deployed environments are a different problem, and it has one answer:

@@ -610,12 +610,14 @@ subprocesses and anything reading the environment get the same isolated database
 the truncate gentler (retry it, `DELETE` instead) would have left both runs deleting each
 other's rows, quietly.
 
-Two other scripts sit outside it, each for the same one reason — it needs a toolchain
-`bin/ci` deliberately does not require:
+Three other scripts sit outside it. Two are there for one reason — a toolchain `bin/ci`
+deliberately does not require — and the third for the opposite of `bin/ci`'s whole
+premise:
 
 ```bash
 bin/build-images     # needs a Docker daemon
 ios/bin/build-app    # needs Xcode
+bin/local-env        # needs a service account key, and the network
 ```
 
 `bin/build-images` builds and smoke-tests the three container images, and it is its own
@@ -628,6 +630,37 @@ no machine in this project except the GitHub-hosted macOS runner the `ios` job u
 calling it from `bin/ci` would turn every Linux run red. It skips on a Mac without Xcode
 and **fails when `CI` is set** — the same shape as `ios/bin/ci-swift`, and for the same
 reason: a green run that compiled nothing is worse than a red one.
+
+`bin/local-env` is the third, and it is outside `bin/ci` for a stronger reason than a
+toolchain: **it is the one script in this repo whose job is to reach a cloud API for real
+credentials**, and `bin/ci` is offline, free and `MOTET_INFERENCE_MODE=fake` by design
+(invariant 7). It writes the `.env` a **real-mode local run** needs — motet#79 — and the
+promise it keeps is that a laptop needs exactly *one* non-public thing on it: a service
+account key with read access to the local-dev secrets. Minting that key is a one-time
+human-owned step (invariant 9); everything after it is the script.
+
+**It discovers a roster rather than restating one, and that is what lets it live here.**
+The project id comes from the key file's own `project_id` field, and the secrets are
+whichever ones carry the label `motet-local=true` — both decided in the private
+infrastructure repo (tadasant-internal#2804). So this repo names no project, no secret
+roster and no staging value, and a change to any of them is a re-run rather than a PR. The
+localhost overrides it appends — `MOTET_INFERENCE_MODE=real`, the `kms` vault backend,
+local storage, `localhost` URLs — are the opposite: application knowledge, so they are a
+literal block in `tools/local_env.py` and are covered by tests.
+
+Three guards on it are load-bearing rather than polish, because the file it writes holds
+real vendor keys: **no value is ever printed** — not on success, not in an error message —
+the file is written `0600`, and an existing one is never replaced without `--force`. The
+block is also *authoritative*: a labelled secret carrying one of the override names is
+dropped with a line naming it, because "`MOTET_API_TOKEN` is unset locally" has to mean
+unset rather than describe an intention that a roster change can silently reverse.
+
+**What nothing in CI can tell you is whether it works**, and that is structural rather than
+an omission. The labelled secrets do not exist until the private half lands, and a test
+that reached Secret Manager would be the vendor call invariant 7 forbids — so the seam is a
+`SecretReader` Protocol with a fake, exactly like every other vendor in this repo, and what
+is pinned is the key-file read, the label filter, the rendering, the refusal and the mode.
+The first real run is a human's, against a key a human minted.
 
 ### The container images
 
