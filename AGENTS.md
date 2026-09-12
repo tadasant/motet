@@ -610,14 +610,15 @@ subprocesses and anything reading the environment get the same isolated database
 the truncate gentler (retry it, `DELETE` instead) would have left both runs deleting each
 other's rows, quietly.
 
-Three other scripts sit outside it. Two are there for one reason — a toolchain `bin/ci`
-deliberately does not require — and the third for the opposite of `bin/ci`'s whole
-premise:
+Four other scripts sit outside it, for two different reasons. Two need a toolchain
+`bin/ci` deliberately does not require; two are the opposite of `bin/ci`'s whole premise,
+which is that a run is offline, free and fake:
 
 ```bash
-bin/build-images     # needs a Docker daemon
-ios/bin/build-app    # needs Xcode
-bin/local-env        # needs a service account key, and the network
+bin/build-images              # needs a Docker daemon
+ios/bin/build-app             # needs Xcode
+bin/check-openrouter-models   # needs OpenRouter's live model list
+bin/local-env                 # needs a service account key, and the network
 ```
 
 `bin/build-images` builds and smoke-tests the three container images, and it is its own
@@ -631,13 +632,17 @@ calling it from `bin/ci` would turn every Linux run red. It skips on a Mac witho
 and **fails when `CI` is set** — the same shape as `ios/bin/ci-swift`, and for the same
 reason: a green run that compiled nothing is worse than a red one.
 
-`bin/local-env` is the third, and it is outside `bin/ci` for a stronger reason than a
-toolchain: **it is the one script in this repo whose job is to reach a cloud API for real
-credentials**, and `bin/ci` is offline, free and `MOTET_INFERENCE_MODE=fake` by design
-(invariant 7). It writes the `.env` a **real-mode local run** needs — motet#79 — and the
-promise it keeps is that a laptop needs exactly *one* non-public thing on it: a service
-account key with read access to the local-dev secrets. Minting that key is a one-time
-human-owned step (invariant 9); everything after it is the script.
+`bin/local-env` is the fourth. **Decided by Tadas, motet#79** — it adds a seam, a vendor
+SDK and a service account in the private repo, which is three of invariant 12's bullets, so
+the sign-off goes here rather than the reasoning alone. It is outside `bin/ci` for
+`bin/check-openrouter-models`'s reason turned up one notch: **it is the one script in this
+repo whose job is to reach a cloud API for real credentials**, and `bin/ci` is offline, free
+and `MOTET_INFERENCE_MODE=fake` by design (invariant 7).
+
+It writes the `.env` a **real-mode local run** needs, and the promise it keeps is that a
+laptop needs exactly *one* non-public thing on it: a service account key with read access
+to the local-dev secrets. Minting that key is a one-time human-owned step (invariant 9);
+everything after it is the script.
 
 **It discovers a roster rather than restating one, and that is what lets it live here.**
 The project id comes from the key file's own `project_id` field, and the secrets are
@@ -655,12 +660,26 @@ block is also *authoritative*: a labelled secret carrying one of the override na
 dropped with a line naming it, because "`MOTET_API_TOKEN` is unset locally" has to mean
 unset rather than describe an intention that a roster change can silently reverse.
 
+**`bin/ci` refuses a `.env` structurally**, which is this change's one edit to it:
+`unset UV_ENV_FILE` plus `UV_NO_ENV_FILE=1`, before anything runs. `uv run` does not read
+`.env` on its own — the variable is what makes it — so the instruction this script prints
+turns a shell into one where *every* `uv run` inherits the file, `bin/ci` included. Two
+of its variables were already pinned and the rest were not: a `bin/ci` in that shell would
+have handed the test suite staging's OTel endpoint and ingest token and shipped its
+telemetry to the estate's obs stack under a real credential, passing green the whole way.
+Pinning the two that matter is counting; refusing the file is a property.
+
 **What nothing in CI can tell you is whether it works**, and that is structural rather than
 an omission. The labelled secrets do not exist until the private half lands, and a test
 that reached Secret Manager would be the vendor call invariant 7 forbids — so the seam is a
 `SecretReader` Protocol with a fake, exactly like every other vendor in this repo, and what
-is pinned is the key-file read, the label filter, the rendering, the refusal and the mode.
-The first real run is a human's, against a key a human minted.
+is pinned is the key-file read, the rendering, the refusal and the mode. The *adapter* is
+the half a fake cannot cover — the filter string, the `versions/latest` alias, the id
+parsed off a resource name — and a typo in any of those ships green, so it is driven over
+a stub that records the requests and they are asserted, which is `api/tests/test_drain.py`
+asserting the bytes rather than a fake's bookkeeping. What is left is whether Google
+answers the request the way the SDK's own types say it will, and the first real run is a
+human's, against a key a human minted.
 
 ### The container images
 

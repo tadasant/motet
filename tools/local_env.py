@@ -22,8 +22,10 @@ vendor keys:
 * **No value is ever printed.** Not on success, not in an error message, not in a
   traceback. The names travel; the values only ever go to the file.
 * **An existing file is never overwritten** without ``--force``.
-* **The file is written ``0600``**, created with that mode rather than chmod-ed into it
-  afterwards, so it is never briefly readable by anyone else.
+* **The file is written ``0600``**, by :func:`os.open` with that mode *and* an
+  :func:`os.fchmod` behind it, because the mode argument alone is masked by the umask.
+  Nothing is written to the descriptor in between, so the only thing the window exposes is
+  an empty file.
 
 Using the SDK rather than shelling out to ``gcloud`` is what keeps the promise at *one*
 thing: ``gcloud`` would be a second install and a second login.
@@ -38,12 +40,24 @@ import json
 import os
 import re
 import sys
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
+from google.api_core import exceptions as api_exceptions
+from google.auth import exceptions as auth_exceptions
 from google.cloud import secretmanager
+
+#: What the SDK raises that this script should report as a sentence. Everything Google
+#: throws on a first run descends from one of these: a malformed key file and an unusable
+#: identity from ``google.auth``, and a refused, missing or unreachable API from
+#: ``google.api_core``. The lesson is ``motet-vault[kms]``'s, one seam along — a backend
+#: that lets ``PermissionDenied`` escape as itself is a backend whose callers cannot catch
+#: it. **The text of the exception is never repeated**: a KMS or Secret Manager refusal
+#: quotes the full resource name, which is a project id, and this script exists partly to
+#: keep that out of a terminal.
+VENDOR_ERRORS = (auth_exceptions.GoogleAuthError, api_exceptions.GoogleAPIError, OSError)
 
 #: The label a secret must carry to be pulled onto a laptop. Applied in the private
 #: infrastructure repo (tadasant-internal#2804); this repo only ever reads it.
@@ -157,10 +171,17 @@ class LocalEnvError(Exception):
 
 @dataclass(frozen=True)
 class Secret:
-    """One labelled secret, already resolved to its latest version."""
+    """One labelled secret, already resolved to its latest version.
+
+    ``value`` is ``repr=False`` and that is the docstring above being structural rather
+    than aspirational: a dataclass repr prints its fields, so ``pytest --showlocals``, a
+    debugger frame, or any future log line that formats one of these would put an API key
+    on a terminal. The one object that can break the no-value promise is the one that
+    holds a value.
+    """
 
     name: str
-    value: str
+    value: str = field(repr=False)
 
 
 class SecretReader(Protocol):
@@ -178,6 +199,21 @@ class SecretReader(Protocol):
         """The latest version of secret ``name``, decoded as UTF-8."""
 
 
+class SecretManagerClient(Protocol):
+    """The two SDK calls this uses, so a test can hand :class:`SecretManagerReader` a stub.
+
+    The adapter itself — the filter string, the ``versions/latest`` alias, the id parsed
+    off a resource name — is the part no fake can cover and the part a typo ships green,
+    so it is driven over a recording stub in ``tools/tests``. Same argument as
+    ``api/tests/test_drain.py`` asserting the bytes on the wire: a claim about a request
+    has to be made against a request.
+    """
+
+    def list_secrets(self, *, request: Any) -> Iterable[Any]: ...
+
+    def access_secret_version(self, *, request: Any) -> Any: ...
+
+
 class SecretManagerReader:
     """:class:`SecretReader` over the real Google SDK.
 
@@ -188,21 +224,44 @@ class SecretManagerReader:
     whether).
     """
 
-    def __init__(self) -> None:
-        self._client = secretmanager.SecretManagerServiceClient()
+    def __init__(self, client: SecretManagerClient | None = None) -> None:
+        if client is not None:
+            self._client: SecretManagerClient = client
+            return
+        try:
+            self._client = secretmanager.SecretManagerServiceClient()
+        except VENDOR_ERRORS as exc:
+            raise LocalEnvError(
+                f"cannot build a Secret Manager client from the key file "
+                f"({type(exc).__name__}). Check that GOOGLE_APPLICATION_CREDENTIALS "
+                "points at a service account key rather than another kind of credential."
+            ) from exc
 
     def labelled(self, project_id: str) -> Sequence[str]:
         request = secretmanager.ListSecretsRequest(
             parent=f"projects/{project_id}", filter=LABEL_FILTER
         )
-        secrets = self._client.list_secrets(request=request)
+        try:
+            secrets = list(self._client.list_secrets(request=request))
+        except VENDOR_ERRORS as exc:
+            raise LocalEnvError(
+                f"cannot list the secrets labelled {LABEL_FILTER} ({type(exc).__name__}). "
+                "The service account needs secretmanager.secrets.list on the project, and "
+                "the labels are applied in the private infrastructure repo."
+            ) from exc
         return [secret.name.rsplit("/", 1)[-1] for secret in secrets]
 
     def value(self, project_id: str, name: str) -> str:
         request = secretmanager.AccessSecretVersionRequest(
             name=f"projects/{project_id}/secrets/{name}/versions/latest"
         )
-        payload = self._client.access_secret_version(request=request).payload.data
+        try:
+            payload = self._client.access_secret_version(request=request).payload.data
+        except VENDOR_ERRORS as exc:
+            raise LocalEnvError(
+                f"cannot read the latest version of secret {name} ({type(exc).__name__}). "
+                "The service account needs secretmanager.versions.access on it."
+            ) from exc
         try:
             return bytes(payload).decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -325,10 +384,19 @@ def write(path: Path, text: str, *, force: bool) -> None:
     masked by the process umask, so on its own it is a request rather than a guarantee.
     """
     check_target(path, force=force)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    # O_NOFOLLOW because this is the one file in the repo whose content is a pile of
+    # vendor keys: a symlink sitting at the target path would otherwise have --force write
+    # them straight through it. O_EXCL without --force closes the gap between the check
+    # above and here.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     if not force:
         flags |= os.O_EXCL
-    fd = os.open(path, flags, 0o600)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise LocalEnvError(f"{path} already exists. Re-run with --force to replace it.") from exc
+    except OSError as exc:
+        raise LocalEnvError(f"cannot write {path}: {exc.strerror}") from exc
     try:
         os.fchmod(fd, 0o600)
     except BaseException:
@@ -367,14 +435,15 @@ def run(argv: Sequence[str], reader: SecretReader | None = None) -> int:
     write(args.output, render(secrets), force=args.force)
 
     # Names, counts and a path. No value reaches a terminal, a log, or a scrollback.
-    print(f"Wrote {args.output} ({len(secrets)} secrets, mode 0600).")
+    plural = "" if len(secrets) == 1 else "s"
+    print(f"Wrote {args.output} ({len(secrets)} secret{plural}, mode 0600).")
     print("  " + ", ".join(secret.name for secret in secrets))
     if dropped:
         print(
             f"Dropped {len(dropped)} labelled secret(s) that a local override owns: "
             + ", ".join(dropped)
         )
-    print("Load it with `export UV_ENV_FILE=.env`, then run the API and the worker.")
+    print(f"Load it with `export UV_ENV_FILE={args.output}`, then run the API and the worker.")
     return 0
 
 

@@ -164,6 +164,8 @@ The dev setup above, plus:
 - The key at `~/.config/motet/local-dev.json` (or anywhere — the path is yours). It is
   minted by a human, once, per the manual-setup runbook in the private infrastructure
   repo. **Do not try to mint one from a session**; that is the boundary, not a gap.
+- No `.env` in the way. If you followed the setup section above and copied `.env.example`
+  to `.env`, `bin/local-env` will refuse rather than replace it — pass `--force`.
 - A `motet_dev` database on the local Postgres, which is what the generated `DATABASE_URL`
   points at — `motet_test` is pytest's, and a real-mode run should not share it:
 
@@ -220,8 +222,16 @@ Three fields are the answer:
 | Field | Wanted | If it is wrong |
 |---|---|---|
 | `inference_mode` | `real` | the `.env` is not loaded — `UV_ENV_FILE` |
-| `vault_ready` | `true` | the key cannot reach the KEK, or `MOTET_VAULT_KMS_KEY` is not in the roster |
+| `vault_ready` | `true` | `MOTET_VAULT_KMS_KEY` is not in the roster, or `motet-vault[kms]` is not installed |
 | `telemetry_exporting` | `true` | `OTEL_EXPORTER_OTLP_ENDPOINT` or the ingest token is not in the roster |
+
+**`vault_ready: true` does not mean the key can reach the KEK**, and reading it that way is
+the never-infer-"no errors"-from-"no data" trap AGENTS.md names. The check resolves
+configuration and deliberately **does not call Cloud KMS** — the route is unauthenticated,
+and a billed vendor call per request would be a free way to spend money. It catches an
+unusable backend name, the `local` backend in real mode, an unset key path, and a missing
+SDK. Whether the service account actually holds encrypt and decrypt on the key is proven by
+the first Gmail connect and by nothing before it.
 
 `revision` reads `local` rather than a commit, and `service` reads `motet-local`, which is
 what keeps a laptop's spans out of the staging panels.
@@ -234,17 +244,22 @@ what keeps a laptop's spans out of the staging panels.
 2. **Audio bytes on disk.** `ls -lh .motet-storage/` after an episode renders. The fake TTS
    writes silent WAV whose length tracks the text; Cartesia writes an MP3 that plays.
 
-**If a worker refuses to start naming a variable** — `MOTET_TTS_VOICE_ID` and
-`OPENROUTER_API_KEY` are the two that fail closed at boot — that variable is missing from
+**If a worker refuses to start naming a variable** — `OPENROUTER_API_KEY`,
+`CARTESIA_API_KEY` and `MOTET_TTS_VOICE_ID` all fail closed at boot, on purpose — that
+variable is missing from
 the roster rather than from this repo. Which secrets carry `motet-local=true` is the
 private infrastructure repo's decision (tadasant-internal#2804), which is exactly what
 keeps the roster out of a public repo.
 
 ### Going back
 
-Delete `.env` (or `unset UV_ENV_FILE`). `bin/ci` never reads it: it pins
-`MOTET_INFERENCE_MODE=fake` itself and needs no key, so the offline, free, deterministic
-path is untouched by any of this.
+Delete `.env`, or `unset UV_ENV_FILE`. `bin/ci` is untouched by any of this either way,
+and structurally rather than by luck: it `unset`s `UV_ENV_FILE` and sets `UV_NO_ENV_FILE=1`
+before it runs anything, so no `.env` reaches the suite — then pins
+`MOTET_INFERENCE_MODE=fake` on top. That matters more than it sounds. Without it, a shell
+with `UV_ENV_FILE=.env` exported would hand every `uv run` in `bin/ci` staging's OTel
+endpoint and ingest token, and the test suite would ship its own telemetry to the estate's
+obs stack under a real credential — and pass, saying nothing.
 
 ## Testing against staging
 

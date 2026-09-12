@@ -18,10 +18,14 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
+from google.api_core import exceptions as api_exceptions
+from google.auth import exceptions as auth_exceptions
 
 import tools.local_env
 from tools.local_env import (
@@ -32,6 +36,7 @@ from tools.local_env import (
     UNSET_NAMES,
     LocalEnvError,
     Secret,
+    SecretManagerReader,
     _render_value,
     collect,
     main,
@@ -75,6 +80,62 @@ class FakeSecrets:
         raise AssertionError(f"asked for {name}, which does not exist")
 
 
+@dataclass
+class _Payload:
+    data: bytes
+
+
+@dataclass
+class _Version:
+    payload: _Payload
+
+
+@dataclass
+class _Secret:
+    name: str
+
+
+class RecordingClient:
+    """A :class:`~tools.local_env.SecretManagerClient` that records the requests it got.
+
+    It answers with the same shapes the SDK does — a resource name on a listed secret, a
+    ``payload.data`` of bytes on a version — because what is under test is the adapter
+    that builds those requests and reads those shapes.
+    """
+
+    def __init__(self, values: dict[str, bytes], *, raises: Exception | None = None) -> None:
+        self._values = values
+        self._raises = raises
+        self.listed: list[Any] = []
+        self.accessed: list[Any] = []
+
+    def list_secrets(self, *, request: Any) -> Iterable[Any]:
+        self.listed.append(request)
+        if self._raises is not None:
+            raise self._raises
+        return [_Secret(f"{request.parent}/secrets/{name}") for name in self._values]
+
+    def access_secret_version(self, *, request: Any) -> Any:
+        self.accessed.append(request)
+        if self._raises is not None:
+            raise self._raises
+        name = str(request.name).split("/secrets/", 1)[1].split("/versions/", 1)[0]
+        return _Version(_Payload(self._values[name]))
+
+
+#: The failures a first real run actually meets, each carrying what Google puts in its
+#: message: a resource name, which is a project id. The SDK's exception classes ship no
+#: annotations, so constructing one is an untyped call in a strict file — ignored here on
+#: three lines rather than relaxed for the file, so that an SDK that grows annotations
+#: turns these red instead of leaving a relaxation nobody revisits.
+VENDOR_FAILURES: list[Exception] = [
+    api_exceptions.PermissionDenied("... projects/a-project-id/secrets/X ..."),  # type: ignore[no-untyped-call]
+    api_exceptions.NotFound("... projects/a-project-id/secrets/X ..."),  # type: ignore[no-untyped-call]
+    auth_exceptions.DefaultCredentialsError("... a-project-id ..."),  # type: ignore[no-untyped-call]
+    OSError("connection refused"),
+]
+
+
 def _key_file(tmp_path: Path, **fields: object) -> Path:
     payload: dict[str, object] = {
         "type": "service_account",
@@ -89,6 +150,18 @@ def _key_file(tmp_path: Path, **fields: object) -> Path:
 
 @pytest.fixture
 def key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A usable key file, and a hard stop between this suite and Google.
+
+    ``main()`` takes no reader and builds a :class:`SecretManagerReader` itself, so every
+    test that goes through it is one refactor away from a real vendor call — invariant 7,
+    from the direction nothing else in this repo can reach. The patch makes that a failed
+    test rather than a network request.
+    """
+
+    def _refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a test tried to build the real Secret Manager client")
+
+    monkeypatch.setattr(tools.local_env, "SecretManagerReader", _refuse)
     path = _key_file(tmp_path)
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(path))
     return path
@@ -168,9 +241,6 @@ class TestTheLabelIsTheRoster:
         assert dropped == []
         assert reader.projects == ["a-project-id"]
 
-    def test_the_real_reader_asks_secret_manager_for_that_label(self) -> None:
-        assert LABEL_FILTER == "labels.motet-local=true"
-
     def test_an_empty_roster_points_at_the_private_half(self) -> None:
         with pytest.raises(LocalEnvError, match="motet-local=true"):
             collect(FakeSecrets({}), "a-project-id")
@@ -191,9 +261,58 @@ class TestTheLabelIsTheRoster:
         with pytest.raises(LocalEnvError, match="every labelled secret collides"):
             collect(FakeSecrets({"MOTET_INFERENCE_MODE": "real"}), "a-project-id")
 
+    def test_a_secrets_repr_does_not_carry_its_value(self) -> None:
+        """The no-value promise, made structural on the one object that holds a value."""
+        secret = Secret("OPENROUTER_API_KEY", "sk-or-v1-SUPERSECRET")
+        assert "SUPERSECRET" not in repr(secret)
+        assert "OPENROUTER_API_KEY" in repr(secret)
+
     def test_a_trailing_newline_from_a_pasted_secret_is_trimmed(self) -> None:
         secrets, _ = collect(FakeSecrets({"OPENROUTER_API_KEY": "sk-or-v1-abc\n"}), "p")
         assert secrets[0].value == "sk-or-v1-abc"
+
+
+class TestTheSecretManagerAdapter:
+    """The real :class:`SecretManagerReader`, over a stub that records the requests.
+
+    This is the half no fake can cover: the filter string, the ``versions/latest`` alias,
+    and the id parsed off a resource name are what a typo ships green. Same argument as
+    ``api/tests/test_drain.py`` asserting the bytes rather than a fake's bookkeeping —
+    a claim about a request has to be made against a request.
+    """
+
+    def test_the_list_request_carries_the_label_filter_and_the_project(self) -> None:
+        client = RecordingClient({"OPENROUTER_API_KEY": b"sk-or-v1-abc"})
+        assert SecretManagerReader(client).labelled("a-project-id") == ["OPENROUTER_API_KEY"]
+        assert client.listed[0].parent == "projects/a-project-id"
+        assert client.listed[0].filter == LABEL_FILTER == "labels.motet-local=true"
+
+    def test_the_access_request_names_the_latest_version(self) -> None:
+        client = RecordingClient({"CARTESIA_API_KEY": b"sk_car_abc"})
+        assert SecretManagerReader(client).value("a-project-id", "CARTESIA_API_KEY") == "sk_car_abc"
+        assert (
+            client.accessed[0].name
+            == "projects/a-project-id/secrets/CARTESIA_API_KEY/versions/latest"
+        )
+
+    def test_a_non_utf8_payload_is_named_not_decoded(self) -> None:
+        client = RecordingClient({"WEIRD": b"\xff\xfe not text"})
+        with pytest.raises(LocalEnvError, match="not UTF-8"):
+            SecretManagerReader(client).value("a-project-id", "WEIRD")
+
+    @pytest.mark.parametrize("error", VENDOR_FAILURES)
+    def test_a_vendor_failure_is_a_sentence_that_does_not_quote_the_vendor(
+        self, error: Exception
+    ) -> None:
+        """A refusal from Google quotes the full resource name, which is a project id."""
+        client = RecordingClient({"OPENROUTER_API_KEY": b"x"}, raises=error)
+        with pytest.raises(LocalEnvError) as listing:
+            SecretManagerReader(client).labelled("a-project-id")
+        with pytest.raises(LocalEnvError) as access:
+            SecretManagerReader(client).value("a-project-id", "OPENROUTER_API_KEY")
+        for exc in (listing.value, access.value):
+            assert type(error).__name__ in str(exc)
+            assert "a-project-id" not in str(exc)
 
 
 class TestRendering:
@@ -202,7 +321,15 @@ class TestRendering:
         lines = [line for line in text.splitlines() if line and not line.startswith("#")]
         assert lines[: len(SECRETS)] == [f"{name}={SECRETS[name]}" for name in sorted(SECRETS)]
 
-    def test_a_value_needing_quotes_survives_a_round_trip(self) -> None:
+    def test_a_value_needing_quotes_is_escaped_exactly(self) -> None:
+        """The escaping, asserted as a literal — *not* a round trip.
+
+        Nothing here parses the result back, so this pins the four escapes and says
+        nothing about whether uv's ``--env-file`` reader agrees. That claim was made by
+        hand against uv 0.12.10 and is recorded in the PR; making it in the suite would
+        mean shelling out to ``uv`` from a test, which is a subprocess and a toolchain
+        this file otherwise needs neither of.
+        """
         tricky = 'a b"c\\d$E\nsecond'
         rendered = _render_value(tricky)
         assert rendered == '"a b\\"c\\\\d\\$E\\nsecond"'
