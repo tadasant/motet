@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import json
 import os
 import secrets
 import threading
@@ -463,6 +464,36 @@ class OtlpCollector:
                 for scope_logs in resource_logs.scope_logs
                 for record in scope_logs.log_records
             ]
+        return found
+
+    def sentry_events(self) -> list[dict[str, Any]]:
+        """Every *event* in the Sentry envelopes that arrived, in arrival order.
+
+        The same server doubles as a GlitchTip ingest endpoint — it answers 200 to any
+        POST — so a subprocess pointed at it with a ``GLITCHTIP_DSN`` sends real envelopes
+        here. That is what makes "this record does not page" assertable off the wire rather
+        than from a flag: whether a record becomes an event is decided inside `sentry_sdk`,
+        and the only honest place to read the answer is the bytes it would have sent.
+
+        Envelopes are newline-framed: a header line, then an item header and item payload
+        per item. A payload is sliced by the header's byte ``length`` when it declares one,
+        because an item is not required to be newline-free.
+        """
+        found = []
+        for path, _, body in self.received:
+            if "/envelope" not in path:
+                continue
+            _, _, rest = body.partition(b"\n")
+            while rest.strip():
+                header_line, _, rest = rest.partition(b"\n")
+                header = json.loads(header_line)
+                length = header.get("length")
+                if length is None:
+                    payload, _, rest = rest.partition(b"\n")
+                else:
+                    payload, rest = rest[:length], rest[length:].removeprefix(b"\n")
+                if header.get("type") == "event":
+                    found.append(dict(json.loads(payload)))
         return found
 
     def metric_names(self) -> list[str]:
