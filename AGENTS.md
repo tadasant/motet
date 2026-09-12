@@ -1700,6 +1700,146 @@ obvious ordering. A sweep placed last is skipped whenever a drain raises or a ta
 ends the execution — so the invocations against the fullest backlogs, which create the most
 rows, would be exactly the ones that prune none.
 
+### One user's burst is stepped over, not claimed and deferred one row at a time
+
+`jobs.CLAIM_SQL`'s busy-key filter, `jobs.lock_key` stored on the row by migration 0011.
+**Signed off by Tadas in motet#78**, which states the approach and rejects the alternative;
+see the invariant-12 note at the end of this section for why that sign-off was read as
+covering it.
+
+Invariant 6 was already enforced and is unchanged: an `integrate` job carries
+`serialize_key = user_id`, a worker takes a Postgres advisory lock on it **after** the
+claim, and a worker that finds the key busy hands the row back with `defer`. What that did
+not bound was cost. The queue is ordered by `run_at`, so a user who pastes two thousand
+items puts two thousand rows at the head of it, and **every other worker claimed and
+deferred each of them in turn — two writes per row — before it reached anybody else's
+work.** Each cycle is milliseconds, so it was a tax rather than starvation; the tax scales
+with the burst.
+
+So the claim now reads `pg_locks` and does not offer a row whose key is held. Four things
+about how that is written are the decision:
+
+- **A read, never a lock.** Taking the advisory lock inside the claim was the other option
+  and is rejected: a function with side effects in a `WHERE` can fire for candidate rows
+  `SKIP LOCKED` then discards, and the lease fence's soundness rests on "a deferred job
+  never starts a keeper", which the claim-then-lock order is what guarantees. **That order
+  is untouched and `try_lock` is still the correctness fence** — this is an optimisation.
+  A key taken in the window between the filter and the lock still ends in `defer`, exactly
+  as it did before, and a test pins that path.
+- **`NOT EXISTS`, not `NOT IN`, and the failure it avoids is total.** One NULL anywhere in
+  a `NOT IN` list makes the predicate NULL for *every* row, so a single unexpected
+  `pg_locks` row would offer nothing on any queue — and a queue nothing is returned from
+  looks exactly like a queue with nothing in it. It is the same property that makes a NULL
+  `lock_key` read as *not held*: a row this migration's backfill did not reach is still
+  offered, and still goes through `try_lock`. The two directions are not symmetric — one
+  costs the cycle this removes, the other strands work permanently and quietly.
+- **`lock_key IS NULL OR …` is there for cost, not correctness**, and it short-circuits:
+  on the four queues that carry no serialization key the subplan is *never executed* and
+  `pg_locks` is never read at all. `pg_lock_status()` takes every lock-manager partition
+  lock to answer, which is not a thing to do once per claim on a queue that can never need
+  it. `EXPLAIN (ANALYZE)` says "never executed" there and `loops=1` on `integrate`, and the
+  test asserts both — the hashed subplan is what makes it once per claim rather than once
+  per candidate row.
+- **`pg_locks` is cluster-wide and an advisory lock is not**, so the subquery filters on the
+  current database. Without it, two pytest runs on one server — each with a database of its
+  own since motet#15 — would stop claiming work because the other was busy, as a flake that
+  looks exactly like an empty queue.
+
+`jobs_ready_idx` and `jobs_stale_idx` both still carry their own arm's `Index Cond`, which
+is asserted rather than assumed: putting the claim back on a sequential scan is motet#49,
+and the filter is a `Filter` on the bitmap heap scan rather than anything the index has to
+answer.
+
+**One behaviour changed beside the cost, and it is named in `MAX_LEASE_EXTENSION_SECONDS`:**
+a wedged worker's stale row is now stepped over instead of being claimed and deferred round
+and round until the process dies. The outcome is the one that constant always described —
+the job does not run while another session holds its key — and the ERROR line naming the
+wedged job still comes from the keeper.
+
+#### The scaling signal counts users with work, not rows
+
+`jobs.queue_readiness`, `motet.jobs.ready{queue}` and `motet.jobs.ready_keys{queue}`, and
+`readiness` on `/v1/processing`. Depth is the wrong number for a serialized queue: two
+thousand ready `integrate` rows for one user can employ **one** worker, because invariant 6
+says so, and a scaler reading depth would start a pool that spends its life deferring.
+
+`ready` is the rows that are ready *and due* — a row backing off up the retry ladder or
+deferred five seconds is not work a new worker can start on. `ready_keys` is how many of
+those could run at the same time: distinct serialization keys, **plus one for each row that
+has no key**. The issue specifies `count(DISTINCT serialize_key)` for the serialized queues
+and a plain row count for the others; this expression equals whichever applies on every
+queue that exists, because a queue's rows today either all carry a key or none of them
+does. What it adds is that a queue carrying both reports a number a scaler can act on
+rather than a zero that reads as "no work". It is two aggregates rather than a
+`count(DISTINCT)`, which cannot hash-aggregate and sorts every due row: 83 ms against 20 ms
+over 20,000 rows, median of eleven, on a query the SPA reaches every three seconds while
+anything is pending.
+
+**`blocked_keys` is the third number, and it is there because the filter above took a
+signal away.** A worker that met a held key used to claim the row, log `job N deferred`, and
+hand it back; the churn was the defect, and that line was the only evidence anywhere that a
+key was blocking work. Stepping the row over silently would leave a *leaked* lock — a
+wedged worker past `MAX_LEASE_EXTENSION_SECONDS`, a session that never released — looking
+exactly like an idle deployment: workers claiming nothing, `ready_keys` saying "start more
+workers", and not a line anywhere. So it is counted instead, which is the same move
+`motet.jobs.lease{outcome="held"}` makes. **Nonzero is the healthy case** — a key is held
+whenever somebody is working it — and what deserves attention is it staying pinned while
+`ready` does not fall.
+
+**`ready` counts nothing that is `running`, so it is zero while a job is still going**, and
+a scaler reading it alone would scale a pool to zero on top of one. That is why motet#78
+specifies a floor of one, and the floor is the deployment's half of this signal rather than
+a gap in it: this number says how much work is waiting, and `worker_heartbeats` says whether
+anyone is on it.
+
+**Every queue is reported on every pass, not only the one being drained**, and that is the
+difference between a signal a scaler can close a loop with and one it cannot: a pool scaled
+to zero drains nothing, would emit nothing, and could therefore never be scaled back up.
+One grouped query answers for all six either way. The route carries the same numbers for
+the case even that does not cover — *no worker at all* — which is why it is on
+`/v1/processing`, beside the heartbeat that answers "is anything draining" (motet#38).
+
+**`readiness` is its own list rather than fields on the heartbeat rows**, because the two
+answer different questions over different sets: a heartbeat exists only for a queue a worker
+has run, and readiness has to exist for every queue. Merging them would have meant widening
+a shipped non-null field to nullable for no gain.
+
+**The gauges are sampled rather than continuous, and a consumer has to know it.** They are
+written once per `drain` call — where the heartbeat is written once per *claim*, because it
+is a single-row upsert and this is an aggregate over every due row, and a scaler decides on
+a scale of tens of seconds rather than per job. The SDK's last-value aggregation also hands
+its value to the exporter and clears it, so a collection interval with no drain pass in it
+exports no point at all. Read them with `last_over_time`; the gap is the honest answer,
+because it is what "no worker ran" looks like.
+
+**The deployment shape is not decided here.** One long-lived pool per queue and a connection
+pooler in front of Cloud SQL are sections 3 and 4 of motet#78, they are the `motet-production`
+surface, and the issue defers them to a design session under invariant 12. `runner <queue>
+--poll-seconds N` already exists and is untouched; nothing here picks an instance count, and
+nothing here is a new resource in the private repo.
+
+**One constraint that session has to be handed, because this change raises its stakes:**
+`try_lock` is `pg_try_advisory_lock`, which is **session-level**, and a PgBouncer in
+transaction-pooling mode breaks that outright — a lock taken in one transaction stays held
+on a connection handed to an unrelated client, and `unlock` may run on a different backend.
+That would break invariant 6 itself, not merely this filter; what the filter adds is that
+the claim now *trusts* `pg_locks` to describe reality. So section 4's answer is either a
+pooler in session mode, or moving to `pg_try_advisory_xact_lock` scoped to the handler's
+transaction — which is a different mechanism and its own design session.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** The filter is a change to an
+existing mechanism in the job queue rather than a new one — no new deployable, datastore,
+vendor, seam, protocol, stage or model call, and no resource in the private repo — but
+invariant 12 names "a new mechanism in the job queue" and says "when in doubt, it counts".
+The judgement taken is that **motet#78 is the design session for it**: the owner filed it,
+laid out both options, rejected taking the lock inside the claim *with the reason*, and
+recommended the `pg_locks` pre-filter. That is the shape invariant 12 asks for — the
+problem, the options, the costs, a recommendation, an owner's choice — and the escape hatch
+"a decision this file already records" is about not holding a session twice, not about
+which file the record lives in. This section is now that record. Sections 3 and 4, where
+the same issue says the shape "is the owner's call and needs a session before anything is
+built", are left alone.
+
 ### The episode tab reflects server state, not this page's lifetime
 
 `web/src/App.tsx`. Nothing loaded episode state on mount, so a reload — the realistic thing

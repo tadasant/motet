@@ -636,6 +636,14 @@ export interface paths {
          *     the same lock as everything else under ``/v1``. There is one account in Phase 1 and one
          *     set of workers behind it; when there are many, the queues are still shared and this
          *     answer is still the same one.
+         *
+         *     ``readiness`` is the other half of that same deployment question, for an operator or a
+         *     scaler rather than for the SPA (motet#78): how much is due per queue, and how many
+         *     workers that work could keep busy. It is here because this is where the heartbeat
+         *     already is — "is anything draining" and "how much is there to drain" are one glance —
+         *     and because it is the only surface that can answer for a queue *no worker is running*,
+         *     which is exactly the queue a scaler has to hear about. The gauges the worker emits
+         *     carry the same numbers and go quiet in that case.
          */
         get: operations["processing_status_v1_processing_get"];
         put?: never;
@@ -1268,6 +1276,11 @@ export interface components {
              */
             queues: components["schemas"]["QueueHeartbeatResponse"][];
             /**
+             * Readiness
+             * @description Per queue, in pipeline order: how much work is due and how many workers could take it. Every queue is present, at zero when it has nothing.
+             */
+            readiness: components["schemas"]["QueueReadinessResponse"][];
+            /**
              * Worker Last Seen At
              * @description When any worker last ran a drain pass, over any queue. Null means none ever has: nothing will happen to a queued item until one does.
              */
@@ -1285,6 +1298,37 @@ export interface components {
             last_seen_at: string;
             /** Queue */
             queue: string;
+        };
+        /**
+         * QueueReadinessResponse
+         * @description One queue's scaling signal: what is due, and how many workers could take it.
+         *
+         *     Separate from :class:`QueueHeartbeatResponse` rather than folded into it, because the
+         *     two lists answer different questions over different sets. A heartbeat exists only for a
+         *     queue a worker has *run*; readiness exists for every queue, and the case it has to
+         *     cover is precisely the one with no worker — a queue scaled to zero emits no gauge, so
+         *     this route is the only place its backlog is visible (motet#78). Merging them would
+         *     have meant widening ``last_seen_at`` to nullable, which is a breaking change to a
+         *     shipped field for no gain.
+         */
+        QueueReadinessResponse: {
+            /**
+             * Blocked Keys
+             * @description How many of those keys are already held by somebody right now, so the work is waiting on a worker that has it rather than on a worker that does not exist. Nonzero is the healthy case — a key is held whenever somebody is working it. This staying pinned while `ready` does not fall is the signal worth looking at: it is what a leaked or wedged advisory lock looks like.
+             */
+            blocked_keys: number;
+            /** Queue */
+            queue: string;
+            /**
+             * Ready
+             * @description Jobs on this queue that are ready and due now. Excludes anything backing off up the retry ladder or deferred because its serialization key was busy — neither is work a new worker could pick up. It also excludes work already `running`, so it is zero while a job is still going: a scaler needs a floor of one wherever a worker heartbeat is fresh.
+             */
+            ready: number;
+            /**
+             * Ready Keys
+             * @description How many of those jobs could be worked on at the same time: distinct serialization keys, plus one for each job that has no key. On a serialized queue (`integrate`, `poll`) this is the number of users with work waiting, which is the number of workers the queue can keep busy — invariant 6 holds the rest to one at a time. On an unserialized queue it equals `ready`.
+             */
+            ready_keys: number;
         };
         /**
          * ReadStateRequest

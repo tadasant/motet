@@ -521,6 +521,47 @@ class TestEndToEnd:
         assert [entry["queue"] for entry in after["queues"]] == ["integrate"]
         assert after["now"] >= after["worker_last_seen_at"]
 
+    def test_processing_reports_the_per_queue_scaling_signal(
+        self, api: TestClient, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """motet#78's other half: how much is due, and how many workers could take it.
+
+        Depth alone is the wrong number for a serialized queue — three `integrate` jobs for
+        one user can employ one worker, not three — so the route carries both. It is on
+        this route because it is the only surface that can answer for a queue **no worker
+        is running**, which is exactly the queue a scaler has to hear about; the worker's
+        gauges go quiet in that case, being emitted by the worker that is not there.
+        """
+        empty = api.get("/v1/processing", headers=AUTH).json()
+        assert [entry["queue"] for entry in empty["readiness"]] == [
+            "poll",
+            "extract",
+            "integrate",
+            "assemble",
+            "script",
+            "tts",
+        ]
+        assert all(
+            (entry["ready"], entry["ready_keys"], entry["blocked_keys"]) == (0, 0, 0)
+            for entry in empty["readiness"]
+        )
+
+        for _ in range(3):
+            jobs.enqueue(
+                db, Queue.INTEGRATE, {"source_item_id": "si_x"}, serialize_key=repo.OWNER_USER_ID
+            )
+        jobs.enqueue(db, Queue.TTS, {"episode_id": "ep_x"})
+        db.commit()
+
+        readiness = {
+            entry["queue"]: entry
+            for entry in api.get("/v1/processing", headers=AUTH).json()["readiness"]
+        }
+        assert (readiness["integrate"]["ready"], readiness["integrate"]["ready_keys"]) == (3, 1)
+        assert (readiness["tts"]["ready"], readiness["tts"]["ready_keys"]) == (1, 1)
+        # Nothing holds a key, so nothing is waiting on a worker that already has it.
+        assert all(entry["blocked_keys"] == 0 for entry in readiness.values())
+
     def test_processing_is_behind_the_same_lock_as_everything_else(
         self, api: TestClient, _migrated: str
     ) -> None:

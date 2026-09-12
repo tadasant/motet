@@ -126,6 +126,7 @@ function mockApi(overrides: Record<string, unknown> = {}) {
       now: '2026-08-24T00:00:10Z',
       worker_last_seen_at: null,
       queues: [],
+      readiness: [],
     },
     '/v1/feed': { url: 'https://example.test/feed.xml?token=secret', token: 'secret' },
     'GET /v1/episodes': [EPISODE],

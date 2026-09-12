@@ -9,6 +9,7 @@ Skips without ``DATABASE_URL`` so a quick local run needs no Postgres; CI always
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -36,6 +37,7 @@ from motet_inference.llm import FakeLlmClient
 from motet_inference.registry import fake_stages
 from motet_storage import LocalObjectStore
 from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, loop, runner
+from motet_workers.queues import PIPELINE
 
 MORNING = (
     "Acme raises $20M Series A",
@@ -298,6 +300,61 @@ class TestTheClaimQueryUsesItsIndexes:
             stale = self._index_cond(plan, "jobs_stale_idx")
             assert "locked_at <" in stale, f"{queue.value}:\n{printed}"
 
+    def test_the_busy_key_filter_reads_pg_locks_once_and_only_when_it_can_matter(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """motet#78's pre-filter, costed rather than described.
+
+        Two properties, and each has a plan shape that would quietly lose it. A *hashed*
+        subplan reads `pg_lock_status()` once per execution and probes a hash per candidate
+        row; an unhashed correlated one would call it per row, and `pg_lock_status()` takes
+        every lock-manager partition lock to answer. And on a queue whose rows carry no
+        serialization key the `lock_key IS NULL` disjunct short-circuits, so the subplan is
+        never evaluated at all — four of the six queues, and `EXPLAIN (ANALYZE)` says so in
+        as many words.
+
+        `EXPLAIN (ANALYZE)` really claims a job, so this runs inside a transaction it rolls
+        back — unlike the plan-only assertions above, which is why it is a test of its own.
+        """
+        self._seed(db)
+        # `_seed` writes no `serialize_key`, so give `integrate` the shape it has in
+        # production — a key on every row — and leave `script` as the keyless queue it is.
+        db.execute(
+            "UPDATE jobs SET serialize_key = 'user-a', lock_key = %s WHERE queue = 'integrate'",
+            (jobs.lock_key("user-a"),),
+        )
+        db.execute("ANALYZE jobs")
+        db.commit()
+
+        def plan(queue: Queue) -> list[str]:
+            lines: list[str] = []
+            # A rolled-back transaction rather than a literal `BEGIN`: psycopg has already
+            # opened one on this connection, so `BEGIN` would draw a warning from Postgres
+            # and roll back the same rows either way.
+            with contextlib.suppress(psycopg.Rollback), db.transaction():
+                lines = [
+                    row["QUERY PLAN"]
+                    for row in db.execute(
+                        f"EXPLAIN (ANALYZE) {jobs.CLAIM_SQL}",
+                        (queue.value, jobs.STALE_LEASE_SECONDS),
+                    ).fetchall()
+                ]
+                raise psycopg.Rollback
+            return lines
+
+        keyed, keyless = plan(Queue.INTEGRATE), plan(Queue.SCRIPT)
+
+        for printed in (keyed, keyless):
+            assert any("hashed SubPlan" in line for line in printed), "\n".join(printed)
+
+        # Keyed: read once for the whole claim, not once per candidate row.
+        scanned = [line for line in keyed if "Function Scan on pg_lock_status" in line]
+        assert scanned and all("loops=1" in line for line in scanned), "\n".join(keyed)
+
+        # Keyless: not read at all.
+        skipped = [line for line in keyless if "Function Scan on pg_lock_status" in line]
+        assert skipped and all("never executed" in line for line in skipped), "\n".join(keyless)
+
     def test_explaining_the_claim_does_not_claim(self, db: psycopg.Connection[Any]) -> None:
         """`EXPLAIN` plans an `UPDATE ... RETURNING` without running it.
 
@@ -341,7 +398,10 @@ class TestSerialization:
 
         with repo.connect(_migrated) as holder:
             assert jobs.try_lock(holder, USER) is True
-            # The drain claims the job, finds the key busy, and hands it straight back.
+            # The drain does not run it, and since motet#78 it does not claim it either:
+            # the busy-key filter steps over the row, so it is left `ready` and untouched
+            # rather than claimed and deferred. `TestTheClaimSkipsBusyKeys` is where that
+            # distinction is the assertion; here it is still "nothing ran for this user".
             assert drain(Queue.INTEGRATE, _migrated) == 0
             row = db.execute(
                 "SELECT state, attempts FROM jobs WHERE payload->>'source_item_id' = %s",
@@ -2306,3 +2366,452 @@ def _stub_result(*, title: str) -> Any:
         news_item=NewsItem(id="ni_proposed", title=title, summary="s", source_item_ids=("si_1",)),
         merged=False,
     )
+
+
+class TestTheClaimSkipsBusyKeys:
+    """motet#78: one user's burst must not be a tax every other worker pays.
+
+    Invariant 6 already holds — an `integrate` job carries `serialize_key = user_id` and a
+    worker takes an advisory lock on it after the claim, so at most one worker is ever
+    integrating for a given user. What it did not hold is *cost*. The queue is ordered by
+    `run_at`, so two thousand rows for one busy user sit at the head of it, and every other
+    worker claimed and deferred each of them in turn — writing `state`, `attempts`,
+    `locked_at`, `run_at` and `updated_at` twice per row — before it reached anybody else's
+    work.
+
+    These run on real connections because an advisory lock is a property of a *session*:
+    one connection re-acquires its own lock happily, so a single-connection test would
+    assert the opposite of the thing.
+    """
+
+    #: Enough of user A's rows at the head of the queue that the old claim-and-defer path
+    #: is unmistakable in the assertions below. Small enough to stay a fast test.
+    BURST = 50
+
+    def _burst(self, conn: psycopg.Connection[Any], *, user: str, count: int, age: int) -> None:
+        """`count` ready `integrate` jobs for `user`, the oldest `age` seconds back."""
+        for i in range(count):
+            job_id = jobs.enqueue(conn, Queue.INTEGRATE, {"user": user, "i": i}, serialize_key=user)
+            conn.execute(
+                "UPDATE jobs SET run_at = now() - make_interval(secs => %s) WHERE id = %s",
+                (age - i, job_id),
+            )
+        conn.commit()
+
+    def _rows(self, conn: psycopg.Connection[Any], user: str) -> list[tuple[Any, ...]]:
+        return [
+            (row["id"], row["state"], row["attempts"], row["run_at"], row["updated_at"])
+            for row in conn.execute(
+                """
+                SELECT id, state, attempts, run_at, updated_at FROM jobs
+                WHERE serialize_key = %s ORDER BY id
+                """,
+                (user,),
+            ).fetchall()
+        ]
+
+    def test_a_busy_user_s_burst_is_stepped_over_untouched(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The fairness property itself, stated as the issue states it.
+
+        User A's rows are older *and* first, and A's key is held by another session. The
+        claim must return user B's row and leave every one of A's exactly as it found it —
+        not merely leave them claimable, which the old defer path also did, but leave them
+        unwritten.
+        """
+        self._burst(db, user="user-a", count=self.BURST, age=600)
+        self._burst(db, user="user-b", count=1, age=1)
+
+        with repo.connect(_migrated) as holder:
+            assert jobs.try_lock(holder, "user-a") is True
+            before = self._rows(db, "user-a")
+
+            claimed = jobs.claim(db, Queue.INTEGRATE)
+            db.commit()
+
+            assert claimed is not None
+            assert claimed.serialize_key == "user-b"
+            # Not "still ready", which deferring also achieves: untouched. `updated_at`,
+            # `run_at` and `attempts` are the three columns the claim-and-defer cycle wrote
+            # on every row it stepped over.
+            assert self._rows(db, "user-a") == before
+            assert all(row[1:3] == ("ready", 0) for row in before)
+
+            jobs.unlock(holder, "user-a")
+
+    def test_a_whole_drain_pass_leaves_the_busy_user_alone(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """The same property through `drain`, which is where the busy loop actually ran.
+
+        A single claim stepping over the burst proves the predicate; a drain pass proves
+        the loop does not come back for it. The burst is skipped, B's one job runs, and the
+        pass ends because nothing else is claimable — rather than because it exhausted
+        `MAX_JOBS_PER_RUN` deferring.
+        """
+        self._burst(db, user="user-a", count=self.BURST, age=600)
+        source_id = paste(db, MORNING)  # user B is the real owner; its key is `USER`.
+        db.execute(
+            "UPDATE jobs SET run_at = now() WHERE payload->>'source_item_id' = %s", (source_id,)
+        )
+        db.commit()
+
+        with repo.connect(_migrated) as holder:
+            assert jobs.try_lock(holder, "user-a") is True
+            before = self._rows(db, "user-a")
+
+            assert drain(Queue.INTEGRATE, _migrated) == 1
+
+            assert self._rows(db, "user-a") == before
+            jobs.unlock(holder, "user-a")
+
+    def test_nothing_changes_when_no_key_is_held(self, db: psycopg.Connection[Any]) -> None:
+        """The other direction, and the one that would starve a queue if the filter is wrong.
+
+        With no advisory lock anywhere, the pre-filter must be invisible: the claim returns
+        the oldest due row, exactly as it did before motet#78.
+        """
+        self._burst(db, user="user-a", count=3, age=600)
+        self._burst(db, user="user-b", count=1, age=1)
+
+        oldest = db.execute(
+            "SELECT id FROM jobs WHERE state = 'ready' ORDER BY run_at, id LIMIT 1"
+        ).fetchone()
+        assert oldest is not None
+
+        claimed = jobs.claim(db, Queue.INTEGRATE)
+        assert claimed is not None
+        assert claimed.id == oldest["id"]
+        assert claimed.serialize_key == "user-a"
+
+    def test_a_key_taken_after_the_filter_still_ends_in_a_defer(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """The pre-filter is an optimisation; `try_lock` is still the correctness fence.
+
+        A row with no `lock_key` is exactly the shape of that race made deterministic: the
+        filter cannot know the key and therefore offers the row, and the lock then refuses
+        it. Same path a genuine race takes — the key is taken in the window between the two
+        — and the same outcome, which is `defer`, not a duplicate run.
+
+        It is also the pre-migration shape. A `ready` row written before migration 0011 and
+        outside its backfill has a NULL key, and it must still be *offered*: a NULL read as
+        "held" would strand it silently, which is why the predicate is `lock_key IS NULL OR
+        NOT EXISTS (...)` and not a bare `NOT IN`.
+        """
+        source_id = paste(db, MORNING)
+        db.execute("UPDATE jobs SET lock_key = NULL")
+        db.commit()
+
+        with repo.connect(_migrated) as holder:
+            assert jobs.try_lock(holder, USER) is True
+
+            # Claimed — the filter had nothing to match on — then handed straight back.
+            assert drain(Queue.INTEGRATE, _migrated) == 0
+
+            row = db.execute(
+                "SELECT state, attempts, run_at > now() AS deferred FROM jobs "
+                "WHERE payload->>'source_item_id' = %s",
+                (source_id,),
+            ).fetchone()
+            assert row is not None
+            assert (row["state"], row["attempts"], row["deferred"]) == ("ready", 0, True)
+            jobs.unlock(holder, USER)
+
+    def test_the_lease_reclaim_arm_still_reclaims(self, db: psycopg.Connection[Any]) -> None:
+        """The second arm of the claim is untouched by the filter, with a key present.
+
+        A `running` row whose worker died is the only thing standing between a killed
+        worker and a job nobody ever runs. It carries a `serialize_key` and therefore a
+        `lock_key`, so a filter written slightly wrong — matching on the row's own key
+        without asking whether anybody holds it — would take exactly this recovery away.
+        """
+        job_id = jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"}, serialize_key=USER)
+        db.execute(
+            """
+            UPDATE jobs SET state = 'running', attempts = 1,
+                   locked_at = now() - make_interval(secs => %s)
+            WHERE id = %s
+            """,
+            (jobs.STALE_LEASE_SECONDS + 60, job_id),
+        )
+        db.commit()
+
+        claimed = jobs.claim(db, Queue.INTEGRATE)
+        assert claimed is not None
+        assert (claimed.id, claimed.attempts) == (job_id, 2)
+
+    def test_a_reclaimable_row_is_left_alone_while_its_key_is_held(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """A wedged worker's row is now stepped over rather than claimed and deferred.
+
+        `MAX_LEASE_EXTENSION_SECONDS` describes this case: past the cap the keeper stops
+        touching, the row goes stale, and the reclaiming worker used to find the key still
+        busy and defer — round and round until the wedged process died. The outcome is
+        unchanged (the job does not run while another session holds its key); what is gone
+        is the churn, and the ERROR line naming the wedged job still comes from the keeper.
+        """
+        job_id = jobs.enqueue(db, Queue.INTEGRATE, {"source_item_id": "si_x"}, serialize_key=USER)
+        db.execute(
+            """
+            UPDATE jobs SET state = 'running', attempts = 1,
+                   locked_at = now() - make_interval(secs => %s)
+            WHERE id = %s
+            """,
+            (jobs.STALE_LEASE_SECONDS + 60, job_id),
+        )
+        db.commit()
+
+        with repo.connect(_migrated) as holder:
+            assert jobs.try_lock(holder, USER) is True
+            assert jobs.claim(db, Queue.INTEGRATE) is None
+            jobs.unlock(holder, USER)
+
+        # And it is reclaimable the moment the key frees, rather than stranded.
+        claimed = jobs.claim(db, Queue.INTEGRATE)
+        assert claimed is not None
+        assert claimed.id == job_id
+
+    def test_only_this_database_s_advisory_locks_count(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """`pg_locks` is cluster-wide; an advisory lock is not.
+
+        Every pytest run creates a database of its own (motet#15), so a run beside a local
+        one — or beside a second agent session — holds advisory locks under the very keys
+        this one uses. Without the `database` predicate each would stop claiming work
+        because the other was busy, which is a flake that looks exactly like an empty queue.
+        """
+        self._burst(db, user=USER, count=1, age=60)
+
+        elsewhere = psycopg.conninfo.make_conninfo(_migrated, dbname="postgres")
+        with psycopg.connect(elsewhere) as other:
+            other.execute("SELECT pg_advisory_lock(%s)", (jobs.lock_key(USER),))
+            try:
+                claimed = jobs.claim(db, Queue.INTEGRATE)
+                assert claimed is not None
+                assert claimed.serialize_key == USER
+            finally:
+                other.execute("SELECT pg_advisory_unlock(%s)", (jobs.lock_key(USER),))
+
+    def test_a_two_int_advisory_lock_is_not_mistaken_for_a_job_s_key(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """`objsubid = 1` is the one-bigint form, and the narrowing is not cosmetic.
+
+        `pg_advisory_lock(int, int)` lands in the same two `pg_locks` columns, so without
+        the `objsubid` predicate its two halves would reassemble into a bigint that can
+        collide with a real `lock_key` and hide that key's rows — silently, and for as long
+        as the other lock lives. Nothing in this system takes one today, which is exactly
+        why it needs a test: the day something does, the failure is a queue that quietly
+        stops offering one user's work.
+
+        The pair here is chosen to reassemble into precisely this user's key, so dropping
+        the narrowing fails this rather than relying on a coincidence to catch it.
+        """
+        key = jobs.lock_key(USER)
+        high, low = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
+        # Signed 32-bit halves, which is what `pg_advisory_lock(int, int)` takes.
+        high -= 1 << 32 if high >= 1 << 31 else 0
+        low -= 1 << 32 if low >= 1 << 31 else 0
+
+        self._burst(db, user=USER, count=1, age=60)
+
+        with repo.connect(_migrated) as holder:
+            holder.execute("SELECT pg_advisory_lock(%s, %s)", (high, low))
+            holder.commit()
+            try:
+                claimed = jobs.claim(db, Queue.INTEGRATE)
+                assert claimed is not None
+                assert claimed.serialize_key == USER
+            finally:
+                holder.execute("SELECT pg_advisory_unlock(%s, %s)", (high, low))
+                holder.commit()
+
+    def test_the_backfill_agrees_with_the_python_hash(self, db: psycopg.Connection[Any]) -> None:
+        """Migration 0011's SQL and `jobs.lock_key` must produce the same bigint.
+
+        Two implementations of one hash is the shape that drifts, so this runs the
+        migration's *own* statement — read out of the file rather than transcribed — over
+        rows this test inserts with a NULL key, and compares what it wrote against the
+        Python function. A transcription here would keep agreeing while the migration did
+        not.
+
+        The keys deliberately include a non-ASCII one (the SQL says `convert_to(...,
+        'UTF8')` and the encoding is where these part company) and one whose digest has its
+        top bit set, which is where an arithmetic reassembly overflows `bigint` instead of
+        producing a negative number.
+        """
+        from motet_db import MIGRATIONS_DIR
+
+        sql = (MIGRATIONS_DIR / "0011_job_lock_key.sql").read_text()
+        backfill = sql[sql.index("UPDATE jobs") :]
+
+        keys = ["motet-owner", "user-42", "ünïcode", "", "src_abc"]
+        assert any(jobs.lock_key(key) < 0 for key in keys), "no key exercises the sign bit"
+
+        for key in keys:
+            db.execute(
+                "INSERT INTO jobs (queue, payload, serialize_key) VALUES (%s, '{}'::jsonb, %s)",
+                (Queue.INTEGRATE.value, key),
+            )
+        # A terminal row is deliberately outside the backfill's WHERE clause: it can never
+        # be claimed again, so rewriting the whole table to give it a key buys nothing.
+        db.execute(
+            "INSERT INTO jobs (queue, payload, serialize_key, state) "
+            "VALUES (%s, '{}'::jsonb, %s, 'done')",
+            (Queue.INTEGRATE.value, "already-finished"),
+        )
+        db.execute("UPDATE jobs SET lock_key = NULL")
+        db.execute(backfill)
+        db.commit()
+
+        written = {
+            row["serialize_key"]: row["lock_key"]
+            for row in db.execute("SELECT serialize_key, lock_key FROM jobs").fetchall()
+        }
+        assert written == {key: jobs.lock_key(key) for key in keys} | {"already-finished": None}
+
+
+class TestTheScalingSignal:
+    """motet#78: depth is the wrong number for a queue that serializes.
+
+    Two thousand ready `integrate` rows for one user can employ one worker, not two
+    thousand — invariant 6 says so. A scaler reading depth would start a pool that spends
+    its life deferring, which is the cost the claim filter above removes and not a reason
+    to have started the workers.
+    """
+
+    def test_a_serialized_queue_counts_users_and_a_plain_one_counts_rows(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        for user, count in (("user-a", 5), ("user-b", 2), ("user-c", 1)):
+            for _ in range(count):
+                jobs.enqueue(db, Queue.INTEGRATE, {"user": user}, serialize_key=user)
+        for _ in range(4):
+            jobs.enqueue(db, Queue.SCRIPT, {"episode_id": "ep_x"})
+        db.commit()
+
+        readiness = {entry.queue: entry for entry in jobs.queue_readiness(db)}
+
+        # Eight rows, three users, three workers' worth of work.
+        assert (readiness["integrate"].ready, readiness["integrate"].ready_keys) == (8, 3)
+        # No serialization key, so every row is its own unit and the two agree.
+        assert (readiness["script"].ready, readiness["script"].ready_keys) == (4, 4)
+        # Nobody is holding anything, so nothing is waiting on a worker that has it.
+        assert all(entry.blocked_keys == 0 for entry in readiness.values())
+
+    def test_a_held_key_is_reported_as_blocked_rather_than_as_silence(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The signal the busy-key filter took away, put back in the right shape.
+
+        A worker that met a held key used to log "job N deferred" every few seconds; the
+        churn was the defect, and that line was the only evidence anywhere that a key was
+        blocking work. Stepping the row over silently would leave a leaked or wedged lock
+        looking exactly like an idle deployment — workers claiming nothing, `ready_keys`
+        saying "start more workers", and not a line anywhere.
+
+        A key nobody holds is deliberately *not* blocked, and a key that is held is — with
+        `ready` and `ready_keys` unchanged either way, because the work is still there.
+        """
+        for user in ("user-a", "user-b", "user-c"):
+            jobs.enqueue(db, Queue.INTEGRATE, {"user": user}, serialize_key=user)
+        db.commit()
+
+        def integrate() -> jobs.QueueReadiness:
+            return next(e for e in jobs.queue_readiness(db) if e.queue == "integrate")
+
+        assert integrate().blocked_keys == 0
+
+        with repo.connect(_migrated) as holder:
+            assert jobs.try_lock(holder, "user-a") is True
+            assert jobs.try_lock(holder, "user-c") is True
+
+            entry = integrate()
+            assert (entry.ready, entry.ready_keys, entry.blocked_keys) == (3, 3, 2)
+
+            jobs.unlock(holder, "user-a")
+            jobs.unlock(holder, "user-c")
+
+        assert integrate().blocked_keys == 0
+
+    def test_every_queue_is_reported_even_with_nothing_on_it(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """An absent series reads as "fine" on both surfaces that consume this."""
+        readiness = jobs.queue_readiness(db)
+        assert [entry.queue for entry in readiness] == [queue.value for queue in PIPELINE]
+        assert all(
+            (entry.ready, entry.ready_keys, entry.blocked_keys) == (0, 0, 0) for entry in readiness
+        )
+
+    def test_work_that_is_not_due_is_not_work_a_new_worker_could_take(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """A queue full of rows backing off is a queue with nothing to scale up for.
+
+        Three states that all look like depth and none of which a new worker can start on:
+        a retry waiting on the backoff ladder, a row deferred because its key was busy, and
+        a row another worker is already running.
+        """
+        jobs.enqueue(db, Queue.INTEGRATE, {"i": 1}, serialize_key="user-a", delay_seconds=600)
+        jobs.enqueue(db, Queue.INTEGRATE, {"i": 2}, serialize_key="user-b")
+        running = jobs.enqueue(db, Queue.INTEGRATE, {"i": 3}, serialize_key="user-c")
+        db.execute("UPDATE jobs SET state = 'running', locked_at = now() WHERE id = %s", (running,))
+        db.commit()
+
+        readiness = {entry.queue: entry for entry in jobs.queue_readiness(db)}
+        assert (readiness["integrate"].ready, readiness["integrate"].ready_keys) == (1, 1)
+
+    def test_a_drain_pass_puts_the_numbers_on_the_gauges(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """Emitted beside the heartbeat, for *every* queue rather than the one being drained.
+
+        A pool scaled to zero drains nothing and would emit nothing, so a gauge covering
+        only the queue its own worker is on could never be the signal that scales that pool
+        back up. One grouped query answers for all six either way.
+        """
+        recorded: list[tuple[str, int, Mapping[str, Any]]] = []
+
+        class _Gauge:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def set(self, value: int, attributes: Mapping[str, Any]) -> None:
+                recorded.append((self.name, value, attributes))
+
+        for user in ("user-a", "user-b"):
+            jobs.enqueue(db, Queue.TTS, {"user": user}, serialize_key=user)
+        jobs.enqueue(db, Queue.TTS, {"user": "user-a"}, serialize_key="user-a")
+        db.commit()
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(loop, "_queue_ready", _Gauge("motet.jobs.ready"))
+            patch.setattr(loop, "_queue_ready_keys", _Gauge("motet.jobs.ready_keys"))
+            patch.setattr(loop, "_queue_blocked_keys", _Gauge("motet.jobs.ready_keys_blocked"))
+            # A queue with nothing on it: the pass still reports every queue.
+            drain(Queue.ASSEMBLE, _migrated)
+
+        emitted = {(name, attributes["motet.queue"]): value for name, value, attributes in recorded}
+        assert emitted[("motet.jobs.ready", "tts")] == 3
+        assert emitted[("motet.jobs.ready_keys", "tts")] == 2
+        assert emitted[("motet.jobs.ready_keys_blocked", "tts")] == 0
+        assert emitted[("motet.jobs.ready", "assemble")] == 0
+        assert {queue for _, queue in emitted} == {queue.value for queue in PIPELINE}
+
+    def test_a_readiness_failure_does_not_stop_the_drain(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """Measuring the queue must never be able to stop draining it."""
+        paste(db, MORNING)
+
+        def _boom(_conn: psycopg.Connection[Any]) -> list[jobs.QueueReadiness]:
+            raise RuntimeError("no")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(loop.jobs, "queue_readiness", _boom)
+            assert drain(Queue.INTEGRATE, _migrated) == 1
