@@ -9,8 +9,6 @@ callers have genuinely different cost and correctness profiles:
   answered ``related`` — the uncertain band motet#41 fell into. It is rare by
   construction, so it can afford the thinking the volume line cannot.
 * **script** is a handful of calls per episode, and quality is user-visible prose.
-* **grounding** decides whether a claim is allowed to be spoken. Invariant 3 lives here,
-  so it gets the most thinking and, when it matters, the strongest model.
 * **voice** is a spoken conversational turn, and its currency is latency rather than
   depth. It defaults to no reasoning at all.
 
@@ -80,7 +78,6 @@ class LlmStage(StrEnum):
     DEDUP = "dedup"
     DEDUP_CONFIRM = "dedup_confirm"
     SCRIPT = "script"
-    GROUNDING = "grounding"
     VOICE = "voice"
 
     @property
@@ -203,9 +200,9 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
     ),
 }
 
-#: Per-stage defaults. Grounding gets the deepest thinking because a wrong verdict there
-#: is a fabricated claim reaching audio; dedup gets the shallowest because it is the
-#: volume line and its judgement is comparatively mechanical.
+#: Per-stage defaults. Script gets the deepest thinking because its output is prose a
+#: listener hears; dedup gets the shallowest because it is the volume line and its
+#: judgement is comparatively mechanical.
 #:
 #: ``None`` is a default in its own right and is spelled the same way a deployment spells
 #: it — :data:`OFF_VALUE`, which :func:`_parse_effort_setting` maps to ``None``. Voice is
@@ -219,7 +216,6 @@ DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort | None]] = {
     # a whole backlog, at `low`, while also being asked to write a headline and a summary.
     LlmStage.DEDUP_CONFIRM: "medium",
     LlmStage.SCRIPT: "high",
-    LlmStage.GROUNDING: "max",
     LlmStage.VOICE: None,
 }
 
@@ -275,9 +271,9 @@ def _default_provider(environ: Mapping[str, str]) -> Provider:
     A second, stricter reading here — an exact ``== "real"``, say — would make
     ``MOTET_INFERENCE_MODE=Real`` mean *real stage adapters wired to a fake model*: a
     revision that boots clean, skips the credential check, and feeds
-    ``fake-completion:...`` into grounding validation and then into audio. "Fails toward
-    the free side" is no comfort there; the failure is not free, it is fabricated output
-    that looks fine.
+    ``fake-completion:...`` into the script stage and then into audio. "Fails toward the
+    free side" is no comfort there; the failure is not free, it is fabricated output that
+    looks fine.
     """
     return Provider.OPENROUTER if current_mode(environ) == "real" else Provider.FAKE
 

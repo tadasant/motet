@@ -52,41 +52,34 @@ almost every design question that comes up is already answered by one of them.
    credentials and no schema knowledge. This is what lets the voice service be reused —
    by Zimmer, among others — rather than being welded to Motet's data model.
 
-3. **Every reported claim carries a source span, validated before TTS — a gate when Motet
-   reports, advisory when it converses.** A briefing that invents a funding number is dead.
-   The two halves are *not* symmetric, and the asymmetry is the decision (Tadas,
-   2026-08-24, motet#10) rather than an implementation that has not caught up:
+3. **Every reported claim carries the source span it was copied from.** Not *validated* —
+   that is the reversal. Removing it was decided by Tadas, 2026-09-12, motet#75, which
+   invariant 12 names as its own first consequence; the issue is the design session and
+   the record of the alternatives. Grounding validation is gone from both halves of the
+   system: the hard gate that stood between the script and Cartesia, and the advisory
+   check that ran behind every conversational reply. What that costs is stated plainly in
+   the issue and is worth restating here — **a claim can now be spoken with nothing having
+   checked that its source supports it.**
 
-   | | **Narration** — the briefing | **Conversation** — answering a question |
-   |---|---|---|
-   | Where | `workers/` script → grounding → Cartesia | `voice/` `VoiceSession.respond_to_text` |
-   | Grounding | **hard gate.** A claim that fails validation is not synthesized. | **advisory.** The reply is spoken, then checked. |
-   | Checked by | `GroundingValidator`, a max-effort model call | `motet_voice.grounding`, ours, local, deterministic |
-   | If it fails | nothing gets spoken | it was already spoken; a counter, a warning and a `grounding` event record it |
+   **The structure stays, and it is load-bearing for reasons that have nothing to do with
+   the gate.** The script stage still asks the model for a verbatim `quote` per claim,
+   `locate_quote` still finds it in the source or discards the claim, and
+   `segment_claims.source_item_id` / `span_start` / `span_end` still record where it came
+   from. Highlights anchor to that span, the show notes and the WebVTT transcript render
+   from it, and the episode screen shows every claim beside its source. Removing spans is a
+   separate and much larger decision; nothing here licenses it.
 
-   **The narration half is not negotiable.** It is where a briefing is *made*, it is
-   asynchronous, and it has all the time in the world. Do not weaken it.
+   **What still constrains what gets spoken is a prompt, and a prompt is not a guarantee.**
+   `SCRIPT_SYSTEM` tells the model not to state a number, a name or a date its quote does
+   not contain, and the conversational system prompt tells the model to answer only from
+   the material it was handed or from a tool result. A claim whose quote cannot be located
+   is dropped while the answer is parsed — `motet.script.claims_dropped{reason}` counts
+   those — but nothing compares the sentence to the span.
 
-   **The conversational half is advisory because a gate there is a silence.** The reply is
-   generated inside a spoken turn with a listener standing on a pavement waiting for it,
-   and the batch validator cannot live in that budget. So the check runs *behind* the
-   reply — off the critical path — and never blocks the audio.
-
-   **Advisory is not absent, and the difference is entirely what survives the turn.**
-   Every conversational reply is checked for fabricated specifics — a number, a name or a
-   quotation the session's material does not contain — and every verdict is recorded:
-   `motet.voice.conversational_replies{grounded="false"}` on the obs stack, a warning
-   carrying the offending text, a `grounding` event to the client, and a count in the
-   session summary. "How often does Motet say something it cannot source out loud?" has an
-   answer, in Grafana. A change that removes the recording removes the invariant, whatever
-   it leaves behind.
-
-   The conversational check does **not** judge paraphrase or entailment; it catches
-   invented specifics, which is invariant 3's own named failure mode. A model-backed
-   entailment check drops in behind `ConversationGroundingChecker` when the reply path
-   grows a *new* source of material — research results, a second corpus, memory across
-   sessions — because that is when the risk stops being paraphrase over already-grounded
-   text. See the tripwire below: none of this is deferrable.
+   **If it comes back, it should come back cheaper first**: a deterministic check for
+   numbers, names and quotations absent from the cited span, run as a counter rather than a
+   gate. A model-backed gate is worth reconsidering when there is a way to measure whether
+   it catches anything — which is the thing the removed one never had.
 
 4. **`spoken_through_ms` is tracked by us, not the provider.** We own playback position.
    Never read it back out of a vendor SDK and never trust a provider's notion of where the
@@ -101,9 +94,9 @@ almost every design question that comes up is already answered by one of them.
    items, so concurrent runs would race and produce duplicate news items.
 
 7. **Every inference stage sits behind an interface with a fake for tests.** Dedup/integrate,
-   script generation, grounding validation, and TTS each have a Protocol in
-   `inference/` and a deterministic fake alongside the real adapter. Tests and CI use the
-   fakes. No test in this repo may make a real vendor call.
+   script generation, and TTS each have a Protocol in `inference/` and a deterministic fake
+   alongside the real adapter. Tests and CI use the fakes. No test in this repo may make a
+   real vendor call.
 
 8. **Source credentials are never plaintext at rest; only workers can decrypt.** Envelope
    encryption, Cloud KMS KEK, per-record DEK, AAD bound to `user_id:source_id:provider`.
@@ -340,7 +333,7 @@ on an existing instrument, docs.
 asking is a mechanism the owner has to discover after it ships. The asymmetry is deliberate.
 
 **A decision this file already records has had its session, and building it is not a new
-one.** Invariant 3's model-backed entailment check and Cartesia's own timestamp output are
+one.** Invariant 3's cheaper deterministic check and Cartesia's own timestamp output are
 each written down here as the intended next step, with the condition that triggers them;
 so is every tripwire, as a decision against. What needs a session is a mechanism nobody
 chose — not one whose choosing is on the page.
@@ -392,12 +385,12 @@ design session does not have to be held twice.
   (`SELECT ... FOR UPDATE SKIP LOCKED`). A day of news items is about 4.5k tokens, which is
   passed in-prompt; there is nothing to embed. Reaching for either is a sign of solving a
   scale problem this system does not have.
-- **Never defer grounding validation.** It shapes the script contract — the script format
-  exists *so that* claims can carry source spans. Adding it later is not a feature, it is a
-  rewrite of everything downstream of the script. On the conversational path it is advisory
-  rather than a gate (invariant 3), and *that* is deferrable in exactly one direction:
-  making it advisory was a decision, making it silent would not be. A conversational reply
-  that is spoken without being counted is the same defect wearing a different hat.
+- **Never drop the claim-to-span structure.** Grounding validation is gone (invariant 3,
+  motet#75) and the shape it forced into existence is not: a claim carries the source item
+  and the character range its quote was located at. Highlights anchor there, the show notes
+  and the transcript render from there, and the episode screen shows a claim beside its
+  source. Deleting that is a much larger change than deleting the checker was, and it is
+  not implied by it.
 
 ---
 
@@ -406,20 +399,20 @@ design session does not have to be held twice.
 Paste arbitrary text in, get an episode out, listen on a dog walk. One hardcoded user.
 
 ```
-paste-in → Source Item → News Item (deduped, grounding-validated)
+paste-in → Source Item → News Item (deduped)
         → Episode → script → Cartesia Sonic → GCS → private authenticated RSS feed
 ```
 
 **In:** paste-in ingestion, dedup/integrate, manual episodes ("all unread", duration-capped),
-script + grounding validation, TTS, GCS, private authenticated RSS, a 3-screen SPA
-(paste-in, backlog, episode), a single hardcoded account.
+script, TTS, GCS, private authenticated RSS, a 3-screen SPA (paste-in, backlog, episode),
+a single hardcoded account.
 
 **Out — do not build these yet:** Gmail, X, OAuth, the secret store, smart episodes,
 ranking, iOS, voice interactivity, signup, brand.
 
-**Status: the Phase 1 path is built** — paste-in, dedup/integrate, assemble, script +
-grounding validation, TTS, object storage, the private feed, and the three SPA screens. The
-stages run as Cloud Run jobs draining Postgres queues (`workers/`), and every one of them
+**Status: the Phase 1 path is built** — paste-in, dedup/integrate, assemble, script, TTS,
+object storage, the private feed, and the three SPA screens. The stages run as Cloud Run
+jobs draining Postgres queues (`workers/`), and every one of them
 is retried independently.
 
 **Deployed as of 2026-08-25, and still unproven — those are different claims.** Both
@@ -567,8 +560,8 @@ the voice/interaction path, and the iOS app.
 **Storage.** Postgres on Cloud SQL for data *and* the job queue (`SKIP LOCKED`). Audio in
 GCS behind signed URLs. No Redis. No vector store. (See tripwires.)
 
-**Inference.** Claude for dedup/integrate, script generation, and grounding validation,
-reached **through OpenRouter** and defaulting to Claude Sonnet 5; Cartesia Sonic for TTS.
+**Inference.** Claude for dedup/integrate and script generation, reached
+**through OpenRouter** and defaulting to Claude Sonnet 5; Cartesia Sonic for TTS.
 OpenAI Realtime (voice) and Exa (research) arrive in Phase 2. Every one of them sits behind
 an interface with a fake — invariant 7.
 
@@ -576,10 +569,10 @@ an interface with a fake — invariant 7.
 voice identity from the realtime vendor.
 
 **Two audio paths, deliberately separate.** Narration is batch and offline-capable
-(script → validation → TTS → GCS → client plays locally). Interaction is realtime and
+(script → TTS → GCS → client plays locally). Interaction is realtime and
 online-only (barge-in → Pipecat → realtime provider → tools → resume narration). Realtime is
-10–15% of session minutes, not 100%. This split is what makes offline possible, grounding
-enforceable, and the economics work.
+10–15% of session minutes, not 100%. This split is what makes offline possible and the
+economics work.
 
 ---
 
@@ -850,9 +843,9 @@ it does for the stage registry.
 
 **The default is `anthropic/claude-sonnet-5`, and switching is a variable, not a commit.**
 `MOTET_LLM_MODEL` moves every stage;
-`MOTET_LLM_MODEL_{DEDUP,DEDUP_CONFIRM,SCRIPT,GROUNDING,VOICE}` moves one. Effort works the
-same way, defaulting per stage: dedup `low` (the volume line), dedup_confirm `medium`,
-script `high`, grounding `max`, voice `off`.
+`MOTET_LLM_MODEL_{DEDUP,DEDUP_CONFIRM,SCRIPT,VOICE}` moves one. Effort works the same way,
+defaulting per stage: dedup `low` (the volume line), dedup_confirm `medium`, script
+`high`, voice `off`.
 
 **A "stage" is a caller with its own cost profile, not a step in the pipeline**, which is
 what lets the voice service's conversational turn be one of them (motet#6) — and what lets
@@ -920,8 +913,8 @@ Four things about this are settled, and each exists because of a specific failur
   Sonnet 5 returns no raw chain of thought, so `usage.reasoning_tokens` is the only signal
   the check has — and OpenRouter routes a slug across several upstreams without pinning
   one. "Dedup's worker process stuck to an upstream that does not surface reasoning-token
-  accounting, while script and grounding stuck to ones that do" fits every observation
-  just as well, and would mean a thought answer whose accounting was lost. It does not
+  accounting, while the script stage stuck to one that does" fits every observation just
+  as well, and would mean a thought answer whose accounting was lost. It does not
   change the fix, because the check cannot tell the two apart either way. The adapter
   therefore logs the **served upstream** alongside the model whenever a response arrives
   unthought, so a real run can settle it.
@@ -968,10 +961,10 @@ reason.
 
 ### A stage records what it spent and what it threw away
 
-`inference/src/motet_inference/accounting.py`. Two issues (motet#24, motet#25) with one
-shape: the work happened and the evidence was discarded. Usage was decoded off every
-OpenRouter response and read by nobody; grounding drops were counted and never
-characterised.
+`inference/src/motet_inference/accounting.py`. motet#25's shape: the work happened and the
+evidence was discarded. Usage was decoded off every OpenRouter response and read by nobody.
+(motet#24 was the same shape one stage along, on the grounding gate's drops; that gate is
+gone — motet#75 — and `motet.script.claims_dropped{reason}` is what is left of the pair.)
 
 **A metric answers "how is the fleet doing", a log line answers "what did *that* one
 cost", and the split is cardinality.** `motet.llm.tokens{stage,model,kind}` carries no
@@ -993,8 +986,8 @@ rather than an exception to it** (motet#58). The load-bearing half of "recording
 the stage adapters" is *the object that owns the call and names the stage is the object
 that records it* — and for `LlmStage.VOICE` that object is
 `LlmConversationModel.reply()`, which is not a pipeline stage and does not live in
-`inference/`. Moving the leg across the package boundary to make it look like the other
-three would drag voice's own `TurnRequest` and system prompt into `motet-inference` and
+`inference/`. Moving the leg across the package boundary to make it look like the pipeline
+stages would drag voice's own `TurnRequest` and system prompt into `motet-inference` and
 point the dependency arrow backwards. Until it recorded, a real voice session's completions
 were billed and appeared in no metric and no log line, so a Grafana panel split by `stage`
 showed three series where the enum has four — a voice fleet spending money and a voice
@@ -1012,206 +1005,12 @@ episode's, one scope smaller.
 field a log query cannot aggregate, and `cache_read=0` is precisely the observation the
 prompt-caching warning above is about.
 
-On the grounding half, **the two drop layers are separate instruments on purpose**.
-`motet.script.claims_dropped{reason}` counts what the script parser could not use — a
-claim counted there never reached the gate — and `motet.grounding.claims{outcome}` plus
-`motet.grounding.claims_dropped{reason}` count what the gate refused. They mean opposite
-things: the first is a script-prompt problem, the second is invariant 3 working. Reasons
-are bucketed by `classify_grounding_reason` before they touch a label, because a model's
-reason is a sentence and a sentence as a label mints a series per claim; the sentence
-itself, the claim text and the episode id go in a warning line, which is the only moment
-that detail exists — the pre-grounding script is never stored and a dropped claim leaves
-no row anywhere.
-
-**A clean episode says so.** "No drops today" and "grounding never ran" must not be the
-same observation, which is the never-infer-"no errors"-from-"no data" trap one section up.
-
-### The grounding gate is chunked, and its ceiling is a function of the work
-
-`ClaudeGroundingValidator` used to judge every claim in an episode in **one** call under a
-fixed 8,000-token ceiling. At nineteen news items — a normal Tuesday — the model spent all
-8,000 tokens reasoning and returned no verdict at all, so `_parse` got an empty completion
-and raised; the input never changed, so every retry did the same thing and the episode
-never left `scripting`. That is motet#42, and it was invisible until then because every
-earlier end-to-end run used two claims, where 8k is never approached.
-
-**The diagnosis is not "the ceiling was too low", and that distinction is the fix.** The
-*required output* of that call grows with the backlog and a constant does not, so every
-constant is a backlog size beyond which the stage cannot complete. Raising it moves the
-size; it does not remove it. So the bound moved onto the work instead: claims are chunked
-(`GROUNDING_CLAIMS_PER_CALL`, plus a character bound, because a chunk of paragraph-sized
-evidence spans is not the same ask as a chunk of short ones) and each call's ceiling is
-`grounding_max_tokens(n)` — a flat term for reading the instructions plus a **per-claim**
-term covering both the verdict and the thinking that produces it. Per-claim rather than
-flat because that is what the staging numbers say: 8,000 reasoning tokens over twelve
-claims, and *cut off*, so ≥660 a claim is a floor and the real figure is unknown. The
-number of calls grows with the episode; the size of each one does not.
-
-**The second observation, and what it moved: motet#52.** A full 21-item backlog survived
-that shape and took 43 minutes and 58 calls to do it, fifteen of which spent their whole
-output ceiling and returned no verdict — ~180k output tokens produced and discarded, on
-the order of $2.70, several times the cost of the episode's useful inference. **Every
-split was discovered by paying for it**, and the docstring above had already conceded the
-gap: both terms were estimates against a single truncated observation, and this is the
-second one.
-
-Three anchors came out of it — eight claims exhausted 14,000, four exhausted 10,000, and
-the cascades stopped at two under 8,000 with no claim dropped for budget. Written as
-`demand(n) = F + c·n` those say `F + 2c ≤ 8000` and `F + 4c > 10000`, hence **`c > 1000`,
-which is exactly the value the per-claim term had**, and `F ≤ 8000 − 2c`. Two things
-follow, and they are the change:
-
-- **The demand is per-claim dominated and the formula was headroom dominated, which is why
-  halving cascaded.** A flat term is the part halving cannot reduce, so a ceiling made
-  mostly of one loses budget faster than it loses work — 8 → 4 → 2 in the logs, each rung
-  paid for. The weight moved onto the per-claim term (2,750) and off the flat one (5,000).
-- **Room per claim is bought by carrying fewer claims, not by lifting the ceiling.** At
-  eight claims, reaching the ~4,000 a claim the exhaustions imply would have meant a
-  32,000-token call; at four it costs 16,000 — which is `demand(4)`'s maximum over the
-  *whole* region consistent with all three anchors, so it is the largest demand the data
-  admits rather than a guess above it. `GROUNDING_CLAIMS_PER_CALL` is 4, and the character
-  bound halved with it so that the characters a chunk may carry per claim are unchanged.
-
-Said plainly, because the merge gate rates it: **the maximum per-call `max_output_tokens`
-goes from 14,000 to 16,000**, and every bound that actually caps grounding spend — the
-chunk count, the halving, the fail-closed single-claim drop — is untouched. The ceiling is
-a truncation bound rather than a charge; what is billed is what the model produces, and an
-exhausted call is the one case where the whole ceiling is billed for nothing. Net spend
-falls: for the eight claims of one cascade rung, 64,400 output tokens become 22,400.
-
-**And the estimate no longer has to be right, because a wrong one is paid once an episode
-rather than once a chunk.** Halving is a local decision that forgets what it learned as
-soon as the chunk is done, so the next chunk paid the same probe — sixteen times over a
-full backlog. A chunk that runs out now narrows the size used for *every remaining chunk of
-that episode*, to the largest size this episode has actually seen answered. Per episode
-rather than per process, deliberately: a limit living on the adapter would ratchet down
-over a worker's lifetime and never recover, turning one pathological claim into a
-permanently more expensive stage.
-
-**A claim that runs out on its own narrows nothing**, and that exception is the same
-argument one scope smaller. There is no smaller chunk to retreat to, so a size-one
-exhaustion is evidence about that *claim* — it is why the claim is dropped — and not about
-how many claims fit in a call. Narrowing on it would put every remaining claim of the
-episode on a call of its own, which is the most expensive shape the stage has.
-
-**`effort` was not touched, and that is a decision.** Lowering it is the other direction
-motet#52 offered and it would cut cost the same way — but grounding is where invariant 3
-lives, the golden set runs against fakes and so cannot score verdict quality, and a stage
-that silently got worse at catching a fabricated number is the one regression this system
-has no instrument for. `MOTET_LLM_EFFORT_GROUNDING` is still the lever if a real run says
-so.
-
-Three things fall out of that, and none of them is decoration:
-
-- **Verdicts are independent per claim, which is what makes chunking free.** The original
-  batching argument — do not multiply the most expensive stage in the pipeline by the
-  length of an episode — survives intact. Chunk size is what trades calls against risk.
-- **A chunk that still exhausts is halved, and a claim that exhausts on its own fails
-  closed.** Both terms of the ceiling are estimates against one truncated observation, so
-  the halving is the part that has to be right: it is what makes a wrong estimate cost a
-  retry rather than an episode. The floor matters more than the ceiling — an unjudged claim
-  is a *failure*, exactly as a missing verdict already was, so it is dropped rather than
-  spoken. `handle_script` then ships what survived — an episode a story short instead of no
-  episode at all, which is what motet#42 actually cost. It records itself as
-  `motet.grounding.claims_dropped{reason="budget_exhausted"}`, the one drop reason that
-  means nobody judged the claim rather than that the gate judged it.
-- **Halving costs calls, so it is instrumented rather than merely logged.** A chunk that
-  never fits costs up to `2n-1` calls at the most expensive effort in the system, and the
-  claim-drop counter only fires at the *floor* — so without a second instrument "the chunk
-  size no longer suits the model" would be invisible until claims started disappearing,
-  which is the never-infer-"no errors"-from-"no data" trap one section up wearing a new
-  hat. `motet.llm.budget_exhausted{stage,model}` counts every exhausted call, and the
-  tokens it burned still land in `motet.llm.tokens`: billed and useless is still billed.
-- **`LlmBudgetExhaustedError` is its own error because it is the one transport failure
-  worth *not* retrying.** The same request spends the same budget every time, so the
-  caller that can send less work should, and for a stage that *cannot* subdivide — dedup,
-  script — the worker loop fails the job permanently rather than buying five identical
-  billed failures. A truncated answer under a JSON schema raises it too: half a document
-  parses no better than none, and the old path surfaced that as malformed JSON — pointing
-  at the model's spelling rather than at the ceiling that cut it off. It is raised **only**
-  on `finish_reason='length'`: an empty answer for any other reason is not deterministic,
-  is worth its retry, and calling it a budget failure would tell the validator to send less
-  work until it had dropped every claim in the chunk.
-
-**The effort stays at `max`, and that is a decision rather than an oversight.** Grounding is
-where invariant 3 lives; the failure was the *shape* of the request rather than the depth
-of the thinking; and moving both at once would leave nobody able to say which one fixed it.
-What has changed is that effort is now a free-standing cost lever with no correctness cliff
-behind it — `MOTET_LLM_EFFORT_GROUNDING` moves it in configuration, and a real run at
-realistic scale is the evidence that should decide it, not this file.
-
-### The claim cites a span and is judged against its source item
-
-Until motet#45 those were the same thing. A claim was judged against its own quoted span
-and nothing around it, so support one sentence outside the span read as fabrication — a
-claim citing 185 voter IDs was refused on staging while `185` sat in the same source item,
-a paragraph away. Chunking (above) moved which call a claim travels in and nothing about
-the evidence that travels with it.
-
-**The tempting non-fix is to widen the quote, and it is the wrong lever.** The script stage
-picks the *tightest* verbatim span it can locate, which is what makes `locate_quote`
-reliable, and that span is what the SPA highlights, what the show notes print, and what a
-highlight anchors to. Loosening it trades a precise citation for a vague one to satisfy a
-checker. So the citation stays tight and the **evidence** widens: the prompt carries the
-source item as a `SOURCE` block and the span beside it as `CITED`.
-
-Five things bound that, and each is the answer to "did the gate get weaker":
-
-- **One source item, never the episode's others.** Only the sources the chunk's claims
-  actually cite are sent, so a claim can never be grounded in a *different* story's
-  article — which is precisely the fabrication the gate exists to catch.
-- **`GROUNDING_CONTEXT_CHARS` bounds the block** at 2,500 characters: the whole item when
-  it fits, and a paragraph-snapped window around the span when it does not. Unbounded, one
-  long article would fill a call on its own and put every claim of that story on a call of
-  its own. Support further away than that is still refused, deliberately, and the golden
-  set pins the case — on both sides of the citation, because a window that kept only the
-  span's own paragraph would be the same defect facing forwards.
-- **The block is fenced, and the fence marker is derived from the request's own text.** A
-  source item is prose a stranger wrote, and the gate now carries up to 2,500 characters
-  of it rather than one script-chosen sentence — so an unfenced block could splice its own
-  `CLAIM`/`SPOKEN` lines into the prompt's grammar, or address the one stage in this system
-  whose whole job is to be un-bypassable. Deriving the marker from the content means a
-  source item cannot close its own block, and the evidence still travels verbatim rather
-  than escaped or truncated. The system prompt carries the other half: everything below it
-  is data, never instruction.
-- **A block is sent once per distinct context**, however many claims cite it, and
-  `_next_chunk` counts it once for the same reason. The claims of one story share one
-  newsletter; paying for it per claim would change no verdict and triple the input. **This
-  is real sharing only while the item fits the budget** — past that, two claims quoting
-  different parts of one article get two windows and two blocks, which is where the cost
-  below comes from.
-- **`GROUNDING_CHARS_PER_CALL` is unchanged at 6,000**, so no call reads more than the
-  bound the per-claim token constants were fitted against — what each call reads *within*
-  that bound did go up. Widening therefore costs *calls*, which is visible, bounded and
-  instrumented, rather than headroom inside a call, which is what exhausts a budget.
-
-**The cost, measured rather than asserted**, on a 21-item backlog of 63 claims at several
-source-item sizes, before and after. "Fitted output" is `demand(n) = 4000 + 1800n`, the
-staging-fitted model `inference/tests` already uses:
-
-| Source item | Calls, before → after | Fitted output tokens |
-|---|---|---|
-| 334 chars | 16 → 16 | 177,400 → 177,400 |
-| 1,264 | 16 → 16 | 177,400 → 177,400 |
-| 2,194 | 16 → 16 | 177,400 → 177,400 |
-| 4,054 | 16 → **21** | 177,400 → 197,400 |
-| 7,774 | 16 → **32** | 177,400 → 241,400 |
-
-So the number that matters is the source length, and a real newsletter body is usually
-past 2,500 characters. The worst shape is one call per claim; the pessimistic row above is
-+16 calls and +36% output on a full backlog. **Clustering a story's spans into one shared
-window was considered and rejected**: a claim at the edge of a cluster would get less
-context on its far side than a window centred on its own citation, which is the same
-evidence starvation this change exists to remove, traded for cost.
-
-**The script prompt was deliberately left alone.** It still tells the script stage not to
-speak a number its quote does not contain, which is now stricter than the gate. That is the
-safe direction — it costs an omission, never a fabrication — and the staging instance
-proves the stage writes such claims anyway, so the gate is where the defect was. Relaxing
-it changes what gets *written*, which nothing in CI can measure; it is a separate decision.
-
-**And the gate is now behind the golden set**, in `goldens/grounding/`: the accepting case
-and the refusing cases together, because a validator that got weaker fails silently.
+On the drop half, **`motet.script.claims_dropped{reason}` is what a claim's loss is
+counted as**, and it is a script-prompt problem every time: the parser could not locate the
+quote, or the claim named a source the story does not have. It is the only such instrument
+left — the grounding gate's two counters went with the gate (motet#75). A dropped claim
+leaves no row anywhere and the model writes a different script on every run, so the log
+line beside the counter is the only moment the detail exists.
 
 ### Ingestion state is a join onto the job queue, not a column
 
@@ -1532,10 +1331,9 @@ about two texts. A string match is not that judgement, so it does not get that r
 nothing left to do for, and `handle_script`'s guard read `state is ready` — the *last*
 state in the pipeline rather than the one the handler itself writes. So an episode in
 `rendering` fell straight through it and the whole stage ran again: another billed script
-completion, another grounding pass at `effort='max'`, a `replace_segments` racing whatever
-TTS was reading, and a second TTS job for an episode that already had one. That is
-motet#50, and it is the module docstring's own idempotence contract being broken by the
-one handler most expensive to re-run.
+completion, a `replace_segments` racing whatever TTS was reading, and a second TTS job for
+an episode that already had one. That is motet#50, and it is the module docstring's own
+idempotence contract being broken by the one handler most expensive to re-run.
 
 **The re-run is not a bug in the queue — it is the queue working.** `_execute` commits the
 handler's work and `jobs.complete` in two transactions on purpose (squashing them would
@@ -1568,11 +1366,11 @@ the fence.
 written to be "longer than the slowest stage can legitimately take" — but the slowest
 stage's size is the *user's backlog*, and no constant is longer than something unbounded.
 A script job ran 2580s against a full one, a second worker took the row while the first was
-still working it, and the whole stage ran twice: a 22k-token script completion, the entire
-grounding cascade, and a complete Cartesia synthesis, billed twice for one episode, with
-the second render silently overwriting the first at the same object key. That is motet#53.
-It only appeared once the always-on worker fleet landed — before that an expired lease was
-picked up by nobody rather than within seconds — so it is an interaction between two
+still working it, and the whole stage ran twice: a 22k-token script completion and a
+complete Cartesia synthesis, billed twice for one episode, with the second render silently
+overwriting the first at the same object key. That is motet#53. It only appeared once the
+always-on worker fleet landed — before that an expired lease was picked up by nobody
+rather than within seconds — so it is an interaction between two
 changes that were each right.
 
 **So the lease now measures silence rather than elapsed time.** A worker touches
@@ -2187,29 +1985,18 @@ it.
 
 ### The golden set is the seam to "is it any good?"
 
-`goldens/` holds four corpora, one per stage that has no single right answer and fails
-*quietly*: dedup and script (`fixtures/`), Gmail extraction (`gmail/`), smart-episode
-selection (`episodes/`), and grounding evidence (`grounding/`). All of it runs in `bin/ci`
-against the fakes, where it asserts the *structural* contract — every claim resolves to a
-real source span, dedup is stable, a newsletter's prose survives and its machinery does
-not, a rule selects the same stories in the same order twice. Scoring real model output
-against the corpus is a separate, later, non-blocking job.
+`goldens/` holds three corpora, one per stage that has no single right answer and fails
+*quietly*: dedup and script (`fixtures/`), Gmail extraction (`gmail/`), and smart-episode
+selection (`episodes/`). All of it runs in `bin/ci` against the fakes, where it asserts the
+*structural* contract — every claim resolves to a real source span, dedup is stable, a
+newsletter's prose survives and its machinery does not, a rule selects the same stories in
+the same order twice. Scoring real model output against the corpus is a separate, later,
+non-blocking job.
 
 The selection corpus runs against **the real repository query and a real Postgres** rather
 than a reimplementation of the ordering: the selection *is* an `ORDER BY` with a window
 predicate and a source-count subquery, so a corpus that recomputed it in the harness would
 pass while the SQL was wrong.
-
-The grounding corpus is the one that needs a *model*, and it is the exception that proves
-the rule. `FakeGroundingValidator` never assembles a prompt, so it cannot answer the
-question motet#45 is about — **what does the gate get to see?** — so the corpus drives the
-real `ClaudeGroundingValidator` over a stand-in client that judges one deterministic thing
-(a number in the spoken text the source does not state) using only the prompt it was
-handed. That makes a verdict a statement about the evidence the validator assembled. The
-cases come in pairs on purpose: three that must now be *accepted* and three that must
-still be *refused*, because widening what counts as support is the one direction in which
-this stage fails silently. A refusing case pins the *reason* as well as the verdict, since
-the gate fails closed in several other ways that would satisfy a naive "was it refused".
 
 ---
 

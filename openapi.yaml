@@ -1296,9 +1296,8 @@ paths:
       - episodes
     post:
       description: "Assemble a manual episode from unread news items, capped by duration.\n\nReturns immediately,\
-        \ in ``pending``. Assembly, scripting, grounding validation, and TTS\nhappen on the queue afterwards,\
-        \ and nothing is synthesized until grounding passes\n(invariant 3) \u2014 so the episode a client\
-        \ polls for moves through states rather than\nappearing finished."
+        \ in ``pending``. Assembly, scripting and TTS happen on the queue\nafterwards \u2014 so the episode\
+        \ a client polls for moves through states rather than\nappearing finished."
       operationId: create_episode_v1_episodes_post
       parameters:
       - in: header

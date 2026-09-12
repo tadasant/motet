@@ -1,6 +1,6 @@
 """What each pipeline stage actually does.
 
-``Paste-in → Integrate → Assemble → Script + grounding → TTS → object storage``.
+``Paste-in → Integrate → Assemble → Script → TTS → object storage``.
 
 Each handler is a function of ``(context, payload)`` that either returns — the job is
 done — or raises, in which case the runner retries it with backoff. They are written to be
@@ -27,18 +27,13 @@ from motet_inference import (
     MPEG_MEDIA_TYPE,
     WAV_MEDIA_TYPE,
     Audio,
-    GroundingReport,
     IntegrationResult,
     NewsItem,
-    Script,
-    ScriptSegment,
     SourceItem,
     Stages,
-    classify_grounding_reason,
     collect_usage,
     estimate_duration_ms,
     join_audio,
-    record_grounding,
     record_tts_characters,
 )
 from motet_storage import ObjectStore, episode_audio_key
@@ -316,22 +311,21 @@ def _rule_for(
         raise PermanentFailure(f"episode {episode_id} has an unusable rule: {exc}") from exc
 
 
-# --- script + grounding --------------------------------------------------------------
+# --- script ---------------------------------------------------------------------------
 
 
 #: The episode states that mean the script stage has already run to completion.
 #:
 #: ``handle_script`` writes ``rendering`` and enqueues the TTS job in the same
-#: transaction, so an episode at ``rendering`` or beyond has already been scripted,
-#: grounded and handed on — and the *only* thing a re-run can add is a second copy of
-#: everything the module docstring promises there will never be a second copy of: another
-#: billed script completion, another grounding pass at ``effort='max'``, a
-#: ``replace_segments`` racing whatever TTS is reading, and a second TTS job for an
-#: episode that already has one. ``ready`` alone was not enough, because ``rendering`` is
-#: precisely the state this handler itself writes: a job whose worker died between the
-#: work commit and ``jobs.complete`` stays ``running`` with the work durably applied, and
-#: ``jobs.STALE_LEASE_SECONDS`` makes it claimable again. That reclaim is the intended
-#: recovery; re-executing a finished stage is not. (motet#50)
+#: transaction, so an episode at ``rendering`` or beyond has already been scripted and
+#: handed on — and the *only* thing a re-run can add is a second copy of everything the
+#: module docstring promises there will never be a second copy of: another billed script
+#: completion, a ``replace_segments`` racing whatever TTS is reading, and a second TTS job
+#: for an episode that already has one. ``ready`` alone was not enough, because
+#: ``rendering`` is precisely the state this handler itself writes: a job whose worker died
+#: between the work commit and ``jobs.complete`` stays ``running`` with the work durably
+#: applied, and ``jobs.STALE_LEASE_SECONDS`` makes it claimable again. That reclaim is the
+#: intended recovery; re-executing a finished stage is not. (motet#50)
 #:
 #: **``pending`` and ``failed`` are deliberately absent, because neither is past this
 #: stage.** ``pending`` means assembly never ran, which raises below rather than
@@ -355,19 +349,16 @@ SCRIPTED_STATES = frozenset({EpisodeState.RENDERING, EpisodeState.READY})
 
 
 def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
-    """Write the briefing, then refuse to pass on anything that is not grounded.
+    """Write the briefing, store it as segments and claims, and hand it to TTS.
 
-    **Invariant 3 lives in this function.** Validation runs here, before TTS is enqueued
-    — never after — and a claim whose evidence does not support it is dropped rather than
-    spoken. Dropping rather than failing the whole episode is deliberate: the remaining
-    claims are individually grounded, so what ships is exactly the subset that passed.
-    An episode where *nothing* passed is a failure, loudly, because that is a signal about
-    the script stage rather than about one sentence.
+    **Every claim carries the source span its evidence was copied from** — invariant 3 —
+    and the script adapter has already discarded any claim whose quote it could not locate
+    verbatim in a source, so what is written here cites real text. Nothing validates the
+    spoken sentence against that span: the grounding gate that used to sit between this
+    stage and TTS was removed in motet#75, deliberately and with the risk stated there.
 
-    An episode already in :data:`SCRIPTED_STATES` returns before any of that, and it does
-    not weaken the gate: validation *ran* on the pass that got it there, and only the
-    claims that survived were written. This is a stage that has completed, not one that
-    was skipped.
+    An episode already in :data:`SCRIPTED_STATES` returns before any of that. This is a
+    stage that has completed, not one that was skipped.
     """
     episode_id = _require(payload, "episode_id")
     episode = repo.get_episode(context.conn, episode_id)
@@ -398,12 +389,11 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
     stage_items = [_as_news_item(item) for item in ordered]
     stage_sources = {sid: _as_source_item(item) for sid, item in sources.items()}
 
-    # Both stages inside one block: the question an operator asks is "what did this
-    # episode cost", and scripting and grounding it are two halves of one answer. The
-    # per-stage split is still on the metric, which is where a split belongs.
+    # Inside a block so that the question an operator asks — "what did this episode
+    # cost" — has an answer with the episode id in it. The per-stage split is on the
+    # metric, which is where a split belongs.
     with collect_usage() as spend:
         script = context.stages.script_generator.generate(stage_items, stage_sources)
-        report = context.stages.grounding_validator.validate(script, stage_sources)
     if spend.requests:
         # The episode id is the whole point of this line. It is what a metric must not
         # carry and what "what did that episode cost" cannot be answered without.
@@ -414,13 +404,8 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
             spend.summary(),
         )
 
-    grounded = _drop_ungrounded(script, report)
-    _record_grounding_outcome(episode_id, script, grounded, report)
-    if not grounded.segments:
-        raise PermanentFailure(
-            "no claim in this episode survived grounding validation: "
-            + "; ".join(f"{f.claim_text[:80]!r}: {f.reason}" for f in report.failures[:5])
-        )
+    if not script.segments:
+        raise PermanentFailure("the script stage produced no usable segments")
 
     specs = _within_cap(
         [
@@ -438,7 +423,7 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
                     for claim in segment.claims
                 ),
             )
-            for segment in grounded.segments
+            for segment in script.segments
         ],
         episode.max_duration_ms,
         episode_id,
@@ -447,83 +432,11 @@ def handle_script(context: Context, payload: Mapping[str, Any]) -> None:
     repo.set_episode_state(context.conn, episode_id, EpisodeState.RENDERING)
     enqueue(context.conn, Queue.TTS, {"episode_id": episode_id})
     logger.info(
-        "episode %s scripted: %d segments, %d grounded claims",
+        "episode %s scripted: %d segments, %d claims",
         episode_id,
         len(specs),
         sum(len(spec.claims) for spec in specs),
     )
-
-
-def _record_grounding_outcome(
-    episode_id: str, script: Script, grounded: Script, report: GroundingReport
-) -> None:
-    """Say what the gate rejected, and why, one claim at a time.
-
-    **The count was never the interesting half (motet#24).** "9 of 34 claims were rejected"
-    tells you a rate and nothing about the nine, and there is no recovering them afterwards:
-    the pre-grounding script is not stored, a dropped claim leaves no row anywhere, and
-    re-running the stage produces a different script. So the only moment the detail exists
-    is this one, and it used to be spent on a single aggregate line.
-
-    The per-claim reason went to waste in exactly the case worth understanding, too. It was
-    rendered only on the *total* failure branch below — so the detail survived precisely
-    when the episode was dead, and was discarded on the normal partial-drop path.
-
-    A log line per failure rather than a metric label per failure: the model's reason is a
-    sentence, and a sentence as a label mints a time series per claim. The *kind* goes on
-    the counter; the sentence and the claim text go here, next to the episode id that makes
-    them attributable.
-    """
-    total = _claim_count(script)
-    kept = _claim_count(grounded)
-    kinds = [classify_grounding_reason(failure.reason) for failure in report.failures]
-    # The count comes from the scripts, not from `len(kinds)`: one verdict can take two
-    # claims with it when a story repeats a sentence, and the rate has to reflect what was
-    # actually not spoken.
-    record_grounding(kept=kept, dropped=total - kept, reasons=kinds)
-    if not report.failures:
-        logger.info("episode %s: all %d claims passed grounding validation", episode_id, total)
-        return
-    logger.warning(
-        "grounding validation rejected %d of %d claims in episode %s",
-        total - kept,
-        total,
-        episode_id,
-    )
-    for failure, kind in zip(report.failures, kinds, strict=True):
-        logger.warning(
-            "episode %s: grounding rejected a claim on news item %s (%s): %s — claim was %r",
-            episode_id,
-            failure.news_item_id,
-            kind,
-            failure.reason,
-            failure.claim_text[:280],
-        )
-
-
-def _drop_ungrounded(script: Script, report: GroundingReport) -> Script:
-    """Remove every claim the validator rejected, and any segment left empty.
-
-    Matching on ``(news_item_id, claim text)`` rather than on identity because a
-    :class:`GroundingFailure` carries exactly those two fields — it is a report, not a
-    reference. Two identical claim texts under one news item would both be dropped
-    together, which is the safe direction to be wrong in.
-    """
-    rejected = {(failure.news_item_id, failure.claim_text) for failure in report.failures}
-    if not rejected:
-        return script
-    segments = []
-    for segment in script.segments:
-        kept = tuple(
-            claim for claim in segment.claims if (segment.news_item_id, claim.text) not in rejected
-        )
-        if kept:
-            segments.append(ScriptSegment(news_item_id=segment.news_item_id, claims=kept))
-    return Script(segments=tuple(segments))
-
-
-def _claim_count(script: Script) -> int:
-    return sum(len(segment.claims) for segment in script.segments)
 
 
 def _within_cap(
@@ -571,9 +484,9 @@ def _within_cap(
 def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
     """Synthesize each segment, join, upload, and publish the episode.
 
-    Nothing here has to re-check grounding: an ungrounded claim was removed before this
-    job was enqueued, so what arrives is exactly the copy that passed. That ordering is
-    invariant 3, and it is enforced by the queue rather than by a flag.
+    What arrives is exactly the copy the script stage wrote and the duration cap kept:
+    this stage reads segments out of the database rather than re-deriving anything, so
+    nothing spoken here differs from what the episode screen shows.
     """
     episode_id = _require(payload, "episode_id")
     episode = repo.get_episode(context.conn, episode_id)

@@ -76,8 +76,8 @@ class CartesiaConfig:
         """Fail at startup rather than partway through rendering an episode.
 
         A missing voice id is the interesting one: the request would be rejected only
-        after the script has been written and grounding-validated, which is the expensive
-        part. Checking it on boot means a bad revision never takes traffic.
+        after the whole script has been written, which is the expensive part. Checking it
+        on boot means a bad revision never takes traffic.
         """
         required = ((API_KEY_ENV, self.api_key), (VOICE_ENV, self.voice_id))
         missing = [name for name, value in required if not value]
@@ -132,11 +132,11 @@ def build_payload(text: str, config: CartesiaConfig) -> dict[str, Any]:
 
 
 class CartesiaSpeechSynthesizer:
-    """Turn validated copy into MP3 bytes.
+    """Turn a segment's spoken copy into MP3 bytes.
 
-    Nothing reaches this class that has not already passed grounding validation —
-    invariant 3 puts the gate *before* synthesis, so a claim that failed validation is
-    never paid for and never spoken.
+    This is the vendor-billed end of the narration path, so everything upstream of it —
+    the duration cap, the claim parsing that discards a quote it cannot locate — runs
+    first, and text that never made it into a segment is never paid for.
     """
 
     def __init__(

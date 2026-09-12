@@ -5,9 +5,9 @@ stay **deterministic** (same input, same output, no clock, no randomness, no net
 **cheap**, because the golden set runs them on every CI run.
 
 A fake is not a mock: each one implements the stage's contract honestly, just with a
-trivial rule standing in for a model. ``FakeGroundingValidator`` in particular does the
-real work — span resolution is not something a model decides — which is exactly why
-grounding can be enforced in CI before any vendor is wired up.
+trivial rule standing in for a model. ``FakeScriptGenerator`` in particular does the real
+work of locating a claim's span in real text, which is what lets the golden set assert the
+claim-to-span contract before any vendor is wired up.
 """
 
 from __future__ import annotations
@@ -21,8 +21,6 @@ from .interfaces import IntegrationResult
 from .types import (
     Audio,
     Claim,
-    GroundingFailure,
-    GroundingReport,
     NewsItem,
     Script,
     ScriptSegment,
@@ -72,7 +70,7 @@ def first_sentence_span(item: SourceItem) -> SourceSpan:
     """The span covering the source's first sentence.
 
     Used by the fake script generator as the thing a claim quotes. It is a real span into
-    real text, so the grounding validator has something genuine to check.
+    real text, so everything downstream of the script has a genuine citation to render.
     """
     start, end = first_sentence_bounds(item.text)
     return SourceSpan(source_item_id=item.id, start=start, end=end)
@@ -105,10 +103,10 @@ class FakeIntegrator:
 class FakeScriptGenerator:
     """Emit one claim per news item, quoting the first source verbatim.
 
-    Quoting verbatim is the point: the resulting script passes grounding validation by
-    construction, which lets the golden set assert the *contract* — every claim resolves —
-    without a model in the loop. A news item whose sources are all missing produces no
-    segment rather than an ungrounded one.
+    Quoting verbatim is the point: every claim's span resolves by construction, which lets
+    the golden set assert the *contract* — a claim always cites real source text — without
+    a model in the loop. A news item whose sources are all missing produces no segment
+    rather than one whose claim cites nothing.
     """
 
     def generate(self, news_items: Sequence[NewsItem], sources: Mapping[str, SourceItem]) -> Script:
@@ -128,35 +126,6 @@ class FakeScriptGenerator:
                 )
             )
         return Script(segments=tuple(segments))
-
-
-class FakeGroundingValidator:
-    """Check that each claim is exactly what its span says.
-
-    Not a stand-in for a model — this *is* the check invariant 3 describes, and the real
-    adapter differs only by also judging paraphrase. Keeping the strict version here means
-    an ungrounded claim fails in CI, on a laptop, with no API key.
-    """
-
-    def validate(self, script: Script, sources: Mapping[str, SourceItem]) -> GroundingReport:
-        failures: list[GroundingFailure] = []
-        for segment in script.segments:
-            for claim in segment.claims:
-                resolved = claim.span.resolve(dict(sources))
-                if resolved is None:
-                    reason = "span does not resolve to any source text"
-                elif resolved != claim.text:
-                    reason = "claim text does not match the span it cites"
-                else:
-                    continue
-                failures.append(
-                    GroundingFailure(
-                        news_item_id=segment.news_item_id,
-                        claim_text=claim.text,
-                        reason=reason,
-                    )
-                )
-        return GroundingReport(failures=tuple(failures))
 
 
 class FakeSpeechSynthesizer:

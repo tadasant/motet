@@ -564,9 +564,9 @@ def _execute(
         # row's work is committed — `mark_work_committed` is written inside the transaction
         # that wrote it — and the worker that did it died before it could say so, so the
         # lease expired and this claim is the recovery. Recovering the *row* is right;
-        # re-running the stage is not, and for `script` it is another billed completion, a
-        # second grounding pass at `effort='max'`, and a `failed` episode quietly put back
-        # into `rendering` with the reason it failed overwritten (motet#55).
+        # re-running the stage is not, and for `script` it is another billed completion
+        # and a `failed` episode quietly put back into `rendering` with the reason it
+        # failed overwritten (motet#55).
         #
         # At WARNING because it is not routine: it means a worker died mid-job, which is
         # worth seeing even though nothing was lost. The counter is what makes "how often"
@@ -592,10 +592,10 @@ def _execute(
             # little of a stage that may run for forty minutes as possible.
             jobs.mark_work_committed(conn, job.id, attempts=job.attempts)
     except LlmBudgetExhaustedError as exc:
-        # A stage that can subdivide its work has already caught this and sent less
-        # (grounding does, motet#42). Reaching here means the stage cannot, and the same
-        # request would spend the same budget on every attempt — so the ladder buys five
-        # identical billed failures and delays the error a user needs to see.
+        # A stage that can subdivide its work would catch this itself and send less
+        # (motet#42). Reaching here means the stage cannot, and the same request would
+        # spend the same budget on every attempt — so the ladder buys five identical
+        # billed failures and delays the error a user needs to see.
         message = f"{type(exc).__name__}: {exc}"
         logger.exception("job %d on %s ran out of token budget", job.id, job.queue.value)
         with conn.transaction():

@@ -91,8 +91,8 @@ def test_the_prose_survives(case: GmailCase) -> None:
     """Every sentence the case says is content must be in the output.
 
     Trimming boilerplate off the ends is safe; losing a sentence from the middle makes a
-    claim uncitable, and the grounding validator would then reject the story rather than
-    tell you extraction ate it.
+    claim uncitable, and the script stage would then discard it rather than tell you
+    extraction ate it.
     """
     text = extract_newsletter(case.raw).text
     for fragment in case.contains:

@@ -25,8 +25,6 @@ import pytest
 from motet_db import EpisodeState, SourceItemState, phase2, repo
 from motet_inference import (
     Audio,
-    GroundingReport,
-    GroundingValidator,
     NewsItem,
     Script,
     ScriptGenerator,
@@ -592,26 +590,14 @@ class CountingScriptGenerator:
         return self._inner.generate(news_items, sources)
 
 
-class CountingGroundingValidator:
-    """The same, for the gate — the most expensive call in the pipeline."""
-
-    def __init__(self, inner: GroundingValidator) -> None:
-        self._inner = inner
-        self.calls = 0
-
-    def validate(self, script: Script, sources: Mapping[str, SourceItem]) -> GroundingReport:
-        self.calls += 1
-        return self._inner.validate(script, sources)
-
-
 class TestASlowJobKeepsItsLease:
     """motet#53: a job slower than the lease was reclaimed while its worker was alive.
 
     A script job ran 2580 seconds against a full backlog — longer than
     `STALE_LEASE_SECONDS`, which was set to be "longer than the slowest stage can
     legitimately take" against a stage whose size is the user's backlog. A second worker
-    took the row and redid the whole thing: a 22k-token script completion, the entire
-    grounding cascade, and a complete Cartesia synthesis, all billed twice for one episode.
+    took the row and redid the whole thing: a 22k-token script completion and a complete
+    Cartesia synthesis, both billed twice for one episode.
 
     `TestAFinishedScriptStageIsNotRerun` is the neighbouring guard and does not cover this:
     there the first run had *finished*, so the episode's state could say so. Here the first
@@ -894,11 +880,9 @@ class TestAFinishedScriptStageIsNotRerun:
     ) -> None:
         base = fake_stages()
         script_generator = CountingScriptGenerator(base.script_generator)
-        grounding_validator = CountingGroundingValidator(base.grounding_validator)
         stages = Stages(
             integrator=base.integrator,
             script_generator=script_generator,
-            grounding_validator=grounding_validator,
             speech_synthesizer=base.speech_synthesizer,
         )
 
@@ -911,7 +895,7 @@ class TestAFinishedScriptStageIsNotRerun:
 
         # The state the stage itself wrote, and the work it handed on.
         assert repo.get_episode(db, episode_id).state is EpisodeState.RENDERING
-        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        assert script_generator.calls == 1
         queued = self._tts_jobs(db)
         assert len(queued) == 1
         segments = [(s.id, s.text) for s in repo.get_episode(db, episode_id).segments]
@@ -934,9 +918,8 @@ class TestAFinishedScriptStageIsNotRerun:
         # lease held it back.
         assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
 
-        # Not a second billed script completion, and not a second grounding pass at
-        # `effort='max'`.
-        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        # Not a second billed script completion.
+        assert script_generator.calls == 1
         # Not a rewrite of segments a concurrent TTS job may be reading.
         assert rewrites == []
         # And not a second TTS job for an episode that already has one.
@@ -992,9 +975,9 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
     Meanwhile the TTS job that work enqueued exhausts its retries and `_record_failure`
     marks the episode `failed`. Half an hour later the lease expires, the `script` row is
     claimable, and `failed` is a state `handle_script` is *deliberately* allowed to run
-    from — so the whole stage ran again: another billed script completion, another grounding
-    pass at `effort='max'`, a second TTS job, and `last_error` overwritten with NULL, which
-    is the answer to "why did this episode fail" gone.
+    from — so the whole stage ran again: another billed script completion, a second TTS
+    job, and `last_error` overwritten with NULL, which is the answer to "why did this
+    episode fail" gone.
 
     `TestAFinishedScriptStageIsNotRerun` (motet#50) is the neighbouring guard and cannot
     reach this: it reads the *episode*, and a replay and a re-script somebody asked for
@@ -1037,19 +1020,16 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
 
     def _counting_stages(
         self,
-    ) -> tuple[Stages, CountingScriptGenerator, CountingGroundingValidator]:
+    ) -> tuple[Stages, CountingScriptGenerator]:
         base = fake_stages()
         script_generator = CountingScriptGenerator(base.script_generator)
-        grounding_validator = CountingGroundingValidator(base.grounding_validator)
         return (
             Stages(
                 integrator=base.integrator,
                 script_generator=script_generator,
-                grounding_validator=grounding_validator,
                 speech_synthesizer=base.speech_synthesizer,
             ),
             script_generator,
-            grounding_validator,
         )
 
     def _scripted_episode(self, db: psycopg.Connection[Any], url: str, stages: Stages) -> str:
@@ -1065,7 +1045,6 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
         broken = Stages(
             integrator=stages.integrator,
             script_generator=stages.script_generator,
-            grounding_validator=stages.grounding_validator,
             speech_synthesizer=BrokenSynthesizer(),
         )
         for _ in range(jobs.DEFAULT_MAX_ATTEMPTS):
@@ -1085,7 +1064,7 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The whole sequence, played out: die, fail, expire, reclaim."""
-        stages, script_generator, grounding_validator = self._counting_stages()
+        stages, script_generator = self._counting_stages()
         episode_id = self._scripted_episode(db, _migrated, stages)
 
         # 1. The stage runs, and the worker dies between the two commits. `SystemExit`
@@ -1102,7 +1081,7 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
 
         # The work landed — and the fence landed with it, in the same transaction.
         assert repo.get_episode(db, episode_id).state is EpisodeState.RENDERING
-        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        assert script_generator.calls == 1
         queued = self._tts_jobs(db)
         assert len(queued) == 1
         script_row = self._job_row(db, Queue.SCRIPT)
@@ -1136,8 +1115,8 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
         self._expire_lease(db, Queue.SCRIPT)
         assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
 
-        # Not a second script completion, and not a second grounding pass at `effort='max'`.
-        assert (script_generator.calls, grounding_validator.calls) == (1, 1)
+        # Not a second script completion.
+        assert script_generator.calls == 1
         assert rewrites == []
         # Not a second TTS job for an episode that already has one.
         assert self._tts_jobs(db) == queued
@@ -1192,7 +1171,7 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
         failure is invisible, which is why it is asserted rather than assumed: a *new*
         `script` job carries no fence, so the stage runs in full.
         """
-        stages, script_generator, grounding_validator = self._counting_stages()
+        stages, script_generator = self._counting_stages()
         episode_id = self._scripted_episode(db, _migrated, stages)
         assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
         self._fail_the_tts_job(db, _migrated, stages)
@@ -1205,7 +1184,7 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
         assert drain(Queue.SCRIPT, _migrated, stages=stages) == 1
 
         # The stage ran, the episode moved on, and there is a TTS job to move it.
-        assert (script_generator.calls, grounding_validator.calls) == (2, 2)
+        assert script_generator.calls == 2
         episode = repo.get_episode(db, episode_id)
         assert episode.state is EpisodeState.RENDERING
         assert episode.last_error is None

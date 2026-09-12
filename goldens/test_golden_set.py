@@ -40,11 +40,21 @@ def test_dedup_matches_the_expected_news_items(case: GoldenCase) -> None:
 
 
 @pytest.mark.parametrize("case", CASES, ids=str)
-def test_every_claim_in_the_script_is_grounded(case: GoldenCase) -> None:
-    """Invariant 3, asserted end to end: an ungrounded briefing must never be speakable."""
+def test_every_claim_cites_a_span_that_resolves(case: GoldenCase) -> None:
+    """Invariant 3, asserted end to end: a claim always carries a real source span.
+
+    Nothing checks the spoken sentence against that span any more (motet#75), but the
+    span itself is what the SPA highlights, what the show notes print, and what a
+    highlight anchors to — so a claim whose citation does not resolve is a claim that
+    breaks all three.
+    """
+    sources = {item.id: item for item in case.sources}
     briefing = build_briefing(case.sources, fake_stages())
-    assert briefing.grounding.ok, [f.reason for f in briefing.grounding.failures]
-    assert briefing.speakable
+    for segment in briefing.script.segments:
+        for claim in segment.claims:
+            assert claim.span.resolve(sources) is not None, (
+                f"{case.why}\n\nunresolvable span on claim: {claim.text!r}"
+            )
 
 
 @pytest.mark.parametrize("case", CASES, ids=str)
@@ -85,7 +95,7 @@ def test_the_script_matches_the_one_this_case_considers_good(case: GoldenCase) -
 
 @pytest.mark.parametrize("case", CASES, ids=str)
 def test_the_briefing_can_be_synthesized(case: GoldenCase) -> None:
-    """The last leg: validated copy reaches TTS and comes back with a duration."""
+    """The last leg: the scripted copy reaches TTS and comes back with a duration."""
     briefing = build_briefing(case.sources, fake_stages())
     audio = fake_stages().speech_synthesizer.synthesize(briefing.script.text)
     assert audio.duration_ms > 0

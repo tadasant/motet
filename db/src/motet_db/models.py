@@ -22,8 +22,8 @@ class EpisodeState(StrEnum):
     """One state per pipeline stage that can fail and be retried on its own.
 
     ``pending`` — created, waiting to be assembled from the backlog.
-    ``scripting`` — assembled; script generation and grounding validation are next.
-    ``rendering`` — grounded; TTS and upload are next.
+    ``scripting`` — assembled; script generation is next.
+    ``rendering`` — scripted; TTS and upload are next.
     ``ready`` — audio is in object storage and the episode is in the feed.
     ``failed`` — a stage gave up. ``last_error`` says which and why.
     """

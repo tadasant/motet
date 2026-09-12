@@ -13,7 +13,6 @@ from dataclasses import replace
 import pytest
 from motet_inference import (
     MODE_ENV_VAR,
-    GroundingValidator,
     Integrator,
     ScriptGenerator,
     SourceItem,
@@ -23,7 +22,7 @@ from motet_inference import (
     get_stages,
 )
 from motet_inference.interfaces import IntegrationResult
-from motet_inference.types import Claim, NewsItem, Script, ScriptSegment, SourceSpan
+from motet_inference.types import Claim, NewsItem, SourceSpan
 
 ITEM_A = SourceItem(id="si_a", title="Acme raises $20M", text="Acme raised $20M. More text.")
 ITEM_A_DUP = SourceItem(id="si_b", title="$20M — ACME Raises!", text="Acme's round closed.")
@@ -34,7 +33,6 @@ def test_fakes_satisfy_the_protocols() -> None:
     stages = fake_stages()
     assert isinstance(stages.integrator, Integrator)
     assert isinstance(stages.script_generator, ScriptGenerator)
-    assert isinstance(stages.grounding_validator, GroundingValidator)
     assert isinstance(stages.speech_synthesizer, SpeechSynthesizer)
 
 
@@ -80,44 +78,23 @@ def test_briefing_is_deterministic() -> None:
     assert first == second
 
 
-def test_generated_script_is_grounded() -> None:
+def test_every_generated_claim_carries_a_span_that_resolves() -> None:
+    """Invariant 3's surviving half: a claim always cites real source text.
+
+    Nothing checks the spoken sentence against the span any more (motet#75), so this is
+    what is left and it is what the SPA, the show notes and a highlight all read.
+    """
+    sources = {item.id: item for item in (ITEM_A, ITEM_C)}
     briefing = build_briefing([ITEM_A, ITEM_C], fake_stages())
-    assert briefing.grounding.ok
-    assert briefing.speakable
+    claims = [claim for segment in briefing.script.segments for claim in segment.claims]
+    assert claims
+    for claim in claims:
+        assert claim.span.resolve(sources) == claim.text
 
 
-def test_validator_rejects_a_claim_its_span_does_not_support() -> None:
-    """The check that makes invariant 3 enforceable, exercised directly."""
-    fabricated = Script(
-        segments=(
-            ScriptSegment(
-                news_item_id="ni_x",
-                claims=(
-                    Claim(
-                        text="Acme raised $900M.",
-                        span=SourceSpan(source_item_id="si_a", start=0, end=18),
-                    ),
-                ),
-            ),
-        )
-    )
-    report = fake_stages().grounding_validator.validate(fabricated, {"si_a": ITEM_A})
-    assert not report.ok
-    assert "does not match" in report.failures[0].reason
-
-
-def test_validator_rejects_a_span_pointing_at_a_missing_source() -> None:
-    orphan = Script(
-        segments=(
-            ScriptSegment(
-                news_item_id="ni_x",
-                claims=(Claim(text="x", span=SourceSpan("si_missing", 0, 1)),),
-            ),
-        )
-    )
-    report = fake_stages().grounding_validator.validate(orphan, {})
-    assert not report.ok
-    assert "does not resolve" in report.failures[0].reason
+def test_a_span_pointing_at_a_missing_source_does_not_resolve() -> None:
+    orphan = Claim(text="x", span=SourceSpan("si_missing", 0, 1))
+    assert orphan.span.resolve({}) is None
 
 
 def test_synthesizer_returns_wav_bytes_with_a_duration() -> None:

@@ -3,9 +3,9 @@
 **This is the arm that can actually run tonight**, which is why it is the default. Of its
 four legs, two are already provisioned and wired to real vendors through seams that exist:
 
-**Grounding runs on this arm's reply path, and does not gate it** — advisory, by decision
-(motet#10). See :func:`_system_prompt` for the containment the prompt provides and
-:mod:`motet_voice.grounding` for the check that runs behind every reply.
+**Nothing checks this arm's replies against their material** — the advisory grounding
+check was removed in motet#75. See :func:`_system_prompt` for the containment the prompt
+provides, which is now the whole of it.
 
 | Leg | Implementation | Provisioned? |
 |---|---|---|
@@ -130,7 +130,7 @@ class LlmConversationModel:
     """The LLM leg, through the provider seam — never a vendor SDK directly.
 
     **Which model, and how hard it thinks, come from ``LlmStage.VOICE``** — the same
-    per-stage seam dedup, script and grounding use, rather than a variable of this
+    per-stage seam dedup and script use, rather than a variable of this
     module's own (motet#6). What that buys is the startup catalogue check: a slug typo in
     ``MOTET_LLM_MODEL_VOICE`` stops the process with a message naming
     ``bin/check-openrouter-models``, instead of surfacing as a vendor error inside
@@ -150,11 +150,11 @@ class LlmConversationModel:
     because *stage* is what an operator splits cost by and an ``LlmRequest`` deliberately
     does not carry one. The load-bearing half of that is "the object that owns the call and
     names the stage is the object that records it" — and for ``LlmStage.VOICE`` that object
-    is this one. Moving the leg into ``inference/`` to make it look like the other three
+    is this one. Moving the leg into ``inference/`` to make it look like the pipeline stages
     would have to drag :class:`~motet_voice.realtime.interfaces.TurnRequest` and
-    :func:`_system_prompt` — voice's own contract, and a prompt whose containment argument
-    is invariant 3's conversational half — across the package boundary, and would point the
-    dependency arrow the wrong way: ``motet-inference`` knows nothing about ``motet-voice``
+    :func:`_system_prompt` — voice's own contract, and the only containment this path has —
+    across the package boundary, and would point the dependency arrow the wrong way:
+    ``motet-inference`` knows nothing about ``motet-voice``
     and must not start.
 
     Without this, a real voice session's completions were billed by OpenRouter and appeared
@@ -192,10 +192,10 @@ class LlmConversationModel:
             # listener gets silence and an error instead of the sentence that was
             # already generated. On a batch stage a lost completion is a retry; here it
             # is the turn. The adapter still logs the warning unconditionally, so the
-            # quality drop is recorded rather than hidden — which is the half that
-            # matters, and the same advisory-not-a-gate shape invariant 3 uses on this
-            # path. Unreachable while voice defaults to ``off``; it stops being
-            # unreachable the moment anyone sets ``MOTET_LLM_EFFORT_VOICE``.
+            # quality drop is recorded rather than hidden, which is the half that matters
+            # on a path where raising costs the listener the answer. Unreachable while
+            # voice defaults to ``off``; it stops being unreachable the moment anyone sets
+            # ``MOTET_LLM_EFFORT_VOICE``.
             require_reasoning_evidence=False,
             config=self.config,
         )
@@ -226,26 +226,18 @@ def _system_prompt(request: TurnRequest) -> str:
     by the caller that owns the database. Invariant 2 is not a rule this prompt obeys; it
     is the reason the prompt is built this way.
 
-    **Grounding — read this before extending the reply path.** Invariant 3 says every
-    reported claim carries a source span validated *before* TTS, and the narration path
-    enforces it as a pipeline gate. This path does not gate: grounding here is **advisory**
-    (motet#10), because a conversational reply is generated inside a spoken turn and the
-    batch validator is a max-effort model call that cannot live there. The check still runs
-    — see :mod:`motet_voice.grounding` — behind the reply rather than in front of it, and
-    every verdict is counted on the obs stack.
+    **This prompt is the only containment on what gets said, and it is not a guarantee.**
+    Nothing checks a reply against its material any more (motet#75). The material is
+    context the caller assembled from an episode's own claims and their source spans; the
+    prompt below tells the model to answer from it and to reach for ``get_item_detail`` —
+    which returns spans — instead of recalling. That narrows the failure to paraphrase and
+    inference over text that came out of a source, and it does not eliminate it: a spoken
+    answer here can assert something no span supports, and nothing will say so.
 
-    This prompt is the other half, and it is containment rather than a guarantee. The
-    material is context the caller assembled from narration that was *already* grounded;
-    the prompt below tells the model to answer from it and to reach for
-    ``get_item_detail`` — which returns spans — instead of recalling. That narrows the
-    failure to paraphrase and inference over grounded text. It does not eliminate it, and
-    a spoken answer here can still assert something no span supports.
-
-    **Do not widen the path on the strength of either half.** Anything that gives this path
-    a *new* source of material — a research result, a second corpus, a longer memory —
-    changes the risk from "paraphrase over grounded text" to "assertion from ungrounded
-    text", and the advisory check catches fabricated specifics rather than bad inference.
-    That is the point at which the gate question has to be reopened.
+    **Do not widen the path without reopening that.** Anything that gives this path a
+    *new* source of material — a research result, a second corpus, a longer memory —
+    changes the risk from "paraphrase over sourced text" to "assertion from unsourced
+    text", and there is now no instrument behind the reply at all.
     """
     parts = [request.persona_instructions.strip()]
     if request.context_notes.strip():

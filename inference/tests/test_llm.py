@@ -219,27 +219,27 @@ def test_the_global_default_can_be_overridden_for_every_stage_at_once() -> None:
 
 
 def test_a_stage_override_beats_the_global_default() -> None:
-    """The volume line runs cheap while grounding runs strong — the point of per-stage."""
+    """The volume line runs cheap while the script runs strong — the point of per-stage."""
     config = load_config(
         {
             "MOTET_LLM_MODEL": "anthropic/claude-sonnet-5",
             "MOTET_LLM_MODEL_DEDUP": "anthropic/claude-haiku-4.5",
             "MOTET_LLM_EFFORT_DEDUP": "off",
-            "MOTET_LLM_MODEL_GROUNDING": "anthropic/claude-opus-5",
+            "MOTET_LLM_MODEL_SCRIPT": "anthropic/claude-opus-5",
         }
     )
     assert config.for_stage(LlmStage.DEDUP).model == "anthropic/claude-haiku-4.5"
-    assert config.for_stage(LlmStage.SCRIPT).model == "anthropic/claude-sonnet-5"
-    assert config.for_stage(LlmStage.GROUNDING).model == "anthropic/claude-opus-5"
+    assert config.for_stage(LlmStage.DEDUP_CONFIRM).model == "anthropic/claude-sonnet-5"
+    assert config.for_stage(LlmStage.SCRIPT).model == "anthropic/claude-opus-5"
 
 
 def test_effort_defaults_are_per_stage_and_overridable() -> None:
     default = load_config({})
     assert default.for_stage(LlmStage.DEDUP).effort == "low"
-    assert default.for_stage(LlmStage.GROUNDING).effort == "max"
+    assert default.for_stage(LlmStage.SCRIPT).effort == "high"
 
-    overridden = load_config({"MOTET_LLM_EFFORT_GROUNDING": "xhigh"})
-    assert overridden.for_stage(LlmStage.GROUNDING).effort == "xhigh"
+    overridden = load_config({"MOTET_LLM_EFFORT_SCRIPT": "xhigh"})
+    assert overridden.for_stage(LlmStage.SCRIPT).effort == "xhigh"
 
 
 def test_effort_off_disables_reasoning_for_one_stage() -> None:
@@ -331,8 +331,13 @@ def test_the_voice_default_lets_a_model_without_selectable_effort_be_chosen() ->
 
 
 def test_build_request_carries_the_stage_model_and_effort() -> None:
-    config = load_config({"MOTET_LLM_MODEL_GROUNDING": "anthropic/claude-opus-5"})
-    request = build_request(LlmStage.GROUNDING, MESSAGES, max_output_tokens=512, config=config)
+    config = load_config(
+        {
+            "MOTET_LLM_MODEL_SCRIPT": "anthropic/claude-opus-5",
+            "MOTET_LLM_EFFORT_SCRIPT": "max",
+        }
+    )
+    request = build_request(LlmStage.SCRIPT, MESSAGES, max_output_tokens=512, config=config)
     assert request.model == "anthropic/claude-opus-5"
     assert request.reasoning is not None
     assert request.reasoning.effort == "max"
@@ -479,7 +484,7 @@ def test_the_startup_summary_names_every_stage_and_its_effort() -> None:
     for stage in LlmStage:
         assert f"{stage.value}={DEFAULT_MODEL}@" in summary
     assert f"voice={DEFAULT_MODEL}@off" in summary
-    assert f"grounding={DEFAULT_MODEL}@max" in summary
+    assert f"script={DEFAULT_MODEL}@high" in summary
 
     raised = load_config({"MOTET_LLM_EFFORT": "medium"}).describe()
     assert f"voice={DEFAULT_MODEL}@medium" in raised, (
@@ -623,8 +628,8 @@ def test_reasoning_silently_dropped_by_the_provider_raises(
 
     Anthropic's own API 400s on an incompatible thinking config. OpenRouter drops the
     field and answers anyway, so the response below is a *success* that was generated
-    without thinking — for grounding validation, quality degradation with no error
-    anywhere. The adapter refuses to pass it off as healthy.
+    without thinking — on the script stage, quality degradation with no error anywhere.
+    The adapter refuses to pass it off as healthy.
     """
     client = a_client(responder(completion(text="an unthought answer", reasoning_tokens=0)))
     with caplog.at_level(logging.WARNING, logger="motet.llm.openrouter"):
@@ -808,7 +813,7 @@ def test_the_inference_mode_is_parsed_the_same_way_everywhere(raw: str) -> None:
     The stage registry normalizes this variable; if the LLM seam read it more strictly,
     ``MOTET_INFERENCE_MODE=Real`` would mean real stage adapters wired to
     ``FakeLlmClient`` — a revision that boots clean, skips the credential check, and
-    feeds fabricated text into grounding validation and then into audio.
+    feeds fabricated text into the script stage and then into audio.
     """
     env = {"MOTET_INFERENCE_MODE": raw}
     assert current_mode(env) == "real"
@@ -849,8 +854,8 @@ def test_an_empty_completion_that_was_not_truncated_stays_retryable() -> None:
 
     A content filter, or a provider hiccup, produces the same empty string with a
     different ``finish_reason`` — and it is not deterministic, so it is worth the retry it
-    has always had. Calling it a budget failure would tell the grounding validator to send
-    less work, which it would keep doing until it had dropped every claim in the chunk.
+    has always had. Calling it a budget failure would tell a caller that subdivides its
+    work to send less and less of it, all the way down to sending none.
     """
     client = a_client(responder(completion(text="   \n  ")))
     with pytest.raises(LlmTransportError, match="empty completion") as caught:

@@ -60,10 +60,10 @@ class LlmBudgetExhaustedError(LlmTransportError):
     Its own class because it is the one transport failure that is **deterministic and
     about the request rather than the provider**: the same call will exhaust the same
     budget every time, so the job-queue retry ladder buys nothing and a caller that can
-    make the work smaller should do that instead. That is motet#42, where grounding
-    validation batched every claim in a 19-item episode into one call with a fixed 8k
-    ceiling, spent all 8,000 tokens reasoning, returned no verdict at all, and then did it
-    again on every retry until the episode gave up.
+    make the work smaller should do that instead. That is motet#42, where a stage batched
+    every claim in a 19-item episode into one call with a fixed 8k ceiling, spent all
+    8,000 tokens reasoning, returned nothing usable at all, and then did it again on every
+    retry until the episode gave up.
 
     It subclasses :class:`LlmTransportError` so that a caller which knows nothing about
     it still behaves as it did. The worker loop *does* know about it, and turns it into a
@@ -89,9 +89,9 @@ class ReasoningNotAppliedError(LlmError):
     This exists because of a specific asymmetry: Anthropic's own API rejects an
     incompatible thinking config with a 400, but OpenRouter **silently drops** the
     ``reasoning`` field and runs the request anyway. The response looks entirely healthy;
-    the only symptom is that the answer was produced without thinking. For grounding
-    validation that is a quality regression with no error anywhere, which is far worse
-    than a loud failure — so this is loud.
+    the only symptom is that the answer was produced without thinking. On the script
+    stage that is a quality regression with no error anywhere, which is far worse than a
+    loud failure — so this is loud.
 
     **It applies only to budget-based models, and that scope is the whole of motet#31.**
     The inference above — *no reasoning in the response, therefore the field was dropped*

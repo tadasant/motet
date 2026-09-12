@@ -17,8 +17,8 @@ properties it must have and one it must not:
   the text of already-ingested items, which is exactly right — an old highlight keeps
   pointing at what the user actually saw.
 * **Not lossy in the middle.** Trimming boilerplate off the *ends* is safe; dropping a
-  sentence from the body would make a claim uncitable, and the grounding validator would
-  reject the story rather than tell you extraction ate it.
+  sentence from the body would make a claim uncitable, and the script stage would discard
+  it rather than tell you extraction ate it.
 
 **text/plain wins where a newsletter offers both.** Not a performance choice: the plain
 part is what the sender wrote, and the HTML part is what a layout tool generated from it.
