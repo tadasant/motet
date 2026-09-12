@@ -53,14 +53,41 @@ METRIC_EXPORT_INTERVAL_MS = 15_000
 #: and *trace* exporters, whose diagnostics cannot feed the log pipeline and so cannot
 #: loop; excluding them meant a dropped metric batch reached VictoriaLogs not at all, and
 #: under invariant 11 the obs stack is the only channel an agent can observe production
-#: through. What stays out is the log exporter itself, the machinery that drives it, and
-#: the HTTP transport — ``urllib3`` and ``_shared_internal`` are shared across signals, so
-#: a record from either cannot be attributed to one and has to be assumed to be the log
-#: pipeline's.
+#: through.
+#:
+#: What stays out is **everything a log export can itself produce a record from**, which is
+#: wider than "the log exporter": the handler, the batch processor behind it, the protobuf
+#: encoder and the attribute cleaner all log from inside ``emit`` or ``export``, on the
+#: emitting thread. Two of them — ``_shared_internal`` and the ``proto.common`` encoder —
+#: are shared with the *other* signals, so a record from either cannot be attributed to one
+#: and has to be assumed to be the log pipeline's. ``urllib3`` is the same argument for the
+#: HTTP transport.
+#:
+#: **``sentry_sdk`` came off this list and stays off**, which is the third removal and not
+#: only the metric and trace exporters. Nothing an OTLP export does produces a
+#: ``sentry_sdk`` record, so it was never part of this loop; its transport failures now
+#: reach VictoriaLogs, which is the only place a GlitchTip outage was ever going to be
+#: visible from.
+#:
+#: **Every ``opentelemetry`` entry is an underscore-private module path**, and upstream has
+#: moved one of them before (``BatchProcessor`` used to live under
+#: ``sdk._logs._internal.export``). A literal that goes stale on a dependency bump reopens
+#: the unbounded loop *silently*, so ``test_alert_scoping.py`` asserts each one against the
+#: installed class's own ``__module__`` — a rename is then a red test rather than a
+#: saturated container. The names are written out rather than derived at import, so that a
+#: rename fails the suite instead of failing ``_install_otlp`` and turning telemetry off
+#: altogether.
 _NO_EXPORT_LOGGERS = (
+    # The export call itself, and the batch processor that drives it.
     "opentelemetry.exporter.otlp.proto.http._log_exporter",
     "opentelemetry.sdk._logs",
     "opentelemetry.sdk._shared_internal",
+    # Encoding and attribute cleaning, both of which log synchronously from inside the
+    # export — `opentelemetry.attributes` re-enters the root handlers while `emit` is
+    # still on the stack.
+    "opentelemetry.exporter.otlp.proto.common",
+    "opentelemetry.attributes",
+    # The HTTP transport under all of it.
     "urllib3",
 )
 
@@ -75,11 +102,24 @@ _NO_EXPORT_LOGGERS = (
 #: retries or shutdown.`` did exactly that once (motet#73), from a Cloud Run instance whose
 #: CPU was throttled while the metric reader's background timer fired.
 #:
-#: These records are not suppressed, only scoped. They keep their stdout line, they are now
-#: *gained* by VictoriaLogs for the two signals the loop guard no longer excludes, and they
-#: still ride along as Sentry breadcrumbs on a real Motet error — which is why this is a
-#: ``before_send`` hook rather than ``ignore_logger``, whose ignore list drops breadcrumbs
-#: too.
+#: These records are scoped rather than suppressed, and the difference is what each one
+#: still reaches. They keep their stdout line; the metric and trace exporters' diagnostics
+#: are now *gained* by VictoriaLogs, which the loop guard above no longer excludes; and all
+#: of them still ride along as Sentry **breadcrumbs** on a real Motet error — which is why
+#: this is a ``before_send`` hook rather than ``ignore_logger``, whose ignore list drops
+#: breadcrumbs too.
+#:
+#: **``urllib3`` is the one that really does end up with stdout only**, because it is on
+#: both guards: it cannot be attributed to a signal, so the loop guard has to assume the
+#: worst. That is an accepted cost rather than an oversight — under invariant 11 stdout is
+#: not a surface an agent can read, so a transport-level failure that produces *no*
+#: ``opentelemetry`` record alongside it would be invisible. Nothing observed has that
+#: shape; the exporters log their own failures.
+#:
+#: The drops are not silent either, which is the question this file's own "a clean X says
+#: so" habit would ask next: ``sentry_sdk`` reports them to GlitchTip as a client report
+#: (``discarded_events``, reason ``before_send``), so "the hook is eating everything" and
+#: "there was nothing to eat" are distinguishable without a metric of our own.
 _NO_EVENT_LOGGERS = ("opentelemetry", "urllib3", "sentry_sdk")
 
 #: What :func:`configure` actually installed, which is a different question from what the

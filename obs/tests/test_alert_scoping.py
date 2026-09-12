@@ -27,6 +27,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from motet_obs import runtime
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from conftest import OtlpCollector
@@ -52,8 +53,21 @@ LOG_EXPORTER_MESSAGE = "Failed to export logs batch code: 503, reason: obs is do
 TRANSPORT_LOGGER = "urllib3.util.retry"
 TRANSPORT_MESSAGE = "Incremented Retry for (url='/v1/logs')"
 
+#: The batch processor behind the log exporter, whose "Queue full, dropping %s." fires on
+#: the *emitting* thread — so a record it produced, exported, would produce another one.
+#: Shared with the span processor, which is why it cannot be let through by signal.
+LOG_PROCESSOR_LOGGER = "opentelemetry.sdk._shared_internal"
+LOG_PROCESSOR_MESSAGE = "Queue full, dropping log."
+
+#: Attribute cleaning, which logs from inside `LoggingHandler.emit` — re-entering the root
+#: handlers while the outer `emit` is still on the stack.
+ATTRIBUTES_LOGGER = "opentelemetry.attributes"
+ATTRIBUTES_MESSAGE = "Invalid type dict for attribute 'motet.queue' value"
+
 #: Motet's own failure, which is what the error channel is *for*. Present so that a green
-#: run cannot be a run where error reporting was switched off wholesale.
+#: run cannot be a run where error reporting was switched off wholesale. Emitted **last**,
+#: so that the three third-party records above are already on the breadcrumb trail when it
+#: becomes an event — see `test_the_dropped_records_survive_as_breadcrumbs`.
 MOTET_LOGGER = "motet.workers.runner"
 MOTET_MESSAGE = "worker could not claim a job"
 
@@ -69,6 +83,8 @@ assert current.errors_configured, current
 logging.getLogger({METRIC_EXPORTER_LOGGER!r}).error({METRIC_EXPORTER_MESSAGE!r})
 logging.getLogger({LOG_EXPORTER_LOGGER!r}).error({LOG_EXPORTER_MESSAGE!r})
 logging.getLogger({TRANSPORT_LOGGER!r}).error({TRANSPORT_MESSAGE!r})
+logging.getLogger({LOG_PROCESSOR_LOGGER!r}).error({LOG_PROCESSOR_MESSAGE!r})
+logging.getLogger({ATTRIBUTES_LOGGER!r}).error({ATTRIBUTES_MESSAGE!r})
 logging.getLogger({MOTET_LOGGER!r}).error({MOTET_MESSAGE!r})
 
 # Flushes both the OTLP batch processors and the Sentry transport, which is what puts the
@@ -150,6 +166,54 @@ def test_the_log_exporters_own_failure_is_still_not_exported(
     assert LOG_EXPORTER_LOGGER not in _event_loggers(otlp_collector)
 
 
+def test_the_rest_of_the_log_export_path_is_on_both_guards(
+    emitted: dict[str, Any], otlp_collector: OtlpCollector
+) -> None:
+    """A log export produces records from more than the log exporter, and all of it loops.
+
+    The batch processor's "queue full" warning and the attribute cleaner's complaint are
+    both emitted *synchronously inside* `LoggingHandler.emit`, so exporting either one
+    re-enters the handler that produced it. Neither is reachable from a metric or trace
+    export in a way this filter could tell apart, so both stay out of the pipeline.
+    """
+    for message in (LOG_PROCESSOR_MESSAGE, ATTRIBUTES_MESSAGE):
+        assert message not in otlp_collector.log_bodies()
+    for logger in (LOG_PROCESSOR_LOGGER, ATTRIBUTES_LOGGER):
+        assert logger not in _event_loggers(otlp_collector)
+
+
+def test_the_loop_guards_module_paths_match_the_installed_sdk(
+    emitted: dict[str, Any],
+) -> None:
+    """Every `opentelemetry` entry in the guard is an underscore-private module path.
+
+    Upstream has already moved one of them once — `BatchProcessor` used to live under
+    `sdk._logs._internal.export` — and a stale literal here reopens an *unbounded* loop
+    without anything going red. So the literals are checked against the classes they name,
+    and a dependency bump that renames one fails this test instead of saturating a
+    container in production.
+    """
+    from opentelemetry.attributes import BoundedAttributes
+    from opentelemetry.exporter.otlp.proto.common import _internal as encoder
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    from opentelemetry.sdk._logs import LoggingHandler
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    from opentelemetry.sdk._shared_internal import BatchProcessor
+
+    on_the_log_export_path = [
+        OTLPLogExporter.__module__,
+        BatchLogRecordProcessor.__module__,
+        BatchProcessor.__module__,
+        LoggingHandler.__module__,
+        BoundedAttributes.__module__,
+        encoder.__name__,
+    ]
+    for module in on_the_log_export_path:
+        assert module.startswith(runtime._NO_EXPORT_LOGGERS), (
+            f"{module} logs from inside a log export but is not behind the loop guard"
+        )
+
+
 def test_the_shared_http_transport_is_on_both_guards(
     emitted: dict[str, Any], otlp_collector: OtlpCollector
 ) -> None:
@@ -160,3 +224,22 @@ def test_the_shared_http_transport_is_on_both_guards(
     """
     assert TRANSPORT_MESSAGE not in otlp_collector.log_bodies()
     assert TRANSPORT_LOGGER not in _event_loggers(otlp_collector)
+
+
+def test_the_dropped_records_survive_as_breadcrumbs(
+    emitted: dict[str, Any], otlp_collector: OtlpCollector
+) -> None:
+    """The reason the event guard is `before_send` and not `ignore_logger`.
+
+    `ignore_logger`'s list drops breadcrumbs as well as events, so a real Motet error would
+    arrive at GlitchTip with no trace of the exporter trouble that preceded it — which is
+    often the context that explains it. Pinned rather than asserted in prose, because a
+    later switch to `ignore_logger` would pass every other test in this module.
+    """
+    events = [
+        event for event in otlp_collector.sentry_events() if event.get("logger") == MOTET_LOGGER
+    ]
+    assert events, "the control event is missing; the rest of this assertion means nothing"
+    trail = [crumb.get("message") for crumb in events[0].get("breadcrumbs", {}).get("values", [])]
+    assert METRIC_EXPORTER_MESSAGE in trail
+    assert TRANSPORT_MESSAGE in trail
