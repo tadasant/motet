@@ -20,6 +20,15 @@ export DATABASE_URL="${DATABASE_URL:-postgresql://postgres:postgres@localhost:54
 # Never let CI reach a vendor — invariant 7.
 export MOTET_INFERENCE_MODE=fake
 
+# This run reads no .env, and that has to be structural rather than a matter of which
+# variables happen to be overridden above. `bin/local-env` writes a real-mode .env and
+# tells you to `export UV_ENV_FILE=.env`; in that shell every `uv run` below would
+# otherwise inherit staging's OTel endpoint and ingest token, and this suite would ship
+# its telemetry to the estate's obs stack under a real credential — and pass, saying
+# nothing. Two mechanisms because the second covers a file named any other way.
+unset UV_ENV_FILE
+export UV_NO_ENV_FILE=1
+
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
 step "Install Python dependencies"

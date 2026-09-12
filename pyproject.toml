@@ -45,6 +45,11 @@ dev = [
     "feedparser>=6.0",
     "httpx>=0.28",
     "podcastparser>=0.6",
+    # Read by `bin/local-env` and by nothing else. Dev-group only, deliberately: no
+    # deployable reads Secret Manager directly — a deployed service is handed its
+    # values by the service definition — so this is a laptop's way of getting the same
+    # values, and it has no business in any image.
+    "google-cloud-secret-manager>=2.20",
     "mypy>=1.14",
     "pytest>=8.3",
     "ruff>=0.9",
@@ -66,6 +71,11 @@ select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logge
 # Same exemption, same reason: `motet-voice` is a hand-run CLI whose entire product is the
 # report it prints. Stated here rather than dodged by excluding the file from the linter.
 "voice/src/motet_voice/cli.py" = ["T201"]
+# And again: `bin/local-env` is a hand-run CLI whose report — what it wrote, which names
+# it found, which it dropped — IS its product. It is also the one place where what must
+# NOT be printed matters, so the exemption is stated here beside the other two rather
+# than sprinkled as per-line noqa where it would be easy to add one more.
+"tools/local_env.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -78,6 +88,7 @@ files = [
     "obs/src",
     "sources/src",
     "storage/src",
+    "tools",
     "vault/src",
     "voice/src",
     "workers/src",
@@ -110,6 +121,7 @@ testpaths = [
     "obs/tests",
     "sources/tests",
     "storage/tests",
+    "tools/tests",
     "vault/tests",
     "voice/tests",
     "workers/tests",

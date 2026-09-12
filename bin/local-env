@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#
+# Write a .env for real-mode local development from the Secret Manager secrets labelled
+# motet-local=true. One non-public thing on the machine — the service account key that
+# GOOGLE_APPLICATION_CREDENTIALS points at — and everything after it is this script.
+#
+# See tools/local_env.py for what it reads and why, and CONTRIBUTING.md's "Local
+# development, real mode" for the whole loop. It never prints a secret value.
+#
+# NOT in bin/ci, and never will be: CI is offline and fake (invariant 7), and this is the
+# one script in the repo whose entire job is to reach a cloud API for real credentials.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec uv run python -m tools.local_env "$@"
