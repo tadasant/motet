@@ -114,8 +114,8 @@ almost every design question that comes up is already answered by one of them.
 
 ## Operating invariants
 
-Settled with Tadas in Zimmer session 8241. These govern how the system is built and run,
-not what it does.
+Settled with Tadas in Zimmer session 8241 — 9 to 11 there, 12 in motet#76. These govern
+how the system is built and run, not what it does.
 
 ### 9. One-time setup boundaries are human-owned; everything inside them is not
 
@@ -295,6 +295,11 @@ testing the stub.
 
 ### 12. No new architecture without an explicit design session and human sign-off
 
+Decided by Tadas, 2026-09-12, motet#76; motet#75 is its first consequence. **This section
+is the worked example of its own rule** — the sign-off goes at the top, because an
+invariant that did not record its own would be asking for something nothing in this file
+demonstrates.
+
 An agent never introduces, replaces or removes a piece of architecture on its own
 judgement, however well argued. It stops, lays out the options and their costs, and waits
 for the owner to choose. The sign-off is recorded in the PR and in the AGENTS.md section
@@ -334,6 +339,12 @@ on an existing instrument, docs.
 **When in doubt, it counts.** The cost of asking is a short conversation; the cost of not
 asking is a mechanism the owner has to discover after it ships. The asymmetry is deliberate.
 
+**A decision this file already records has had its session, and building it is not a new
+one.** Invariant 3's model-backed entailment check and Cartesia's own timestamp output are
+each written down here as the intended next step, with the condition that triggers them;
+so is every tripwire, as a decision against. What needs a session is a mechanism nobody
+chose — not one whose choosing is on the page.
+
 **What a design session looks like.** The agent stops before writing code and presents, **in
 the conversation rather than a PR**:
 
@@ -356,14 +367,23 @@ reachable by an agent optimising a local problem. Neither invariant makes the ot
 9 is about who may spend money or accept a terms-of-service, 12 is about who may add a
 mechanism.
 
+**So 9's operational half survives 12 intact, and the line between them is structure
+against operation.** Deploying, rotating a provisioned secret, adding a DNS record, scaling
+a service, running a migration — 9 says an agent does all of those with no human in the
+loop, and running the system the owner already chose is not adding to it. The seventh
+bullet above bites when the resource *is* the new structure, not when it is the routine
+operation of structure that exists. A routine operation that stalls waiting for a human is
+still the defect 9 names. Where both readings genuinely fit, "when in doubt, it counts"
+decides — that is what it is for.
+
 ---
 
 ## Tripwires
 
 Signals that the project has gone wrong. If one fires, stop and re-plan rather than
 pushing through. **These stand as written; they are the specific instances of the general
-rule invariant 12 now states** — each one is a structural move somebody already decided
-against, named in advance so that the design session does not have to be held twice.
+rule invariant 12 now states** — decisions already taken, named in advance so that the
+design session does not have to be held twice.
 
 - **The SPA is not the product.** It is the eyes-on backlog surface, and in Phase 1 it is
   three thin screens over the API. If SPA work is still running after a week, something has
