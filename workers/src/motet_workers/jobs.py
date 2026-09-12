@@ -214,20 +214,25 @@ RETENTION_SECONDS: Mapping[str, int] = {
 #: here ever waits (:func:`try_lock` is ``pg_try_advisory_lock``), so this is belt and
 #: braces rather than load-bearing.
 #:
-#: **"Held by anybody", not "held by somebody else", and that is a precondition rather
-#: than an oversight.** :func:`~motet_workers.loop.drain` releases its lock in a ``finally``
-#: before its next claim, so a worker never meets its own. A future change that held a key
-#: *across* claims — batching one user's jobs, judging them in parallel — would make a
-#: worker hide the rows it is working on, with no test failing. ``AND l.pid <>
-#: pg_backend_pid()`` is the one-line answer if that day comes; it is left off today
-#: because it would also hide a *second* connection of this same process, which is the
-#: lease keeper's shape and exactly the thing worth not hiding.
+#: **"Held by anybody", not "held by somebody else", and both readers want it that way.**
+#: :func:`~motet_workers.loop.drain` releases its lock in a ``finally`` before its next
+#: claim, so a claiming worker never meets its own and a ``pid`` filter would buy it
+#: nothing; and :attr:`QueueReadiness.blocked_keys` reads this same statement precisely to
+#: report "somebody is on this key", which includes the pass asking. A future change that
+#: held a key *across* claims — batching one user's jobs, judging them in parallel — would
+#: make a worker hide the rows it is working on, with no test failing, and ``AND l.pid <>
+#: pg_backend_pid()`` is the one-line answer if that day comes. Note what it would *not*
+#: do, because the name invites the mistake: ``pg_backend_pid()`` identifies a
+#: **connection**, not an OS process, so a second connection of this same worker survives
+#: the filter untouched.
 #:
-#: A role that cannot read ``pg_locks`` or ``pg_database`` would make :func:`claim` raise
-#: and stop every queue, with no fail-open path — unlike
-#: :func:`~motet_workers.loop._record_readiness`, which swallows. Both views are readable
-#: by any role on a stock Postgres and on Cloud SQL, so this is a claim about the estate
-#: that nothing here can test; staging is where it is settled.
+#: A role that cannot read ``pg_locks`` or ``pg_database`` makes every reader of this
+#: statement raise, and they degrade differently: :func:`claim` has no fail-open path and
+#: would stop every queue, :func:`~motet_workers.loop._record_readiness` swallows, and
+#: ``/v1/processing`` would 500 — which the SPA already renders as its "could not ask"
+#: state rather than as an idle pipeline. Both views are readable by any role on a stock
+#: Postgres and on Cloud SQL, so this is a claim about the estate that nothing here can
+#: test; staging is where it is settled.
 HELD_LOCK_KEYS_SQL = """
     SELECT ((l.classid::bigint::bit(64) << 32) | l.objid::bigint::bit(64))::bigint AS key
     FROM pg_locks l
@@ -801,15 +806,20 @@ class QueueReadiness:
 #: five seconds because a key was busy, is a queue with nothing for a new worker to do.
 #:
 #: **Two aggregates rather than ``count(DISTINCT serialize_key)``, and the reason is the
-#: plan.** ``count(DISTINCT)`` cannot hash-aggregate, so it sorts every due row: measured
-#: at 93 ms over 20,000 due rows against 20 ms for the shape below, which groups by the key
-#: once and counts the groups. This runs on every drain pass *and* on every
+#: plan.** ``count(DISTINCT)`` cannot hash-aggregate, so it plans as a ``GroupAggregate``
+#: over a ``Sort`` of every due row; the shape below groups by the key once and counts the
+#: groups, which is two nested ``HashAggregate``\ s. Measured over 20,000 due rows, median
+#: of eleven: 83 ms against 20 ms. This runs on every drain pass *and* on every
 #: ``/v1/processing``, which the SPA polls every three seconds while anything is pending —
 #: which is exactly during the burst this signal is about.
 #:
 #: ``max(lock_key)`` rather than grouping by it: the two columns are one-to-one, and taking
 #: the key as an aggregate means a row that somehow disagreed could not split one user into
-#: two groups and count them twice.
+#: two groups and count them twice. ``max`` also skips NULLs, which is what decides the
+#: rolling-deploy window migration 0011 describes — a key whose rows are half backfilled
+#: resolves to the real key and reads as blocked, and a key with no ``lock_key`` on any of
+#: its rows reads as *not* blocked. The second is the same fail-open the claim makes, and
+#: it is worth knowing it costs the operator signal below for the length of the deploy.
 QUEUE_READINESS_SQL = f"""
     WITH held AS ({HELD_LOCK_KEYS_SQL}),
     due AS (

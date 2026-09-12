@@ -1719,8 +1719,9 @@ and a plain row count for the others; this expression equals whichever applies o
 queue that exists, because a queue's rows today either all carry a key or none of them
 does. What it adds is that a queue carrying both reports a number a scaler can act on
 rather than a zero that reads as "no work". It is two aggregates rather than a
-`count(DISTINCT)`, which cannot hash-aggregate and sorts every due row: 93 ms against 20 ms
-over 20,000 rows, on a query the SPA reaches every three seconds while anything is pending.
+`count(DISTINCT)`, which cannot hash-aggregate and sorts every due row: 83 ms against 20 ms
+over 20,000 rows, median of eleven, on a query the SPA reaches every three seconds while
+anything is pending.
 
 **`blocked_keys` is the third number, and it is there because the filter above took a
 signal away.** A worker that met a held key used to claim the row, log `job N deferred`, and
