@@ -12,7 +12,9 @@ interactive podcast you listen to on a dog walk and can interrupt with your voic
 do not re-litigate them. If you find yourself about to argue with something below, the
 bar is not "I have a better idea" — it is "the reason this was decided no longer holds,
 and here is why." Say that out loud in your PR rather than quietly building the other
-thing.
+thing. And a better idea is a reason to **ask**, never a licence to build: where it would
+change the shape of the system rather than the inside of it, invariant 12 says to stop and
+put the options to the owner.
 
 ---
 
@@ -112,8 +114,8 @@ almost every design question that comes up is already answered by one of them.
 
 ## Operating invariants
 
-Settled with Tadas in Zimmer session 8241. These govern how the system is built and run,
-not what it does.
+Settled with Tadas in Zimmer session 8241 — 9 to 11 there, 12 in motet#76. These govern
+how the system is built and run, not what it does.
 
 ### 9. One-time setup boundaries are human-owned; everything inside them is not
 
@@ -139,6 +141,10 @@ reachable by an agent through CI, an API, or an MCP tool, with no human in the l
 
 When you hit a genuine one-time boundary mid-task, do not improvise around it: write it
 down as a provisioning step (what to create, where the credential goes) and hand it back.
+
+**This invariant stands as written, and invariant 12 is its structural counterpart** — the
+same human-owned boundary drawn around what the system *is* rather than around what it is
+allowed to spend or sign for.
 
 ### 10. No production box access, ever
 
@@ -287,12 +293,97 @@ Sentry envelopes that arrive at the same local socket the OTLP collector answers
 whether a record becomes an event is decided inside `sentry_sdk`, so a stub would be
 testing the stub.
 
+### 12. No new architecture without an explicit design session and human sign-off
+
+Decided by Tadas, 2026-09-12, motet#76; motet#75 is its first consequence. **This section
+is the worked example of its own rule** — the sign-off goes at the top, because an
+invariant that did not record its own would be asking for something nothing in this file
+demonstrates.
+
+An agent never introduces, replaces or removes a piece of architecture on its own
+judgement, however well argued. It stops, lays out the options and their costs, and waits
+for the owner to choose. The sign-off is recorded in the PR and in the AGENTS.md section
+that describes the change.
+
+**This exists because the system grew structure one well-justified step at a time.** The
+grounding gate went from one model call to a chunked, halving, self-narrowing, fenced,
+fail-closed subsystem across four issues. The job queue went from `SKIP LOCKED` to a lease
+heartbeat, two fences, a lock order and a bounded pruner across five. Every step was
+correct in isolation, documented here, and merged. **The aggregate was never chosen by
+anyone** — which is the failure this invariant names, and it is not one any individual
+review could have caught.
+
+**What counts as architecture.** The test is: would the system diagram or the package graph
+change, or would a new mechanism need its own section in this file to be understood? If
+yes, it needs sign-off. Concretely, at least:
+
+- A new deployable, image, or process shape (a new service, job, or a change from one-shot
+  to always-on).
+- A new datastore, cache, queue, or a new role for an existing table (a table used as a
+  queue, a table used as a log).
+- A new vendor, provider, or seam, or a second implementation behind an existing seam.
+- A new cross-service protocol or contract (a new API surface between our own services, a
+  WebSocket contract, a session contract).
+- A new mechanism in the job queue or the pipeline (a fence, a lease, a retry policy, a new
+  stage, a scheduler).
+- A new inference stage, or a new model call anywhere one does not exist today.
+- Anything that requires a new resource, IAM grant, secret, or variable in the private
+  infrastructure repo.
+- Removing any of the above.
+
+**What does not.** Work inside an existing shape needs no session: a route on the existing
+API, a column on an existing table used the way that table is already used, a handler change
+within the existing queue mechanics, a bug fix inside an existing adapter, a test, a metric
+on an existing instrument, docs.
+
+**When in doubt, it counts.** The cost of asking is a short conversation; the cost of not
+asking is a mechanism the owner has to discover after it ships. The asymmetry is deliberate.
+
+**A decision this file already records has had its session, and building it is not a new
+one.** Invariant 3's model-backed entailment check and Cartesia's own timestamp output are
+each written down here as the intended next step, with the condition that triggers them;
+so is every tripwire, as a decision against. What needs a session is a mechanism nobody
+chose — not one whose choosing is on the page.
+
+**What a design session looks like.** The agent stops before writing code and presents, **in
+the conversation rather than a PR**:
+
+1. The problem, with the evidence that it is real — an incident, a measurement — not a
+   hypothetical.
+2. At least two options, including "do nothing" where it is viable, each with what it buys,
+   what it costs, and what it would take to reverse.
+3. A recommendation.
+
+The owner picks. The PR then records the choice and the alternatives rejected, and the
+section in this file for the mechanism opens with the sign-off rather than only the
+reasoning.
+
+**Invariant 9 is this one's other half, and the split is what each protects.** 9 draws the
+human-owned boundary around *one-time setup* — provisioning an account, minting a first key
+— and says everything inside it must be reachable by an agent. 12 is its structural
+counterpart: it draws the same kind of boundary around *what the system is*, and for the
+same reason. These are the choices where a person decides the shape, and they should not be
+reachable by an agent optimising a local problem. Neither invariant makes the other's call:
+9 is about who may spend money or accept a terms-of-service, 12 is about who may add a
+mechanism.
+
+**So 9's operational half survives 12 intact, and the line between them is structure
+against operation.** Deploying, rotating a provisioned secret, adding a DNS record, scaling
+a service, running a migration — 9 says an agent does all of those with no human in the
+loop, and running the system the owner already chose is not adding to it. The seventh
+bullet above bites when the resource *is* the new structure, not when it is the routine
+operation of structure that exists. A routine operation that stalls waiting for a human is
+still the defect 9 names. Where both readings genuinely fit, "when in doubt, it counts"
+decides — that is what it is for.
+
 ---
 
 ## Tripwires
 
 Signals that the project has gone wrong. If one fires, stop and re-plan rather than
-pushing through.
+pushing through. **These stand as written; they are the specific instances of the general
+rule invariant 12 now states** — decisions already taken, named in advance so that the
+design session does not have to be held twice.
 
 - **The SPA is not the product.** It is the eyes-on backlog surface, and in Phase 1 it is
   three thin screens over the API. If SPA work is still running after a week, something has
