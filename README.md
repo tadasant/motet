@@ -50,6 +50,7 @@ to a small fraction of session minutes.
 ## Getting started
 
 ```bash
+bin/dev       # Postgres, migrations, API, worker, SPA — one Ctrl-C stops it
 bin/ci        # migrations, tests, typecheck — everything CI runs
 ```
 

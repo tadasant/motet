@@ -46,6 +46,12 @@ web/dist
 .npm-cache
 **/*_stderr.log
 
+# Local development only: `docker-compose.yml` starts a Postgres for a laptop and
+# `db/local/` is the init script it mounts. Neither image reads either one, and the
+# compose file is not a build input — it has no `build:` stanza at all.
+docker-compose.yml
+db/local
+
 # Docs and editor noise: nothing in either image reads them.
 *.md
 .idea

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# The one local-development command: Postgres, migrations, the API, a worker, and the SPA
+# — one process group, one log stream, one Ctrl-C.
+#
+#   bin/dev                 # everything
+#   bin/dev --no-db         # use the Postgres DATABASE_URL already names
+#   bin/dev --without web   # ...when you are running the SPA yourself
+#
+# See tools/dev.py for what it supervises and why nothing but Postgres is containerised,
+# and CONTRIBUTING.md for the loop this belongs to.
+#
+# NOT in bin/ci, for `bin/build-images`' reason: it needs a Docker daemon, and `bin/ci`
+# needs only a Postgres. It is also the opposite of a CI run — it starts processes and
+# waits, where every check in `bin/ci` finishes.
+#
+# Deliberately does NOT set UV_ENV_FILE. `uv run` reads no .env without it, real mode
+# spends real money (CONTRIBUTING.md), and that export stays the deliberate act it is
+# documented as — `export UV_ENV_FILE=.env` before this, and every child picks it up.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec uv run python -m tools.dev "$@"

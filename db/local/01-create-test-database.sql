@@ -1,0 +1,20 @@
+-- Runs once, on an empty data directory, from docker-compose.yml's bind mount into the
+-- Postgres image's /docker-entrypoint-initdb.d.
+--
+-- The compose service creates `motet_dev` itself (POSTGRES_DB), which is what
+-- `.env.example` and `bin/local-env` point DATABASE_URL at. This file creates the OTHER
+-- one, because a laptop needs both and they are not interchangeable:
+--
+--   motet_dev   a real-mode run's data, which survives across runs.
+--   motet_test  what `bin/ci` defaults DATABASE_URL to. pytest does not use it directly
+--               — conftest.py connects to it and CREATEs a database per run, dropping it
+--               at the end (motet#15) — but it has to exist to be connected to.
+--
+-- Creating it here rather than leaving it to a developer is the point of the issue this
+-- landed for (motet#83): `docker exec motet-pg createdb -U postgres motet_dev` was a
+-- documented manual step that is invisible until a migration fails against a database
+-- that is not there.
+--
+-- NOT in db/migrations/: that directory is applied in order and recorded in
+-- schema_migrations, and this is server setup rather than schema.
+CREATE DATABASE motet_test;

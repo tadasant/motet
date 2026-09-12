@@ -15,25 +15,52 @@ change you had in mind may well get built.
 
 ## Development setup
 
-You need **Python 3.13**, **Node 22**, **[uv](https://docs.astral.sh/uv/)**, and a
-**Postgres 16**.
+You need **Python 3.13**, **Node 22**, **[uv](https://docs.astral.sh/uv/)**, and **Docker**
+(for Postgres — nothing else runs in a container).
 
 ```bash
-uv sync --all-packages     # Python workspace: api, db, inference, obs, storage, workers
-npm --prefix web ci        # the SPA
+bin/dev        # Postgres, migrations, API, worker, SPA — one Ctrl-C stops it
 ```
 
-A local Postgres, however you prefer to run one:
+That is the whole loop, from a fresh clone. [`bin/dev`](bin/dev) brings the compose Postgres
+up and waits for it to be **healthy**, applies migrations, then runs the API, a polling
+worker, and the SPA's dev server in one prefixed log stream. Dependencies come with it:
+every child goes through `uv run`, which syncs the Python workspace itself, and the SPA's
+`npm ci` runs when `web/node_modules` is missing and not otherwise.
+
+Ctrl-C stops all three — it signals each process *group*, so `vite` and `uvicorn` go down
+with the wrappers that started them rather than being orphaned onto their ports.
 
 ```bash
-docker run -d --name motet-pg \
-  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=motet_test \
-  -p 5432:5432 postgres:16
+bin/dev --api-port 8123      # ...and the Vite proxy follows it
+bin/dev --without web        # ...when you are running the SPA yourself
+bin/dev --no-db              # use the Postgres DATABASE_URL already names
+bin/dev --no-migrate         # start without applying anything
 ```
 
-Then copy `.env.example` to `.env`. `bin/ci` defaults `DATABASE_URL` to
-`postgresql://postgres:postgres@localhost:5432/motet_test`, so the container above needs no
-further configuration.
+`docker-compose.yml` owns Postgres and deliberately nothing else — see the comment at the
+top of it for why `uvicorn --reload` and `vite` stay on the host. It creates **both**
+databases a laptop needs, which is what `docker exec … createdb` used to be for:
+
+| Database | Whose |
+|---|---|
+| `motet_dev` | a local run's data — what `.env.example` and `bin/local-env` point `DATABASE_URL` at |
+| `motet_test` | what `bin/ci` defaults to. pytest connects to it and creates a database per run |
+
+```bash
+docker compose down          # stop Postgres, keep the data
+docker compose down -v       # ...and wipe it, so the next `bin/dev` starts clean
+```
+
+If a Postgres from the older manual instructions is still bound to 5432, `docker rm -f
+motet-pg` first — compose cannot have the port while it is held.
+
+`.env.example` is the documented shape of the environment; nothing above needs it, because
+every default already points at the compose Postgres.
+
+**Running your own Postgres 16 instead is still supported** — compose is a convenience, not
+a dependency, and `bin/ci` still needs only a Postgres. Create both databases on it, point
+`DATABASE_URL` at `motet_dev`, and pass `bin/dev --no-db` so nothing touches compose.
 
 > Without a `DATABASE_URL`, the migration-apply tests **skip** rather than fail, so a quick
 > `uv run pytest` works with no database. CI always has one, so that path is always covered
@@ -104,13 +131,18 @@ a slug or a reasoning config against the live API, do it by hand outside the sui
 ## Running the pipeline locally
 
 Nothing happens on the request thread: the API writes a row and enqueues a job, and a
-worker does the work. So a local run needs both.
+worker does the work. So a local run needs both, which is why `bin/dev` starts both. What
+it runs, if you would rather run them yourself:
 
 ```bash
 uv run uvicorn motet_api:app --reload                 # the API
 uv run python -m motet_workers.runner all --poll-seconds 2   # ...and a worker
 npm --prefix web run dev                              # the SPA
 ```
+
+Started by hand they need `DATABASE_URL` in the environment and the API on port 8000, or
+on whatever port `MOTET_DEV_API_PORT` tells the Vite proxy to target. `bin/dev` is those
+two facts written down once.
 
 `all` sweeps every queue in pipeline order on each pass, so a paste integrates and an
 episode assembles, scripts and renders without you starting anything per stage. Name a
@@ -164,14 +196,12 @@ The dev setup above, plus:
 - The key at `~/.config/motet/local-dev.json` (or anywhere — the path is yours). It is
   minted by a human, once, per the manual-setup runbook in the private infrastructure
   repo. **Do not try to mint one from a session**; that is the boundary, not a gap.
-- No `.env` in the way. If you followed the setup section above and copied `.env.example`
-  to `.env`, `bin/local-env` will refuse rather than replace it — pass `--force`.
-- A `motet_dev` database on the local Postgres, which is what the generated `DATABASE_URL`
-  points at — `motet_test` is pytest's, and a real-mode run should not share it:
+- No `.env` in the way. If you already have one, `bin/local-env` will refuse rather than
+  replace it — pass `--force`.
 
-  ```bash
-  docker exec motet-pg createdb -U postgres motet_dev
-  ```
+The `motet_dev` database the generated `DATABASE_URL` points at is created by
+`docker-compose.yml`, so there is nothing to do for it. It is not `motet_test`, and the
+two must not be shared: pytest owns that one.
 
 ### The one export, then the script
 
@@ -195,11 +225,13 @@ or pass `--env-file .env` to each command.
 ### The loop
 
 ```bash
-uv run python -m motet_db.migrate                             # against motet_dev
-uv run uvicorn motet_api:app --reload                         # the API
-uv run python -m motet_workers.runner all --poll-seconds 2    # ...and a worker
-npm --prefix web run dev                                      # the SPA
+bin/dev
 ```
+
+The same one command as fake mode: `bin/dev` deliberately does **not** set `UV_ENV_FILE`
+itself, so which mode you get is decided by the export above and by nothing else. Run it
+without that export and it says the `.env` is there and unread rather than quietly
+spending money.
 
 Then open **`http://localhost:5173`** — `localhost`, never `127.0.0.1`, because Google
 matches a redirect URI as an exact string — sign in, and paste something.

@@ -1,0 +1,75 @@
+# The local stack's ONE stateful dependency, and deliberately nothing else.
+#
+# `bin/dev` owns the three application processes — the API, a worker, and the SPA's dev
+# server — and runs them on the host rather than in containers. That split is the decision
+# (motet#83), not an unfinished compose file:
+#
+#   * `uvicorn --reload` and `vite` both watch the host filesystem. In a container that
+#     becomes a bind mount and an inotify story per platform, for a loop that already
+#     works.
+#   * The API and the worker need `UV_ENV_FILE=.env` *and* a still-exported
+#     `GOOGLE_APPLICATION_CREDENTIALS` — the KMS vault builds its client from ADC
+#     (`vault/src/motet_vault/envelope.py`), and `bin/local-env` deliberately does not
+#     write that variable into `.env`. Containerising them would mean bind-mounting a
+#     service account key into a container to keep real mode working.
+#   * Postgres has neither problem: it has no source tree to watch and no credential of
+#     ours, and running it by hand is where the two documented sharp edges lived.
+#
+# There is no one-shot `migrate` service either, for a third reason: it would have to run
+# the application image, so `docker compose up` would build the Cloud Run image before a
+# laptop could migrate. `bin/dev` runs `motet_db.migrate` on the host, against this
+# service, once it reports healthy.
+#
+#   docker compose up -d --wait     # what bin/dev does
+#   docker compose down             # stop, keep the data
+#   docker compose down -v          # stop and wipe, re-running db/local/ on next up
+#
+# Ports and credentials match `.env.example` and `bin/local-env`'s override block, so the
+# default DATABASE_URL needs no editing. They are dev-only values, published on loopback
+# only (see `ports:` below); nothing here is a secret and nothing here is deployed. The
+# deployed database is Cloud SQL, defined in the private infrastructure repo.
+name: motet
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: motet-postgres
+    # No restart policy on purpose: a laptop that reboots should not silently acquire a
+    # Postgres running forever. `bin/dev` starts it, every time, in about a second.
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # The database a local run's data lives in. `motet_test` is created beside it by
+      # db/local/01-create-test-database.sql — see that file for why there are two.
+      POSTGRES_DB: motet_dev
+      # For the healthcheck's own psql calls, which authenticate like any other client.
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    ports:
+      # Bound to loopback, not to every interface. `5432:5432` publishes on 0.0.0.0 and
+      # [::], which on a café network is `postgres:postgres` offered to the room. Nothing
+      # in this repo needs it reachable off-host: DATABASE_URL says `localhost`.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - motet-pgdata:/var/lib/postgresql/data
+      # Read-only, and applied by the image only when the volume above is empty.
+      - ./db/local:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Two properties, and `pg_isready` alone would prove neither. It answers "a server
+      # is accepting connections", which is true of the TEMPORARY server the image runs
+      # while it is still executing the init scripts — so a `--wait` gated on it can
+      # return before `motet_test` exists. Naming both databases makes the check the
+      # thing the caller actually needs, and `-h 127.0.0.1` forces TCP, which the
+      # temporary server does not listen on (it sets `listen_addresses=''`).
+      test:
+        [
+          "CMD-SHELL",
+          "psql -qtAX -h 127.0.0.1 -d motet_dev -c 'SELECT 1' >/dev/null && psql -qtAX -h 127.0.0.1 -d motet_test -c 'SELECT 1' >/dev/null",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  motet-pgdata:
