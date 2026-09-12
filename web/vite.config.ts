@@ -9,11 +9,18 @@ import { defineConfig } from 'vitest/config'
 // build time, so an origin set at build time would mean one image per environment; the
 // deployed bundle reads it from `/config.js`, which the container writes at start-up.
 // See web/src/api/client.ts.
-// Where `npm run dev` proxies API calls. Hardcoded rather than read from the
-// environment: reading `process.env` here would mean pulling Node's type definitions
-// into a tsconfig that otherwise describes browser code, which is a bigger change than
-// this one line deserves.
-const DEV_API = 'http://127.0.0.1:8000'
+// Where `npm run dev` proxies API calls, and the second half of one number. `bin/dev`
+// starts uvicorn on this port and exports MOTET_DEV_API_PORT to the Vite child, so the
+// port the API listens on and the port this proxies to cannot disagree. They used to:
+// the target was a literal here, so moving uvicorn off 8000 made `/v1/...` return
+// index.html and fail as a JSON parse error pointing nowhere near the cause (motet#83).
+//
+// `process` is declared locally rather than by adding @types/node: this file is in a
+// tsconfig that otherwise describes browser code, and one ambient declaration is a
+// smaller change than a Node type surface the SPA's own sources would then see.
+declare const process: { env: Record<string, string | undefined> }
+
+const DEV_API = `http://127.0.0.1:${process.env.MOTET_DEV_API_PORT ?? '8000'}`
 
 export default defineConfig({
   plugins: [react()],

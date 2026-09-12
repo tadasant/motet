@@ -610,15 +610,17 @@ subprocesses and anything reading the environment get the same isolated database
 the truncate gentler (retry it, `DELETE` instead) would have left both runs deleting each
 other's rows, quietly.
 
-Four other scripts sit outside it, for two different reasons. Two need a toolchain
+Five other scripts sit outside it, for three different reasons. Two need a toolchain
 `bin/ci` deliberately does not require; two are the opposite of `bin/ci`'s whole premise,
-which is that a run is offline, free and fake:
+which is that a run is offline, free and fake; and one is the opposite of its *shape*,
+because every check in `bin/ci` finishes and this one starts processes and waits:
 
 ```bash
 bin/build-images              # needs a Docker daemon
 ios/bin/build-app             # needs Xcode
 bin/check-openrouter-models   # needs OpenRouter's live model list
 bin/local-env                 # needs a service account key, and the network
+bin/dev                       # needs a Docker daemon, and never returns
 ```
 
 `bin/build-images` builds and smoke-tests the three container images, and it is its own
@@ -680,6 +682,64 @@ a stub that records the requests and they are asserted, which is `api/tests/test
 asserting the bytes rather than a fake's bookkeeping. What is left is whether Google
 answers the request the way the SDK's own types say it will, and the first real run is a
 human's, against a key a human minted.
+
+### `bin/dev` runs the processes; compose runs the one thing that holds state
+
+**Decided in motet#83**, which named the design question and answered it, and whose issue
+gate instructed the implementing session to take that reading. The split is the decision:
+`docker-compose.yml` owns **Postgres and nothing else**, and `bin/dev` (`tools/dev.py`)
+owns the API, a polling worker, and the SPA's dev server, on the host.
+
+The reasons are the issue's and they are concrete. `uvicorn --reload` and `vite` both watch
+the host filesystem, which in a container is a bind mount and a per-platform inotify story
+for a loop that already works. And the API and the worker need `UV_ENV_FILE=.env` *and* a
+still-exported `GOOGLE_APPLICATION_CREDENTIALS` — the KMS vault builds its client from ADC
+— so containerising them would mean bind-mounting a service account key into a container to
+keep real mode working. Postgres has neither problem, and it is where both of the sharp
+edges lived: the database name, and a port.
+
+Four things about it are the design:
+
+- **The compose file creates `motet_dev` *and* `motet_test`** (`db/local/`, which the image
+  runs once on an empty volume), because a laptop needs both and they are not
+  interchangeable — the second is what `bin/ci` defaults to and what `conftest.py` creates
+  a per-run database from. `docker exec motet-pg createdb -U postgres motet_dev` was a
+  documented manual step whose omission surfaces as a migration failing against a database
+  that is not there.
+- **The healthcheck asserts both databases answer a query, over TCP.** `pg_isready` alone
+  would not: the image runs a *temporary* server while it executes the init scripts, so a
+  check that only asks "is a server accepting connections" can pass before `motet_test`
+  exists — and `-h 127.0.0.1` forces the transport that temporary server does not listen
+  on. `--wait` is only a bring-up if the health question is the one the caller needs.
+- **Teardown signals each child's process *group*.** Both interesting children are wrappers
+  — `uv run` around `uvicorn`, `npm run dev` around `vite` — so signalling the pid the
+  supervisor holds reaches the wrapper and orphans the process actually holding the port.
+  Each child is started in a session of its own, so Ctrl-C arrives at the supervisor alone
+  and teardown happens in one place, with a grace period and a SIGKILL behind it.
+  `tools/tests/test_dev.py` proves it on a real grandchild rather than asserting a call was
+  made, which is `bin/build-images`' argument one seam along.
+- **It does not set `UV_ENV_FILE`, and that is a safety property rather than an omission.**
+  `uv run` reads no `.env` without it, real mode spends real money against staging's caps,
+  and that export is documented as the deliberate act that turns real mode on. What
+  `bin/dev` adds is a line saying the file is there and unread — "my .env is ignored" and
+  "I forgot the export" are otherwise the same five minutes.
+
+**The API's port is now set in one place and passed to the other.** `web/vite.config.ts`
+reads `MOTET_DEV_API_PORT` (defaulting to 8000) and `bin/dev` exports it to the Vite child,
+so `--api-port 8123` moves both. It used to be a literal in the Vite config, which made any
+other port return `index.html` for `/v1/...` and fail as a JSON parse error pointing nowhere
+near the cause. The SPA's own port is passed with `--strictPort` for the same class of
+reason: Vite silently picking 5174 breaks a registered OAuth redirect URI, and Google
+matches one as an exact string.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** This adds no deployable, no
+datastore, no vendor, no seam, no protocol, no queue mechanism, no inference stage and no
+resource in the private repo — nothing it touches runs anywhere but a laptop, and the
+Postgres it starts is the Postgres `CONTRIBUTING.md` already told you to start by hand. The
+judgement taken is that **motet#83 is its design session**: the owner filed it, named the
+alternative ("add a `docker-compose.yml` that runs everything"), argued against it with
+reasons, and recommended this split; the issue gate then told the implementing session to
+take that reading. This section is the record.
 
 ### The container images
 
