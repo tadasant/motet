@@ -14,16 +14,20 @@ about process groups, and a real API would make it a test about startup validati
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+import tools.dev
 from tools.dev import (
     API_PORT_ENV,
     DEFAULT_API_PORT,
@@ -32,10 +36,14 @@ from tools.dev import (
     Service,
     Supervisor,
     _redacted,
+    _run,
     build_services,
     check_ports,
+    compose_up,
     ensure_web_dependencies,
-    env_file_path,
+    env_file_paths,
+    main,
+    migrate,
     parse_args,
     port_is_free,
     read_env_file,
@@ -50,6 +58,16 @@ import subprocess, sys, time
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
 print("PID", child.pid, flush=True)
 time.sleep(300)
+"""
+
+#: A wrapper that spawns a grandchild and then EXITS, leaving the grandchild holding
+#: whatever the group holds. This is `uv run` propagating and returning while uvicorn's
+#: reloader child is still winding down, and it is the case a teardown that derives the
+#: group from `os.getpgid(pid)` cannot signal at all: the leader has been reaped by then.
+EXITS_BEFORE_ITS_GRANDCHILD = """
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+print("PID", child.pid, flush=True)
 """
 
 #: A child that refuses SIGTERM — and says so only once the handler is actually installed.
@@ -103,6 +121,28 @@ class TestTeardownLeavesNothing:
 
         assert _wait_gone(grandchild), "the grandchild outlived shutdown — an orphan"
         assert supervisor.poll() is not None
+
+    def test_a_grandchild_of_an_already_exited_wrapper_is_killed_too(self) -> None:
+        """The orphan case a group derived at teardown silently misses.
+
+        Once the wrapper has been reaped there is no pid-table entry to ask for a group
+        id, so `os.getpgid` raises and the SIGKILL that is meant to be unconditional
+        signals nothing — leaving the process that actually holds the port running.
+        """
+        out = io.StringIO()
+        supervisor = Supervisor(
+            [Service(name="tree", argv=(sys.executable, "-u", "-c", EXITS_BEFORE_ITS_GRANDCHILD))],
+            out=out,
+            colour=False,
+            grace_seconds=2.0,
+        )
+        supervisor.start()
+        grandchild = _read_marker_pid(out)
+        assert _wait_gone(supervisor._procs["tree"].pid) or True  # the wrapper exits on its own
+
+        supervisor.shutdown()
+
+        assert _wait_gone(grandchild), "the wrapper was reaped and its group was never killed"
 
     def test_a_child_that_ignores_sigterm_is_killed(self) -> None:
         """The grace period has a SIGKILL behind it, or a wedged child hangs the script."""
@@ -168,9 +208,8 @@ class TestRun:
             colour=False,
             grace_seconds=5.0,
         )
-        _send_self_signal_soon(signal.SIGINT, delay=2.0)
-
-        status = supervisor.run()
+        with _self_signal_soon(signal.SIGINT, delay=2.0):
+            status = supervisor.run()
 
         assert status == 128 + int(signal.SIGINT)
         assert "got SIGINT; shutting down" in out.getvalue()
@@ -276,29 +315,42 @@ class TestDatabaseUrlResolution:
     def test_the_default_is_the_compose_service(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.delenv("UV_ENV_FILE", raising=False)
-        assert resolve_database_url() == DEFAULT_DATABASE_URL
+        assert resolve_database_url() == (DEFAULT_DATABASE_URL, "default")
         assert "motet_dev" in DEFAULT_DATABASE_URL
 
     def test_an_exported_variable_wins_over_the_env_file(self, tmp_path: Path) -> None:
         env_file = tmp_path / ".env"
         env_file.write_text("DATABASE_URL=postgresql://from/file\n")
         environ = {"DATABASE_URL": "postgresql://from/shell", "UV_ENV_FILE": str(env_file)}
-        assert resolve_database_url(environ) == "postgresql://from/shell"
+        assert resolve_database_url(environ) == ("postgresql://from/shell", "environment")
 
     def test_the_env_file_wins_over_the_default(self, tmp_path: Path) -> None:
         env_file = tmp_path / ".env"
         env_file.write_text("# a comment\nDATABASE_URL='postgresql://from/file'\n")
-        assert resolve_database_url({"UV_ENV_FILE": str(env_file)}) == "postgresql://from/file"
+        assert resolve_database_url({"UV_ENV_FILE": str(env_file)}) == (
+            "postgresql://from/file",
+            "env file",
+        )
 
     def test_an_env_file_uv_will_not_read_is_not_read_here_either(self, tmp_path: Path) -> None:
         env_file = tmp_path / ".env"
         env_file.write_text("DATABASE_URL=postgresql://from/file\n")
         environ = {"UV_ENV_FILE": str(env_file), "UV_NO_ENV_FILE": "1"}
-        assert env_file_path(environ) is None
-        assert resolve_database_url(environ) == DEFAULT_DATABASE_URL
+        assert env_file_paths(environ) == []
+        assert resolve_database_url(environ) == (DEFAULT_DATABASE_URL, "default")
 
     def test_no_env_file_is_named_means_none_is_read(self) -> None:
-        assert env_file_path({}) is None
+        assert env_file_paths({}) == []
+
+    def test_uv_env_file_may_name_several_files(self, tmp_path: Path) -> None:
+        """`uv` takes a whitespace-separated list; one `Path()` over it reads nothing."""
+        first = tmp_path / "a.env"
+        first.write_text("OTHER=1\n")
+        second = tmp_path / "b.env"
+        second.write_text("DATABASE_URL=postgresql://from/second\n")
+        environ = {"UV_ENV_FILE": f"{first} {second}"}
+        assert env_file_paths(environ) == [first, second]
+        assert resolve_database_url(environ) == ("postgresql://from/second", "env file")
 
     def test_a_missing_file_is_not_an_error(self, tmp_path: Path) -> None:
         assert read_env_file(tmp_path / "absent") == {}
@@ -316,6 +368,157 @@ class TestWebDependencies:
         (tmp_path / "web" / "node_modules").mkdir(parents=True)
         # No npm is invoked, so this passes on a machine without one.
         assert ensure_web_dependencies(tmp_path) is False
+
+    def test_a_failed_install_is_a_sentence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(tools.dev, "_run", lambda *a, **k: 1)
+        with pytest.raises(DevError, match="npm ci"):
+            ensure_web_dependencies(tmp_path)
+
+
+class TestTheOneShotStepsFailLoudly:
+    """`main` catches DevError and nothing else, so every step has to raise one."""
+
+    def test_a_missing_program_is_a_sentence_rather_than_a_traceback(self, tmp_path: Path) -> None:
+        with pytest.raises(DevError, match="could not run"):
+            _run(["motet-does-not-exist"], cwd=tmp_path)
+
+    def test_a_missing_docker_says_what_to_do_instead(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        with pytest.raises(DevError, match="--no-db"):
+            compose_up(tmp_path)
+
+    def test_a_failed_compose_up_points_at_the_old_container(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(tools.dev, "_run", lambda *a, **k: 1)
+        with pytest.raises(DevError, match="motet-pg"):
+            compose_up(tmp_path)
+
+    def test_failed_migrations_name_the_database_without_its_password(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(tools.dev, "_run", lambda *a, **k: 1)
+        with pytest.raises(DevError) as caught:
+            migrate(tmp_path, "postgresql://postgres:hunter2@localhost:5432/motet_dev")
+        assert "hunter2" not in str(caught.value)
+        assert "motet_dev" in str(caught.value)
+
+    def test_migrations_are_handed_the_url_through_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An argument would put the password in every `ps` on the machine."""
+        seen: dict[str, object] = {}
+
+        def _fake(argv: object, *, cwd: object, env: object = None) -> int:
+            seen["argv"] = argv
+            seen["env"] = env
+            return 0
+
+        monkeypatch.setattr(tools.dev, "_run", _fake)
+        migrate(tmp_path, "postgresql://postgres:hunter2@localhost:5432/motet_dev")
+        argv = seen["argv"]
+        assert isinstance(argv, list)
+        assert not any("hunter2" in part for part in argv)
+        env = seen["env"]
+        assert isinstance(env, dict)
+        assert env["DATABASE_URL"].endswith("/motet_dev")
+
+
+class TestMain:
+    """The orchestration, driven with every side effect turned off."""
+
+    def test_without_everything_does_the_steps_and_returns_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("UV_ENV_FILE", raising=False)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:hunter2@localhost/mine")
+
+        status = main(
+            [
+                "--no-db",
+                "--no-migrate",
+                "--without",
+                "api",
+                "--without",
+                "worker",
+                "--without",
+                "web",
+            ]
+        )
+
+        printed = capsys.readouterr().out
+        assert status == 0
+        assert "nothing left to start" in printed
+        assert "hunter2" not in printed
+        assert "(environment)" in printed
+
+    def test_an_unread_env_file_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """ "my .env is ignored" and "I forgot the export" are the same five minutes."""
+        monkeypatch.delenv("UV_ENV_FILE", raising=False)
+        monkeypatch.setattr(Path, "exists", lambda self: True)
+
+        main(
+            [
+                "--no-db",
+                "--no-migrate",
+                "--without",
+                "api",
+                "--without",
+                "worker",
+                "--without",
+                "web",
+            ]
+        )
+
+        assert "NOT being read" in capsys.readouterr().out
+
+    def test_a_named_env_file_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://from/file\n")
+        monkeypatch.setenv("UV_ENV_FILE", str(env_file))
+        # `bin/ci` exports this to keep a real .env out of the suite (invariant 7), and it
+        # is the very flag `env_file_paths` honours — so without clearing it this test
+        # passes on a laptop and fails in CI.
+        monkeypatch.delenv("UV_NO_ENV_FILE", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+        main(
+            [
+                "--no-db",
+                "--no-migrate",
+                "--without",
+                "api",
+                "--without",
+                "worker",
+                "--without",
+                "web",
+            ]
+        )
+
+        printed = capsys.readouterr().out
+        assert str(env_file) in printed
+        assert "(env file)" in printed
+
+    def test_a_dev_error_is_one_line_and_a_nonzero_status(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(tools.dev, "compose_up", _raise_dev_error)
+
+        status = main(
+            ["--no-migrate", "--without", "api", "--without", "worker", "--without", "web"]
+        )
+
+        assert status == 1
+        assert "error: nope" in capsys.readouterr().out
 
 
 class TestTheLineAHumanReads:
@@ -335,6 +538,10 @@ class TestTheLineAHumanReads:
         assert _redacted("postgresql://me@localhost/motet_dev") == (
             "postgresql://me@localhost/motet_dev"
         )
+
+
+def _raise_dev_error(*_args: object, **_kwargs: object) -> None:
+    raise DevError("nope")
 
 
 def _wait_for(out: io.StringIO, name: str, marker: str, timeout: float = 15.0) -> str:
@@ -360,19 +567,34 @@ def _read_marker_pid(out: io.StringIO, name: str = "tree") -> int:
     return int(_wait_for(out, name, "PID ").rsplit(" ", 1)[1])
 
 
-def _send_self_signal_soon(signum: int, delay: float = 1.0) -> None:
+@contextlib.contextmanager
+def _self_signal_soon(signum: int, delay: float = 1.0) -> Iterator[None]:
     """Deliver a signal to this process from a thread, the way a terminal would.
 
     `Supervisor.run` blocks, so the signal has to come from somewhere else; `os.kill` on
     our own pid runs the handler `run` installed, which is the code under test.
+
+    **Cancelled on the way out, and that is not tidiness.** `run` restores the default
+    SIGINT disposition in its own `finally`, so a signal still pending after the test
+    returns early — because an assertion failed, say — lands on pytest as a
+    `KeyboardInterrupt` and aborts the whole suite with a cause that names the wrong
+    thing.
     """
     import threading
 
-    def _fire() -> None:
-        time.sleep(delay)
-        os.kill(os.getpid(), signum)
+    cancelled = threading.Event()
 
-    threading.Thread(target=_fire, daemon=True).start()
+    def _fire() -> None:
+        if not cancelled.wait(delay):
+            os.kill(os.getpid(), signum)
+
+    thread = threading.Thread(target=_fire, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        cancelled.set()
+        thread.join(timeout=5.0)
 
 
 @pytest.fixture(autouse=True)

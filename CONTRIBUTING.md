@@ -58,6 +58,10 @@ motet-pg` first — compose cannot have the port while it is held.
 `.env.example` is the documented shape of the environment; nothing above needs it, because
 every default already points at the compose Postgres.
 
+**Running your own Postgres 16 instead is still supported** — compose is a convenience, not
+a dependency, and `bin/ci` still needs only a Postgres. Create both databases on it, point
+`DATABASE_URL` at `motet_dev`, and pass `bin/dev --no-db` so nothing touches compose.
+
 > Without a `DATABASE_URL`, the migration-apply tests **skip** rather than fail, so a quick
 > `uv run pytest` works with no database. CI always has one, so that path is always covered
 > there — but a green local run with Postgres missing has not exercised it.

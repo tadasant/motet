@@ -40,6 +40,7 @@ Run it through ``bin/dev``; see CONTRIBUTING.md for the loop it belongs to.
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import shlex
 import shutil
@@ -106,6 +107,9 @@ class Service:
     #: Ports this service needs free before it starts. Checked up front so that a busy
     #: port is one clear line rather than three processes and one confusing traceback.
     ports: tuple[int, ...] = ()
+    #: Where the child runs. Pinned rather than inherited, so that `uvicorn --reload`
+    #: watches the repo whichever directory `python -m tools.dev` was invoked from.
+    cwd: Path | None = None
 
 
 def _paint(name: str, text: str, colour: bool) -> str:
@@ -134,6 +138,13 @@ class Supervisor:
         self._colour = self._out.isatty() if colour is None else colour
         self._grace = grace_seconds
         self._procs: dict[str, subprocess.Popen[str]] = {}
+        #: The process group each child leads, recorded when it is spawned rather than
+        #: derived at teardown. `os.getpgid(pid)` raises once the child has been *reaped*,
+        #: so a wrapper that exits before the process it spawned would leave the group
+        #: unsignalled — which is exactly the orphan this whole mechanism is about.
+        #: With ``start_new_session=True`` the group id is the child's own pid, and the
+        #: kernel keeps that pid number reserved while the group still has members.
+        self._groups: dict[str, int] = {}
         self._readers: list[threading.Thread] = []
         self._lock = threading.Lock()
         self._stopping = threading.Event()
@@ -166,6 +177,7 @@ class Supervisor:
                     text=True,
                     bufsize=1,
                     env=env,
+                    cwd=service.cwd,
                     # The whole teardown story. See the module docstring.
                     start_new_session=True,
                 )
@@ -173,6 +185,7 @@ class Supervisor:
                 self.shutdown()
                 raise DevError(f"could not start {service.name}: {exc}") from exc
             self._procs[service.name] = proc
+            self._groups[service.name] = proc.pid
             stream = proc.stdout
             if stream is None:  # pragma: no cover — stdout=PIPE guarantees one
                 raise DevError(f"{service.name} was started without a readable stdout")
@@ -198,11 +211,12 @@ class Supervisor:
         if self._stopping.is_set():
             return
         self._stopping.set()
-        for name, proc in self._procs.items():
-            if proc.poll() is not None:
-                continue
+        for name in self._procs:
+            # Signalled whether or not the child we hold is still alive: a wrapper can
+            # exit while the process it spawned is still running and still holding a
+            # port, and that survivor is in this group.
             self.say("dev", f"stopping {name}")
-            _signal_group(proc.pid, sig)
+            _signal_group(self._groups[name], sig)
         deadline = time.monotonic() + self._grace
         for proc in self._procs.values():
             remaining = max(0.0, deadline - time.monotonic())
@@ -216,7 +230,7 @@ class Supervisor:
             # Unconditional, and that is deliberate: a wrapper can exit while the process
             # it spawned holds the port, so the group is killed even when the child we
             # hold is already reaped. There is nothing left to kill in the common case.
-            _signal_group(proc.pid, signal.SIGKILL)
+            _signal_group(self._groups[name], signal.SIGKILL)
             # Reaped here rather than left to the interpreter: a killed child that nobody
             # waits on is a zombie, and this process may go on to start another stack.
             try:
@@ -257,9 +271,17 @@ class Supervisor:
                 signal.signal(sig, handler)
 
 
-def _signal_group(pid: int, sig: int) -> None:
+def _signal_group(pgid: int, sig: int) -> None:
+    """Signal a process group by the id recorded when its leader was spawned.
+
+    Deliberately **not** ``os.killpg(os.getpgid(pid), sig)``: ``getpgid`` needs a live
+    pid-table entry, and the leader is reaped as soon as it exits — so deriving the group
+    at teardown means the one case that matters, a wrapper that dies before the process
+    it spawned, silently signals nothing. An empty group is a ``ProcessLookupError`` and
+    is the ordinary outcome.
+    """
     try:
-        os.killpg(os.getpgid(pid), sig)
+        os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
@@ -293,36 +315,44 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def env_file_path(environ: Mapping[str, str] | None = None) -> Path | None:
-    """The ``.env`` ``uv run`` will read, or ``None`` if it will read none.
+def env_file_paths(environ: Mapping[str, str] | None = None) -> list[Path]:
+    """The ``.env`` files ``uv run`` will read, in order, or empty if it will read none.
 
     ``UV_ENV_FILE`` is the only thing that turns one on, and this script does not set it —
-    see the module docstring for why that is a decision rather than an omission.
+    see the module docstring for why that is a decision rather than an omission. It takes
+    a **whitespace-separated list**, so a single ``Path(named)`` would turn two files into
+    one path that does not exist, and read nothing while reporting nothing.
     """
     env = os.environ if environ is None else environ
     named = env.get("UV_ENV_FILE")
     if not named or env.get("UV_NO_ENV_FILE"):
-        return None
-    return Path(named)
+        return []
+    return [Path(part) for part in named.split()]
 
 
-def resolve_database_url(environ: Mapping[str, str] | None = None) -> str:
-    """What the children will actually connect to, resolved the way ``uv run`` resolves it.
+def resolve_database_url(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """What the children will connect to, and *where that came from*.
 
-    An exported variable wins over the env file — that is uv's precedence, not a choice
-    made here — and the default below is the compose service, which is the same string
-    ``.env.example`` carries.
+    Resolved the way ``uv run`` resolves it: an exported variable wins over the env file —
+    that is uv's precedence, not a choice made here — and the fallback is the compose
+    service, which is the same string ``.env.example`` carries.
+
+    The source is returned because it decides whether this value is *injected* into the
+    children. Only ``"default"`` is: in the other two cases the children resolve the same
+    value themselves, and overriding uv's own answer with our re-reading of it would turn
+    every gap between the two — ``${VAR}`` interpolation, which uv does and
+    :func:`read_env_file` does not — into a laptop quietly pointed at a different
+    database.
     """
     env = os.environ if environ is None else environ
     exported = env.get("DATABASE_URL")
     if exported:
-        return exported
-    path = env_file_path(env)
-    if path is not None:
+        return exported, "environment"
+    for path in env_file_paths(env):
         from_file = read_env_file(path).get("DATABASE_URL")
         if from_file:
-            return from_file
-    return DEFAULT_DATABASE_URL
+            return from_file, "env file"
+    return DEFAULT_DATABASE_URL, "default"
 
 
 # -- the steps --------------------------------------------------------------------
@@ -340,12 +370,11 @@ def compose_up(root: Path) -> None:
             "docker is not on PATH. Start a Postgres yourself and pass --no-db, or see "
             "CONTRIBUTING.md."
         )
-    result = subprocess.run(
+    result = _run(
         ["docker", "compose", "up", "-d", "--wait", DATABASE_SERVICE],
         cwd=root,
-        check=False,
     )
-    if result.returncode != 0:
+    if result != 0:
         raise DevError(
             "`docker compose up -d --wait` failed. If a Postgres from the old manual "
             "instructions is still bound to 5432, `docker rm -f motet-pg` and try again."
@@ -363,8 +392,7 @@ def ensure_web_dependencies(root: Path) -> bool:
     """
     if (root / "web" / "node_modules").exists():
         return False
-    result = subprocess.run(["npm", "--prefix", str(root / "web"), "ci"], cwd=root, check=False)
-    if result.returncode != 0:
+    if _run(["npm", "--prefix", str(root / "web"), "ci"], cwd=root) != 0:
         raise DevError("`npm ci` failed; the SPA cannot start without its dependencies")
     return True
 
@@ -380,14 +408,24 @@ def migrate(root: Path, database_url: str) -> None:
     Through the environment rather than ``--database-url``, because an argument is in
     every ``ps`` on the machine and a connection string carries a password.
     """
-    result = subprocess.run(
-        ["uv", "run", "python", "-m", "motet_db.migrate"],
-        cwd=root,
-        check=False,
-        env={**os.environ, "DATABASE_URL": database_url},
-    )
-    if result.returncode != 0:
+    env = {**os.environ, "DATABASE_URL": database_url}
+    if _run(["uv", "run", "python", "-m", "motet_db.migrate"], cwd=root, env=env) != 0:
         raise DevError(f"migrations failed against {_redacted(database_url)}")
+
+
+def _run(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str] | None = None) -> int:
+    """Run a one-shot step, and turn "that program is not installed" into a sentence.
+
+    :class:`DevError`'s docstring promises a sentence rather than a traceback, and
+    ``main`` catches nothing else — so an absent ``docker``, ``npm`` or ``uv`` has to be
+    converted here rather than escaping as ``FileNotFoundError``.
+    """
+    try:
+        return subprocess.run(
+            list(argv), cwd=cwd, check=False, env=None if env is None else dict(env)
+        ).returncode
+    except OSError as exc:
+        raise DevError(f"could not run `{shlex.join(argv)}`: {exc}") from exc
 
 
 def _redacted(url: str) -> str:
@@ -395,18 +433,33 @@ def _redacted(url: str) -> str:
     scheme, sep, rest = url.partition("://")
     if not sep or "@" not in rest:
         return url
-    creds, _, host = rest.partition("@")
+    # rpartition, not partition: the separator is the LAST '@', and a password may
+    # contain one. Splitting at the first would print most of it.
+    creds, _, host = rest.rpartition("@")
     user, has_password, _ = creds.partition(":")
     return f"{scheme}://{user}{':***' if has_password else ''}@{host}"
 
 
-def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def port_is_free(port: int) -> bool:
+    """Whether a port is free on **both** loopback families.
+
+    Vite is told to bind ``localhost``, which on a dual-stack machine may resolve to
+    ``::1`` first — so an IPv4-only probe passes and Vite then dies on ``EADDRINUSE``,
+    which is the confusing failure this check exists to replace.
+    """
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
         try:
-            probe.bind((host, port))
-        except OSError:
-            return False
+            probe = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:  # pragma: no cover — a host without IPv6 at all
+            continue
+        with probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, port))
+            except OSError as exc:
+                if exc.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                    continue  # pragma: no cover — this family is not configured
+                return False
     return True
 
 
@@ -432,6 +485,7 @@ def build_services(
     web_port: int,
     poll_seconds: int,
     database_url: str = DEFAULT_DATABASE_URL,
+    inject_database_url: bool = True,
     without: Sequence[str] = (),
 ) -> list[Service]:
     """The three processes, and the one place the API's port is written down.
@@ -440,13 +494,15 @@ def build_services(
     the whole point is that one number reaches both the server that listens on it and the
     proxy that forwards to it.
 
-    ``DATABASE_URL`` is handed to the two Python processes for the same reason, and
-    handing them the *resolved* value changes nothing when it was already resolved from
-    their own environment or from the ``.env`` ``uv run`` reads — :func:`resolve_database_url`
-    reads those in uv's own order. What it adds is the case where neither exists, which is
-    a fresh clone.
+    ``DATABASE_URL`` is handed to the two Python processes **only when nothing else would
+    give them one** — ``inject_database_url``, which ``main`` sets from
+    :func:`resolve_database_url`'s source. The case it covers is a fresh clone with no
+    ``.env`` and nothing exported, where there is no ``DATABASE_URL`` anywhere and the
+    migrate CLI answers with a usage message. In the other two cases the children resolve
+    it themselves, through the same ``uv run`` that read it, and an injected copy would
+    *override* uv's own answer with our re-reading of it.
     """
-    database_env = {"DATABASE_URL": database_url}
+    database_env = {"DATABASE_URL": database_url} if inject_database_url else {}
     services = [
         Service(
             name="api",
@@ -461,6 +517,7 @@ def build_services(
             ),
             env=database_env,
             ports=(api_port,),
+            cwd=root,
         ),
         Service(
             name="worker",
@@ -475,6 +532,7 @@ def build_services(
                 str(poll_seconds),
             ),
             env=database_env,
+            cwd=root,
         ),
         Service(
             name="web",
@@ -491,6 +549,7 @@ def build_services(
             ),
             env={API_PORT_ENV: str(api_port)},
             ports=(web_port,),
+            cwd=root,
         ),
     ]
     return [service for service in services if service.name not in without]
@@ -505,7 +564,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--api-port",
         type=int,
         default=int(os.environ.get(API_PORT_ENV, DEFAULT_API_PORT)),
-        help=f"port for the API, and what the Vite proxy targets (default {DEFAULT_API_PORT})",
+        help=(
+            f"port for the API, and what the Vite proxy targets (default {DEFAULT_API_PORT}). "
+            "It does NOT move MOTET_PUBLIC_BASE_URL, which bin/local-env writes as a "
+            "literal, so real-mode feed and audio URLs still name 8000."
+        ),
     )
     parser.add_argument(
         "--web-port",
@@ -554,32 +617,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         out.flush()
 
     try:
-        env_file = env_file_path()
-        if env_file is not None:
-            say(f"reading {env_file} (UV_ENV_FILE) — this run uses whatever mode it sets")
+        env_files = env_file_paths()
+        if env_files:
+            named = ", ".join(str(path) for path in env_files)
+            say(f"reading {named} (UV_ENV_FILE) — this run uses whatever mode it sets")
         elif (root / ".env").exists():
             say(
                 ".env is present but NOT being read: `uv run` needs UV_ENV_FILE. "
                 "`export UV_ENV_FILE=.env` for real mode (it spends money — CONTRIBUTING.md)."
             )
 
-        database_url = resolve_database_url()
+        database_url, source = resolve_database_url()
         services = build_services(
             root=root,
             api_port=args.api_port,
             web_port=args.web_port,
             poll_seconds=args.poll_seconds,
             database_url=database_url,
+            inject_database_url=source == "default",
             without=args.without,
         )
         check_ports(services)
 
         if args.no_db:
-            say(f"--no-db: using {_redacted(database_url)} as it is")
+            say(f"--no-db: using {_redacted(database_url)} ({source}) as it is")
         else:
             say("bringing up Postgres (docker compose up -d --wait)")
             compose_up(root)
-            say(f"Postgres is healthy: {_redacted(database_url)}")
+            say(f"Postgres is healthy: {_redacted(database_url)} ({source})")
 
         if any(service.name == "web" for service in services):
             say("checking the SPA's dependencies")

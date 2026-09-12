@@ -25,9 +25,9 @@
 #   docker compose down -v          # stop and wipe, re-running db/local/ on next up
 #
 # Ports and credentials match `.env.example` and `bin/local-env`'s override block, so the
-# default DATABASE_URL needs no editing. They are dev-only values on a loopback port;
-# nothing here is a secret and nothing here is deployed. The deployed database is Cloud
-# SQL, defined in the private infrastructure repo.
+# default DATABASE_URL needs no editing. They are dev-only values, published on loopback
+# only (see `ports:` below); nothing here is a secret and nothing here is deployed. The
+# deployed database is Cloud SQL, defined in the private infrastructure repo.
 name: motet
 
 services:
@@ -46,7 +46,10 @@ services:
       PGUSER: postgres
       PGPASSWORD: postgres
     ports:
-      - "5432:5432"
+      # Bound to loopback, not to every interface. `5432:5432` publishes on 0.0.0.0 and
+      # [::], which on a café network is `postgres:postgres` offered to the room. Nothing
+      # in this repo needs it reachable off-host: DATABASE_URL says `localhost`.
+      - "127.0.0.1:5432:5432"
     volumes:
       - motet-pgdata:/var/lib/postgresql/data
       # Read-only, and applied by the image only when the volume above is empty.

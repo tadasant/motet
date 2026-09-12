@@ -20,7 +20,9 @@ import { defineConfig } from 'vitest/config'
 // smaller change than a Node type surface the SPA's own sources would then see.
 declare const process: { env: Record<string, string | undefined> }
 
-const DEV_API = `http://127.0.0.1:${process.env.MOTET_DEV_API_PORT ?? '8000'}`
+// `||`, not `??`: an exported-but-empty MOTET_DEV_API_PORT is not a port, and `??`
+// would build a target with nothing after the colon.
+const DEV_API = `http://127.0.0.1:${process.env.MOTET_DEV_API_PORT || '8000'}`
 
 export default defineConfig({
   plugins: [react()],
