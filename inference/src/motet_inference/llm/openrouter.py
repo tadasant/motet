@@ -278,14 +278,13 @@ class OpenRouterClient:
         #
         # `LlmBudgetExhaustedError` rather than a bare transport error because this one is
         # deterministic -- retrying the identical request spends the identical budget --
-        # so a caller that can send less work should do that instead of retrying. That is
-        # what the grounding validator does (motet#42).
+        # so a caller that can send less work should do that instead of retrying (motet#42).
         #
         # **Both branches are gated on finish_reason, and that gate is load-bearing.** An
         # empty answer for any *other* reason -- a content filter, a provider hiccup -- is
         # not deterministic and is worth exactly the retry it always got. Calling it a
-        # budget failure would tell the grounding validator to send less work, which it
-        # would do all the way down to dropping every claim in the chunk.
+        # budget failure would tell a caller that subdivides its work to send less and
+        # less of it, all the way down to sending none.
         if not isinstance(content, str) or not content.strip():
             if finish_reason == "length":
                 raise LlmBudgetExhaustedError(

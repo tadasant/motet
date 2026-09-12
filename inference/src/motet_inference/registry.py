@@ -10,12 +10,10 @@ from __future__ import annotations
 
 from .adapters import (
     CartesiaSpeechSynthesizer,
-    ClaudeGroundingValidator,
     ClaudeIntegrator,
     ClaudeScriptGenerator,
 )
 from .fakes import (
-    FakeGroundingValidator,
     FakeIntegrator,
     FakeScriptGenerator,
     FakeSpeechSynthesizer,
@@ -30,17 +28,16 @@ def fake_stages() -> Stages:
     return Stages(
         integrator=FakeIntegrator(),
         script_generator=FakeScriptGenerator(),
-        grounding_validator=FakeGroundingValidator(),
         speech_synthesizer=FakeSpeechSynthesizer(),
     )
 
 
 def real_stages() -> Stages:
-    """Build the vendor-backed stages, sharing **one** LLM client between the three.
+    """Build the vendor-backed stages, sharing **one** LLM client between the two text ones.
 
-    One client, not three: each holds its own connection pool, and OpenRouter's sticky
+    One client, not two: each holds its own connection pool, and OpenRouter's sticky
     upstream routing — which is what keeps the dedup prompt cache warm — is per client.
-    Three clients would triple the pools and split the routing three ways for no gain.
+    Two clients would double the pools and split the routing two ways for no gain.
     """
     from .llm import build_client  # noqa: PLC0415  — keeps fake mode off the HTTP path
 
@@ -48,11 +45,10 @@ def real_stages() -> Stages:
     return Stages(
         integrator=ClaudeIntegrator(client),
         script_generator=ClaudeScriptGenerator(client),
-        grounding_validator=ClaudeGroundingValidator(client),
         speech_synthesizer=CartesiaSpeechSynthesizer(),
     )
 
 
 def get_stages(mode: Mode | None = None) -> Stages:
-    """Resolve all four stages together. Defaults to the environment, then to ``fake``."""
+    """Resolve all three stages together. Defaults to the environment, then to ``fake``."""
     return real_stages() if (mode or current_mode()) == "real" else fake_stages()

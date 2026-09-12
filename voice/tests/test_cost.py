@@ -23,7 +23,7 @@ import logging
 from typing import Any
 
 import pytest
-from motet_inference.accounting import collect_usage, record_usage
+from motet_inference.accounting import collect_usage
 from motet_inference.fakes import FakeSpeechSynthesizer
 from motet_inference.llm import (
     FakeLlmClient,
@@ -36,7 +36,6 @@ from motet_inference.llm import (
     load_config,
 )
 from motet_voice.contract import StartSessionRequest
-from motet_voice.grounding import GroundingVerdict
 from motet_voice.realtime.composed import ComposedArm, LlmConversationModel
 from motet_voice.session import VoiceSession
 from motet_voice.tools import ToolRegistry
@@ -82,7 +81,6 @@ class _FailingSynthesisArm(ComposedArm):
 async def _turns(voice_session: VoiceSession, *texts: str) -> None:
     for text in texts:
         await voice_session.respond_to_text(text)
-    await voice_session.drain_grounding_checks()
 
 
 class TestTheFleetWideHalf:
@@ -229,48 +227,6 @@ class TestThePerSessionHalf:
         assert voice_session.spend.requests == 1
         assert voice_session.spend.entries[0].stage is LlmStage.VOICE
 
-    def test_a_check_that_spends_lands_on_the_metric_and_not_in_the_turns_total(
-        self, metrics: Any
-    ) -> None:
-        """The advisory check is not part of what the turn cost.
-
-        A model-backed entailment check is the named upgrade to
-        :class:`~motet_voice.grounding.ConversationGroundingChecker`, and it would spend.
-        Its completion must reach ``motet.llm.tokens`` — every completion does — and must
-        not be added to the turn a listener was waiting on, whose price is the thing being
-        measured.
-
-        **What this actually falsifies**, so nobody over-reads it: awaiting the check
-        inside the turn instead of scheduling it behind the reply makes this fail with
-        ``4 != 2``. Merely widening the ``collect_usage`` block does not, because
-        ``_record_turn_spend`` copies the entries out before the scheduled task can run —
-        which is a fact about the fold-in, not about the block, and the comment there says
-        so. The inline-await *is* the refactor worth catching: it is the ordering that
-        makes grounding advisory here (motet#10).
-
-        Driven with a checker that records, because the shipped one is local and
-        deterministic and spends nothing — against that, every assertion below holds
-        trivially and the test would be a test of nothing.
-        """
-        before = _voice_requests(metrics)
-        voice_session = VoiceSession.create(
-            session_id="vs_scope",
-            config=CONFIG,
-            arm=ComposedArm(
-                model=llm_model(), synthesizer=FakeSpeechSynthesizer(), conversational=True
-            ),
-            tools=ToolRegistry({}),
-            grounding=_RecordingChecker(),
-        )
-
-        asyncio.run(_turns(voice_session, "who led the round", "how much was it"))
-
-        assert len(voice_session.verdicts) == 2
-        # Two turns billed one completion each; the two checks behind them billed one more
-        # each, and only the turns' are the session's.
-        assert voice_session.spend.requests == 2
-        assert _voice_requests(metrics) - before == 4
-
 
 def _turn_request() -> Any:
     from motet_voice.realtime import TurnRequest
@@ -291,30 +247,6 @@ def _voice_requests(metrics: Any) -> int:
         for point in metrics.points("motet.llm.requests")
         if point.attributes and point.attributes.get("stage") == LlmStage.VOICE.value
     )
-
-
-class _RecordingChecker:
-    """A stand-in for the model-backed checker AGENTS.md says drops in behind this seam.
-
-    It records a completion of its own, which is the only way the scope of the turn's
-    ``collect_usage`` block is observable at all: the shipped checker is ours, local and
-    deterministic, and spends nothing.
-    """
-
-    @property
-    def name(self) -> str:
-        return "recording"
-
-    def check(self, reply: str, material: str) -> GroundingVerdict:
-        record_usage(
-            LlmStage.VOICE,
-            LlmResponse(
-                text="supported",
-                model="fake/checker",
-                usage=Usage(input_tokens=10, output_tokens=1),
-            ),
-        )
-        return GroundingVerdict(checker=self.name, checked=1)
 
 
 class _ExhaustedClient:

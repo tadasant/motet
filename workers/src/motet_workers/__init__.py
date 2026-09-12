@@ -1,6 +1,6 @@
 """Ingestion and pipeline workers (Cloud Run jobs).
 
-`Integrate → Assemble → Script + grounding → TTS → object storage`. Each stage is its own
+`Integrate → Assemble → Script → TTS → object storage`. Each stage is its own
 queue on the one Postgres ``jobs`` table, drained by its own Cloud Run job, because the
 stages have different rate limits and failure modes.
 

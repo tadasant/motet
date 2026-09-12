@@ -6,10 +6,8 @@ directly — that is what keeps invariant 7 true.
 
 from .accounting import (
     Ledger,
-    classify_grounding_reason,
     collect_usage,
     describe_usage,
-    record_grounding,
     record_tts_characters,
 )
 from .audio import (
@@ -21,7 +19,6 @@ from .audio import (
 )
 from .fakes import first_sentence
 from .interfaces import (
-    GroundingValidator,
     IntegrationResult,
     Integrator,
     ScriptGenerator,
@@ -33,8 +30,6 @@ from .registry import MODE_ENV_VAR, current_mode, fake_stages, get_stages, real_
 from .types import (
     Audio,
     Claim,
-    GroundingFailure,
-    GroundingReport,
     NewsItem,
     Script,
     ScriptSegment,
@@ -47,9 +42,6 @@ __all__ = [
     "AudioError",
     "Briefing",
     "Claim",
-    "GroundingFailure",
-    "GroundingReport",
-    "GroundingValidator",
     "IntegrationResult",
     "Integrator",
     "Ledger",
@@ -64,10 +56,8 @@ __all__ = [
     "SpeechSynthesizer",
     "Stages",
     "WAV_MEDIA_TYPE",
-    "classify_grounding_reason",
     "collect_usage",
     "describe_usage",
-    "record_grounding",
     "record_tts_characters",
     "build_briefing",
     "current_mode",

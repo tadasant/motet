@@ -1,9 +1,8 @@
 """Compose the stages into the narration path, up to (but not including) TTS.
 
-`Dedup/Integrate → Assemble → Script + grounding`. Synthesis is deliberately *not* here:
-invariant 3 says validation gates TTS, so the caller checks ``report.ok`` and only then
-reaches for the synthesizer. Making that a separate step keeps the gate impossible to
-skip by accident.
+`Dedup/Integrate → Assemble → Script`. Synthesis is deliberately *not* here: it is the
+expensive, vendor-billed half, and keeping it out means the golden set can exercise the
+whole text path without a synthesizer in the loop.
 
 This is the composition the golden set exercises. It is intentionally thin — retries,
 persistence, and queueing belong to the workers, not to the library.
@@ -15,24 +14,19 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .interfaces import Stages
-from .types import GroundingReport, NewsItem, Script, SourceItem
+from .types import NewsItem, Script, SourceItem
 
 
 @dataclass(frozen=True)
 class Briefing:
-    """A scripted briefing plus the verdict on whether it may be spoken."""
+    """A scripted briefing, with the window of news items it was written from."""
 
     news_items: tuple[NewsItem, ...]
     script: Script
-    grounding: GroundingReport
-
-    @property
-    def speakable(self) -> bool:
-        return self.grounding.ok
 
 
 def build_briefing(source_items: Iterable[SourceItem], stages: Stages) -> Briefing:
-    """Run source items through dedup, scripting, and grounding validation.
+    """Run source items through dedup and scripting.
 
     Source items are integrated one at a time against the growing window, which is what
     makes the result depend on ingestion order — and why invariant 6 serializes ingestion
@@ -50,8 +44,7 @@ def build_briefing(source_items: Iterable[SourceItem], stages: Stages) -> Briefi
             window.append(result.news_item)
 
     script = stages.script_generator.generate(window, sources)
-    grounding = stages.grounding_validator.validate(script, sources)
-    return Briefing(news_items=tuple(window), script=script, grounding=grounding)
+    return Briefing(news_items=tuple(window), script=script)
 
 
 def _index_of(window: list[NewsItem], news_item_id: str, source_item_id: str) -> int:

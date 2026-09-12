@@ -41,11 +41,10 @@ nothing to add to.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Final
 
 from opentelemetry import metrics
 
@@ -54,12 +53,10 @@ from .llm import LlmBudgetExhaustedError, LlmResponse, LlmStage, Usage
 __all__ = [
     "Ledger",
     "StageUsage",
-    "classify_grounding_reason",
     "collect_usage",
     "describe_usage",
     "record_budget_exhausted",
     "record_dedup_decision",
-    "record_grounding",
     "record_script_drop",
     "record_tts_characters",
     "record_usage",
@@ -92,8 +89,8 @@ _budget_exhausted = _meter.create_counter(
     unit="{request}",
     description=(
         "Completions that hit max_output_tokens before finishing an answer, by stage and "
-        "model. On grounding this is also the chunk-amplification signal: each one is a "
-        "chunk that will be split and re-sent, so it rises before any claim is dropped."
+        "model. Billed and useless is still billed, and a rate that stops being ~0 says a "
+        "stage's ceiling no longer fits the work it is being asked to do."
     ),
 )
 _dedup_decisions = _meter.create_counter(
@@ -118,36 +115,17 @@ _characters = _meter.create_counter(
 
 # --- what got thrown away (motet#24) ------------------------------------------------
 #
-# A claim can be lost at two different points, and until now the two were indistinguishable
-# after the fact: the script adapter drops what it cannot locate in a source, and the
-# grounding gate drops what the evidence does not support. They mean opposite things — the
-# first is a script-prompt problem, the second is invariant 3 doing its job — so they are
-# separate instruments rather than one counter with a label somebody might forget to split
-# on.
+# A claim the script stage wrote can still fail to reach an episode: the adapter discards
+# what it cannot locate verbatim in a source. That is a *script-prompt* problem, and the
+# counter is what makes it visible — a claim silently dropped while parsing an answer
+# leaves no row anywhere, and the model writes a different script on every run.
 
 _script_drops = _meter.create_counter(
     "motet.script.claims_dropped",
     unit="{claim}",
     description=(
         "Claims and segments discarded while parsing the script model's answer, by reason. "
-        "This is the layer BEFORE grounding: a claim counted here never reached the gate."
-    ),
-)
-_grounding_claims = _meter.create_counter(
-    "motet.grounding.claims",
-    unit="{claim}",
-    description=(
-        "Claims that reached grounding validation, by whether they survived it. The "
-        "denominator for the drop rate — a count of drops alone cannot produce one."
-    ),
-)
-_grounding_drops = _meter.create_counter(
-    "motet.grounding.claims_dropped",
-    unit="{claim}",
-    description=(
-        "Claims the grounding gate refused, bucketed by KIND of failure. The free-text "
-        "reason a model gives is unbounded and belongs in a log line, not in a label that "
-        "would mint a time series per sentence."
+        "A claim counted here never reached an episode."
     ),
 )
 
@@ -224,10 +202,9 @@ def record_budget_exhausted(stage: LlmStage, error: LlmBudgetExhaustedError) -> 
     metric ever sees — motet#24's defect, on the one path where it costs the most.
 
     ``motet.llm.budget_exhausted`` is the separate question: *how often does a call not fit
-    its ceiling?* On the grounding stage that is also the amplification signal, because
-    every one of these is a chunk about to be split and re-sent. A rate that stops being
-    ~0 says the chunk size no longer fits the model — and it says so **before** claims
-    start being dropped, which is the only warning that arrives while nothing is yet wrong.
+    its ceiling?* A rate that stops being ~0 says a stage's ceiling no longer fits the work
+    the model is being asked to do — and it says so while the only cost is money, which is
+    the warning that arrives before a stage starts failing outright.
     """
     model = error.model or "unknown"
     _budget_exhausted.add(1, {"stage": stage.value, "model": model})
@@ -295,58 +272,6 @@ def record_dedup_decision(*, relation: str, outcome: str) -> None:
     itself is the extra spend this design buys the accuracy with.
     """
     _dedup_decisions.add(1, {"relation": relation, "outcome": outcome})
-
-
-def record_grounding(*, kept: int, dropped: int, reasons: Sequence[str]) -> None:
-    """Count one episode's grounding verdicts, with the drops bucketed by kind.
-
-    Both halves are recorded because a drop count with no denominator is not a drop
-    *rate*, and the rate is the number the question was about.
-
-    **``dropped`` is counted, not inferred from ``reasons``, and the two can legitimately
-    differ.** ``_drop_ungrounded`` matches a failure on ``(news_item_id, claim_text)``
-    rather than on identity — a report is not a reference — so two identical claim texts
-    under one story are dropped together on one verdict. Deriving the count from the number
-    of reasons would therefore understate the drop rate in exactly that case, and the rate
-    is the headline number. The reason breakdown is per *verdict* and stays that way: a
-    claim co-dropped with its twin has no reason of its own to attribute.
-    """
-    if kept:
-        _grounding_claims.add(kept, {"outcome": "kept"})
-    if dropped:
-        _grounding_claims.add(dropped, {"outcome": "dropped"})
-    for kind in reasons:
-        _grounding_drops.add(1, {"reason": kind})
-
-
-#: The reasons :class:`~motet_inference.adapters.ClaudeGroundingValidator` produces
-#: itself, matched on prefix. Anything else came out of the model's mouth as free text.
-_MECHANICAL_REASONS: Final = (
-    ("span does not resolve", "span_unresolved"),
-    ("grounding validation returned no verdict", "no_verdict"),
-    ("grounding validation ran out of token budget", "budget_exhausted"),
-)
-
-
-def classify_grounding_reason(reason: str) -> str:
-    """Bucket a failure reason into something a metric label can hold.
-
-    A model's own reason is a sentence, and a sentence as a label is a new time series per
-    claim — which is how a cardinality problem is built. The distinction that matters for
-    the metric is only *which kind* of failure it was: a span that would not resolve is a
-    script-stage bug, a missing verdict is a validator-response bug, an exhausted budget
-    is a claim nobody managed to judge at all (motet#42), and an unsupported claim is the
-    gate working as designed. The sentence itself survives in the log line.
-
-    ``budget_exhausted`` is the one to watch rather than merely count: it is the only
-    reason here that costs a claim without any judgement having been made, so a rate that
-    stops being ~0 says the chunk size in ``adapters`` no longer fits the model.
-    """
-    lowered = reason.lower()
-    for prefix, kind in _MECHANICAL_REASONS:
-        if lowered.startswith(prefix):
-            return kind
-    return "unsupported"
 
 
 def describe_usage(usage: Usage) -> str:

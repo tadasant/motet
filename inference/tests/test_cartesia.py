@@ -43,7 +43,7 @@ class TestConfig:
         """Both, checked together, and checked on boot.
 
         A missing voice id would otherwise only surface after the script has been written
-        and grounding-validated — the expensive part — and would then fail every retry.
+        — the expensive part — and would then fail every retry.
         """
         monkeypatch.delenv(API_KEY_ENV, raising=False)
         monkeypatch.delenv(VOICE_ENV, raising=False)

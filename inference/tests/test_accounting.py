@@ -1,9 +1,8 @@
-"""The accounting seam: what a stage spent, and what it threw away.
+"""The accounting seam: what a stage spent.
 
-Two defects with one shape (motet#24, motet#25) — the system did the work and discarded
-the evidence. These tests assert the evidence survives, which is the only property that
-matters: a counter nobody increments and a ledger nobody appends to look exactly like a
-pipeline that never ran.
+motet#25's shape — the system did the work and discarded the evidence. These tests assert
+the evidence survives, which is the only property that matters: a counter nobody
+increments and a ledger nobody appends to look exactly like a pipeline that never ran.
 
 Driven through the *real* stage adapters against the LLM fake, because recording is done
 by the adapters and a test of the helper alone would pass while the call site was missing.
@@ -11,15 +10,13 @@ by the adapters and a test of the helper alone would pass while the call site wa
 
 from __future__ import annotations
 
-import inspect
 import json
 import logging
 
 import pytest
-from motet_inference import classify_grounding_reason, collect_usage, record_grounding
+from motet_inference import collect_usage
 from motet_inference.accounting import Ledger, StageUsage, describe_usage
 from motet_inference.adapters import (
-    ClaudeGroundingValidator,
     ClaudeIntegrator,
     ClaudeScriptGenerator,
 )
@@ -102,11 +99,11 @@ class TestUsageSurvivesTheStage:
         assert entry.usage.input_tokens > 0
         assert entry.usage.output_tokens > 0
 
-    def test_script_and_grounding_add_up_in_one_ledger(self) -> None:
+    def test_dedup_and_script_add_up_in_one_ledger(self) -> None:
         """The shape an episode's cost line needs: several stages, one total.
 
-        Scripting and grounding an episode are two completions and one question — "what
-        did that episode cost" — so the block spans both and the totals are summed.
+        Deduping and scripting an episode are several completions and one question —
+        "what did that episode cost" — so the block spans both and the totals are summed.
         """
         script_client = canned(
             {
@@ -124,14 +121,22 @@ class TestUsageSurvivesTheStage:
                 ]
             }
         )
-        grounding_client = canned({"verdicts": [{"index": 0, "supported": True}]})
+        dedup_client = canned(
+            {
+                "closest_news_item_id": None,
+                "relation": "unrelated",
+                "reason": "nothing in the window is about this.",
+                "title": "Acme raises $20M Series A",
+                "summary": "Acme raised $20M led by Northwind Ventures.",
+            }
+        )
 
         with collect_usage() as spend:
-            script = ClaudeScriptGenerator(script_client).generate([STORY], {MORNING.id: MORNING})
-            ClaudeGroundingValidator(grounding_client).validate(script, {MORNING.id: MORNING})
+            ClaudeIntegrator(dedup_client).integrate(MORNING, [])
+            ClaudeScriptGenerator(script_client).generate([STORY], {MORNING.id: MORNING})
 
         assert spend.requests == 2
-        assert {entry.stage for entry in spend.entries} == {LlmStage.SCRIPT, LlmStage.GROUNDING}
+        assert {entry.stage for entry in spend.entries} == {LlmStage.DEDUP, LlmStage.SCRIPT}
         total = spend.total()
         assert total.input_tokens == sum(e.usage.input_tokens for e in spend.entries)
         assert total.output_tokens == sum(e.usage.output_tokens for e in spend.entries)
@@ -203,55 +208,10 @@ class TestDescribeUsage:
         ledger = Ledger(
             entries=[
                 StageUsage(LlmStage.SCRIPT, "m", Usage(input_tokens=3, cache_read_tokens=7)),
-                StageUsage(LlmStage.GROUNDING, "m", Usage(input_tokens=4, cache_read_tokens=1)),
+                StageUsage(LlmStage.DEDUP, "m", Usage(input_tokens=4, cache_read_tokens=1)),
             ]
         )
 
         assert ledger.total() == Usage(input_tokens=7, cache_read_tokens=8)
         assert "input=7" in ledger.summary()
         assert "cache_read=8" in ledger.summary()
-
-
-class TestGroundingCounts:
-    def test_the_drop_count_is_not_inferred_from_the_number_of_reasons(self) -> None:
-        """One verdict can take two claims with it, and the rate has to say so.
-
-        `_drop_ungrounded` matches a failure on `(news_item_id, claim_text)` rather than on
-        identity — a `GroundingFailure` is a report, not a reference — so a story that
-        repeats a sentence loses both copies on one verdict. Deriving the count from the
-        reasons would understate the drop rate in exactly that case, and the rate is the
-        headline number the question was about.
-
-        Asserted on the signature rather than on the counter because the two arguments
-        being separate *is* the property: a single sequence could only say one of them.
-        """
-        signature = inspect.signature(record_grounding)
-
-        assert set(signature.parameters) == {"kept", "dropped", "reasons"}
-        assert signature.parameters["dropped"].annotation == "int"
-        # And it accepts a drop count larger than the number of reasons without complaint.
-        record_grounding(kept=1, dropped=2, reasons=["unsupported"])
-
-
-class TestGroundingReasonKinds:
-    def test_the_two_reasons_we_write_ourselves_are_recognised(self) -> None:
-        """These come from `ClaudeGroundingValidator`, not from a model.
-
-        They mean different things from a model's refusal — one is a script-stage bug and
-        one is a validator-response bug — so they must not land in the same bucket as
-        "the evidence does not support this", which is the gate working as designed.
-        """
-        assert classify_grounding_reason("span does not resolve to any source text") == (
-            "span_unresolved"
-        )
-        assert (
-            classify_grounding_reason("grounding validation returned no verdict for this claim")
-            == "no_verdict"
-        )
-
-    def test_a_model_s_own_sentence_becomes_one_bounded_bucket(self) -> None:
-        """A sentence as a metric label is a time series per claim, forever."""
-        assert classify_grounding_reason("The $31M total appears nowhere in the source.") == (
-            "unsupported"
-        )
-        assert classify_grounding_reason("") == "unsupported"

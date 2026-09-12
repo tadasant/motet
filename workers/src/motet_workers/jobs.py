@@ -58,8 +58,8 @@ BUSY_RETRY_SECONDS = 5
 #: slowest stage" is a guess about work whose size is the user's backlog, and a constant
 #: cannot be longer than something unbounded. A script job took 2580s against a full
 #: backlog, a second worker reclaimed it while the first was still working it, and the
-#: whole stage — a 22k-token script completion, the entire grounding cascade, a complete
-#: Cartesia synthesis — ran and billed twice for one episode. That is exactly the mistake
+#: whole stage — a 22k-token script completion and a complete Cartesia synthesis — ran
+#: and billed twice for one episode. That is exactly the mistake
 #: this comment already named as the more expensive of the two.
 #:
 #: So the constant no longer has to bound the work: a live worker pushes its own lease out
@@ -350,9 +350,8 @@ def mark_work_committed(conn: psycopg.Connection[Any], job_id: int, *, attempts:
     the work durably applied, and :data:`STALE_LEASE_SECONDS` later another worker claims
     it. That reclaim is the recovery a killed worker depends on and must stay — what must
     not happen is the stage running a second time, which for ``script`` means another billed
-    completion, another grounding pass at ``effort='max'``, and a ``failed`` episode
-    silently put back into ``rendering`` with the ``last_error`` that said why it failed
-    overwritten (motet#55).
+    completion and a ``failed`` episode silently put back into ``rendering`` with the
+    ``last_error`` that said why it failed overwritten (motet#55).
 
     **Why the fence is on the job and not on the episode.** Every handler already
     short-circuits its own finished work by reading domain state, and for ``script`` that

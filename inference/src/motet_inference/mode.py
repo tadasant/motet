@@ -9,7 +9,7 @@ That is not tidiness. When the two read it separately they can disagree, and the
 disagreement is silent: an exact ``== "real"`` on one side and a normalizing parse on the
 other means ``MOTET_INFERENCE_MODE=Real`` selects *real stage adapters wired to a fake
 model*. The revision boots clean, skips the credential check, and feeds fabricated text
-into grounding validation and then into audio. One parser, one answer.
+into the script stage and then into audio. One parser, one answer.
 """
 
 from __future__ import annotations

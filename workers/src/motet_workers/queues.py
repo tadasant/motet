@@ -1,6 +1,6 @@
 """The pipeline's queue names.
 
-`Poll → Extract → Dedup/Integrate → Assemble → Script + grounding → TTS → GCS`.
+`Poll → Extract → Dedup/Integrate → Assemble → Script → TTS → GCS`.
 
 Each stage is a separate queue on the one ``jobs`` table because the stages have different
 rate limits and failure modes — a Cartesia 429 must not stall dedup. They are named here,

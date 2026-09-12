@@ -779,9 +779,8 @@ def create_episode(
 ) -> EpisodeResponse:
     """Assemble a manual episode from unread news items, capped by duration.
 
-    Returns immediately, in ``pending``. Assembly, scripting, grounding validation, and TTS
-    happen on the queue afterwards, and nothing is synthesized until grounding passes
-    (invariant 3) — so the episode a client polls for moves through states rather than
+    Returns immediately, in ``pending``. Assembly, scripting and TTS happen on the queue
+    afterwards — so the episode a client polls for moves through states rather than
     appearing finished.
     """
     episode_id = enqueue_episode(

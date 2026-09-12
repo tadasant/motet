@@ -17,8 +17,8 @@ and eyes aren't.
 hardcoded user, shipped as a private authenticated RSS feed rather than a player.
 
 The Phase 1 path is built end to end: paste text in, it is deduplicated into news items,
-an episode is assembled from what is unread, scripted, grounding-validated, synthesized,
-and published to a private authenticated feed you can subscribe to in Overcast or Apple
+an episode is assembled from what is unread, scripted, synthesized, and published to a
+private authenticated feed you can subscribe to in Overcast or Apple
 Podcasts. Three plain SPA screens cover paste-in, the backlog, and an episode's transcript
 with every claim shown beside the source span it came from.
 
@@ -44,8 +44,8 @@ Redis, no vector store.
 
 The core design bet: **don't run narration through the realtime model.** Pre-render the
 briefing as audio, play it locally, and spin up a realtime session only when the user
-speaks. That makes offline possible, makes grounding enforceable, and cuts realtime spend
-to a small fraction of session minutes.
+speaks. That makes offline possible and cuts realtime spend to a small fraction of
+session minutes.
 
 ## Getting started
 

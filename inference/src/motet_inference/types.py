@@ -7,7 +7,7 @@ input out from under the caller.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -23,8 +23,9 @@ class SourceItem:
 class SourceSpan:
     """A half-open character range in a specific source item's ``text``.
 
-    This is the unit that makes invariant 3 enforceable: a claim without a span that
-    resolves to its source is a claim that never gets spoken.
+    This is the unit invariant 3 is built on: a claim carries the span its evidence was
+    copied from, so the SPA can highlight it, the show notes can print it, and a highlight
+    can anchor to something that survives re-scripting.
     """
 
     source_item_id: str
@@ -71,31 +72,13 @@ class ScriptSegment:
 
 @dataclass(frozen=True)
 class Script:
-    """A full briefing, ready for grounding validation and then TTS."""
+    """A full briefing, ready for TTS."""
 
     segments: tuple[ScriptSegment, ...]
 
     @property
     def text(self) -> str:
         return "\n\n".join(segment.text for segment in self.segments)
-
-
-@dataclass(frozen=True)
-class GroundingFailure:
-    news_item_id: str
-    claim_text: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class GroundingReport:
-    """The verdict that gates TTS. ``ok`` false means nothing gets synthesized."""
-
-    failures: tuple[GroundingFailure, ...] = field(default=())
-
-    @property
-    def ok(self) -> bool:
-        return not self.failures
 
 
 @dataclass(frozen=True)

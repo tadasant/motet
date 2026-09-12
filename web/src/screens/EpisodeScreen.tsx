@@ -84,7 +84,7 @@ export function EpisodeScreen({
       {IN_PROGRESS.has(episode.state) &&
         (worker === 'running' || worker === 'unknown' || episode.state !== 'pending' ? (
           <p className="hint" role="status">
-            Working… assembly, script, grounding validation, then audio. This page polls.
+            Working… assembly, script, then audio. This page polls.
           </p>
         ) : (
           // The same lie the Processing panel used to tell, one stage later and more

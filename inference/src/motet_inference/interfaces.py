@@ -1,4 +1,4 @@
-"""The four inference stages, as Protocols.
+"""The three inference stages, as Protocols.
 
 **Invariant 7:** every inference stage sits behind an interface with a fake for tests.
 Nothing in this repo may call a vendor directly — it calls one of these, and the registry
@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from .types import Audio, GroundingReport, NewsItem, Script, SourceItem
+from .types import Audio, NewsItem, Script, SourceItem
 
 
 @dataclass(frozen=True)
@@ -52,19 +52,8 @@ class ScriptGenerator(Protocol):
 
 
 @runtime_checkable
-class GroundingValidator(Protocol):
-    """Gate TTS on whether every claim resolves to what its span actually says.
-
-    **Invariant 3.** This runs before synthesis, never after. A report with failures means
-    nothing gets spoken.
-    """
-
-    def validate(self, script: Script, sources: Mapping[str, SourceItem]) -> GroundingReport: ...
-
-
-@runtime_checkable
 class SpeechSynthesizer(Protocol):
-    """Render validated copy to audio."""
+    """Render spoken copy to audio."""
 
     def synthesize(self, text: str) -> Audio: ...
 
@@ -73,11 +62,10 @@ class SpeechSynthesizer(Protocol):
 class Stages:
     """The full set of inference stages, resolved together.
 
-    Callers take this rather than four separate arguments so that a test cannot
-    accidentally mix a fake script generator with a real validator.
+    Callers take this rather than three separate arguments so that a test cannot
+    accidentally mix a fake script generator with a real synthesizer.
     """
 
     integrator: Integrator
     script_generator: ScriptGenerator
-    grounding_validator: GroundingValidator
     speech_synthesizer: SpeechSynthesizer

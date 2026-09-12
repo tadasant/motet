@@ -97,54 +97,30 @@ def test_health_reports_what_is_dormant(client: Any) -> None:
     assert "start_research" in dormant
 
 
-def test_health_names_the_grounding_checker_and_says_it_does_not_gate(client: Any) -> None:
-    """An operator has to be able to see, without reading code, which half of motet#10 runs.
+def test_health_separates_configured_from_exporting(client: Any) -> None:
+    """Two questions, not one: somebody set the variables, and this process is exporting.
 
-    ``grounding_advisory`` is stated rather than inferred: invariant 3's hard gate lives on
-    the narration path, and a reader of this route must not assume it applies here too.
+    With no OTLP endpoint set the second is false and every span goes nowhere. Saying so
+    is the point of the field — a silent no-op looks exactly like a healthy, quiet service.
     """
     payload = client.get(HEALTH_PATH).json()
-    assert payload["grounding_checker"] == "specifics"
-    assert payload["grounding_advisory"] is True
-    # Configured and exporting are different questions; with no OTLP endpoint set, the
-    # second is false and the counters go nowhere. Saying so is the point of the field.
     assert payload["telemetry_configured"] is False
     assert payload["telemetry_exporting"] is False
 
 
-def test_an_ungrounded_reply_reaches_the_client_over_the_wire(settings: VoiceSettings) -> None:
-    """End to end on the socket: the audio goes out, and the verdict follows it.
-
-    The advisory half of motet#10 as a client sees it — not as a unit test of the checker.
-    """
-    app = create_app(settings, arm=_scripted_arm(settings, "Sequoia led the 900 million round."))
-    with TestClient(app) as client:
-        with _authenticated(client, context={"notes": "Helion raised 425 million."}) as socket:
-            socket.send_text(json.dumps({"type": "text", "text": "who led it"}))
-            events = [json.loads(socket.receive_text()) for _ in range(4)]
-
-    assert events[2]["type"] == "audio_chunk", "it was spoken; the check did not gate it"
-    verdict = events[3]
-    assert verdict["type"] == "grounding"
-    assert verdict["grounded"] is False
-    assert verdict["checker"] == "specifics"
-    assert {item["kind"] for item in verdict["unsupported"]} == {"name", "number"}
-    assert verdict["reply"] == "Sequoia led the 900 million round."
-
-
 def test_the_closed_frame_is_the_last_one_a_client_sees(settings: VoiceSettings) -> None:
-    """A client tears down on ``closed``, so a verdict queued after it is a verdict lost."""
-    app = create_app(settings, arm=_scripted_arm(settings, "Sequoia led the 900 million round."))
+    """A client tears down on ``closed``, so anything queued after it is lost."""
+    app = create_app(settings, arm=_scripted_arm(settings, "Sequoia led the round."))
     with TestClient(app) as client:
         with _authenticated(client) as socket:
             socket.send_text(json.dumps({"type": "text", "text": "who led it"}))
             for _ in range(3):
                 socket.receive_text()
             socket.send_text(json.dumps({"type": "close"}))
-            tail = [json.loads(socket.receive_text()) for _ in range(2)]
+            tail = [json.loads(socket.receive_text())]
 
-    assert [event["type"] for event in tail] == ["grounding", "session_state"]
-    assert tail[1]["state"] == "closed"
+    assert [event["type"] for event in tail] == ["session_state"]
+    assert tail[0]["state"] == "closed"
 
 
 def test_abandoning_the_outbox_releases_join_rather_than_waiting_out_the_flush() -> None:
@@ -297,15 +273,10 @@ def _authenticated(client: Any, **overrides: Any) -> Iterator[Any]:
 
 
 def test_a_turn_produces_transcripts_and_audio(client: Any) -> None:
-    """...and the grounding verdict arrives *behind* the audio, which is what advisory means.
-
-    The order in this assertion is the decision in motet#10, expressed as a wire fact: the
-    listener has the answer in their ear before anything has judged it. On the narration
-    path the same check is a gate and the order is the other way round.
-    """
+    """One turn on the wire: what the listener said, what Motet said, and the audio."""
     with _authenticated(client, tools=[{"name": "mark_read", "defaults": {}}]) as socket:
         socket.send_text(json.dumps({"type": "text", "text": "what was that"}))
-        events = [json.loads(socket.receive_text()) for _ in range(4)]
+        events = [json.loads(socket.receive_text()) for _ in range(3)]
         socket.send_text(json.dumps({"type": "close"}))
         assert json.loads(socket.receive_text())["state"] == "closed"
 
@@ -313,14 +284,10 @@ def test_a_turn_produces_transcripts_and_audio(client: Any) -> None:
         "transcript",
         "transcript",
         "audio_chunk",
-        "grounding",
     ]
     assert events[0]["speaker"] == "user"
     assert events[1]["speaker"] == "assistant"
     assert events[2]["duration_ms"] > 0
-    assert events[3]["grounded"] is True
-    assert events[3]["checker"] == "specifics"
-    assert events[3]["reply"] == events[1]["text"]
 
 
 def test_an_assistant_reply_does_not_advance_the_narration_clock(client: Any) -> None:
@@ -332,7 +299,7 @@ def test_an_assistant_reply_does_not_advance_the_narration_clock(client: Any) ->
     """
     with _authenticated(client, context={"spoken_through_ms": 30_000}) as socket:
         socket.send_text(json.dumps({"type": "text", "text": "go on"}))
-        for _ in range(4):  # transcript, transcript, audio_chunk, grounding
+        for _ in range(3):  # transcript, transcript, audio_chunk
             socket.receive_text()
         socket.send_text(json.dumps({"type": "barge_in"}))
         assert json.loads(socket.receive_text())["offset_ms"] == 30_000

@@ -223,7 +223,7 @@ lands on `/signin/rejected`.
 Be precise about this when you report a green run, because the gap is not small.
 
 **What a minted session does exercise:** every `/v1` route that does product work, the whole
-ingestion → dedup → assemble → script → grounding → TTS → storage pipeline, the RSS feed, the
+ingestion → dedup → assemble → script → TTS → storage pipeline, the RSS feed, the
 SPA's screens including the signed-in header, and the real vendors behind them in staging's
 `real` inference mode. It also exercises the session machinery itself against a real
 deployment — a row created, resolved on every request, re-checked against the allowlist,

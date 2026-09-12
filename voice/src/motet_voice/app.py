@@ -48,7 +48,6 @@ from .contract import (
     StartSessionRequest,
     StartSessionResponse,
 )
-from .grounding import ConversationGroundingChecker, build_grounding_checker
 from .realtime import RealtimeArm, build_arm
 from .session import VoiceSession
 from .tools import HttpToolTransport, ToolRegistry, ToolTransport, build_platform_tools
@@ -99,15 +98,8 @@ class HealthResponse(BaseModel):
     start_session_authenticated: bool
     #: Whether this process installed an exporter, as opposed to merely having the
     #: variables set. The two were different for months on the API, which is how a service
-    #: looks monitored and emits nothing — and the advisory grounding counters are only
-    #: worth anything if this is true.
+    #: looks monitored and emits nothing.
     telemetry_exporting: bool
-    #: Which advisory grounding checker is running on the conversational reply path, and
-    #: whether it gates audio. It never does — motet#10 — and the field says so out loud
-    #: rather than leaving a reader of ``/internal/health`` to assume invariant 3's hard
-    #: narration gate applies here too.
-    grounding_checker: str
-    grounding_advisory: bool
     tools: list[dict[str, Any]]
 
 
@@ -124,15 +116,11 @@ class VoiceApp:
         *,
         arm: RealtimeArm | None = None,
         transport: ToolTransport | None = None,
-        grounding: ConversationGroundingChecker | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.arm = arm or build_arm(self.settings)
         self._explicit_transport = transport is not None
         self.transport = transport or self._build_transport()
-        # Process-wide because it is stateless and free: unlike the VAD, which carries one
-        # stream's noise floor and must be per-session, the checker holds nothing.
-        self.grounding = grounding or build_grounding_checker()
 
     def _build_transport(self) -> ToolTransport | None:
         if not self.settings.api_base_url:
@@ -164,10 +152,9 @@ def create_app(
     *,
     arm: RealtimeArm | None = None,
     transport: ToolTransport | None = None,
-    grounding: ConversationGroundingChecker | None = None,
 ) -> FastAPI:
     """Build the ASGI app. Injectable so tests never touch a network or a vendor."""
-    state = VoiceApp(settings, arm=arm, transport=transport, grounding=grounding)
+    state = VoiceApp(settings, arm=arm, transport=transport)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -229,11 +216,6 @@ def create_app(
             telemetry_configured=current.otlp_configured,
             errors_configured=current.errors_configured,
             telemetry_exporting=current.exporting,
-            grounding_checker=state.grounding.name,
-            # Stated as a constant rather than read from anything, because there is nothing
-            # to read: the conversational path has no gate to switch on. Invariant 3's hard
-            # gate lives on the narration path, in the pipeline, and is not this service's.
-            grounding_advisory=True,
             inference_mode=state.settings.inference_mode,
             arm=capabilities.name,
             arm_conversational=capabilities.conversational,
@@ -386,7 +368,6 @@ async def _authenticate(
         config=config,
         arm=state.arm,
         tools=state.registry(config),
-        grounding=state.grounding,
     )
     await _send(websocket, session.ready())
     return session
@@ -400,12 +381,10 @@ async def _pump(websocket: WebSocket, session: VoiceSession) -> None:
     one bad message should not lose a walk.
 
     **Every outbound event goes through ``session.outbox`` and one sender task**, rather
-    than being written here. Grounding is advisory on this path (motet#10), so its verdict
-    is produced *after* the turn that caused it and has to reach the socket from a
-    background task — and two coroutines writing to one WebSocket is a protocol violation
-    waiting for a busy walk. One writer, FIFO, and the ordering falls out for free:
-    ``put_nowait`` on an unbounded queue never yields, so a turn's own events are queued
-    ahead of any verdict about them before the check has had a chance to run.
+    than being written here: two coroutines writing to one WebSocket is a protocol
+    violation waiting for a busy walk. One writer, FIFO, and the ordering falls out for
+    free — ``put_nowait`` on an unbounded queue never yields, so events reach the socket
+    in exactly the order the session produced them.
     """
     sender = asyncio.create_task(_deliver(websocket, session))
     try:
@@ -436,10 +415,6 @@ async def _pump(websocket: WebSocket, session: VoiceSession) -> None:
             if await _handle_control(session, payload):
                 return
     finally:
-        # Verdicts first, then the queue: an advisory check still running when the listener
-        # hangs up is the case most worth counting, and letting it drop would bias the
-        # ungrounded rate toward clean in exactly the wrong direction.
-        await session.drain_grounding_checks()
         if not sender.done():
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(FLUSH_TIMEOUT_SECONDS):
@@ -460,17 +435,16 @@ async def _deliver(websocket: WebSocket, session: VoiceSession) -> None:
     **Anything that stops this task mutes the session**, because ``_pump`` goes on reading
     frames and queueing replies nobody sends. A disconnect is the expected way for that to
     happen and is not worth a stack trace; anything else is a bug and gets logged, because
-    the alternative is a walk where every answer and every advisory verdict is silently
-    dropped and nothing anywhere says so.
+    the alternative is a walk where every answer is silently dropped and nothing anywhere
+    says so.
     """
     while True:
         event = await session.outbox.get()
         try:
             await _send(websocket, event)
         except (WebSocketDisconnect, RuntimeError):
-            # The client left mid-flight. Nothing here is recoverable and nothing here is
-            # the record: a verdict has already been counted and logged by the time it
-            # reaches this queue, so what is lost is the client's copy and not the signal.
+            # The client left mid-flight. Nothing here is recoverable, and what is lost is
+            # the client's copy of an event the session has already recorded.
             session.outbox.task_done()
             _abandon(session.outbox)
             return
@@ -502,11 +476,6 @@ async def _handle_control(session: VoiceSession, payload: dict[str, Any]) -> boo
     kind = str(payload.get("type", ""))
 
     if kind == "close":
-        # Verdicts first: `closed` is the frame a well-behaved client tears down on, and
-        # queueing it ahead of the advisory checks still in flight would drop from the wire
-        # exactly the verdicts this path exists to deliver. `_pump`'s own drain stays as
-        # the backstop for every other way a session ends.
-        await session.drain_grounding_checks()
         session.outbox.put_nowait(
             SessionStateEvent(at_ms=session.clock.spoken_through_ms, state="closed")
         )
