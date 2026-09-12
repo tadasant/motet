@@ -100,6 +100,100 @@ LEASE_TOUCH_SECONDS = 60
 #: this constant and predates it; what the cap adds is the ERROR line saying which job.
 MAX_LEASE_EXTENSION_SECONDS = 7200
 
+#: How long a ``done`` row is kept after it stops being a job (motet#56).
+#:
+#: **The floor is :data:`~motet_db.repo.INTEGRATED_GRACE`, and everything above it is
+#: forensics.** A terminal ``done`` row carries nothing the domain rows do not already hold
+#: — ``source_items.state``, ``episodes.state`` — with one exception: ``repo.list_ingestion``
+#: joins a just-succeeded ``integrate`` job onto the line it keeps up for ten minutes after a
+#: paste lands, so that the paste does not vanish from one list and reappear in another under
+#: a title dedup rewrote. Anything older than that grace is dead weight to the only reader
+#: that wants it.
+#:
+#: **Be exact about what a window under the grace would cost, because it is less than it
+#: sounds and the accuracy is the point.** That arm is driven by ``source_items`` and joins
+#: the job *left*, so deleting the row does not remove the line — it empties it: the attempt
+#: count reads zero and any job-side error goes with it, on the one line somebody is at that
+#: moment watching. Blanking a field on a panel is not what the ``failed`` window below is
+#: guarding against, and conflating the two would be an argument for making that one shorter.
+#:
+#: Seven days rather than eleven minutes because the row is still the only record of *when a
+#: stage ran and how many attempts it took* — the domain rows carry the end state, not the
+#: history — and the realistic question is "something looked wrong in Monday's briefing",
+#: asked on Friday. A week is a thousand times the grace it has to outlive and still bounds
+#: the table by throughput instead of by the deployment's age, which is the whole of what
+#: this fixes.
+DONE_RETENTION_SECONDS = 7 * 24 * 3600
+
+#: How long a ``failed`` row is kept. Materially longer than :data:`DONE_RETENTION_SECONDS`,
+#: and the asymmetry is the decision rather than caution.
+#:
+#: **A ``failed`` row's ``last_error`` is the only copy of why a job stopped being retried,
+#: and for two queues it is the only copy of anything.** ``failure_recorders`` has no entry
+#: for ``poll`` or ``extract``, because neither has a domain object to mark: a mailbox
+#: message that could not be fetched has no ``source_items`` row, extraction is what would
+#: have written one, and ``handle_poll`` has already advanced the cursor past it. The failed
+#: job row *is* the record that the message was ever seen (motet#35) — and
+#: ``repo.list_ingestion``'s extract arm, which is what puts it on the user's screen, has no
+#: time bound of its own, so a deleted row does not age out of that panel, it disappears
+#: from it.
+#:
+#: That is the quiet failure this window is set against: too short, and a lost newsletter
+#: stops being reported with nothing anywhere saying it was. A quarter is far longer than
+#: anyone leaves a backlog unattended, and costs nothing in rows — a ``failed`` row means
+#: five attempts were exhausted, which is rare by construction and is not the volume line.
+FAILED_RETENTION_SECONDS = 90 * 24 * 3600
+
+#: Rows deleted per statement by :func:`prune`.
+#:
+#: **The bound is the point.** An unbounded ``DELETE`` on a queue table holds every row lock
+#: it takes until it commits, against the claim query the pruning exists to help. A batch is
+#: one statement on an autocommit connection, so the locks are released a thousand rows at a
+#: time and a sweep is interruptible at every boundary.
+PRUNE_BATCH_SIZE = 1000
+
+#: The most batches one :func:`prune` call runs, per state. The second half of the bound: a
+#: sweep is work an operator has not asked for, sharing a database with jobs somebody is
+#: waiting on, so it does a fixed amount and leaves the rest to the next one. Reaching it is
+#: not an error — with a sweep every :data:`~motet_workers.runner.PRUNE_INTERVAL_SECONDS` a
+#: backlog drains steadily — but it is worth a line, because a cap hit every hour forever is
+#: the table growing faster than this drains it.
+PRUNE_MAX_BATCHES = 10
+
+#: One batch of the retention sweep, hoisted out of :func:`prune` for the same reason
+#: :data:`CLAIM_SQL` is: a test can ``EXPLAIN`` *this* rather than a transcription of it,
+#: and a transcription is what keeps its index while the statement being run drifts off it.
+#:
+#: One state per call, not ``state IN ('done', 'failed')`` with a ``CASE`` over the windows:
+#: the two states have different windows for different reasons, and an ``OR`` would need an
+#: index path per arm to avoid the sequential scan this is designed around (motet#49).
+#:
+#: ``FOR UPDATE SKIP LOCKED`` over a row the claim query cannot return — its subquery
+#: matches only ``ready`` and ``running`` — so this is belt-and-braces against a future
+#: writer rather than load-bearing today. It costs nothing and it means a sweep can never be
+#: the thing a worker is waiting behind.
+#:
+#: Parameters, in order: the state, its retention window in seconds, and the batch size.
+PRUNE_SQL = """
+    DELETE FROM jobs
+    WHERE id IN (
+        SELECT id FROM jobs
+        WHERE state = %s
+          AND updated_at < now() - make_interval(secs => %s)
+        ORDER BY updated_at
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+    )
+"""
+
+#: The retention windows, by the state each applies to. Iterated by :func:`prune`, so a
+#: state added to the ``CHECK`` constraint and not to this mapping is simply not swept —
+#: which is the right default for a statement whose whole content is deletion.
+RETENTION_SECONDS: Mapping[str, int] = {
+    "done": DONE_RETENTION_SECONDS,
+    "failed": FAILED_RETENTION_SECONDS,
+}
+
 #: The claim statement itself, hoisted out of :func:`claim` so that a test can ``EXPLAIN``
 #: *this* rather than a transcription of it.
 #:
@@ -196,8 +290,10 @@ def claim(conn: psycopg.Connection[Any], queue: Queue) -> Job | None:
     the most expensive stage in the system twice (motet#53).
 
     Both arms are indexed — see :data:`CLAIM_SQL`. This runs once per claim *and* once per
-    queue per drain pass to discover the queue is empty, over a table nothing prunes, so it
-    is the one query here where the plan is worth pinning.
+    queue per drain pass to discover the queue is empty, over a table whose size is now
+    bounded by :func:`prune`'s retention windows rather than by the deployment's age — days
+    of every stage's traffic, which is still orders of magnitude more rows than this query
+    wants. So it remains the one query here where the plan is worth pinning.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(CLAIM_SQL, (queue.value, STALE_LEASE_SECONDS))
@@ -441,6 +537,81 @@ def try_lock(conn: psycopg.Connection[Any], serialize_key: str) -> bool:
 
 def unlock(conn: psycopg.Connection[Any], serialize_key: str) -> None:
     conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key(serialize_key),))
+
+
+@dataclass(frozen=True)
+class Pruned:
+    """What one retention sweep deleted, and whether it ran out of budget doing it."""
+
+    #: Rows deleted, by state. Every swept state is present, at zero if nothing matched —
+    #: "nothing to delete" and "the sweep never ran" are different facts and the never-infer-
+    #: "no errors"-from-"no data" trap in AGENTS.md is what happens when they share a shape.
+    deleted: Mapping[str, int]
+    #: Whether any state used its whole batch budget — every batch full, none short. The
+    #: sweep stopped because it ran out of budget rather than out of rows, so there is
+    #: probably more past that window than one sweep removes.
+    capped: bool
+
+    @property
+    def total(self) -> int:
+        return sum(self.deleted.values())
+
+
+def prune(
+    conn: psycopg.Connection[Any],
+    *,
+    batch_size: int = PRUNE_BATCH_SIZE,
+    max_batches: int = PRUNE_MAX_BATCHES,
+) -> Pruned:
+    """Delete terminal job rows past their retention window, in bounded batches.
+
+    Nothing had ever deleted a job row (motet#56). ``complete`` flips the state to ``done``
+    and the row stays, so the table grew for the life of the deployment: one row per
+    pipeline stage per pasted item and per episode, forever. The consequence left after
+    motet#49's index is storage, autovacuum work, and the size of every *other* index on the
+    table — ``jobs_source_item_idx`` holds every ``integrate`` job ever run and is walked by
+    the ingestion panel the SPA polls while anything is pending.
+
+    **Two windows, because the two terminal states hold different amounts of information.**
+    A ``done`` row is redundant with the domain rows past
+    :data:`~motet_db.repo.INTEGRATED_GRACE`; a ``failed`` row carries ``last_error``, which
+    for ``poll`` and ``extract`` is the only record anywhere that a mailbox message was seen
+    and lost. See :data:`DONE_RETENTION_SECONDS` and :data:`FAILED_RETENTION_SECONDS` — the
+    windows are where the reasoning is, and the short one is the one that fails quietly.
+
+    **Call this on an autocommit connection.** The batching is the entire bound, and inside
+    one transaction it would not be one: every batch's row locks would be held until the
+    last of them committed, which is an unbounded ``DELETE`` with extra steps. Autocommit
+    makes each statement its own transaction, so the sweep holds at most ``batch_size`` row
+    locks at a time and can be abandoned between batches without rolling anything back.
+
+    ``updated_at`` is the age, and it is the right column because ``complete`` and ``fail``
+    both write it when the row reaches its terminal state and nothing writes it afterwards.
+    ``created_at`` would be when the job was *enqueued*, which for a job retried up the
+    backoff ladder is most of an hour earlier, and ``id`` is not a clock at all.
+
+    Returns what it deleted, so the caller can say so — see
+    :func:`~motet_workers.loop.prune_jobs`, which is where the metric and the log line live
+    for the same reason the rest of the telemetry does: this module takes connections and
+    never opens one, and is not where a decision about observability belongs.
+    """
+    deleted: dict[str, int] = {}
+    capped = False
+    for state, seconds in RETENTION_SECONDS.items():
+        removed = 0
+        for _ in range(max_batches):
+            cursor = conn.execute(PRUNE_SQL, (state, seconds, batch_size))
+            removed += cursor.rowcount
+            # A short batch means the window is drained: there is no point asking again,
+            # and asking is a scan. Only running every batch to the full size reaches the
+            # `else` below, which is what `capped` reports — "stopped on budget" rather
+            # than "stopped on rows", the one of the two worth a line.
+            if cursor.rowcount < batch_size:
+                break
+        else:
+            capped = True
+        deleted[state] = removed
+    return Pruned(deleted=deleted, capped=capped)
 
 
 def queue_depths(conn: psycopg.Connection[Any]) -> dict[str, dict[str, int]]:

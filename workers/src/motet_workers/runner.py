@@ -56,7 +56,7 @@ from motet_inference.llm import validate_startup as validate_llm_startup
 from motet_storage import build_store
 from motet_vault import vault_status
 
-from .loop import MAX_JOBS_PER_RUN, drain
+from .loop import MAX_JOBS_PER_RUN, drain, prune_jobs
 from .queues import PIPELINE, Queue
 
 logger = logging.getLogger("motet.worker")
@@ -72,6 +72,27 @@ SERVICE_NAME = "motet-worker"
 #: enum would make it a legal value everywhere a queue name is accepted, including
 #: ``enqueue``.
 ALL_QUEUES = "all"
+
+#: How long a ``--poll-seconds`` worker goes between retention sweeps.
+#:
+#: **The sweep rides the drain pass rather than a scheduler**, which is the answer motet#56
+#: left open and the one taken here: a cron entry would live in the private infrastructure
+#: repo, which splits a change that is otherwise one file across two repositories and one of
+#: them not public. The worker is already the process with a database connection, a poll
+#: loop and nothing to wait for; a retention sweep is the smallest possible thing to hang
+#: off it.
+#:
+#: An hour because the windows are days wide: sweeping oftener cannot delete a row any
+#: sooner, it only asks a question whose answer is "nothing" more times. The poll loop runs
+#: several times a *second*, so without an interval the sweep would be the busiest query in
+#: the process, and the one that takes row locks.
+#:
+#: **The one-shot shape has no interval and needs none.** ``runner <queue>`` with no
+#: ``--poll-seconds`` is a Cloud Run job, which is what production runs and what the API's
+#: enqueue trigger starts (motet#71), so a sweep gated on a clock this process does not have
+#: would simply never run there. It sweeps once per invocation instead: two index scans that
+#: usually delete nothing, against an execution that was already going to start a container.
+PRUNE_INTERVAL_SECONDS = 3600.0
 
 
 @dataclass
@@ -183,11 +204,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.poll_seconds <= 0:
             for queue in queues:
                 drain(queue, database_url, max_jobs=args.max_jobs, stages=stages, store=store)
+            # After the drain, not before: the sweep is bookkeeping and the jobs are the
+            # work, and a Cloud Run job's execution time is what the drain is competing
+            # for. It deletes nothing this run put there — every window is days wide.
+            prune_jobs(database_url)
             return 0
 
         _install_sigterm(stop)
         logger.info("polling %s every %.1fs", ", ".join(q.value for q in queues), args.poll_seconds)
+        # Zero rather than `+ PRUNE_INTERVAL_SECONDS`, so a long-lived worker sweeps on its
+        # first pass. A process restarted oftener than the interval would otherwise never
+        # sweep at all, which is the failure mode of every "do it later" timer.
+        prune_due_at = 0.0
         while not stop.requested:
+            if time.monotonic() >= prune_due_at:
+                prune_jobs(database_url)
+                prune_due_at = time.monotonic() + PRUNE_INTERVAL_SECONDS
             processed = 0
             for queue in queues:
                 if stop.requested:

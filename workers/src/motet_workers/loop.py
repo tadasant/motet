@@ -127,6 +127,19 @@ _lease_events = _meter.create_counter(
     description="Lease-keeper outcomes for a running job, by queue and outcome.",
 )
 
+#: Rows the retention sweep deleted, by the terminal state they were in.
+#:
+#: Added to **even when it deletes nothing**, so the series exists on a healthy deployment.
+#: Without that, "the table has nothing old in it" and "no worker has swept since the
+#: window was last changed" are the same empty panel — the
+#: never-infer-"no errors"-from-"no data" trap in AGENTS.md, on a stage whose whole content
+#: is deletion and which therefore leaves no other trace. Cardinality is two.
+_jobs_pruned = _meter.create_counter(
+    "motet.jobs.pruned",
+    unit="{job}",
+    description="Terminal job rows deleted by the retention sweep, by state.",
+)
+
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
 #: alive indefinitely. Reaching it is not an error — the next scheduled run continues.
 MAX_JOBS_PER_RUN = 500
@@ -233,6 +246,59 @@ def drain(
         )
     logger.info("drained %d job(s) from %s", processed, queue.value)
     return processed
+
+
+def prune_jobs(database_url: str) -> jobs.Pruned:
+    """Run one retention sweep over the ``jobs`` table, and say what it deleted.
+
+    The observable half of :func:`~motet_workers.jobs.prune`: that function is the SQL and
+    its bounds, this is the connection, the counter and the line an operator reads. Same
+    split as everything else here — ``jobs`` takes connections and never opens one.
+
+    **Autocommit, because the batching is the bound.** Each ``DELETE`` is its own
+    transaction, so the sweep holds at most one batch of row locks at a time rather than
+    every lock it has taken since it started. A connection per sweep rather than one held
+    for the process, for :func:`drain`'s reason: a poll loop that opens and closes heals
+    itself when Postgres drops one.
+
+    Failure is swallowed, and that is deliberate. Pruning is bookkeeping nobody asked for,
+    it runs beside work somebody *is* waiting on, and the only cost of skipping an hour is
+    an hour of rows. A worker that died because its retention sweep could not reach the
+    database would be a defect traded for a much worse one.
+    """
+    try:
+        with repo.connect(database_url) as conn:
+            conn.autocommit = True
+            pruned = jobs.prune(conn)
+    except Exception:  # noqa: BLE001 — a sweep must never be able to stop a worker
+        # No counter here, and that is the one place this departs from
+        # never-infer-"no errors"-from-"no data": a swallowed failure records no rows, so a
+        # sweep failing every hour looks on the metric like a sweep finding nothing. The
+        # warning below carries the exception and is the instrument for it, because the
+        # database being unreachable is not a failure this could hide — `drain` opens the
+        # same connection on the same pass and does *not* swallow, so it goes red first.
+        # What is left for this arm is a prune-specific fault, and a stack trace names it
+        # better than a second counter would.
+        logger.warning("could not prune terminal job rows; will try again", exc_info=True)
+        return jobs.Pruned(deleted={}, capped=False)
+
+    for state, count in pruned.deleted.items():
+        _jobs_pruned.add(count, {"motet.job.state": state})
+    logger.info(
+        "pruned %d terminal job row(s): %s",
+        pruned.total,
+        ", ".join(f"{count} {state}" for state, count in sorted(pruned.deleted.items())),
+    )
+    if pruned.capped:
+        # Not an error — the next sweep continues, and a backlog built up before this
+        # existed drains over a few of them. Said out loud because a cap reached every
+        # hour forever is the table growing faster than this removes it, and the counter
+        # above cannot distinguish that from a busy deployment.
+        logger.warning(
+            "the retention sweep used its whole batch budget; more terminal rows are "
+            "probably past their window and the next sweep will take them"
+        )
+    return pruned
 
 
 @contextlib.contextmanager

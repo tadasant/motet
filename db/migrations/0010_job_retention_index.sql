@@ -1,0 +1,32 @@
+-- Find the terminal jobs a retention sweep is about to delete, without reading the table.
+--
+-- `jobs` has never been pruned: `complete()` flips a row to `done` and nothing removes it,
+-- so the table grows for the life of the deployment — one row per pipeline stage per
+-- pasted item and per episode, forever (motet#56). Migration 0007 took the *claim* query
+-- off a sequential scan of that table; it did nothing about the growth, which is storage,
+-- autovacuum work, and the footprint of every other index on the table — `jobs_source_item_idx`
+-- in particular, which holds every `integrate` job ever run and is walked by the ingestion
+-- panel the SPA polls.
+--
+-- `motet_workers.jobs.prune` deletes terminal rows past their retention window, and
+-- without this index the statement that finds them is the very sequential scan the sweep
+-- exists to make unnecessary — run every hour, on the queue table, holding row locks. That
+-- is motet#49's mistake facing the other way, and it measures the same way: on a 20k-row
+-- table with nothing past the window, which is what an hourly sweep on a healthy
+-- deployment finds every time, `EXPLAIN (ANALYZE, BUFFERS)` on the delete's own statement
+-- reads 2 shared buffers with this index and 228 without it.
+--
+-- `(state, updated_at)` is the shape the sweep asks for: one state at a time, oldest first,
+-- `LIMIT` a batch. The two states have different windows — `done` rows carry nothing the
+-- domain rows do not, while a `failed` row's `last_error` is the only copy of why a job
+-- stopped being retried — so they are two statements rather than an `OR`, and each gets a
+-- plain index scan instead of a `BitmapOr` needing a path per arm.
+--
+-- Partial, on the two terminal states. That is most of the table today and that is the
+-- point: those are exactly the rows the sweep reads, and once it is running the set it
+-- covers is bounded by the retention window rather than by the deployment's age. It holds
+-- no `ready` or `running` row, so the claim query's write path is untouched — a claim
+-- already forfeits its HOT update to `jobs_ready_idx`, and this adds one index entry per
+-- job, once, when it reaches a terminal state.
+CREATE INDEX jobs_terminal_idx ON jobs (state, updated_at)
+    WHERE state IN ('done', 'failed');

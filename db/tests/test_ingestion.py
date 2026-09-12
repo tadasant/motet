@@ -499,9 +499,9 @@ class TestExtractJobsWithNoSourceItem:
 def test_the_extract_index_covers_the_open_job_lookup(db: psycopg.Connection[Any]) -> None:
     """Migration 0008's index is the one the extract arm uses.
 
-    Same reasoning as the integrate one above: nothing prunes `jobs`, so without a
-    matching partial expression index this arm is a sequential scan of every job ever run,
-    behind a route the SPA polls while anything is pending.
+    Same reasoning as the integrate one above: without a matching partial expression index
+    this arm is a sequential scan of every job the retention window holds — days of every
+    stage's traffic — behind a route the SPA polls while anything is pending.
 
     ``EXPLAIN`` runs against ``repo.INGESTION_SQL`` itself rather than a transcription of
     the arm. A copy would keep matching the index while the statement being run drifted

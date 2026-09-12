@@ -12,9 +12,11 @@
 --
 -- That is the hottest query in the system: once per claim, and once more per queue per
 -- drain pass to discover the queue is empty, so a long-lived `runner all --poll-seconds`
--- process runs it at least six times a sweep. And nothing prunes `jobs` — `complete()`
--- only flips the state to `done` — so the relation it was scanning grows for the life of
--- the deployment.
+-- process runs it at least six times a sweep. And when this was written nothing pruned
+-- `jobs` — `complete()` only flipped the state to `done` — so the relation it was scanning
+-- grew for the life of the deployment. Migration 0010 and `motet_workers.jobs.prune` are
+-- the other half of that (motet#56); the relation is now bounded by a retention window
+-- instead, which is days of traffic and changes nothing about needing this index.
 --
 -- `(queue, locked_at)` rather than `(queue, run_at, id)`, which is the shape that would
 -- have mirrored `jobs_ready_idx`: the reclaim arm filters on `locked_at`, and the mirrored
