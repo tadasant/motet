@@ -1441,6 +1441,89 @@ return value. Written the other way round, the two concurrent claims the lease b
 does not eliminate can deadlock on one job, and the transaction Postgres picks is not the
 one you would choose.
 
+### A terminal job row is kept for a window, and the two windows are not the same
+
+`motet_workers.jobs.prune`, `loop.prune_jobs`, migration `0010`. Nothing had ever deleted a
+job row: `complete()` flips the state to `done` and the row stays, so `jobs` grew for the
+life of the deployment — one row per pipeline stage per pasted item and per episode,
+forever (motet#56). That is the half of motet#49 its PR did not take; the index there
+removed the *latency* consequence of an unpruned table and nothing about its growth. What
+was left is storage, autovacuum work, and the footprint of every *other* index on the
+table — `jobs_source_item_idx` holds every `integrate` job ever run and is walked by the
+ingestion panel the SPA polls.
+
+**The sweep rides the drain pass rather than a scheduler.** A cron entry would live in the
+private infrastructure repo, splitting a one-file change across two repositories and one of
+them not public. The worker is already the process with a connection, a loop and nothing to
+wait for. It runs once per invocation in the one-shot Cloud Run job shape — which is what
+production runs and what an enqueue starts (motet#71), so a sweep gated on a clock the
+process does not have would never fire there at all — and every
+`runner.PRUNE_INTERVAL_SECONDS` in the poll loop, on the first pass rather than after one
+interval, because a worker restarted oftener than the interval would otherwise never sweep.
+
+**Two windows, because the two terminal states hold different amounts of information, and
+the short one is the one that fails quietly.**
+
+| | `done` — 7 days | `failed` — 90 days |
+|---|---|---|
+| What the row still holds | when a stage ran, and how many attempts it took | that, plus `last_error` |
+| Who else holds it | `source_items.state`, `episodes.state` | for `integrate`/`assemble`/`script`/`tts`, `si.last_error`. **For `poll` and `extract`, nobody** |
+| The floor it must clear | `repo.INTEGRATED_GRACE`, ten minutes | the debugging window for a failure a person has not looked at yet |
+
+**`failed` is materially longer because of one specific row.** `failure_recorders` has no
+entry for `poll` or `extract` — neither has a domain object to mark, extraction is what
+writes the `source_items` row, and `handle_poll` has already advanced the cursor past the
+message — so a failed `extract` job *is* the record that a newsletter arrived and was lost
+(motet#35). `list_ingestion`'s extract arm, which is what puts it on the user's screen, is
+driven by those job rows and has no time bound of its own: delete one and the message does
+not age off the panel, it disappears from it, with nothing anywhere saying it existed. A
+quarter is far longer than anyone leaves a backlog unattended and costs nothing in rows,
+because a `failed` row means five attempts were exhausted and is not the volume line.
+
+**Be exact about what the `done` floor protects, because it is less than it sounds.** That
+arm of `list_ingestion` is driven by `source_items` and joins the job *left*, so a window
+under the grace would not remove the just-landed line — it would empty it, zeroing the
+attempt count on the row somebody is at that moment watching. Seven days is well past that
+and is chosen for forensics instead: the job row is the only record of *when* a stage ran,
+and the realistic question is asked days later.
+
+**The delete is bounded, and the bound is two numbers.** `PRUNE_BATCH_SIZE` caps the row
+locks one statement takes — an unbounded `DELETE` on a queue table holds every lock it
+takes until it commits, against the claim query the pruning exists to help — and
+`PRUNE_MAX_BATCHES` caps the sweep, so a backlog drains over several passes instead of one
+long one. Reaching the cap is not an error and is still a WARNING, because a cap hit every
+hour forever is the table growing faster than this removes it — though `capped` is a
+lower-bound signal rather than a count of what is left, since a batch cut short by `SKIP
+LOCKED` under a concurrent sweep reads the same as a drained window.
+
+**Autocommit is what makes the batch bound real, and `prune` refuses without it.** Inside
+one transaction the batches would hold every lock to the end, which is an unbounded delete
+with extra steps — and it would delete exactly the same rows, so every test about *which*
+rows still passes. The single property the design rests on could therefore be dropped
+without a test going red, which is why it is a `ValueError` rather than a docstring.
+
+**`updated_at` is the age**, written by `complete` and `fail` and by nothing afterwards. A
+job that went up the backoff ladder, or a script stage that ran for forty minutes, was
+enqueued long before it settled — keyed on `created_at` such a row would be deleted as it
+produced it.
+
+**`motet.jobs.pruned{state}` is added to even at zero, and `motet.jobs.prune_sweeps{outcome}`
+is the second instrument rather than decoration.** A sweep's whole content is deletion, so
+it leaves no other trace, and "nothing was old" and "no worker has swept" would otherwise be
+the same empty panel — the never-infer-"no errors"-from-"no data" trap one section up. A
+*failed* sweep is a third thing again and records no rows at all, which is why it gets an
+outcome of its own: the residual fault this catches is narrow but never heals — a worker
+role without `DELETE` on `jobs`, a lock timeout — and each one recurs every sweep forever
+while the table grows. Connectivity is deliberately not in that set, because `drain` opens
+the same connection on the same pass and does not swallow. The failure is swallowed and
+logged at ERROR: pruning is bookkeeping running beside work somebody is waiting on, and the
+cost of skipping an hour is an hour of rows.
+
+**In the one-shot shape the sweep runs *before* the drain**, which is the opposite of the
+obvious ordering. A sweep placed last is skipped whenever a drain raises or a task timeout
+ends the execution — so the invocations against the fullest backlogs, which create the most
+rows, would be exactly the ones that prune none.
+
 ### The episode tab reflects server state, not this page's lifetime
 
 `web/src/App.tsx`. Nothing loaded episode state on mount, so a reload — the realistic thing

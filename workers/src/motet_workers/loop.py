@@ -127,6 +127,35 @@ _lease_events = _meter.create_counter(
     description="Lease-keeper outcomes for a running job, by queue and outcome.",
 )
 
+#: Rows the retention sweep deleted, by the terminal state they were in.
+#:
+#: Added to **even when it deletes nothing**, so the series exists on a healthy deployment.
+#: Without that, "the table has nothing old in it" and "no worker has swept since the
+#: window was last changed" are the same empty panel — the
+#: never-infer-"no errors"-from-"no data" trap in AGENTS.md, on a stage whose whole content
+#: is deletion and which therefore leaves no other trace. Cardinality is two.
+_jobs_pruned = _meter.create_counter(
+    "motet.jobs.pruned",
+    unit="{job}",
+    description="Terminal job rows deleted by the retention sweep, by state.",
+)
+
+#: Whether the sweep ran, and whether it worked. The row count above cannot answer either.
+#:
+#: **A swallowed failure records no rows, which on the counter above is indistinguishable
+#: from a sweep that found nothing to delete** — the same trap that counter exists to avoid,
+#: one level up. The residual fault this catches is narrow but it is the shape that never
+#: heals: a worker role without ``DELETE`` on ``jobs``, a lock timeout, a statement timeout.
+#: Each recurs every sweep forever while the table grows, and every one of them produces a
+#: perfectly quiet worker. Connectivity is *not* in that set — ``drain`` opens the same
+#: connection on the same pass and does not swallow — which is why this is two series rather
+#: than an alert.
+_prune_sweeps = _meter.create_counter(
+    "motet.jobs.prune_sweeps",
+    unit="{sweep}",
+    description="Retention sweeps run by a worker, by outcome.",
+)
+
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
 #: alive indefinitely. Reaching it is not an error — the next scheduled run continues.
 MAX_JOBS_PER_RUN = 500
@@ -233,6 +262,59 @@ def drain(
         )
     logger.info("drained %d job(s) from %s", processed, queue.value)
     return processed
+
+
+def prune_jobs(database_url: str) -> jobs.Pruned:
+    """Run one retention sweep over the ``jobs`` table, and say what it deleted.
+
+    The observable half of :func:`~motet_workers.jobs.prune`: that function is the SQL and
+    its bounds, this is the connection, the counter and the line an operator reads. Same
+    split as everything else here — ``jobs`` takes connections and never opens one.
+
+    **Autocommit, because the batching is the bound.** Each ``DELETE`` is its own
+    transaction, so the sweep holds at most one batch of row locks at a time rather than
+    every lock it has taken since it started. A connection per sweep rather than one held
+    for the process, for :func:`drain`'s reason: a poll loop that opens and closes heals
+    itself when Postgres drops one.
+
+    Failure is swallowed, and that is deliberate. Pruning is bookkeeping nobody asked for,
+    it runs beside work somebody *is* waiting on, and the only cost of skipping an hour is
+    an hour of rows. A worker that died because its retention sweep could not reach the
+    database would be a defect traded for a much worse one. **Swallowed is not silent**: it
+    is an ERROR with a stack trace and a point on :data:`_prune_sweeps`, because a fault that
+    recurs every sweep forever is the one thing a row count cannot report.
+    """
+    try:
+        with repo.connect(database_url) as conn:
+            conn.autocommit = True
+            pruned = jobs.prune(conn)
+    except Exception:  # noqa: BLE001 — a sweep must never be able to stop a worker
+        # At ERROR, and on its own counter, because a swallowed failure records no rows and
+        # is therefore invisible on `_jobs_pruned` — identical to a sweep that found nothing.
+        # ERROR is also what reaches GlitchTip: nobody *chose* this, unlike the drain
+        # trigger's expected 403, so it is a fault rather than a configuration answer.
+        _prune_sweeps.add(1, {"motet.prune.outcome": "failed"})
+        logger.exception("could not prune terminal job rows; will try again")
+        return jobs.Pruned(deleted={}, capped=False)
+
+    _prune_sweeps.add(1, {"motet.prune.outcome": "ok"})
+    for state, count in pruned.deleted.items():
+        _jobs_pruned.add(count, {"motet.job.state": state})
+    logger.info(
+        "pruned %d terminal job row(s): %s",
+        pruned.total,
+        ", ".join(f"{count} {state}" for state, count in sorted(pruned.deleted.items())),
+    )
+    if pruned.capped:
+        # Not an error — the next sweep continues, and a backlog built up before this
+        # existed drains over a few of them. Said out loud because a cap reached every
+        # hour forever is the table growing faster than this removes it, and the counter
+        # above cannot distinguish that from a busy deployment.
+        logger.warning(
+            "the retention sweep used its whole batch budget; more terminal rows are "
+            "probably past their window and the next sweep will take them"
+        )
+    return pruned
 
 
 @contextlib.contextmanager

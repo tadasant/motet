@@ -9,8 +9,8 @@
 --
 -- `list_ingestion` therefore reads those rows directly, and it is read by a route the SPA
 -- polls every few seconds. Without this index that read is a sequential scan of every job
--- ever run — nothing prunes `jobs`; `complete()` only flips the state to 'done' — so the
--- relation grows for the life of the deployment while the useful part of it does not.
+-- the retention window still holds (migration 0010; before it, of every job ever run),
+-- while the useful part of that relation stays a handful of rows.
 --
 -- Partial on both halves of that predicate, and each half earns its place differently.
 -- `queue = 'extract'` is needed *because* the key is not exclusive to this queue — a

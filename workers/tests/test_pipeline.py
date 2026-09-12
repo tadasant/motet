@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg
 import pytest
-from motet_db import EpisodeState, SourceItemState, repo
+from motet_db import EpisodeState, SourceItemState, phase2, repo
 from motet_inference import (
     Audio,
     GroundingReport,
@@ -188,7 +188,9 @@ class TestTheClaimQueryUsesItsIndexes:
     `jobs_ready_idx` is partial on `state = 'ready'`, so it holds no `running` rows and
     cannot answer the lease-reclaim arm. A `BitmapOr` needs an index path for *every* arm,
     so with only one indexed the planner fell back to a sequential scan of every job ever
-    run — on the hottest query in the system, over a table nothing prunes.
+    run — on the hottest query in the system, over a table that at the time nothing pruned
+    and that `jobs.prune` now bounds to a retention window of days rather than to the
+    deployment's age.
 
     A comment on the index is what failed to catch that (it said "covers the claim query"
     for as long as the reclaim arm existed), so the plan is asserted rather than described.
@@ -1525,6 +1527,451 @@ class TestNothingDrainsTheQueue:
         finally:
             signal.signal(signal.SIGTERM, previous)
         assert drained[0] is Queue.INTEGRATE
+
+
+class TestJobRetention:
+    """motet#56: nothing ever deleted a job row, so `jobs` grew for the deployment's life.
+
+    `complete()` flips a row to `done` and it stays. One row per pipeline stage per pasted
+    item and per episode, forever — which after motet#49's index is no longer a latency
+    problem and is still storage, autovacuum work, and the footprint of every other index
+    on the table.
+
+    **The risk this class is mostly about is the quiet one.** Deleting too little is
+    visible in `pg_total_relation_size`; deleting too much destroys `last_error`, which for
+    `poll` and `extract` is the only record anywhere that a mailbox message was seen and
+    lost — and `list_ingestion`'s extract arm, the surface that reports it, has no time
+    bound of its own, so such a row does not age off the user's screen, it vanishes from
+    it. Both windows are therefore asserted against the readers that need them, not only
+    against themselves.
+    """
+
+    def terminal(
+        self,
+        conn: psycopg.Connection[Any],
+        *,
+        state: str,
+        age_seconds: float,
+        queue: Queue = Queue.INTEGRATE,
+        payload: Mapping[str, Any] | None = None,
+        count: int = 1,
+        attempts: int = 1,
+    ) -> None:
+        """`count` rows that reached `state` `age_seconds` ago.
+
+        Written straight in rather than by running and failing jobs: what is under test is
+        a `DELETE` keyed on `state` and `updated_at`, and driving a row to an age of eight
+        days through the queue's own API is not available at any price.
+        """
+        conn.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, attempts, run_at, created_at, updated_at)
+            SELECT %s, %s::jsonb, %s, %s,
+                   now() - make_interval(secs => %s),
+                   now() - make_interval(secs => %s),
+                   now() - make_interval(secs => %s)
+            FROM generate_series(1, %s)
+            """,
+            (
+                queue.value,
+                json.dumps(dict(payload or {})),
+                state,
+                attempts,
+                age_seconds,
+                age_seconds,
+                age_seconds,
+                count,
+            ),
+        )
+        conn.commit()
+
+    def sweep(self, conn: psycopg.Connection[Any], **kwargs: Any) -> jobs.Pruned:
+        """`jobs.prune` on an autocommit connection, which is its documented precondition.
+
+        Seeding above commits, so flipping the connection here rather than taking a second
+        one keeps each test reading as one story — and it means every test below exercises
+        the mode the bound depends on, instead of the transactional one where the batching
+        is not a bound at all.
+        """
+        conn.commit()
+        conn.autocommit = True
+        return jobs.prune(conn, **kwargs)
+
+    def states(self, conn: psycopg.Connection[Any]) -> list[tuple[str, int]]:
+        rows = conn.execute(
+            "SELECT state, count(*) AS n FROM jobs GROUP BY state ORDER BY state"
+        ).fetchall()
+        return [(row["state"], row["n"]) for row in rows]
+
+    def test_the_windows_outlive_the_readers_that_need_them(self) -> None:
+        """The two orderings the whole design rests on, pinned as constants.
+
+        `INTEGRATED_GRACE` is the bound on the only reader that wants a `done` row at all;
+        a `done` window shorter than it would blank the ingestion panel's success line
+        while somebody was looking at it. And `failed` must outlive `done` by enough to be
+        a different decision rather than a rounding of the same one — a `failed` row is
+        the only copy of `last_error`.
+        """
+        assert jobs.DONE_RETENTION_SECONDS > repo.INTEGRATED_GRACE.total_seconds()
+        assert jobs.FAILED_RETENTION_SECONDS > jobs.DONE_RETENTION_SECONDS * 10
+
+    def test_pruning_inside_a_transaction_is_refused(self, db: psycopg.Connection[Any]) -> None:
+        """The bound is autocommit, and a violated precondition here is otherwise invisible.
+
+        Inside one transaction the batches hold every row lock until the last of them
+        commits, which is the unbounded `DELETE` the batching exists to avoid — against the
+        claim query the pruning is meant to be helping. It deletes exactly the same rows
+        either way, so every assertion about *which* rows still passes: the single property
+        the design rests on could be dropped without a test going red. Hence a `ValueError`
+        and this test, rather than a sentence in a docstring.
+        """
+        self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS + 3600)
+        assert not db.autocommit
+
+        with pytest.raises(ValueError, match="autocommit"):
+            jobs.prune(db)
+
+        assert self.states(db) == [("done", 1)], "the refusal must not have deleted anything"
+
+    def test_a_done_row_past_the_window_goes_and_one_inside_it_stays(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS + 3600)
+        self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS - 3600)
+        assert self.states(db) == [("done", 2)]
+
+        pruned = self.sweep(db)
+
+        assert pruned.deleted["done"] == 1
+        assert not pruned.capped
+        assert self.states(db) == [("done", 1)]
+
+    def test_a_failed_row_is_kept_long_after_a_done_one_would_be_gone(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The asymmetry, at the age where it is the only thing deciding.
+
+        Both rows are a fortnight old. The `done` one is redundant with `source_items` by
+        then; the `failed` one still carries the sentence that says why the job stopped
+        being retried, and for `poll` and `extract` there is no second copy of it anywhere.
+        """
+        fortnight = 14 * 24 * 3600
+        self.terminal(db, state="done", age_seconds=fortnight)
+        self.terminal(db, state="failed", age_seconds=fortnight, payload={"why": "keep me"})
+
+        pruned = self.sweep(db)
+
+        assert pruned.deleted == {"done": 1, "failed": 0}
+        assert self.states(db) == [("failed", 1)]
+
+    def test_a_failed_row_past_its_own_window_goes_too(self, db: psycopg.Connection[Any]) -> None:
+        """Longer is not forever: the table has to be bounded on both states or on neither."""
+        self.terminal(db, state="failed", age_seconds=jobs.FAILED_RETENTION_SECONDS + 86400)
+        self.terminal(db, state="failed", age_seconds=jobs.FAILED_RETENTION_SECONDS - 86400)
+
+        pruned = self.sweep(db)
+
+        assert pruned.deleted["failed"] == 1
+        assert self.states(db) == [("failed", 1)]
+
+    def test_a_job_ages_from_when_it_finished_not_from_when_it_was_enqueued(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """`updated_at`, which `complete` and `fail` write, and nothing writes afterwards.
+
+        A job that went up the backoff ladder — five attempts, ten minutes of waiting, a
+        vendor outage in between — was enqueued long before it settled, and a stage whose
+        work is the user's whole backlog can run for the better part of an hour by itself.
+        Keyed on `created_at` this row would be deleted the moment it completed, which is
+        the version of this change that silently loses a job's record as it produces it.
+        `id` is not a clock either, for the same reason.
+        """
+        db.execute(
+            """
+            INSERT INTO jobs (queue, payload, state, attempts, created_at, updated_at)
+            VALUES ('script', '{}'::jsonb, 'done', 5,
+                    now() - make_interval(secs => %s), now() - make_interval(secs => 60))
+            """,
+            (jobs.DONE_RETENTION_SECONDS + 86400,),
+        )
+        db.commit()
+
+        assert self.sweep(db).total == 0
+        assert self.states(db) == [("done", 1)]
+
+    def test_a_live_job_is_never_touched_however_old_it_is(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Age is not the criterion — reaching a terminal state is, and age bounds it.
+
+        A `ready` job a year old is a job somebody is still owed; a `running` one that old
+        is a stranded row the lease reclaim exists to recover. Deleting either would turn
+        a retention sweep into data loss, and `run_at`/`created_at` are the columns that
+        would have done it, which is why the statement keys on `updated_at` and `state`.
+        """
+        year = 365 * 24 * 3600
+        self.terminal(db, state="ready", age_seconds=year)
+        self.terminal(db, state="running", age_seconds=year)
+
+        pruned = self.sweep(db)
+
+        assert pruned.total == 0
+        assert self.states(db) == [("ready", 1), ("running", 1)]
+
+    def test_the_delete_is_bounded_and_says_so(self, db: psycopg.Connection[Any]) -> None:
+        """One sweep removes a fixed number of rows and leaves the rest for the next one.
+
+        An unbounded `DELETE` on a queue table holds every row lock it takes until it
+        commits, against the claim query the pruning is meant to be helping. The batch size
+        is what caps the locks; the batch count is what caps the sweep.
+        """
+        budget = 8
+        excess = 5
+        self.terminal(
+            db,
+            state="done",
+            age_seconds=jobs.DONE_RETENTION_SECONDS + 3600,
+            count=budget + excess,
+        )
+
+        first = self.sweep(db, batch_size=2, max_batches=4)
+
+        assert first.deleted["done"] == budget
+        assert first.capped, "a sweep that stopped on its budget has to say so"
+        assert self.states(db) == [("done", excess)]
+
+        second = self.sweep(db, batch_size=2, max_batches=4)
+
+        assert second.deleted["done"] == excess
+        assert not second.capped
+        assert self.states(db) == []
+
+    def test_the_oldest_rows_go_first(self, db: psycopg.Connection[Any]) -> None:
+        """Which rows a capped sweep takes, and it is the answer that makes it converge.
+
+        A sweep that took an arbitrary batch would leave the oldest rows to be re-read on
+        every pass — and on a table whose growth outran one sweep, never delete them.
+        """
+        for age_days in (30, 20, 10):
+            # `attempts` is a spare integer column, used here only to label which row is
+            # which: the rows are otherwise identical apart from an age this then reads back.
+            self.terminal(db, state="done", age_seconds=age_days * 24 * 3600, attempts=age_days)
+
+        self.sweep(db, batch_size=1, max_batches=1)
+
+        remaining = [row["attempts"] for row in db.execute("SELECT attempts FROM jobs").fetchall()]
+        assert sorted(remaining) == [10, 20]
+
+    def test_the_ingestion_panel_keeps_a_just_landed_paste_intact(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The one reader that wants a `done` row, at the far edge of the grace it is given.
+
+        `list_ingestion` joins the just-succeeded `integrate` job onto the line it keeps up
+        for `INTEGRATED_GRACE` after a paste lands. Aged to nine minutes, the line is still
+        up and the join still has to find its row — which is the boundary a `done` window
+        under the grace would cross, and a fresh row proves nothing about.
+
+        **What such a window would cost is the attempt count, not the line**: the arm is
+        driven by `source_items` and joins the job *left*, so the row goes on being
+        reported, emptied. That is why `attempts` is what this asserts.
+        """
+        paste(db, MORNING)
+        drain(Queue.INTEGRATE, _migrated)
+        nearly_expired = repo.INTEGRATED_GRACE.total_seconds() - 60
+        db.execute(
+            """
+            UPDATE jobs SET updated_at = now() - make_interval(secs => %s)
+            WHERE queue = 'integrate'
+            """,
+            (nearly_expired,),
+        )
+        db.execute(
+            "UPDATE source_items SET integrated_at = now() - make_interval(secs => %s)",
+            (nearly_expired,),
+        )
+        db.commit()
+
+        (before,) = repo.list_ingestion(db, USER)
+        assert before.state is SourceItemState.INTEGRATED
+        assert before.attempts == 1
+
+        pruned = self.sweep(db)
+
+        assert pruned.total == 0
+        (after,) = repo.list_ingestion(db, USER)
+        assert (after.id, after.state, after.attempts) == (before.id, before.state, 1)
+
+    def test_a_lost_mailbox_message_is_still_reported_after_a_sweep(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """The quiet failure, guarded at the surface it would have failed at.
+
+        `handle_extract` writes a `source_items` row only when extraction succeeds, and
+        `handle_poll` has already moved the cursor past the message — so a `failed`
+        extract job is the whole record that a newsletter arrived and was lost, and
+        `list_ingestion`'s extract arm reports it with no time bound of its own. Delete the
+        row and the message does not age off the panel; it disappears from it, with nothing
+        anywhere saying it ever existed. A fortnight is past the `done` window and nowhere
+        near the `failed` one.
+        """
+        source_id = phase2.create_source(db, user_id=USER, kind="gmail", name="Gmail").id
+        db.commit()
+        self.terminal(
+            db,
+            state="failed",
+            queue=Queue.EXTRACT,
+            age_seconds=14 * 24 * 3600,
+            payload={"source_id": source_id, "message_id": "msg_lost"},
+        )
+        db.execute(
+            "UPDATE jobs SET last_error = %s WHERE queue = 'extract'",
+            ("HttpError: the mailbox would not answer",),
+        )
+        db.commit()
+
+        self.sweep(db)
+
+        (status,) = repo.list_ingestion(db, USER)
+        assert status.state is SourceItemState.FAILED
+        assert status.last_error == "HttpError: the mailbox would not answer"
+
+    def test_the_prune_statement_reads_its_index_rather_than_the_table(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Migration 0010's index, asserted on the plan of the statement `prune` runs.
+
+        Without it the sweep is a sequential scan of `jobs` — the very scan it exists to
+        make unnecessary, run every hour, taking row locks. That is motet#49's mistake
+        facing the other way, and a comment on the index is what failed to catch it the
+        first time, so this `EXPLAIN`s `jobs.PRUNE_SQL` itself rather than a copy.
+        """
+        # Both shapes, because they plan differently and only one of them is the sweep
+        # doing work: rows inside the window are the hourly no-op, rows past it are the
+        # delete that matters. The index has to answer the *search* in both.
+        self.terminal(db, state="done", age_seconds=3600, count=2000)
+        self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS + 3600, count=2000)
+        # Without fresh statistics the planner is costing a table it thinks is empty, and
+        # would pick a sequential scan for any query at all.
+        db.execute("ANALYZE jobs")
+        db.commit()
+
+        plan = "\n".join(
+            row["QUERY PLAN"]
+            for row in db.execute(
+                f"EXPLAIN {jobs.PRUNE_SQL}",
+                ("done", jobs.DONE_RETENTION_SECONDS, jobs.PRUNE_BATCH_SIZE),
+            ).fetchall()
+        )
+
+        # The *inner* scan — how the rows to delete are found — is the claim. Not the outer
+        # `DELETE ... WHERE id IN`, which Postgres plans as a hash semi-join over a seq scan
+        # on a small table and as a nested loop on the primary key on a large one: both are
+        # cost-justified, neither is what this index is for, and asserting no sequential scan
+        # anywhere in the plan would fail on a realistic table for no defect.
+        assert "jobs_terminal_idx" in plan, plan
+        assert "Seq Scan on jobs jobs_1" not in plan, plan
+
+    def test_a_one_shot_drain_sweeps_once(
+        self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Cloud Run job shape is the one production runs, so it cannot be left out.
+
+        A sweep gated on a clock would never fire in a process that exits after one drain
+        — and since motet#71 an execution starts whenever somebody pastes, so that process
+        is most of what runs at all.
+        """
+        sweeps: list[str] = []
+        monkeypatch.setattr(runner, "prune_jobs", lambda url: sweeps.append(url))
+
+        assert runner.main(["integrate"]) == 0
+
+        assert sweeps == [_migrated]
+
+    def test_the_poll_loop_sweeps_on_its_first_pass_and_then_waits(
+        self, _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once per interval, not once per pass — the loop runs several times a second.
+
+        The first pass sweeps rather than waiting out an interval, because a worker
+        restarted oftener than the interval would otherwise never sweep at all.
+        """
+        sweeps: list[str] = []
+        passes = 0
+
+        def fake_drain(queue: Queue, url: str, *, max_jobs: int, **_: Any) -> int:
+            nonlocal passes
+            passes += 1
+            assert passes <= 5, "the poll loop did not stop"
+            if passes == 5:
+                os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+        monkeypatch.setattr(runner, "drain", fake_drain)
+        monkeypatch.setattr(runner, "prune_jobs", lambda url: sweeps.append(url))
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            assert runner.main(["integrate", "--poll-seconds", "0.001"]) == 0
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+        assert sweeps == [_migrated], f"{passes} passes swept {len(sweeps)} times"
+
+    def test_the_poll_loop_sweeps_again_once_the_interval_elapses(
+        self, _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half, and the one a "swept once per process" bug would slip past.
+
+        A long-lived worker is the shape the interval exists for, so "it swept, then stopped
+        asking" has to be distinguishable from "it swept, then waited". With the interval at
+        zero every pass is due, so the count of sweeps has to track the count of passes.
+        """
+        sweeps: list[str] = []
+        passes = 0
+
+        def fake_drain(queue: Queue, url: str, *, max_jobs: int, **_: Any) -> int:
+            nonlocal passes
+            passes += 1
+            assert passes <= 5, "the poll loop did not stop"
+            if passes == 4:
+                os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+        monkeypatch.setattr(runner, "drain", fake_drain)
+        monkeypatch.setattr(runner, "PRUNE_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr(runner, "prune_jobs", lambda url: sweeps.append(url))
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            assert runner.main(["integrate", "--poll-seconds", "0.001"]) == 0
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+        assert len(sweeps) == passes == 4
+
+    def test_a_sweep_that_cannot_reach_the_database_does_not_stop_the_worker(
+        self, _migrated: str
+    ) -> None:
+        """Pruning is bookkeeping beside work somebody is waiting on.
+
+        The cost of skipping an hour is an hour of rows; the cost of a worker that exits
+        because its retention sweep could not connect is every job on every queue.
+        """
+        pruned = loop.prune_jobs("postgresql://nobody@127.0.0.1:1/nowhere")
+
+        assert pruned.total == 0
+        assert not pruned.capped
+
+    def test_a_sweep_that_deleted_nothing_still_records_that_it_ran(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """A sweep that found nothing and a sweep that never ran are different facts.
+
+        The counter carries a zero for every swept state for exactly that reason, which is
+        the never-infer-"no errors"-from-"no data" trap in AGENTS.md; this asserts the
+        shape the metric is built from, since the counter itself is a no-op with no obs
+        stack configured.
+        """
+        assert loop.prune_jobs(_migrated).deleted == {"done": 0, "failed": 0}
 
 
 class TestIdenticalTitles:
