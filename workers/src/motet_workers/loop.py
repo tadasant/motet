@@ -140,6 +140,22 @@ _jobs_pruned = _meter.create_counter(
     description="Terminal job rows deleted by the retention sweep, by state.",
 )
 
+#: Whether the sweep ran, and whether it worked. The row count above cannot answer either.
+#:
+#: **A swallowed failure records no rows, which on the counter above is indistinguishable
+#: from a sweep that found nothing to delete** — the same trap that counter exists to avoid,
+#: one level up. The residual fault this catches is narrow but it is the shape that never
+#: heals: a worker role without ``DELETE`` on ``jobs``, a lock timeout, a statement timeout.
+#: Each recurs every sweep forever while the table grows, and every one of them produces a
+#: perfectly quiet worker. Connectivity is *not* in that set — ``drain`` opens the same
+#: connection on the same pass and does not swallow — which is why this is two series rather
+#: than an alert.
+_prune_sweeps = _meter.create_counter(
+    "motet.jobs.prune_sweeps",
+    unit="{sweep}",
+    description="Retention sweeps run by a worker, by outcome.",
+)
+
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
 #: alive indefinitely. Reaching it is not an error — the next scheduled run continues.
 MAX_JOBS_PER_RUN = 500
@@ -264,24 +280,24 @@ def prune_jobs(database_url: str) -> jobs.Pruned:
     Failure is swallowed, and that is deliberate. Pruning is bookkeeping nobody asked for,
     it runs beside work somebody *is* waiting on, and the only cost of skipping an hour is
     an hour of rows. A worker that died because its retention sweep could not reach the
-    database would be a defect traded for a much worse one.
+    database would be a defect traded for a much worse one. **Swallowed is not silent**: it
+    is an ERROR with a stack trace and a point on :data:`_prune_sweeps`, because a fault that
+    recurs every sweep forever is the one thing a row count cannot report.
     """
     try:
         with repo.connect(database_url) as conn:
             conn.autocommit = True
             pruned = jobs.prune(conn)
     except Exception:  # noqa: BLE001 — a sweep must never be able to stop a worker
-        # No counter here, and that is the one place this departs from
-        # never-infer-"no errors"-from-"no data": a swallowed failure records no rows, so a
-        # sweep failing every hour looks on the metric like a sweep finding nothing. The
-        # warning below carries the exception and is the instrument for it, because the
-        # database being unreachable is not a failure this could hide — `drain` opens the
-        # same connection on the same pass and does *not* swallow, so it goes red first.
-        # What is left for this arm is a prune-specific fault, and a stack trace names it
-        # better than a second counter would.
-        logger.warning("could not prune terminal job rows; will try again", exc_info=True)
+        # At ERROR, and on its own counter, because a swallowed failure records no rows and
+        # is therefore invisible on `_jobs_pruned` — identical to a sweep that found nothing.
+        # ERROR is also what reaches GlitchTip: nobody *chose* this, unlike the drain
+        # trigger's expected 403, so it is a fault rather than a configuration answer.
+        _prune_sweeps.add(1, {"motet.prune.outcome": "failed"})
+        logger.exception("could not prune terminal job rows; will try again")
         return jobs.Pruned(deleted={}, capped=False)
 
+    _prune_sweeps.add(1, {"motet.prune.outcome": "ok"})
     for state, count in pruned.deleted.items():
         _jobs_pruned.add(count, {"motet.job.state": state})
     logger.info(

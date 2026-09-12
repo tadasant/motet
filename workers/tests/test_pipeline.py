@@ -1585,6 +1585,18 @@ class TestJobRetention:
         )
         conn.commit()
 
+    def sweep(self, conn: psycopg.Connection[Any], **kwargs: Any) -> jobs.Pruned:
+        """`jobs.prune` on an autocommit connection, which is its documented precondition.
+
+        Seeding above commits, so flipping the connection here rather than taking a second
+        one keeps each test reading as one story — and it means every test below exercises
+        the mode the bound depends on, instead of the transactional one where the batching
+        is not a bound at all.
+        """
+        conn.commit()
+        conn.autocommit = True
+        return jobs.prune(conn, **kwargs)
+
     def states(self, conn: psycopg.Connection[Any]) -> list[tuple[str, int]]:
         rows = conn.execute(
             "SELECT state, count(*) AS n FROM jobs GROUP BY state ORDER BY state"
@@ -1603,6 +1615,24 @@ class TestJobRetention:
         assert jobs.DONE_RETENTION_SECONDS > repo.INTEGRATED_GRACE.total_seconds()
         assert jobs.FAILED_RETENTION_SECONDS > jobs.DONE_RETENTION_SECONDS * 10
 
+    def test_pruning_inside_a_transaction_is_refused(self, db: psycopg.Connection[Any]) -> None:
+        """The bound is autocommit, and a violated precondition here is otherwise invisible.
+
+        Inside one transaction the batches hold every row lock until the last of them
+        commits, which is the unbounded `DELETE` the batching exists to avoid — against the
+        claim query the pruning is meant to be helping. It deletes exactly the same rows
+        either way, so every assertion about *which* rows still passes: the single property
+        the design rests on could be dropped without a test going red. Hence a `ValueError`
+        and this test, rather than a sentence in a docstring.
+        """
+        self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS + 3600)
+        assert not db.autocommit
+
+        with pytest.raises(ValueError, match="autocommit"):
+            jobs.prune(db)
+
+        assert self.states(db) == [("done", 1)], "the refusal must not have deleted anything"
+
     def test_a_done_row_past_the_window_goes_and_one_inside_it_stays(
         self, db: psycopg.Connection[Any]
     ) -> None:
@@ -1610,7 +1640,7 @@ class TestJobRetention:
         self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS - 3600)
         assert self.states(db) == [("done", 2)]
 
-        pruned = jobs.prune(db)
+        pruned = self.sweep(db)
 
         assert pruned.deleted["done"] == 1
         assert not pruned.capped
@@ -1629,7 +1659,7 @@ class TestJobRetention:
         self.terminal(db, state="done", age_seconds=fortnight)
         self.terminal(db, state="failed", age_seconds=fortnight, payload={"why": "keep me"})
 
-        pruned = jobs.prune(db)
+        pruned = self.sweep(db)
 
         assert pruned.deleted == {"done": 1, "failed": 0}
         assert self.states(db) == [("failed", 1)]
@@ -1639,7 +1669,7 @@ class TestJobRetention:
         self.terminal(db, state="failed", age_seconds=jobs.FAILED_RETENTION_SECONDS + 86400)
         self.terminal(db, state="failed", age_seconds=jobs.FAILED_RETENTION_SECONDS - 86400)
 
-        pruned = jobs.prune(db)
+        pruned = self.sweep(db)
 
         assert pruned.deleted["failed"] == 1
         assert self.states(db) == [("failed", 1)]
@@ -1666,7 +1696,7 @@ class TestJobRetention:
         )
         db.commit()
 
-        assert jobs.prune(db).total == 0
+        assert self.sweep(db).total == 0
         assert self.states(db) == [("done", 1)]
 
     def test_a_live_job_is_never_touched_however_old_it_is(
@@ -1683,7 +1713,7 @@ class TestJobRetention:
         self.terminal(db, state="ready", age_seconds=year)
         self.terminal(db, state="running", age_seconds=year)
 
-        pruned = jobs.prune(db)
+        pruned = self.sweep(db)
 
         assert pruned.total == 0
         assert self.states(db) == [("ready", 1), ("running", 1)]
@@ -1704,13 +1734,13 @@ class TestJobRetention:
             count=budget + excess,
         )
 
-        first = jobs.prune(db, batch_size=2, max_batches=4)
+        first = self.sweep(db, batch_size=2, max_batches=4)
 
         assert first.deleted["done"] == budget
         assert first.capped, "a sweep that stopped on its budget has to say so"
         assert self.states(db) == [("done", excess)]
 
-        second = jobs.prune(db, batch_size=2, max_batches=4)
+        second = self.sweep(db, batch_size=2, max_batches=4)
 
         assert second.deleted["done"] == excess
         assert not second.capped
@@ -1727,7 +1757,7 @@ class TestJobRetention:
             # which: the rows are otherwise identical apart from an age this then reads back.
             self.terminal(db, state="done", age_seconds=age_days * 24 * 3600, attempts=age_days)
 
-        jobs.prune(db, batch_size=1, max_batches=1)
+        self.sweep(db, batch_size=1, max_batches=1)
 
         remaining = [row["attempts"] for row in db.execute("SELECT attempts FROM jobs").fetchall()]
         assert sorted(remaining) == [10, 20]
@@ -1766,7 +1796,7 @@ class TestJobRetention:
         assert before.state is SourceItemState.INTEGRATED
         assert before.attempts == 1
 
-        pruned = jobs.prune(db)
+        pruned = self.sweep(db)
 
         assert pruned.total == 0
         (after,) = repo.list_ingestion(db, USER)
@@ -1800,7 +1830,7 @@ class TestJobRetention:
         )
         db.commit()
 
-        jobs.prune(db)
+        self.sweep(db)
 
         (status,) = repo.list_ingestion(db, USER)
         assert status.state is SourceItemState.FAILED
@@ -1816,7 +1846,11 @@ class TestJobRetention:
         facing the other way, and a comment on the index is what failed to catch it the
         first time, so this `EXPLAIN`s `jobs.PRUNE_SQL` itself rather than a copy.
         """
+        # Both shapes, because they plan differently and only one of them is the sweep
+        # doing work: rows inside the window are the hourly no-op, rows past it are the
+        # delete that matters. The index has to answer the *search* in both.
         self.terminal(db, state="done", age_seconds=3600, count=2000)
+        self.terminal(db, state="done", age_seconds=jobs.DONE_RETENTION_SECONDS + 3600, count=2000)
         # Without fresh statistics the planner is costing a table it thinks is empty, and
         # would pick a sequential scan for any query at all.
         db.execute("ANALYZE jobs")
@@ -1830,8 +1864,13 @@ class TestJobRetention:
             ).fetchall()
         )
 
+        # The *inner* scan — how the rows to delete are found — is the claim. Not the outer
+        # `DELETE ... WHERE id IN`, which Postgres plans as a hash semi-join over a seq scan
+        # on a small table and as a nested loop on the primary key on a large one: both are
+        # cost-justified, neither is what this index is for, and asserting no sequential scan
+        # anywhere in the plan would fail on a realistic table for no defect.
         assert "jobs_terminal_idx" in plan, plan
-        assert "Seq Scan on jobs" not in plan, plan
+        assert "Seq Scan on jobs jobs_1" not in plan, plan
 
     def test_a_one_shot_drain_sweeps_once(
         self, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
@@ -1877,6 +1916,37 @@ class TestJobRetention:
             signal.signal(signal.SIGTERM, previous)
 
         assert sweeps == [_migrated], f"{passes} passes swept {len(sweeps)} times"
+
+    def test_the_poll_loop_sweeps_again_once_the_interval_elapses(
+        self, _migrated: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half, and the one a "swept once per process" bug would slip past.
+
+        A long-lived worker is the shape the interval exists for, so "it swept, then stopped
+        asking" has to be distinguishable from "it swept, then waited". With the interval at
+        zero every pass is due, so the count of sweeps has to track the count of passes.
+        """
+        sweeps: list[str] = []
+        passes = 0
+
+        def fake_drain(queue: Queue, url: str, *, max_jobs: int, **_: Any) -> int:
+            nonlocal passes
+            passes += 1
+            assert passes <= 5, "the poll loop did not stop"
+            if passes == 4:
+                os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+        monkeypatch.setattr(runner, "drain", fake_drain)
+        monkeypatch.setattr(runner, "PRUNE_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr(runner, "prune_jobs", lambda url: sweeps.append(url))
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            assert runner.main(["integrate", "--poll-seconds", "0.001"]) == 0
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+        assert len(sweeps) == passes == 4
 
     def test_a_sweep_that_cannot_reach_the_database_does_not_stop_the_worker(
         self, _migrated: str

@@ -87,11 +87,15 @@ ALL_QUEUES = "all"
 #: several times a *second*, so without an interval the sweep would be the busiest query in
 #: the process, and the one that takes row locks.
 #:
-#: **The one-shot shape has no interval and needs none.** ``runner <queue>`` with no
-#: ``--poll-seconds`` is a Cloud Run job, which is what production runs and what the API's
-#: enqueue trigger starts (motet#71), so a sweep gated on a clock this process does not have
-#: would simply never run there. It sweeps once per invocation instead: two index scans that
-#: usually delete nothing, against an execution that was already going to start a container.
+#: **This bounds the poll loop and nothing else, which matters because the poll loop is not
+#: what production runs.** ``runner <queue>`` with no ``--poll-seconds`` is a Cloud Run job,
+#: and a sweep gated on a clock a process that exits does not have would never fire there at
+#: all — so that shape sweeps once per invocation, unconditionally. Between the scheduler
+#: backstop and one execution per enqueue (motet#71) that is on the order of a sweep a
+#: minute, not one an hour, and the paragraph above is not a claim about it. The cost is
+#: what makes that acceptable rather than a bound: a sweep with nothing past its window is
+#: two index scans and about 2 shared buffers, inside an execution that was already going to
+#: start a container.
 PRUNE_INTERVAL_SECONDS = 3600.0
 
 
@@ -202,12 +206,15 @@ def main(argv: list[str] | None = None) -> int:
     stop = _Stop()
     try:
         if args.poll_seconds <= 0:
+            # Before the drain rather than after it, which is the opposite of the obvious
+            # ordering and is the one that actually runs. A sweep placed last is skipped
+            # whenever a drain raises or a Cloud Run task timeout ends the execution — so
+            # the invocations that create the most rows, against the fullest backlogs, would
+            # be exactly the ones that prune none. It costs milliseconds and deletes nothing
+            # this execution is about to write, because every window is days wide.
+            prune_jobs(database_url)
             for queue in queues:
                 drain(queue, database_url, max_jobs=args.max_jobs, stages=stages, store=store)
-            # After the drain, not before: the sweep is bookkeeping and the jobs are the
-            # work, and a Cloud Run job's execution time is what the drain is competing
-            # for. It deletes nothing this run put there — every window is days wide.
-            prune_jobs(database_url)
             return 0
 
         _install_sigterm(stop)

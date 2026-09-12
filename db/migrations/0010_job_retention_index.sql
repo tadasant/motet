@@ -16,6 +16,13 @@
 -- deployment finds every time, `EXPLAIN (ANALYZE, BUFFERS)` on the delete's own statement
 -- reads 2 shared buffers with this index and 228 without it.
 --
+-- That figure is the sweep finding nothing, which is deliberate — it is the shape that runs
+-- every hour. Where there *is* work, the inner search still comes through this index and
+-- the outer `DELETE ... WHERE id IN` is planned as Postgres sees fit: a hash semi-join over
+-- a sequential scan on a small table, a nested loop on the primary key on a large one. Both
+-- are cost decisions about the delete, not about finding the rows, which is why the test
+-- asserts on the inner scan and not on the absence of a sequential scan anywhere.
+--
 -- `(state, updated_at)` is the shape the sweep asks for: one state at a time, oldest first,
 -- `LIMIT` a batch. The two states have different windows — `done` rows carry nothing the
 -- domain rows do not, while a `failed` row's `last_error` is the only copy of why a job

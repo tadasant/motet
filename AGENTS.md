@@ -1491,22 +1491,38 @@ and the realistic question is asked days later.
 locks one statement takes — an unbounded `DELETE` on a queue table holds every lock it
 takes until it commits, against the claim query the pruning exists to help — and
 `PRUNE_MAX_BATCHES` caps the sweep, so a backlog drains over several passes instead of one
-long one. **Autocommit is what makes the first of those real**: inside one transaction the
-batches would hold every lock to the end, which is an unbounded delete with extra steps.
-Reaching the cap is not an error and is still a WARNING, because a cap hit every hour
-forever is the table growing faster than this removes it.
+long one. Reaching the cap is not an error and is still a WARNING, because a cap hit every
+hour forever is the table growing faster than this removes it — though `capped` is a
+lower-bound signal rather than a count of what is left, since a batch cut short by `SKIP
+LOCKED` under a concurrent sweep reads the same as a drained window.
+
+**Autocommit is what makes the batch bound real, and `prune` refuses without it.** Inside
+one transaction the batches would hold every lock to the end, which is an unbounded delete
+with extra steps — and it would delete exactly the same rows, so every test about *which*
+rows still passes. The single property the design rests on could therefore be dropped
+without a test going red, which is why it is a `ValueError` rather than a docstring.
 
 **`updated_at` is the age**, written by `complete` and `fail` and by nothing afterwards. A
 job that went up the backoff ladder, or a script stage that ran for forty minutes, was
 enqueued long before it settled — keyed on `created_at` such a row would be deleted as it
 produced it.
 
-**`motet.jobs.pruned{state}` is added to even at zero.** A sweep's whole content is
-deletion, so it leaves no other trace, and "nothing was old" and "no worker has swept"
-would otherwise be the same empty panel — the
-never-infer-"no errors"-from-"no data" trap one section up. A failure to sweep is swallowed
-and logged: pruning is bookkeeping running beside work somebody is waiting on, and the cost
-of skipping an hour is an hour of rows.
+**`motet.jobs.pruned{state}` is added to even at zero, and `motet.jobs.prune_sweeps{outcome}`
+is the second instrument rather than decoration.** A sweep's whole content is deletion, so
+it leaves no other trace, and "nothing was old" and "no worker has swept" would otherwise be
+the same empty panel — the never-infer-"no errors"-from-"no data" trap one section up. A
+*failed* sweep is a third thing again and records no rows at all, which is why it gets an
+outcome of its own: the residual fault this catches is narrow but never heals — a worker
+role without `DELETE` on `jobs`, a lock timeout — and each one recurs every sweep forever
+while the table grows. Connectivity is deliberately not in that set, because `drain` opens
+the same connection on the same pass and does not swallow. The failure is swallowed and
+logged at ERROR: pruning is bookkeeping running beside work somebody is waiting on, and the
+cost of skipping an hour is an hour of rows.
+
+**In the one-shot shape the sweep runs *before* the drain**, which is the opposite of the
+obvious ordering. A sweep placed last is skipped whenever a drain raises or a task timeout
+ends the execution — so the invocations against the fullest backlogs, which create the most
+rows, would be exactly the ones that prune none.
 
 ### The episode tab reflects server state, not this page's lifetime
 

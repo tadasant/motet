@@ -546,10 +546,19 @@ class Pruned:
     #: Rows deleted, by state. Every swept state is present, at zero if nothing matched —
     #: "nothing to delete" and "the sweep never ran" are different facts and the never-infer-
     #: "no errors"-from-"no data" trap in AGENTS.md is what happens when they share a shape.
+    #: **Empty means the sweep failed**, which is a third thing again and is why
+    #: :func:`~motet_workers.loop.prune_jobs` reports its outcome on a counter of its own
+    #: rather than leaving a fault to be inferred from a missing row count.
     deleted: Mapping[str, int]
-    #: Whether any state used its whole batch budget — every batch full, none short. The
-    #: sweep stopped because it ran out of budget rather than out of rows, so there is
-    #: probably more past that window than one sweep removes.
+    #: Whether any state used its whole batch budget — every batch full, none short.
+    #:
+    #: **A lower-bound signal, not a count of what is left**, and wrong at both edges in the
+    #: direction that costs nothing. A sweep that empties the window in exactly its whole
+    #: budget says ``True`` with nothing remaining; and a batch cut short by ``SKIP LOCKED``
+    #: — two sweeps at once is the ordinary deployment, an always-on worker beside a
+    #: per-enqueue execution — breaks the loop and says ``False`` with rows left. Both are
+    #: benign because the next sweep settles it; what this is for is the case that does not
+    #: settle, a budget exhausted every sweep forever.
     capped: bool
 
     @property
@@ -579,11 +588,19 @@ def prune(
     and lost. See :data:`DONE_RETENTION_SECONDS` and :data:`FAILED_RETENTION_SECONDS` — the
     windows are where the reasoning is, and the short one is the one that fails quietly.
 
-    **Call this on an autocommit connection.** The batching is the entire bound, and inside
-    one transaction it would not be one: every batch's row locks would be held until the
-    last of them committed, which is an unbounded ``DELETE`` with extra steps. Autocommit
-    makes each statement its own transaction, so the sweep holds at most ``batch_size`` row
-    locks at a time and can be abandoned between batches without rolling anything back.
+    **Call this on an autocommit connection, and it refuses otherwise.** The batching is
+    the entire bound, and inside one transaction it would not be one: every batch's row
+    locks would be held until the last of them committed, which is an unbounded ``DELETE``
+    with extra steps. Autocommit makes each statement its own transaction, so the sweep
+    holds at most ``batch_size`` row locks at a time and can be abandoned between batches
+    without rolling anything back.
+
+    The check is a ``ValueError`` rather than a docstring because a violated precondition
+    here is invisible: the sweep deletes exactly the same rows either way and every
+    assertion about *which* rows still passes, so the one property the design rests on could
+    be dropped without a single test going red. The caller that has to get this right is
+    :func:`~motet_workers.loop.prune_jobs`, and this is what says so at the moment it is
+    wrong rather than in production.
 
     ``updated_at`` is the age, and it is the right column because ``complete`` and ``fail``
     both write it when the row reaches its terminal state and nothing writes it afterwards.
@@ -595,6 +612,13 @@ def prune(
     for the same reason the rest of the telemetry does: this module takes connections and
     never opens one, and is not where a decision about observability belongs.
     """
+    if not conn.autocommit:
+        raise ValueError(
+            "prune() needs an autocommit connection: inside one transaction the batches "
+            "hold every row lock until the last of them commits, which is the unbounded "
+            "DELETE the batching exists to avoid"
+        )
+
     deleted: dict[str, int] = {}
     capped = False
     for state, seconds in RETENTION_SECONDS.items():
@@ -602,10 +626,12 @@ def prune(
         for _ in range(max_batches):
             cursor = conn.execute(PRUNE_SQL, (state, seconds, batch_size))
             removed += cursor.rowcount
-            # A short batch means the window is drained: there is no point asking again,
-            # and asking is a scan. Only running every batch to the full size reaches the
-            # `else` below, which is what `capped` reports — "stopped on budget" rather
-            # than "stopped on rows", the one of the two worth a line.
+            # A short batch means there is no point asking again, and asking is a scan.
+            # Usually that means the window is drained; under a concurrent sweep it can
+            # instead mean `SKIP LOCKED` passed over rows the other one holds, which is why
+            # `capped` is documented as a lower bound. Only running every batch to the full
+            # size reaches the `else` below — "stopped on budget" rather than "stopped on
+            # rows", the one of the two worth a line.
             if cursor.rowcount < batch_size:
                 break
         else:
