@@ -213,6 +213,21 @@ RETENTION_SECONDS: Mapping[str, int] = {
 #: ``granted``, because a lock somebody is queued for is not a lock anybody holds. Nothing
 #: here ever waits (:func:`try_lock` is ``pg_try_advisory_lock``), so this is belt and
 #: braces rather than load-bearing.
+#:
+#: **"Held by anybody", not "held by somebody else", and that is a precondition rather
+#: than an oversight.** :func:`~motet_workers.loop.drain` releases its lock in a ``finally``
+#: before its next claim, so a worker never meets its own. A future change that held a key
+#: *across* claims — batching one user's jobs, judging them in parallel — would make a
+#: worker hide the rows it is working on, with no test failing. ``AND l.pid <>
+#: pg_backend_pid()`` is the one-line answer if that day comes; it is left off today
+#: because it would also hide a *second* connection of this same process, which is the
+#: lease keeper's shape and exactly the thing worth not hiding.
+#:
+#: A role that cannot read ``pg_locks`` or ``pg_database`` would make :func:`claim` raise
+#: and stop every queue, with no fail-open path — unlike
+#: :func:`~motet_workers.loop._record_readiness`, which swallows. Both views are readable
+#: by any role on a stock Postgres and on Cloud SQL, so this is a claim about the estate
+#: that nothing here can test; staging is where it is settled.
 HELD_LOCK_KEYS_SQL = """
     SELECT ((l.classid::bigint::bit(64) << 32) | l.objid::bigint::bit(64))::bigint AS key
     FROM pg_locks l
@@ -741,6 +756,13 @@ class QueueReadiness:
     #: Rows that are ``ready`` and due. The right signal for a queue with no serialization:
     #: ``extract``, ``assemble``, ``script`` and ``tts`` parallelize freely, and a scaler
     #: wants ``ceil(ready / target_per_worker)`` of them.
+    #:
+    #: **Ready and due only, so it is zero while the queue's whole backlog is ``running``**,
+    #: and a scaler reading it alone would scale a pool to zero on top of a job that is
+    #: still going. That is why motet#78 specifies a **floor of one** wherever a heartbeat
+    #: is fresh, and the floor is the deployment's half of this signal rather than an
+    #: oversight in it: this number answers "how much work is waiting", and
+    #: ``worker_heartbeats`` answers "is anyone on it".
     ready: int
     #: How many of those rows could be worked on **at the same time** — the number of
     #: workers this queue could keep busy, and the answer for ``integrate`` and ``poll``.
@@ -754,6 +776,22 @@ class QueueReadiness:
     #: never-infer-"no errors"-from-"no data" trap in AGENTS.md, on the one series a scaler
     #: would act on.
     ready_keys: int
+    #: How many of those keys are, at this instant, **already held by somebody** — so the
+    #: work is waiting on a worker that has it rather than on a worker that does not exist.
+    #:
+    #: This exists because the busy-key filter in :data:`CLAIM_SQL` took a signal away. A
+    #: worker that met a held key used to claim the row, log "job N deferred", and defer it;
+    #: the churn was the defect, and the log line was the only evidence anywhere that a key
+    #: was blocking work. Stepping the row over silently would leave a *leaked* lock — a
+    #: wedged worker past :data:`MAX_LEASE_EXTENSION_SECONDS`, a session that never released
+    #: — looking exactly like an idle deployment: workers claiming nothing, ``ready_keys``
+    #: saying "start more workers", and not a line anywhere. Same argument as
+    #: ``motet.jobs.lease{outcome="held"}``.
+    #:
+    #: **Nonzero is the healthy case, not the alarm.** A key is held whenever somebody is
+    #: working it, which is what the whole mechanism is for. What is worth an operator's
+    #: attention is this staying pinned while ``ready`` does not fall.
+    blocked_keys: int
 
 
 #: Work that could start right now, per queue, with keyed rows counted once per key.
@@ -762,15 +800,35 @@ class QueueReadiness:
 #: signal's usefulness: a queue full of rows backing off up the retry ladder, or deferred
 #: five seconds because a key was busy, is a queue with nothing for a new worker to do.
 #:
-#: ``count(DISTINCT serialize_key)`` ignores NULLs, which is why the second term is there —
-#: see :attr:`QueueReadiness.ready_keys`.
-QUEUE_READINESS_SQL = """
+#: **Two aggregates rather than ``count(DISTINCT serialize_key)``, and the reason is the
+#: plan.** ``count(DISTINCT)`` cannot hash-aggregate, so it sorts every due row: measured
+#: at 93 ms over 20,000 due rows against 20 ms for the shape below, which groups by the key
+#: once and counts the groups. This runs on every drain pass *and* on every
+#: ``/v1/processing``, which the SPA polls every three seconds while anything is pending —
+#: which is exactly during the burst this signal is about.
+#:
+#: ``max(lock_key)`` rather than grouping by it: the two columns are one-to-one, and taking
+#: the key as an aggregate means a row that somehow disagreed could not split one user into
+#: two groups and count them twice.
+QUEUE_READINESS_SQL = f"""
+    WITH held AS ({HELD_LOCK_KEYS_SQL}),
+    due AS (
+        SELECT queue, serialize_key, max(lock_key) AS lock_key, count(*) AS n
+        FROM jobs
+        WHERE state = 'ready' AND run_at <= now()
+        GROUP BY queue, serialize_key
+    )
     SELECT queue,
-           count(*) AS ready,
-           count(DISTINCT serialize_key)
-             + count(*) FILTER (WHERE serialize_key IS NULL) AS ready_keys
-    FROM jobs
-    WHERE state = 'ready' AND run_at <= now()
+           sum(n)::bigint AS ready,
+           -- One per key, plus one per keyless row: see QueueReadiness.ready_keys. The
+           -- coalesce is for a queue with no keyless rows at all, where the sum is NULL.
+           (count(*) FILTER (WHERE serialize_key IS NOT NULL)
+            + coalesce(sum(n) FILTER (WHERE serialize_key IS NULL), 0))::bigint AS ready_keys,
+           count(*) FILTER (
+               WHERE serialize_key IS NOT NULL
+                 AND EXISTS (SELECT 1 FROM held WHERE held.key = due.lock_key)
+           )::bigint AS blocked_keys
+    FROM due
     GROUP BY queue
 """
 
@@ -795,6 +853,7 @@ def queue_readiness(conn: psycopg.Connection[Any]) -> list[QueueReadiness]:
             queue=queue.value,
             ready=rows[queue.value]["ready"] if queue.value in rows else 0,
             ready_keys=rows[queue.value]["ready_keys"] if queue.value in rows else 0,
+            blocked_keys=rows[queue.value]["blocked_keys"] if queue.value in rows else 0,
         )
         for queue in PIPELINE
     ]

@@ -597,17 +597,20 @@ public struct QueueHeartbeatResponse: Codable, Hashable, Sendable {
 /// have meant widening ``last_seen_at`` to nullable, which is a breaking change to a
 /// shipped field for no gain.
 public struct QueueReadinessResponse: Codable, Hashable, Sendable {
+    public var blockedKeys: Int
     public var queue: String
     public var ready: Int
     public var readyKeys: Int
 
-    public init(queue: String, ready: Int, readyKeys: Int) {
+    public init(blockedKeys: Int, queue: String, ready: Int, readyKeys: Int) {
+        self.blockedKeys = blockedKeys
         self.queue = queue
         self.ready = ready
         self.readyKeys = readyKeys
     }
 
     private enum CodingKeys: String, CodingKey {
+        case blockedKeys = "blocked_keys"
         case queue
         case ready
         case readyKeys = "ready_keys"

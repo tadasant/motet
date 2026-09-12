@@ -541,7 +541,10 @@ class TestEndToEnd:
             "script",
             "tts",
         ]
-        assert all(entry["ready"] == 0 for entry in empty["readiness"])
+        assert all(
+            (entry["ready"], entry["ready_keys"], entry["blocked_keys"]) == (0, 0, 0)
+            for entry in empty["readiness"]
+        )
 
         for _ in range(3):
             jobs.enqueue(
@@ -556,6 +559,8 @@ class TestEndToEnd:
         }
         assert (readiness["integrate"]["ready"], readiness["integrate"]["ready_keys"]) == (3, 1)
         assert (readiness["tts"]["ready"], readiness["tts"]["ready_keys"]) == (1, 1)
+        # Nothing holds a key, so nothing is waiting on a worker that already has it.
+        assert all(entry["blocked_keys"] == 0 for entry in readiness.values())
 
     def test_processing_is_behind_the_same_lock_as_everything_else(
         self, api: TestClient, _migrated: str

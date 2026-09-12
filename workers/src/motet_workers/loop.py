@@ -173,6 +173,13 @@ _prune_sweeps = _meter.create_counter(
 #: It costs nothing to avoid: the readiness query is one grouped scan over the ready rows
 #: whether it answers for one queue or for all six. The API's ``/v1/processing`` carries
 #: the same numbers for the case that matters even more, which is *no worker at all*.
+#:
+#: **These series are sampled, not continuous, and a consumer has to know it.** The SDK's
+#: last-value aggregation hands its value to the exporter and clears it, so a collection
+#: interval in which no drain pass ran exports no point at all — for a one-shot Cloud Run
+#: job, that is one point per execution and nothing in between. A panel or a scaler reads
+#: them with ``last_over_time`` rather than expecting a value every scrape, and the gap is
+#: the honest answer anyway: it is what "no worker ran" looks like.
 _queue_ready = _meter.create_gauge(
     "motet.jobs.ready",
     unit="{job}",
@@ -182,6 +189,11 @@ _queue_ready_keys = _meter.create_gauge(
     "motet.jobs.ready_keys",
     unit="{key}",
     description="Distinct units of ready work on a queue that could run concurrently.",
+)
+_queue_blocked_keys = _meter.create_gauge(
+    "motet.jobs.ready_keys_blocked",
+    unit="{key}",
+    description="Ready serialization keys already held by somebody, by queue.",
 )
 
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
@@ -294,16 +306,27 @@ def drain(
 
 
 def _record_readiness(conn: psycopg.Connection[Any]) -> None:
-    """Put every queue's scaling signal on the gauges, once per drain pass.
+    """Put every queue's scaling signal on the gauges, once per :func:`drain` call.
 
     Beside the heartbeat and for the same reason: this is the pass saying what it sees,
-    and a number nobody emits is a number nobody can scale on. Swallowed, because a worker
-    that refused to drain because it could not *measure* the queue would be a much worse
-    defect than a gap in a gauge — and swallowed is not silent, it is a WARNING with the
-    stack trace. Deliberately no counter beside it, unlike the retention sweep: that runs
-    on its own connection and could fail alone forever, while this shares the connection
-    the claim below is about to use, so a failure here is a failure the drain is about to
-    report anyway.
+    and a number nobody emits is a number nobody can scale on.
+
+    **Once per call, where the heartbeat is once per claim, and the asymmetry is the
+    cost.** The heartbeat is inside the loop because a worker chewing through
+    :data:`MAX_JOBS_PER_RUN` jobs would otherwise go quiet for as long as that takes, and
+    it pays one single-row upsert for it. This is an aggregate over every due row, and the
+    thing reading it is a scaler that decides on a scale of tens of seconds — so sampling
+    it once per pass is the rate that matters, and once per *job* would be five hundred
+    times the query for no decision anybody makes differently. The cost of that choice is
+    real and bounded: a pass that runs the full five hundred jobs reports the queue as it
+    was when the pass started.
+
+    Swallowed, because a worker that refused to drain because it could not *measure* the
+    queue would be a much worse defect than a gap in a gauge — and swallowed is not silent,
+    it is a WARNING with the stack trace. Deliberately no counter beside it, unlike the
+    retention sweep: that runs on its own connection and could fail alone forever, while
+    this shares the connection the claim is about to use, so a failure here is a failure
+    the drain is about to report anyway.
     """
     try:
         readiness = jobs.queue_readiness(conn)
@@ -314,8 +337,10 @@ def _record_readiness(conn: psycopg.Connection[Any]) -> None:
         )
         return
     for entry in readiness:
-        _queue_ready.set(entry.ready, {"motet.queue": entry.queue})
-        _queue_ready_keys.set(entry.ready_keys, {"motet.queue": entry.queue})
+        attributes = {"motet.queue": entry.queue}
+        _queue_ready.set(entry.ready, attributes)
+        _queue_ready_keys.set(entry.ready_keys, attributes)
+        _queue_blocked_keys.set(entry.blocked_keys, attributes)
 
 
 def prune_jobs(database_url: str) -> jobs.Pruned:

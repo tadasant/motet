@@ -1312,11 +1312,16 @@ export interface components {
          *     shipped field for no gain.
          */
         QueueReadinessResponse: {
+            /**
+             * Blocked Keys
+             * @description How many of those keys are already held by somebody right now, so the work is waiting on a worker that has it rather than on a worker that does not exist. Nonzero is the healthy case — a key is held whenever somebody is working it. This staying pinned while `ready` does not fall is the signal worth looking at: it is what a leaked or wedged advisory lock looks like.
+             */
+            blocked_keys: number;
             /** Queue */
             queue: string;
             /**
              * Ready
-             * @description Jobs on this queue that are ready and due now. Excludes anything backing off up the retry ladder or deferred because its serialization key was busy — neither is work a new worker could pick up.
+             * @description Jobs on this queue that are ready and due now. Excludes anything backing off up the retry ladder or deferred because its serialization key was busy — neither is work a new worker could pick up. It also excludes work already `running`, so it is zero while a job is still going: a scaler needs a floor of one wherever a worker heartbeat is fresh.
              */
             ready: number;
             /**

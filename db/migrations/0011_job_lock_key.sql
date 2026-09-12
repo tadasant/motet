@@ -19,16 +19,31 @@
 -- is an optimisation: a row whose key is taken between the filter and the lock still ends
 -- in `defer()`, as it does today.
 --
--- `bigint`, nullable, no index, no `CHECK`. Nullable because a job without a
--- `serialize_key` has no key — and, deliberately, because a NULL here must read as "not
--- known to be held" rather than as "held": the claim spells that `lock_key IS NULL OR NOT
--- EXISTS (...)`, so a row this migration missed is still offered. The opposite reading is
--- the failure mode to fear, and it is silent — a queue whose rows are never returned looks
--- exactly like a queue with nothing in it.
+-- `bigint`, nullable, no index, no `CHECK`, and not generated. Nullable because a job
+-- without a `serialize_key` has no key — and, deliberately, because a NULL here must read
+-- as "not known to be held" rather than as "held": the claim spells that `lock_key IS NULL
+-- OR NOT EXISTS (...)`, so a row this migration missed is still offered. The opposite
+-- reading is the failure mode to fear, and it is silent — a queue whose rows are never
+-- returned looks exactly like a queue with nothing in it.
 --
 -- No index because the column is never a search key: it is read off rows the two existing
 -- partial indexes have already found, and compared against a handful of `pg_locks` rows.
 -- An index would be write amplification on the queue table for nothing.
+--
+-- **No `CHECK ((serialize_key IS NULL) = (lock_key IS NULL))`, and that is a decision
+-- rather than an omission.** It would make "a key with no lock_key" impossible, which
+-- sounds strictly better — but the shape it has to survive is a rolling deploy, where an
+-- old image whose `enqueue` does not know the column is inserting beside a new one. Under
+-- the constraint every paste on the old image is a failed INSERT; without it those rows
+-- simply fail open, are still offered, and are still serialized by `try_lock` — a
+-- performance regression for the length of the deploy instead of an outage. Turning a
+-- benign degradation into a hard failure is the wrong direction for a column whose whole
+-- design is to fail open.
+--
+-- And **not `GENERATED ALWAYS AS (...) STORED`**, which would remove the second copy of
+-- the hash entirely and is the first thing to reach for: Postgres refuses it, because
+-- `convert_to` is `stable` rather than `immutable` and a generation expression must be
+-- immutable. Recorded here so nobody derives that a second time.
 ALTER TABLE jobs ADD COLUMN lock_key bigint;
 
 -- Backfill the rows that are still in play. `done` and `failed` rows are never claimed
@@ -45,9 +60,11 @@ ALTER TABLE jobs ADD COLUMN lock_key bigint;
 -- arithmetic conversion would fail on any digest with the high bit set — half of them.
 --
 -- A transcription of a hash is exactly the kind of second copy that drifts, so
--- `db/tests/test_migrate.py` pins this expression against the Python function over a set
--- of keys including a non-ASCII one and the empty string. It runs once, here; every row
--- written after this gets its key from `jobs.enqueue`, which calls the Python function.
+-- `workers/tests/test_pipeline.py::TestTheClaimSkipsBusyKeys::test_the_backfill_agrees_with_the_python_hash`
+-- runs *this statement*, read out of this file, and pins what it writes against the Python
+-- function over a set of keys including a non-ASCII one, the empty string, and one whose
+-- digest has its top bit set. It runs once, here; every row written after this gets its key
+-- from `jobs.enqueue`, which calls the Python function.
 UPDATE jobs
 SET lock_key = ('x' || encode(substring(sha256(convert_to(serialize_key, 'UTF8')) FROM 1 FOR 8), 'hex'))::bit(64)::bigint
 WHERE serialize_key IS NOT NULL

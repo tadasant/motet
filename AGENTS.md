@@ -1718,7 +1718,26 @@ has no key**. The issue specifies `count(DISTINCT serialize_key)` for the serial
 and a plain row count for the others; this expression equals whichever applies on every
 queue that exists, because a queue's rows today either all carry a key or none of them
 does. What it adds is that a queue carrying both reports a number a scaler can act on
-rather than a zero that reads as "no work".
+rather than a zero that reads as "no work". It is two aggregates rather than a
+`count(DISTINCT)`, which cannot hash-aggregate and sorts every due row: 93 ms against 20 ms
+over 20,000 rows, on a query the SPA reaches every three seconds while anything is pending.
+
+**`blocked_keys` is the third number, and it is there because the filter above took a
+signal away.** A worker that met a held key used to claim the row, log `job N deferred`, and
+hand it back; the churn was the defect, and that line was the only evidence anywhere that a
+key was blocking work. Stepping the row over silently would leave a *leaked* lock — a
+wedged worker past `MAX_LEASE_EXTENSION_SECONDS`, a session that never released — looking
+exactly like an idle deployment: workers claiming nothing, `ready_keys` saying "start more
+workers", and not a line anywhere. So it is counted instead, which is the same move
+`motet.jobs.lease{outcome="held"}` makes. **Nonzero is the healthy case** — a key is held
+whenever somebody is working it — and what deserves attention is it staying pinned while
+`ready` does not fall.
+
+**`ready` counts nothing that is `running`, so it is zero while a job is still going**, and
+a scaler reading it alone would scale a pool to zero on top of one. That is why motet#78
+specifies a floor of one, and the floor is the deployment's half of this signal rather than
+a gap in it: this number says how much work is waiting, and `worker_heartbeats` says whether
+anyone is on it.
 
 **Every queue is reported on every pass, not only the one being drained**, and that is the
 difference between a signal a scaler can close a loop with and one it cannot: a pool scaled
@@ -1732,11 +1751,28 @@ answer different questions over different sets: a heartbeat exists only for a qu
 has run, and readiness has to exist for every queue. Merging them would have meant widening
 a shipped non-null field to nullable for no gain.
 
+**The gauges are sampled rather than continuous, and a consumer has to know it.** They are
+written once per `drain` call — where the heartbeat is written once per *claim*, because it
+is a single-row upsert and this is an aggregate over every due row, and a scaler decides on
+a scale of tens of seconds rather than per job. The SDK's last-value aggregation also hands
+its value to the exporter and clears it, so a collection interval with no drain pass in it
+exports no point at all. Read them with `last_over_time`; the gap is the honest answer,
+because it is what "no worker ran" looks like.
+
 **The deployment shape is not decided here.** One long-lived pool per queue and a connection
 pooler in front of Cloud SQL are sections 3 and 4 of motet#78, they are the `motet-production`
 surface, and the issue defers them to a design session under invariant 12. `runner <queue>
 --poll-seconds N` already exists and is untouched; nothing here picks an instance count, and
 nothing here is a new resource in the private repo.
+
+**One constraint that session has to be handed, because this change raises its stakes:**
+`try_lock` is `pg_try_advisory_lock`, which is **session-level**, and a PgBouncer in
+transaction-pooling mode breaks that outright — a lock taken in one transaction stays held
+on a connection handed to an unrelated client, and `unlock` may run on a different backend.
+That would break invariant 6 itself, not merely this filter; what the filter adds is that
+the claim now *trusts* `pg_locks` to describe reality. So section 4's answer is either a
+pooler in session mode, or moving to `pg_try_advisory_xact_lock` scoped to the handler's
+transaction — which is a different mechanism and its own design session.
 
 **The invariant-12 reading, recorded as invariant 12 asks.** The filter is a change to an
 existing mechanism in the job queue rather than a new one — no new deployable, datastore,

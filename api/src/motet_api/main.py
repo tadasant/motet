@@ -753,7 +753,10 @@ def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
         ],
         readiness=[
             QueueReadinessResponse(
-                queue=entry.queue, ready=entry.ready, ready_keys=entry.ready_keys
+                queue=entry.queue,
+                ready=entry.ready,
+                ready_keys=entry.ready_keys,
+                blocked_keys=entry.blocked_keys,
             )
             for entry in queue_readiness(conn)
         ],

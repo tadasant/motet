@@ -683,13 +683,22 @@ components:
         \ is visible (motet#78). Merging them would\nhave meant widening ``last_seen_at`` to nullable,\
         \ which is a breaking change to a\nshipped field for no gain."
       properties:
+        blocked_keys:
+          description: "How many of those keys are already held by somebody right now, so the work is\
+            \ waiting on a worker that has it rather than on a worker that does not exist. Nonzero is\
+            \ the healthy case \u2014 a key is held whenever somebody is working it. This staying pinned\
+            \ while `ready` does not fall is the signal worth looking at: it is what a leaked or wedged\
+            \ advisory lock looks like."
+          title: Blocked Keys
+          type: integer
         queue:
           title: Queue
           type: string
         ready:
           description: "Jobs on this queue that are ready and due now. Excludes anything backing off up\
             \ the retry ladder or deferred because its serialization key was busy \u2014 neither is work\
-            \ a new worker could pick up."
+            \ a new worker could pick up. It also excludes work already `running`, so it is zero while\
+            \ a job is still going: a scaler needs a floor of one wherever a worker heartbeat is fresh."
           title: Ready
           type: integer
         ready_keys:
@@ -704,6 +713,7 @@ components:
       - queue
       - ready
       - ready_keys
+      - blocked_keys
       title: QueueReadinessResponse
       type: object
     ReadStateRequest:

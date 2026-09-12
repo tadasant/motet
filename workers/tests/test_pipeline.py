@@ -9,6 +9,7 @@ Skips without ``DATABASE_URL`` so a quick local run needs no Postgres; CI always
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -326,17 +327,20 @@ class TestTheClaimQueryUsesItsIndexes:
         db.commit()
 
         def plan(queue: Queue) -> list[str]:
-            db.execute("BEGIN")
-            try:
-                return [
+            lines: list[str] = []
+            # A rolled-back transaction rather than a literal `BEGIN`: psycopg has already
+            # opened one on this connection, so `BEGIN` would draw a warning from Postgres
+            # and roll back the same rows either way.
+            with contextlib.suppress(psycopg.Rollback), db.transaction():
+                lines = [
                     row["QUERY PLAN"]
                     for row in db.execute(
                         f"EXPLAIN (ANALYZE) {jobs.CLAIM_SQL}",
                         (queue.value, jobs.STALE_LEASE_SECONDS),
                     ).fetchall()
                 ]
-            finally:
-                db.execute("ROLLBACK")
+                raise psycopg.Rollback
+            return lines
 
         keyed, keyless = plan(Queue.INTEGRATE), plan(Queue.SCRIPT)
 
@@ -2592,6 +2596,40 @@ class TestTheClaimSkipsBusyKeys:
             finally:
                 other.execute("SELECT pg_advisory_unlock(%s)", (jobs.lock_key(USER),))
 
+    def test_a_two_int_advisory_lock_is_not_mistaken_for_a_job_s_key(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """`objsubid = 1` is the one-bigint form, and the narrowing is not cosmetic.
+
+        `pg_advisory_lock(int, int)` lands in the same two `pg_locks` columns, so without
+        the `objsubid` predicate its two halves would reassemble into a bigint that can
+        collide with a real `lock_key` and hide that key's rows — silently, and for as long
+        as the other lock lives. Nothing in this system takes one today, which is exactly
+        why it needs a test: the day something does, the failure is a queue that quietly
+        stops offering one user's work.
+
+        The pair here is chosen to reassemble into precisely this user's key, so dropping
+        the narrowing fails this rather than relying on a coincidence to catch it.
+        """
+        key = jobs.lock_key(USER)
+        high, low = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
+        # Signed 32-bit halves, which is what `pg_advisory_lock(int, int)` takes.
+        high -= 1 << 32 if high >= 1 << 31 else 0
+        low -= 1 << 32 if low >= 1 << 31 else 0
+
+        self._burst(db, user=USER, count=1, age=60)
+
+        with repo.connect(_migrated) as holder:
+            holder.execute("SELECT pg_advisory_lock(%s, %s)", (high, low))
+            holder.commit()
+            try:
+                claimed = jobs.claim(db, Queue.INTEGRATE)
+                assert claimed is not None
+                assert claimed.serialize_key == USER
+            finally:
+                holder.execute("SELECT pg_advisory_unlock(%s, %s)", (high, low))
+                holder.commit()
+
     def test_the_backfill_agrees_with_the_python_hash(self, db: psycopg.Connection[Any]) -> None:
         """Migration 0011's SQL and `jobs.lock_key` must produce the same bigint.
 
@@ -2662,6 +2700,43 @@ class TestTheScalingSignal:
         assert (readiness["integrate"].ready, readiness["integrate"].ready_keys) == (8, 3)
         # No serialization key, so every row is its own unit and the two agree.
         assert (readiness["script"].ready, readiness["script"].ready_keys) == (4, 4)
+        # Nobody is holding anything, so nothing is waiting on a worker that has it.
+        assert all(entry.blocked_keys == 0 for entry in readiness.values())
+
+    def test_a_held_key_is_reported_as_blocked_rather_than_as_silence(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """The signal the busy-key filter took away, put back in the right shape.
+
+        A worker that met a held key used to log "job N deferred" every few seconds; the
+        churn was the defect, and that line was the only evidence anywhere that a key was
+        blocking work. Stepping the row over silently would leave a leaked or wedged lock
+        looking exactly like an idle deployment — workers claiming nothing, `ready_keys`
+        saying "start more workers", and not a line anywhere.
+
+        A key nobody holds is deliberately *not* blocked, and a key that is held is — with
+        `ready` and `ready_keys` unchanged either way, because the work is still there.
+        """
+        for user in ("user-a", "user-b", "user-c"):
+            jobs.enqueue(db, Queue.INTEGRATE, {"user": user}, serialize_key=user)
+        db.commit()
+
+        def integrate() -> jobs.QueueReadiness:
+            return next(e for e in jobs.queue_readiness(db) if e.queue == "integrate")
+
+        assert integrate().blocked_keys == 0
+
+        with repo.connect(_migrated) as holder:
+            assert jobs.try_lock(holder, "user-a") is True
+            assert jobs.try_lock(holder, "user-c") is True
+
+            entry = integrate()
+            assert (entry.ready, entry.ready_keys, entry.blocked_keys) == (3, 3, 2)
+
+            jobs.unlock(holder, "user-a")
+            jobs.unlock(holder, "user-c")
+
+        assert integrate().blocked_keys == 0
 
     def test_every_queue_is_reported_even_with_nothing_on_it(
         self, db: psycopg.Connection[Any]
@@ -2669,7 +2744,9 @@ class TestTheScalingSignal:
         """An absent series reads as "fine" on both surfaces that consume this."""
         readiness = jobs.queue_readiness(db)
         assert [entry.queue for entry in readiness] == [queue.value for queue in PIPELINE]
-        assert all((entry.ready, entry.ready_keys) == (0, 0) for entry in readiness)
+        assert all(
+            (entry.ready, entry.ready_keys, entry.blocked_keys) == (0, 0, 0) for entry in readiness
+        )
 
     def test_work_that_is_not_due_is_not_work_a_new_worker_could_take(
         self, db: psycopg.Connection[Any]
@@ -2715,12 +2792,14 @@ class TestTheScalingSignal:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(loop, "_queue_ready", _Gauge("motet.jobs.ready"))
             patch.setattr(loop, "_queue_ready_keys", _Gauge("motet.jobs.ready_keys"))
+            patch.setattr(loop, "_queue_blocked_keys", _Gauge("motet.jobs.ready_keys_blocked"))
             # A queue with nothing on it: the pass still reports every queue.
             drain(Queue.ASSEMBLE, _migrated)
 
         emitted = {(name, attributes["motet.queue"]): value for name, value, attributes in recorded}
         assert emitted[("motet.jobs.ready", "tts")] == 3
         assert emitted[("motet.jobs.ready_keys", "tts")] == 2
+        assert emitted[("motet.jobs.ready_keys_blocked", "tts")] == 0
         assert emitted[("motet.jobs.ready", "assemble")] == 0
         assert {queue for _, queue in emitted} == {queue.value for queue in PIPELINE}
 
