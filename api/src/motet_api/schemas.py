@@ -191,6 +191,37 @@ class QueueHeartbeatResponse(BaseModel):
     last_seen_at: datetime
 
 
+class QueueReadinessResponse(BaseModel):
+    """One queue's scaling signal: what is due, and how many workers could take it.
+
+    Separate from :class:`QueueHeartbeatResponse` rather than folded into it, because the
+    two lists answer different questions over different sets. A heartbeat exists only for a
+    queue a worker has *run*; readiness exists for every queue, and the case it has to
+    cover is precisely the one with no worker — a queue scaled to zero emits no gauge, so
+    this route is the only place its backlog is visible (motet#78). Merging them would
+    have meant widening ``last_seen_at`` to nullable, which is a breaking change to a
+    shipped field for no gain.
+    """
+
+    queue: str
+    ready: int = Field(
+        description=(
+            "Jobs on this queue that are ready and due now. Excludes anything backing off "
+            "up the retry ladder or deferred because its serialization key was busy — "
+            "neither is work a new worker could pick up."
+        )
+    )
+    ready_keys: int = Field(
+        description=(
+            "How many of those jobs could be worked on at the same time: distinct "
+            "serialization keys, plus one for each job that has no key. On a serialized "
+            "queue (`integrate`, `poll`) this is the number of users with work waiting, "
+            "which is the number of workers the queue can keep busy — invariant 6 holds "
+            "the rest to one at a time. On an unserialized queue it equals `ready`."
+        )
+    )
+
+
 class ProcessingStatusResponse(BaseModel):
     """Whether anything is actually draining the queues — motet#38's missing fact.
 
@@ -228,6 +259,12 @@ class ProcessingStatusResponse(BaseModel):
     )
     queues: list[QueueHeartbeatResponse] = Field(
         description="Per queue, most recently drained first. Absent queues have never run."
+    )
+    readiness: list[QueueReadinessResponse] = Field(
+        description=(
+            "Per queue, in pipeline order: how much work is due and how many workers "
+            "could take it. Every queue is present, at zero when it has nothing."
+        )
     )
 
 

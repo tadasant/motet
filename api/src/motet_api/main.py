@@ -55,6 +55,7 @@ from motet_workers import (
     enqueue_paste,
     enqueue_smart_episode,
     enqueue_source_poll,
+    queue_readiness,
 )
 from starlette.requests import ClientDisconnect
 
@@ -109,6 +110,7 @@ from .schemas import (
     PasteRequest,
     ProcessingStatusResponse,
     QueueHeartbeatResponse,
+    QueueReadinessResponse,
     ReadStateRequest,
     RevokedResponse,
     SaveHighlightRequest,
@@ -732,6 +734,14 @@ def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
     the same lock as everything else under ``/v1``. There is one account in Phase 1 and one
     set of workers behind it; when there are many, the queues are still shared and this
     answer is still the same one.
+
+    ``readiness`` is the other half of that same deployment question, for an operator or a
+    scaler rather than for the SPA (motet#78): how much is due per queue, and how many
+    workers that work could keep busy. It is here because this is where the heartbeat
+    already is — "is anything draining" and "how much is there to drain" are one glance —
+    and because it is the only surface that can answer for a queue *no worker is running*,
+    which is exactly the queue a scaler has to hear about. The gauges the worker emits
+    carry the same numbers and go quiet in that case.
     """
     now, beats = repo.worker_heartbeats(conn)
     return ProcessingStatusResponse(
@@ -740,6 +750,12 @@ def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
         queues=[
             QueueHeartbeatResponse(queue=beat.queue, last_seen_at=beat.last_seen_at)
             for beat in beats
+        ],
+        readiness=[
+            QueueReadinessResponse(
+                queue=entry.queue, ready=entry.ready, ready_keys=entry.ready_keys
+            )
+            for entry in queue_readiness(conn)
         ],
     )
 

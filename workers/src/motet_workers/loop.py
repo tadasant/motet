@@ -156,6 +156,34 @@ _prune_sweeps = _meter.create_counter(
     description="Retention sweeps run by a worker, by outcome.",
 )
 
+#: How much work each queue has that could start now, and how many workers could take it.
+#:
+#: **Gauges rather than counters, because the question is "how many workers should exist",
+#: which is a level and not a rate** (motet#78). ``ready`` is the signal for a queue whose
+#: rows parallelize freely; ``ready_keys`` is the signal for a serialized one, where two
+#: thousand rows for one user can employ exactly one worker and depth would have a scaler
+#: start a pool that spends its life deferring. See
+#: :class:`~motet_workers.jobs.QueueReadiness` for what each counts.
+#:
+#: **Every queue is reported on every pass, not only the one being drained**, and that is
+#: the difference between a signal a scaler can act on and one it cannot. A pool per queue
+#: is the deployment shape this is for, and a queue scaled to zero drains nothing, emits
+#: nothing, and would therefore never be scaled back up — the
+#: never-infer-"no errors"-from-"no data" trap in AGENTS.md with a feedback loop attached.
+#: It costs nothing to avoid: the readiness query is one grouped scan over the ready rows
+#: whether it answers for one queue or for all six. The API's ``/v1/processing`` carries
+#: the same numbers for the case that matters even more, which is *no worker at all*.
+_queue_ready = _meter.create_gauge(
+    "motet.jobs.ready",
+    unit="{job}",
+    description="Jobs on a queue that are ready and due, by queue.",
+)
+_queue_ready_keys = _meter.create_gauge(
+    "motet.jobs.ready_keys",
+    unit="{key}",
+    description="Distinct units of ready work on a queue that could run concurrently.",
+)
+
 #: A safety stop on one invocation, so a runaway producer cannot keep a Cloud Run job
 #: alive indefinitely. Reaching it is not an error — the next scheduled run continues.
 MAX_JOBS_PER_RUN = 500
@@ -212,6 +240,7 @@ def drain(
         repo.connect(database_url) as conn,
     ):
         conn.autocommit = True
+        _record_readiness(conn)
         while processed < max_jobs:
             # Before every claim, including the one that finds nothing. "A worker is
             # running" is what an *empty* pass proves, and it is the fact motet#38 turned
@@ -262,6 +291,31 @@ def drain(
         )
     logger.info("drained %d job(s) from %s", processed, queue.value)
     return processed
+
+
+def _record_readiness(conn: psycopg.Connection[Any]) -> None:
+    """Put every queue's scaling signal on the gauges, once per drain pass.
+
+    Beside the heartbeat and for the same reason: this is the pass saying what it sees,
+    and a number nobody emits is a number nobody can scale on. Swallowed, because a worker
+    that refused to drain because it could not *measure* the queue would be a much worse
+    defect than a gap in a gauge — and swallowed is not silent, it is a WARNING with the
+    stack trace. Deliberately no counter beside it, unlike the retention sweep: that runs
+    on its own connection and could fail alone forever, while this shares the connection
+    the claim below is about to use, so a failure here is a failure the drain is about to
+    report anyway.
+    """
+    try:
+        readiness = jobs.queue_readiness(conn)
+    except Exception:  # noqa: BLE001 — measuring the queue must not stop draining it
+        logger.warning(
+            "could not read queue readiness; the scaling gauges skip this pass",
+            exc_info=True,
+        )
+        return
+    for entry in readiness:
+        _queue_ready.set(entry.ready, {"motet.queue": entry.queue})
+        _queue_ready_keys.set(entry.ready_keys, {"motet.queue": entry.queue})
 
 
 def prune_jobs(database_url: str) -> jobs.Pruned:

@@ -548,17 +548,25 @@ public struct PasteRequest: Codable, Hashable, Sendable {
 public struct ProcessingStatusResponse: Codable, Hashable, Sendable {
     public var now: Date
     public var queues: [QueueHeartbeatResponse]
+    public var readiness: [QueueReadinessResponse]
     public var workerLastSeenAt: Date?
 
-    public init(now: Date, queues: [QueueHeartbeatResponse], workerLastSeenAt: Date? = nil) {
+    public init(
+        now: Date,
+        queues: [QueueHeartbeatResponse],
+        readiness: [QueueReadinessResponse],
+        workerLastSeenAt: Date? = nil
+    ) {
         self.now = now
         self.queues = queues
+        self.readiness = readiness
         self.workerLastSeenAt = workerLastSeenAt
     }
 
     private enum CodingKeys: String, CodingKey {
         case now
         case queues
+        case readiness
         case workerLastSeenAt = "worker_last_seen_at"
     }
 }
@@ -576,6 +584,33 @@ public struct QueueHeartbeatResponse: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case lastSeenAt = "last_seen_at"
         case queue
+    }
+}
+
+/// One queue's scaling signal: what is due, and how many workers could take it.
+///
+/// Separate from :class:`QueueHeartbeatResponse` rather than folded into it, because the
+/// two lists answer different questions over different sets. A heartbeat exists only for a
+/// queue a worker has *run*; readiness exists for every queue, and the case it has to
+/// cover is precisely the one with no worker — a queue scaled to zero emits no gauge, so
+/// this route is the only place its backlog is visible (motet#78). Merging them would
+/// have meant widening ``last_seen_at`` to nullable, which is a breaking change to a
+/// shipped field for no gain.
+public struct QueueReadinessResponse: Codable, Hashable, Sendable {
+    public var queue: String
+    public var ready: Int
+    public var readyKeys: Int
+
+    public init(queue: String, ready: Int, readyKeys: Int) {
+        self.queue = queue
+        self.ready = ready
+        self.readyKeys = readyKeys
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case queue
+        case ready
+        case readyKeys = "ready_keys"
     }
 }
 

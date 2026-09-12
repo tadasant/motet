@@ -52,13 +52,20 @@ const running: ProcessingStatus = {
   now: NOW_ISO,
   worker_last_seen_at: '2026-08-25T21:59:30Z',
   queues: [],
+  readiness: [],
 }
 const idle: ProcessingStatus = {
   now: NOW_ISO,
   worker_last_seen_at: '2026-08-25T20:00:00Z',
   queues: [],
+  readiness: [],
 }
-const never: ProcessingStatus = { now: NOW_ISO, worker_last_seen_at: null, queues: [] }
+const never: ProcessingStatus = {
+  now: NOW_ISO,
+  worker_last_seen_at: null,
+  queues: [],
+  readiness: [],
+}
 
 describe('relative', () => {
   it('reports a backoff as the wait it is', () => {

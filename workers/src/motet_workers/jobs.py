@@ -29,7 +29,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from .queues import Queue
+from .queues import PIPELINE, Queue
 
 logger = logging.getLogger("motet.worker.jobs")
 
@@ -94,10 +94,12 @@ LEASE_TOUCH_SECONDS = 60
 #: healthy job never reaches it and reaching it is a signal rather than a routine event.
 #:
 #: **On a queue with a ``serialize_key`` the cap buys visibility rather than recovery**,
-#: and that is worth not mistaking. A wedged worker still holds its advisory lock, so the
-#: worker that reclaims the row finds the key busy and hands it to :func:`defer`, which
-#: does not count an attempt — round and round, until the wedged process dies. Unchanged by
-#: this constant and predates it; what the cap adds is the ERROR line saying which job.
+#: and that is worth not mistaking. A wedged worker still holds its advisory lock, so no
+#: other worker can run that key's job while it lives — the row is stepped over by the
+#: claim's busy-key filter (see :data:`CLAIM_SQL`, motet#78), where before that filter it
+#: was claimed and handed to :func:`defer`, round and round, until the wedged process died.
+#: The outcome is the one this paragraph always described and the churn is gone; what the
+#: cap adds is still the ERROR line saying which job.
 MAX_LEASE_EXTENSION_SECONDS = 7200
 
 #: How long a ``done`` row is kept after it stops being a job (motet#56).
@@ -194,6 +196,32 @@ RETENTION_SECONDS: Mapping[str, int] = {
     "failed": FAILED_RETENTION_SECONDS,
 }
 
+#: Every advisory-lock key held right now, as the bigint :func:`lock_key` produced.
+#:
+#: ``pg_locks`` splits a one-argument advisory lock back into the two 32-bit halves it was
+#: passed as — the high half in ``classid``, the low in ``objid``, both typed ``oid`` and
+#: therefore *unsigned*. Reassembling them arithmetically overflows ``bigint`` for any key
+#: with the top bit set, which is half of them, so the halves are concatenated as bit
+#: strings and read back as two's complement. ``objsubid = 1`` is the one-bigint form;
+#: ``2`` would be ``pg_advisory_lock(int, int)``, which nothing here uses.
+#:
+#: ``database`` is not decoration. ``pg_locks`` is cluster-wide while an advisory lock is
+#: per database, so without it a worker would skip work because *another database on the
+#: same server* held a key that happens to collide — which is every CI run beside a local
+#: one, since each pytest run creates a database of its own.
+#:
+#: ``granted``, because a lock somebody is queued for is not a lock anybody holds. Nothing
+#: here ever waits (:func:`try_lock` is ``pg_try_advisory_lock``), so this is belt and
+#: braces rather than load-bearing.
+HELD_LOCK_KEYS_SQL = """
+    SELECT ((l.classid::bigint::bit(64) << 32) | l.objid::bigint::bit(64))::bigint AS key
+    FROM pg_locks l
+    WHERE l.locktype = 'advisory'
+      AND l.objsubid = 1
+      AND l.granted
+      AND l.database = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
+"""
+
 #: The claim statement itself, hoisted out of :func:`claim` so that a test can ``EXPLAIN``
 #: *this* rather than a transcription of it.
 #:
@@ -205,22 +233,57 @@ RETENTION_SECONDS: Mapping[str, int] = {
 #: a copy of this SQL would have reproduced the same failure one level down: the copy would
 #: keep its index while the query being run drifted off it.
 #:
+#: **The ``lock_key`` arm is the per-user fairness filter** (motet#78), and three things
+#: about how it is written are the whole of it:
+#:
+#: * It is a *read* of ``pg_locks``, never a call to ``pg_try_advisory_lock``. A function
+#:   with side effects in a ``WHERE`` can fire for candidate rows that ``SKIP LOCKED`` then
+#:   throws away, and it would take the lock before the claim — while the lease fence's
+#:   soundness rests on "a deferred job never starts a keeper", which the claim-then-lock
+#:   order in :func:`~motet_workers.loop.drain` is what guarantees. That order is untouched:
+#:   this is an optimisation, and :func:`try_lock` is still the correctness fence. A key
+#:   taken in the window between the two still ends in :func:`defer`, exactly as before.
+#: * ``NOT EXISTS`` rather than ``NOT IN``, and the difference is a queue that stops. A
+#:   single NULL anywhere in a ``NOT IN`` list makes the predicate NULL for *every* row, so
+#:   one unexpected row in ``pg_locks`` would silently offer nothing on any queue — and a
+#:   queue nothing is returned from looks exactly like a queue with nothing in it. It is
+#:   also what makes a row whose ``lock_key`` is NULL read as *not held* rather than as
+#:   held: a row written before migration 0011 and outside its backfill is still offered,
+#:   and still goes through :func:`try_lock`. The two directions are not symmetric —
+#:   leaning this way costs the claim-and-defer cycle this exists to remove, and leaning
+#:   the other way strands work permanently and quietly.
+#: * ``lock_key IS NULL OR ...`` is therefore not needed for correctness, and it is here
+#:   for cost: it short-circuits, so on the four queues that carry no serialization key at
+#:   all — ``extract``, ``assemble``, ``script``, ``tts`` — the subplan is *never executed*
+#:   and ``pg_locks`` is never read. ``pg_lock_status()`` takes every lock-manager
+#:   partition lock to build its answer, which is not a thing to do once a claim on a queue
+#:   that can never need it. ``EXPLAIN (ANALYZE)`` says "never executed" for those queues,
+#:   and ``workers/tests/test_pipeline.py`` asserts it.
+#:
 #: Parameters, in order: the queue name, and :data:`STALE_LEASE_SECONDS`.
-CLAIM_SQL = """
+CLAIM_SQL = f"""
     UPDATE jobs
     SET state = 'running', locked_at = now(), attempts = attempts + 1, updated_at = now()
     WHERE id = (
-        SELECT id FROM jobs
-        WHERE queue = %s
+        SELECT j.id FROM jobs j
+        WHERE j.queue = %s
           AND (
-            (state = 'ready' AND run_at <= now())
+            (j.state = 'ready' AND j.run_at <= now())
             -- Lease reclaim. A worker that died mid-job left this row `running`
             -- and nothing else would ever pick it up. `attempts` was already
             -- incremented when it was first claimed, so the retry ceiling still
             -- bounds a job that kills every worker that touches it.
-            OR (state = 'running' AND locked_at < now() - make_interval(secs => %s))
+            OR (j.state = 'running' AND j.locked_at < now() - make_interval(secs => %s))
           )
-        ORDER BY run_at, id
+          -- Invariant 6's serialization, read a step earlier: do not offer a row whose
+          -- user is already being worked on. Without it a burst of one user's jobs at the
+          -- head of the queue is claimed and deferred by every other worker in turn,
+          -- once per row, before any of them reaches anyone else's work.
+          AND (
+            j.lock_key IS NULL
+            OR NOT EXISTS (SELECT 1 FROM ({HELD_LOCK_KEYS_SQL}) held WHERE held.key = j.lock_key)
+          )
+        ORDER BY j.run_at, j.id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
     )
@@ -253,14 +316,27 @@ def enqueue(
     serialize_key: str | None = None,
     delay_seconds: int = 0,
 ) -> int:
-    """Add a job. Call inside the transaction that creates the work it refers to."""
+    """Add a job. Call inside the transaction that creates the work it refers to.
+
+    ``lock_key`` is derived here rather than left to the claim, so that the claim can read
+    it off the row instead of hashing every candidate (motet#78). This is the only place it
+    is ever written: it is a pure function of ``serialize_key``, which nothing updates, so
+    there is no second writer to keep in step. The one other producer is migration 0011's
+    backfill, which runs once and is pinned against :func:`lock_key` by a test.
+    """
     row = conn.execute(
         """
-        INSERT INTO jobs (queue, payload, serialize_key, run_at)
-        VALUES (%s, %s::jsonb, %s, now() + make_interval(secs => %s))
+        INSERT INTO jobs (queue, payload, serialize_key, lock_key, run_at)
+        VALUES (%s, %s::jsonb, %s, %s, now() + make_interval(secs => %s))
         RETURNING id
         """,
-        (queue.value, json.dumps(dict(payload)), serialize_key, delay_seconds),
+        (
+            queue.value,
+            json.dumps(dict(payload)),
+            serialize_key,
+            None if serialize_key is None else lock_key(serialize_key),
+            delay_seconds,
+        ),
     ).fetchone()
     assert row is not None
     job_id = row["id"] if isinstance(row, dict) else row[0]
@@ -649,3 +725,76 @@ def queue_depths(conn: psycopg.Connection[Any]) -> dict[str, dict[str, int]]:
     for row in rows:
         depths.setdefault(row["queue"], {})[row["state"]] = row["n"]
     return depths
+
+
+@dataclass(frozen=True)
+class QueueReadiness:
+    """How much work one queue has that could start now, and how many workers could take it.
+
+    Two numbers rather than one, because **queue depth is the wrong scaling signal for a
+    serialized queue** (motet#78). Two thousand ready ``integrate`` rows for one user can
+    employ exactly one worker — invariant 6 says so, and the advisory lock enforces it — so
+    a scaler reading ``ready`` would start a pool that spends its life deferring.
+    """
+
+    queue: str
+    #: Rows that are ``ready`` and due. The right signal for a queue with no serialization:
+    #: ``extract``, ``assemble``, ``script`` and ``tts`` parallelize freely, and a scaler
+    #: wants ``ceil(ready / target_per_worker)`` of them.
+    ready: int
+    #: How many of those rows could be worked on **at the same time** — the number of
+    #: workers this queue could keep busy, and the answer for ``integrate`` and ``poll``.
+    #:
+    #: Distinct serialization keys, **plus one for each row that has no key**. The issue
+    #: specifies ``count(DISTINCT serialize_key)`` for the serialized queues and a plain row
+    #: count for the others; this expression is equal to whichever of those applies, on
+    #: every queue that exists, because today a queue's rows either all carry a key or none
+    #: of them does. What it adds is that a queue carrying *both* reports a number a scaler
+    #: can use, instead of a zero that reads as "no work" — the
+    #: never-infer-"no errors"-from-"no data" trap in AGENTS.md, on the one series a scaler
+    #: would act on.
+    ready_keys: int
+
+
+#: Work that could start right now, per queue, with keyed rows counted once per key.
+#:
+#: ``run_at <= now()`` is what "due" means, and leaving it out would be the whole of the
+#: signal's usefulness: a queue full of rows backing off up the retry ladder, or deferred
+#: five seconds because a key was busy, is a queue with nothing for a new worker to do.
+#:
+#: ``count(DISTINCT serialize_key)`` ignores NULLs, which is why the second term is there —
+#: see :attr:`QueueReadiness.ready_keys`.
+QUEUE_READINESS_SQL = """
+    SELECT queue,
+           count(*) AS ready,
+           count(DISTINCT serialize_key)
+             + count(*) FILTER (WHERE serialize_key IS NULL) AS ready_keys
+    FROM jobs
+    WHERE state = 'ready' AND run_at <= now()
+    GROUP BY queue
+"""
+
+
+def queue_readiness(conn: psycopg.Connection[Any]) -> list[QueueReadiness]:
+    """Per queue, in pipeline order: how much is due, and how many workers could take it.
+
+    **Every queue is returned, at zero when it has nothing** — a queue missing from the
+    result would be indistinguishable from a queue nobody asked about, and this is read by
+    a gauge and by ``/v1/processing``, which are both surfaces where an absent series reads
+    as "fine". Same argument as the worker heartbeat one module over (motet#38).
+
+    A queue name in the table that is not in :data:`~motet_workers.queues.PIPELINE` is
+    dropped rather than reported: nothing drains it, so it is not a scaling signal, and the
+    alternative is a metric label an unknown string can mint a time series under.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(QUEUE_READINESS_SQL)
+        rows = {row["queue"]: row for row in cur.fetchall()}
+    return [
+        QueueReadiness(
+            queue=queue.value,
+            ready=rows[queue.value]["ready"] if queue.value in rows else 0,
+            ready_keys=rows[queue.value]["ready_keys"] if queue.value in rows else 0,
+        )
+        for queue in PIPELINE
+    ]
