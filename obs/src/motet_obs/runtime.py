@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .settings import (
     OTLP_ENDPOINT_ENV,
@@ -31,6 +31,9 @@ from .settings import (
     status as _env_status,
 )
 
+if TYPE_CHECKING:  # pragma: no cover — typing only; the SDK is imported lazily below
+    from sentry_sdk.types import Event, Hint
+
 logger = logging.getLogger("motet.obs")
 
 #: How often metrics are pushed. Shorter than the SDK's 60s default because the worker is
@@ -38,13 +41,46 @@ logger = logging.getLogger("motet.obs")
 #: export exactly one point, at shutdown, or none at all if the flush were missed.
 METRIC_EXPORT_INTERVAL_MS = 15_000
 
-#: Loggers whose records must never be exported through the OTLP log pipeline.
+#: Loggers whose records must never be exported through the OTLP **log** pipeline.
 #:
 #: This is a feedback-loop guard, not tidiness. The log exporter is an HTTP client; when
 #: the obs stack is unreachable it logs the failure, and a handler that exported *that*
 #: record would produce another export, another failure, and another record. The loop is
 #: fast enough to saturate a container.
-_NO_EXPORT_LOGGERS = ("opentelemetry", "urllib3", "sentry_sdk")
+#:
+#: **It is exactly as wide as the loop, and no wider** — which is narrower than it used to
+#: be (motet#73). A whole-namespace ``"opentelemetry"`` prefix also silenced the *metric*
+#: and *trace* exporters, whose diagnostics cannot feed the log pipeline and so cannot
+#: loop; excluding them meant a dropped metric batch reached VictoriaLogs not at all, and
+#: under invariant 11 the obs stack is the only channel an agent can observe production
+#: through. What stays out is the log exporter itself, the machinery that drives it, and
+#: the HTTP transport — ``urllib3`` and ``_shared_internal`` are shared across signals, so
+#: a record from either cannot be attributed to one and has to be assumed to be the log
+#: pipeline's.
+_NO_EXPORT_LOGGERS = (
+    "opentelemetry.exporter.otlp.proto.http._log_exporter",
+    "opentelemetry.sdk._logs",
+    "opentelemetry.sdk._shared_internal",
+    "urllib3",
+)
+
+#: Loggers whose records must never become GlitchTip **events**.
+#:
+#: A different guard against a different failure, and the asymmetry with
+#: :data:`_NO_EXPORT_LOGGERS` above is the point. ``_install_errors`` promotes every
+#: ``logging.ERROR`` record to an event on purpose — it is how the worker reports failure
+#: without importing a vendor SDK into the queue runner — and a *new* GlitchTip issue in
+#: the production project pages Slack. A third-party exporter's own diagnostic is not a
+#: Motet fault, so it must not page: ``Failed to export metrics batch due to timeout, max
+#: retries or shutdown.`` did exactly that once (motet#73), from a Cloud Run instance whose
+#: CPU was throttled while the metric reader's background timer fired.
+#:
+#: These records are not suppressed, only scoped. They keep their stdout line, they are now
+#: *gained* by VictoriaLogs for the two signals the loop guard no longer excludes, and they
+#: still ride along as Sentry breadcrumbs on a real Motet error — which is why this is a
+#: ``before_send`` hook rather than ``ignore_logger``, whose ignore list drops breadcrumbs
+#: too.
+_NO_EVENT_LOGGERS = ("opentelemetry", "urllib3", "sentry_sdk")
 
 #: What :func:`configure` actually installed, which is a different question from what the
 #: environment asked for. Read back by :func:`status` so that the health route can answer "is
@@ -68,10 +104,24 @@ _shutdown_hooks: list[Any] = []
 
 
 class _ExporterLoopFilter(logging.Filter):
-    """Drop the exporters' own records, so exporting cannot cause exporting."""
+    """Drop the log pipeline's own records, so exporting a log cannot export a log."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not record.name.startswith(_NO_EXPORT_LOGGERS)
+
+
+def _drop_third_party_diagnostics(event: Event, _hint: Hint) -> Event | None:
+    """Keep a library's own log record out of GlitchTip, where a new issue pages.
+
+    The logging integration sets ``event["logger"]`` to the record's logger name, and that
+    is the only thing distinguishing "Motet failed" from "somebody else's HTTP client gave
+    up". Returning ``None`` drops the event and nothing else — see :data:`_NO_EVENT_LOGGERS`
+    for where the record does still show up.
+
+    An event with no ``logger`` is kept: that is a ``capture_exception`` from Motet's own
+    code, and defaulting the other way would make this an off switch for error reporting.
+    """
+    return None if str(event.get("logger") or "").startswith(_NO_EVENT_LOGGERS) else event
 
 
 def status(
@@ -173,6 +223,11 @@ def _install_errors(service_name: str, dsn: str, env: Mapping[str, str]) -> list
     ``logger.exception`` and ``logger.error`` become events through the SDK's logging
     integration, which is why the worker reports failures by logging them rather than by
     importing a vendor SDK into the queue runner.
+
+    That integration patches ``logging.Logger.callHandlers``, so it sees every record in
+    the process and is reached by no handler-level filter — including the loop guard the
+    OTLP handler carries. :data:`_NO_EVENT_LOGGERS` is therefore enforced here instead,
+    through ``before_send``.
     """
     import sentry_sdk
 
@@ -180,6 +235,10 @@ def _install_errors(service_name: str, dsn: str, env: Mapping[str, str]) -> list
         dsn=dsn,
         environment=resolve_deployment_environment(env),
         release=resolve_service_version(env),
+        # The one thing standing between a third-party exporter's diagnostic and a Slack
+        # page. `logging`'s integration is installed on every logger in the process, so the
+        # OTLP handler's own filter does not reach it — that asymmetry was motet#73.
+        before_send=_drop_third_party_diagnostics,
         # Tracing is OpenTelemetry's job here, and paying for both would mean two
         # sampling decisions and two trace ids for the same request.
         traces_sample_rate=0.0,

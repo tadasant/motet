@@ -130,7 +130,11 @@ def test_a_log_record_arrives(emitted: dict[str, Any], otlp_collector: OtlpColle
 def test_the_exporters_own_logs_are_not_exported(
     emitted: dict[str, Any], otlp_collector: OtlpCollector
 ) -> None:
-    """Otherwise an unreachable collector is a feedback loop rather than an outage."""
+    """Otherwise an unreachable collector is a feedback loop rather than an outage.
+
+    The guard is only as wide as the loop — a *metric* exporter's diagnostic is exported,
+    deliberately. `test_alert_scoping.py` is where that boundary is pinned from both sides.
+    """
     assert not [line for line in otlp_collector.log_bodies() if "Failed to export" in line]
 
 

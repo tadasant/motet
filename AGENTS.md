@@ -254,6 +254,27 @@ export, so that combination buys a 401 per export rather than data — which rea
 fault. `/internal/health` reports `telemetry_configured: false` for it deliberately, and
 startup logs a warning saying so.
 
+**A library's own log record gets two guards, and they are deliberately different widths.**
+`motet_obs.runtime` carries `_NO_EXPORT_LOGGERS` — a feedback-loop guard on the OTLP *log*
+handler, because exporting the log exporter's failure produces another failure fast enough
+to saturate a container — and `_NO_EVENT_LOGGERS`, a `before_send` hook keeping a
+third-party diagnostic out of GlitchTip, where a new issue in the production project pages
+Slack. **One tuple served both and could not**, which is motet#73: the loop guard is a
+filter on a handler, and `sentry_sdk`'s logging integration patches
+`logging.Logger.callHandlers`, so no handler-level filter reaches it. `Failed to export
+metrics batch due to timeout, max retries or shutdown.` therefore paged — while being
+excluded from the log pipeline, which left it on **no** obs surface at all.
+
+So the loop guard is now **exactly as wide as the loop**: the log exporter, the machinery
+that drives it, and the shared HTTP transport. A *metric* or *trace* exporter's diagnostic
+cannot feed the log pipeline, so it now reaches VictoriaLogs, which is where invariant 11
+wants it — observable to an agent, and not a page. The event guard stays at whole-namespace
+width, because "is this a Motet fault" is a question about who wrote the code, not about
+which signal failed. `obs/tests/test_alert_scoping.py` pins both halves against the real
+SDKs, reading events out of the Sentry envelopes that arrive at the same local socket the
+OTLP collector answers on — whether a record becomes an event is decided inside
+`sentry_sdk`, so a stub would be testing the stub.
+
 ---
 
 ## Tripwires
