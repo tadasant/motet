@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The Motet mark as a square tile: four voices converging into one ink line, on
+       parchment. The source for the iOS app icon and the podcast artwork. The curves are
+       the nav glyph's (brand/polyphony/index.html, viewBox 0 0 26 22), with the resolved
+       ink stroke the guidelines describe carried on past the meeting point. -->
+  <rect width="1024" height="1024" fill="#F4EFE6"/>
+  <g transform="translate(165 281) scale(21)" fill="none" stroke-linecap="round" stroke-width="2.4">
+    <path d="M1 3 C8 3 10 11 25 11" stroke="#D64B2A"/>
+    <path d="M1 8 C8 8 12 11 25 11" stroke="#D9A441"/>
+    <path d="M1 14 C8 14 12 11 25 11" stroke="#2A7F86"/>
+    <path d="M1 19 C8 19 10 11 25 11" stroke="#6B3E86"/>
+    <path d="M24.5 11 H 32" stroke="#1B1A2E"/>
+  </g>
+</svg>

@@ -66,6 +66,37 @@ describe('Play Live with a voice service', () => {
   })
 })
 
+describe('Play Live drawn as the transport mic pill (motet#110)', () => {
+  it('puts its one Play Live control in the slot, and starts a session from it', async () => {
+    vi.spyOn(api, 'voiceStatus').mockResolvedValue({ configured: true, reason: null })
+    const mint = vi.spyOn(api, 'startVoiceSession').mockRejectedValue(new Error('mint refused'))
+    const slot = document.createElement('span')
+    document.body.appendChild(slot)
+    const player = createRef<HTMLAudioElement>()
+
+    render(
+      <>
+        <audio ref={player} />
+        <Live episode={EPISODE} player={player} micSlot={slot} />
+      </>,
+    )
+
+    const pill = await vi.waitFor(() => {
+      const found = slot.querySelector('button.mic') as HTMLButtonElement | null
+      expect(found?.disabled).toBe(false)
+      return found!
+    })
+    expect(pill.textContent).toBe('Play Live')
+    // Not drawn a second time in its own row.
+    expect(screen.getAllByRole('button', { name: 'Play Live' })).toHaveLength(1)
+
+    fireEvent.click(pill)
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledWith('ep_1', 0))
+    expect(await screen.findByText('mint refused')).toBeTruthy()
+    slot.remove()
+  })
+})
+
 describe('Play Live stopped while it is still starting', () => {
   it('opens no socket and takes no mic once the mint finally answers', async () => {
     vi.spyOn(api, 'voiceStatus').mockResolvedValue({ configured: true, reason: null })

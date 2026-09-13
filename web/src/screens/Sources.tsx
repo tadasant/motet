@@ -151,7 +151,7 @@ export function Sources({
   return (
     <section aria-label="Sources" className="sources">
       <p className="lead">
-        Where your reading comes from. Connect a source and Motet pulls new items in on its
+        Where the content you trust comes from. Connect a source and Motet pulls new items in on its
         own; <strong>nothing is processed until you ingest it</strong> from the Backlog.
       </p>
 

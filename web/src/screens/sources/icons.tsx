@@ -1,6 +1,7 @@
 // Monochrome inline SVGs for the integration cards — `currentColor`, stroke only, no icon
 // font and no dependency, the same shape `shell/sections.tsx` uses. Not brand marks: a
-// mail glyph rather than Google's logo, a bookmark rather than X's. Brand is Phase 3.
+// mail glyph rather than Google's logo, a bookmark rather than X's. They take
+// the ink they sit in; the brand's colour is not theirs to carry.
 
 import type { ReactElement } from 'react'
 

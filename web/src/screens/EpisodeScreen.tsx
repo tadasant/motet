@@ -13,7 +13,8 @@
 // to see the notes and play control" is what the owner asked this screen to be. The player
 // is for listening at a desk, with the transcript beside it.
 //
-// It is an `<audio>` element pointed straight at the audio route, and it reports where the
+// It is an `<audio>` element pointed straight at the audio route, driven by the brand's
+// transport rather than the browser's own controls (motet#110), and it reports where the
 // listener got to through `PUT /v1/episodes/{id}/position`, the write AGENTS.md names for a
 // syncing player — so listening here moves the shelf's In progress / Listened state and
 // marks stories read as their segments pass, which is invariant 5 reaching this surface.
@@ -65,6 +66,10 @@ export function EpisodeScreen({
   const [listened, setListened] = useState<number | null>(null)
   const [marking, setMarking] = useState(false)
   const player = useRef<HTMLAudioElement>(null)
+  // Where Play Live puts its mic pill: in the player's transport, beside the speed pill. A
+  // node rather than a ref so Live re-renders into it when the player (keyed per episode)
+  // is replaced.
+  const [micSlot, setMicSlot] = useState<HTMLElement | null>(null)
 
   useEffect(() => {
     api.feed().then(setFeed).catch(() => setFeed(null))
@@ -97,9 +102,12 @@ export function EpisodeScreen({
 
   return (
     <section aria-label="Episode">
-      <p className="hint">
-        <strong>{episode.title}</strong> · {episode.state}
-        {episode.state === 'ready' && ` · ${formatClock(episode.duration_ms)}`}
+      <p className="hint episode-heading">
+        <strong>{episode.title}</strong>
+        <span>
+          {episode.state}
+          {episode.state === 'ready' && ` · ${formatClock(episode.duration_ms)}`}
+        </span>
       </p>
 
       {IN_PROGRESS.has(episode.state) &&
@@ -144,6 +152,7 @@ export function EpisodeScreen({
           src={api.audioUrl(episode.id, feed.token)}
           audioRef={player}
           autoPlay={autoPlay}
+          micSlot={setMicSlot}
           onReported={(at, marked) => {
             onPositionReported(episode.id, at)
             if (marked > 0) onBacklogChanged()
@@ -152,7 +161,7 @@ export function EpisodeScreen({
       )}
       {/* Play Live: this player's episode through the voice service, interruptible by
           voice (motet#93). Disabled, with the reason, where no voice service exists. */}
-      {playable && <Live episode={episode} player={player} />}
+      {playable && <Live episode={episode} player={player} micSlot={micSlot} />}
 
       {episode.state === 'ready' && (
         <div className="row">
@@ -224,6 +233,9 @@ export function EpisodeScreen({
   )
 }
 
+/** What the speed pill steps through, in order, from 1×. */
+const SPEEDS = [1, 1.2, 1.5, 2, 0.8]
+
 /**
  * The in-page player: resume from the server's position, report the furthest point played.
  *
@@ -251,12 +263,15 @@ function Player({
   src,
   audioRef,
   autoPlay,
+  micSlot,
   onReported,
 }: {
   episode: Episode
   src: string
   audioRef: RefObject<HTMLAudioElement | null>
   autoPlay: boolean
+  /** Receives the transport's pill slot, which Play Live renders its mic pill into. */
+  micSlot: (node: HTMLElement | null) => void
   onReported: (listenedThroughMs: number, newsItemsMarkedRead: number) => void
 }) {
   // Read once, at mount: a report coming back mid-play moves the episode's position, and
@@ -298,13 +313,84 @@ function Player({
   // shelf, another section, another episode.
   useEffect(() => () => flush(), [])
 
+  // What the transport draws. The element is the truth and these follow its events; the
+  // position ledgers above are a separate question and are not moved by any of this.
+  const [playing, setPlaying] = useState(false)
+  const [at, setAt] = useState(resumeAt)
+  const [rate, setRate] = useState(1)
+  // The browser's own controls used to show a broken player when the audio could not load;
+  // the transport has to say so itself, or its play circle is a button that does nothing.
+  const [failed, setFailed] = useState(false)
+  const duration = episode.duration_ms
+  const played = duration > 0 ? Math.min(100, (at / duration) * 100) : 0
+
+  const toggle = () => {
+    const el = audioRef.current
+    if (!el) return
+    if (el.paused) el.play()?.catch(() => undefined)
+    else el.pause()
+  }
+  const cycleRate = () => {
+    const next = SPEEDS[(SPEEDS.indexOf(rate) + 1) % SPEEDS.length] ?? 1
+    setRate(next)
+    if (audioRef.current) audioRef.current.playbackRate = next
+  }
+
   return (
     <div className="player">
+      {/* The reference transport (brand/GUIDELINES.md): an ink play circle, the track with
+          the chord on its played portion, tabular times, a speed pill and the mic pill. The
+          element underneath has no controls of its own; these drive it. */}
+      <div className="transport" role="group" aria-label="Player">
+        <button
+          type="button"
+          className={`play${playing ? ' playing' : ''}`}
+          onClick={toggle}
+          aria-label={playing ? 'Pause' : 'Play'}
+        />
+        <div className="scrub">
+          <span className="t">{formatClock(at)}</span>
+          <div className="track">
+            <div className="played" style={{ width: `${played}%` }} />
+            <div className="knob" style={{ left: `${played}%` }} />
+            <input
+              type="range"
+              aria-label="Seek"
+              min={0}
+              max={duration}
+              step={1000}
+              value={Math.min(at, duration)}
+              aria-valuetext={`${formatClock(at)} of ${formatClock(duration)}`}
+              onChange={(event) => {
+                const el = audioRef.current
+                const ms = Number(event.target.value)
+                setAt(ms)
+                if (el) el.currentTime = ms / 1000
+              }}
+            />
+          </div>
+          <span className="t">{formatClock(duration)}</span>
+        </div>
+        <span className="pills">
+          <button type="button" onClick={cycleRate} aria-label={`Playback speed ${rate}×`}>
+            {rate}×
+          </button>
+          {/* Empty, and React renders nothing else into it: Play Live portals its mic pill here. */}
+          <span className="mic-slot" ref={micSlot} />
+        </span>
+      </div>
       <audio
         ref={audioRef}
-        controls
         preload="metadata"
         src={src}
+        onPlay={() => {
+          setPlaying(true)
+          setFailed(false)
+        }}
+        onError={() => {
+          setPlaying(false)
+          setFailed(true)
+        }}
         onLoadedMetadata={(event) => {
           const el = event.currentTarget
           if (resumeAt > 0) el.currentTime = resumeAt / 1000
@@ -318,6 +404,7 @@ function Player({
         onTimeUpdate={(event) => {
           const el = event.currentTarget
           const now = el.currentTime * 1000
+          setAt(now)
           const previous = last.current
           last.current = now
           if (el.paused || el.seeking || previous === null) return
@@ -330,8 +417,12 @@ function Player({
           furthest.current = Math.max(furthest.current, now)
           if (furthest.current - sent.current >= REPORT_EVERY_MS) flush()
         }}
-        onPause={flush}
+        onPause={() => {
+          setPlaying(false)
+          flush()
+        }}
         onEnded={() => {
+          setPlaying(false)
           // Played out from the frontier, the file's end is heard; scrubbed to the end
           // while the frontier sat minutes earlier, it is not.
           const { duration } = latest.current
@@ -339,6 +430,11 @@ function Player({
           flush()
         }}
       />
+      {failed && (
+        <p className="error" role="alert">
+          This episode&rsquo;s audio could not be loaded. The podcast feed below still has it.
+        </p>
+      )}
       {resumeAt > 0 && (
         <p className="hint">Resumes at {formatClock(resumeAt)}, where you got to.</p>
       )}

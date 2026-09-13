@@ -117,7 +117,7 @@ describe('Held', () => {
 
     fireEvent.click(await screen.findByLabelText('Select all'))
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
-    expect(confirm).toHaveBeenCalledWith('Dismiss 2 items? They will not be briefed.')
+    expect(confirm).toHaveBeenCalledWith('Dismiss 2 items? They will not be in an episode.')
     expect(calls.some((call) => call.method === 'POST')).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))

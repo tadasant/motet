@@ -14,6 +14,7 @@ import {
   type ProcessingStatus,
   api,
 } from '../api/client'
+import { Motif } from '../brand/Brand'
 import { Held } from './Held'
 import { Processing } from './Processing'
 import { SourceItemDetail } from './SourceItemDetail'
@@ -67,7 +68,7 @@ export function Backlog({
     setError('')
     try {
       const episode = await api.createEpisode(
-        `Briefing — ${new Date().toLocaleDateString()}`,
+        `Episode — ${new Date().toLocaleDateString()}`,
         minutes * 60_000,
       )
       onOpenEpisode(episode)
@@ -105,7 +106,7 @@ export function Backlog({
           value={minutes}
           onChange={(e) => setMinutes(Math.max(1, Number(e.target.value) || 1))}
         />
-        <button type="button" onClick={makeEpisode} disabled={busy || unread.length === 0}>
+        <button type="button" className="primary" onClick={makeEpisode} disabled={busy || unread.length === 0}>
           {busy ? 'Creating…' : 'Make an episode'}
         </button>
       </div>
@@ -120,7 +121,15 @@ export function Backlog({
         // item that is visibly being retried is the same lie in a smaller font.
         ingestion.length === 0 &&
         !ingestionUnavailable && (
-          <p className="hint">Nothing here yet. Paste a newsletter in.</p>
+          // The one empty state that gets the motif (brand/GUIDELINES.md): what this list
+          // becomes once there is something in it.
+          <div className="empty">
+            <p className="hint">
+              Nothing here yet. Paste in a newsletter you trust, or connect a mailbox under
+              Sources and pick what to ingest.
+            </p>
+            <Motif quiet caption="Many voices, one podcast." />
+          </div>
         )
       ) : (
         <ul className="items">

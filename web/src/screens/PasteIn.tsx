@@ -35,8 +35,8 @@ export function PasteIn({ onIngested }: { onIngested: () => void }) {
   return (
     <section aria-label="Paste in">
       <p className="hint">
-        Paste a newsletter. A worker deduplicates it against your backlog and turns it into
-        a news item — it will not appear here instantly.
+        Paste in a newsletter, a thread, anything you trust. A worker folds it into your
+        backlog as a story for your next episode — it will not appear there instantly.
       </p>
       <form onSubmit={submit}>
         <label htmlFor="paste-title">Title</label>
@@ -57,7 +57,7 @@ export function PasteIn({ onIngested }: { onIngested: () => void }) {
           placeholder="Paste the whole newsletter here."
           onChange={(e) => setText(e.target.value)}
         />
-        <button type="submit" disabled={status.kind === 'busy' || !title.trim() || !text.trim()}>
+        <button type="submit" className="primary" disabled={status.kind === 'busy' || !title.trim() || !text.trim()}>
           {status.kind === 'busy' ? 'Sending…' : 'Ingest'}
         </button>
       </form>

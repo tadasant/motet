@@ -38,6 +38,7 @@ import {
   getToken,
   setToken,
 } from './api/client'
+import { Wordmark } from './brand/Brand'
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
@@ -400,19 +401,18 @@ export default function App() {
     return (
       <div className="door">
         <header className="door-bar">
-          <h1 className="brand">Motet</h1>
+          <Wordmark className="brand" />
         </header>
-        <main className="door-main">
+        {/* The landing is a hero and runs full width; a callback is a message and a button,
+            so it gets a reading column. */}
+        <main className={`door-main${callback ? ' narrow' : ''}`}>
           {errorLine}
           {callback && signingIn ? (
             <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
           ) : callback ? (
             <OAuthCallback callback={callback} onDone={finishCallback} />
           ) : (
-            <>
-              {tokenField}
-              <SignIn />
-            </>
+            <SignIn tokenField={tokenField} />
           )}
         </main>
       </div>

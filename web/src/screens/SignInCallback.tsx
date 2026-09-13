@@ -92,7 +92,7 @@ export function SignInCallback({
 
   return (
     <section aria-labelledby="signin-callback-heading">
-      <h2 id="signin-callback-heading">Signing in</h2>
+      <h1 id="signin-callback-heading">Signing in</h1>
 
       {callback.kind === 'denied' && (
         <p className="hint" role="status">

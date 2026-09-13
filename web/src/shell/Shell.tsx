@@ -1,12 +1,14 @@
-// The app shell: a sidebar, a top bar, and a content area. Structure only — colours and
-// type are Phase 3, and every screen inside it renders as it did in the tab strip, less
-// the title the top bar now carries.
+// The app shell: a sidebar, a top bar, and a content area. Dressed in the Polyphony brand
+// (brand/GUIDELINES.md, motet#110) — the wordmark top left, the page title in the display
+// face — and every screen inside it renders as it did in the tab strip, less the title the
+// top bar now carries.
 //
 // Under ~800px the sidebar folds into a bar across the top with a menu button; the nav
 // is the same element either way, so there is one list of sections and one active state.
 
 import { type MouseEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 
+import { Wordmark } from '../brand/Brand'
 import { ChevronIcon, HOME, MenuIcon, type Section, sectionById } from './sections'
 
 export function Shell({
@@ -64,8 +66,8 @@ export function Shell({
     <div className="shell">
       <aside className={`sidebar${menuOpen ? ' open' : ''}`}>
         <div className="brand-row">
-          <a className="brand" href={home} onClick={(event) => go(event, home)}>
-            Motet
+          <a className="brand wordmark-link" href={home} onClick={(event) => go(event, home)}>
+            <Wordmark />
           </a>
           <button
             type="button"

@@ -23,7 +23,7 @@ function stamp(iso: string | null | undefined): string {
 /** What to say when stage 2 has no steps, by the item's overall status. */
 const EMPTY_STAGE_COPY: Record<string, string> = {
   held: 'Not processed yet — held. Nothing has been spent on this item; pick it and press Ingest now.',
-  dismissed: 'Dismissed. Nothing was spent on this item and it will not be briefed.',
+  dismissed: 'Dismissed. Nothing was spent on this item and it will not be in an episode.',
 }
 
 const STEP_COPY: Record<string, string> = {

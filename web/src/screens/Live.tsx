@@ -18,9 +18,11 @@
 // The socket's event types are hand-typed from voice/src/motet_voice/contract.py: the voice
 // service has no OpenAPI seam into this SPA.
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 
 import { api, type Episode, type VoiceSession } from '../api/client'
+import { MicGlyph } from '../brand/Brand'
 
 // ---- contract ---------------------------------------------------------------------------
 
@@ -138,7 +140,21 @@ const PHASE_LABEL: Record<Phase, string> = {
   error: 'error',
 }
 
-export function Live({ episode, player }: { episode: Episode; player: RefObject<HTMLAudioElement | null> }) {
+export function Live({
+  episode,
+  player,
+  micSlot = null,
+}: {
+  episode: Episode
+  player: RefObject<HTMLAudioElement | null>
+  /**
+   * The player transport's pill slot. Given one, Play Live's primary control is drawn there
+   * as the brand's mic pill (motet#110) instead of as a button in its own row. The
+   * interaction is the one this component always had — a press starts Play Live, a press
+   * while narrating interrupts — and nothing about it is hold-to-talk.
+   */
+  micSlot?: HTMLElement | null
+}) {
   const [availability, setAvailability] = useState<Availability>({ state: 'checking' })
   const [phase, setPhase] = useState<Phase>('idle')
   const [arm, setArm] = useState<string>('')
@@ -581,13 +597,33 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
 
   const running = phase !== 'idle' && phase !== 'error'
 
+  /** The mic pill in the transport, or null when there is no transport to put it in. */
+  const micPill = (content: ReactNode, options: { onClick?: () => void; disabled?: boolean; label?: string }) =>
+    micSlot &&
+    createPortal(
+      <button
+        type="button"
+        className="mic"
+        onClick={options.onClick}
+        disabled={options.disabled}
+        aria-label={options.label}
+      >
+        <MicGlyph />
+        {content}
+      </button>,
+      micSlot,
+    )
+
   if (availability.state !== 'available') {
     return (
       <div className="live" data-live-availability={availability.state}>
+        {micPill('Play Live', { disabled: true })}
         <div className="row">
-          <button type="button" disabled>
-            Play Live
-          </button>
+          {!micSlot && (
+            <button type="button" disabled>
+              Play Live
+            </button>
+          )}
           <span className="hint" role="status" data-live-unavailable-reason>
             {availability.state === 'checking' ? 'checking whether live voice is available…' : availability.reason}
           </span>
@@ -598,25 +634,36 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
 
   return (
     <div className="live" data-live-availability="available">
+      {!running
+        ? micPill('Play Live', { onClick: start })
+        : phase === 'narrating' || phase === 'paused'
+          ? micPill('just ask', { onClick: interrupt, label: 'just ask (interrupt)' })
+          : micPill(phase === 'connecting' ? 'connecting…' : phase === 'replying' ? 'replying…' : phase === 'resuming' ? 'resuming…' : 'listening…', {
+              disabled: true,
+            })}
       <div className="row">
         {running ? (
           <>
             <button type="button" onClick={stop}>
               Stop Live
             </button>
-            {(phase === 'narrating' || phase === 'paused') && (
+            {!micSlot && (phase === 'narrating' || phase === 'paused') && (
               <button type="button" onClick={interrupt}>
                 Interrupt
               </button>
             )}
           </>
         ) : (
-          <button type="button" onClick={start}>
-            Play Live
-          </button>
+          !micSlot && (
+            <button type="button" onClick={start}>
+              Play Live
+            </button>
+          )
         )}
         <span className={phase === 'error' ? 'error' : 'hint'} role="status" data-live-phase={phase}>
-          {PHASE_LABEL[phase]}
+          {/* "Just ask" only where the question can be spoken: the composed arm hears the
+              interruption but takes the question typed. */}
+          {phase === 'narrating' && live ? 'narrating — just ask: talk over it' : PHASE_LABEL[phase]}
           {arm && ` · ${arm}`}
         </span>
         {running && (
