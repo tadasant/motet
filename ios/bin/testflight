@@ -142,7 +142,14 @@ fi
 # inside the upload. Captured rather than piped into `grep -q`, which under pipefail can
 # report a match as a miss when the writer dies of SIGPIPE.
 settings="$(xcodebuild -showBuildSettings -project App/Motet.xcodeproj -scheme Motet -configuration Release "${build_settings[@]}" 2>/dev/null)"
-entitlements="$(printf '%s\n' "$settings" | awk '$1 == "CODE_SIGN_ENTITLEMENTS" { $1 = ""; $2 = ""; print }' | tr -d ' ')"
+# `sort -u`, because -showBuildSettings prints a block per target in the scheme and a
+# setting passed on the command line is resolved in every one of them. Without it the
+# answer is the same path repeated once per target, which matches neither "" nor the one
+# permitted file — so the guard failed a correct build (run 34776726410). Deduplicating
+# keeps the check it is actually making: *which* files are signed in, not how many blocks
+# named them. Two genuinely different values remain two lines, and still fail.
+entitlements="$(printf '%s\n' "$settings" \
+  | awk '$1 == "CODE_SIGN_ENTITLEMENTS" { $1 = ""; $2 = ""; print }' | tr -d ' ' | sort -u)"
 case "$entitlements" in
   "")
     printf '    ok  %-44s none\n' "CODE_SIGN_ENTITLEMENTS"
