@@ -1,13 +1,17 @@
+import AuthenticationServices
 import MotetKit
 import SwiftUI
 
-/// Where the app is pointed, and how it behaves on a walk.
+/// Where the app is pointed, who it is signed in as, and how it behaves on a walk.
 ///
-/// The token is typed in here, never compiled in: a default token would be a credential in a
-/// shipped binary. The server URL arrives prefilled on a TestFlight build (`CredentialStore`
-/// says where from) and is typed in on every other build.
+/// Signing in goes through the web sign-in in the system sheet and ends in a session this
+/// device keeps (AGENTS.md, "The phone signs in through the web sign-in"). An API token can
+/// still be pasted instead; it is never compiled in, because a default token would be a
+/// credential in a shipped binary. The server URL arrives prefilled on a TestFlight build
+/// (`CredentialStore` says where from) and is typed in on every other build.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
     @State private var baseURL = ""
     @State private var apiToken = ""
     @State private var offlineBytes = 0
@@ -15,6 +19,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                accountSection
                 serverSection
                 listeningSection
                 offlineSection
@@ -32,6 +37,61 @@ struct SettingsView: View {
         }
     }
 
+    private var accountSection: some View {
+        Section {
+            if let email = model.signedInEmail {
+                LabeledContent("Signed in as", value: email)
+                    .listRowBackground(Theme.surface)
+                Button("Sign out", role: .destructive) {
+                    Task {
+                        await model.signOut()
+                        apiToken = model.currentCredentials().apiToken
+                    }
+                }
+                .listRowBackground(Theme.surface)
+            } else {
+                Button(model.isSigningIn ? "Signing in…" : "Sign in with Google") {
+                    Task { await signIn() }
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(model.isSigningIn || baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 4, trailing: 0))
+            }
+            if let message = model.signInMessage {
+                Text(message)
+                    .font(Theme.aside(14))
+                    .foregroundStyle(Theme.inkSoft)
+                    .listRowBackground(Color.clear)
+            }
+        } header: {
+            Text("Account").brandLabel()
+        } footer: {
+            Text("Signs in with a Google account this Motet allows. The session is kept in the Keychain, on this device only.")
+                .font(Theme.aside(14))
+                .foregroundStyle(Theme.inkSoft)
+        }
+    }
+
+    /// The system sheet opens the web sign-in and closes on the API's `motet://` link.
+    private func signIn() async {
+        let server = baseURL
+        guard let started = await model.beginSignIn(baseURL: server) else { return }
+        do {
+            let callback = try await webAuthenticationSession.authenticate(
+                using: started.url, callbackURLScheme: started.callbackScheme
+            )
+            await model.finishSignIn(callback: callback, pkce: started.pkce, baseURL: server)
+            apiToken = model.currentCredentials().apiToken
+        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
+            model.abandonSignIn(nil)
+        } catch is CancellationError {
+            model.abandonSignIn(nil)
+        } catch {
+            model.abandonSignIn(error)
+        }
+    }
+
     private var serverSection: some View {
         Section {
             TextField("https://…", text: $baseURL)
@@ -39,8 +99,10 @@ struct SettingsView: View {
                 .autocorrectionDisabled()
                 .keyboardType(.URL)
                 .listRowBackground(Theme.surface)
-            SecureField("API token", text: $apiToken)
-                .listRowBackground(Theme.surface)
+            DisclosureGroup("Use an API token instead") {
+                SecureField("API token", text: $apiToken)
+            }
+            .listRowBackground(Theme.surface)
             Button("Save and refresh") {
                 Task { await model.saveCredentials(baseURL: baseURL, apiToken: apiToken) }
             }

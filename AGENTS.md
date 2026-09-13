@@ -2501,6 +2501,69 @@ The widening this does buy, said plainly: **CI can write an `auth_sessions` row 
 anybody signing in.** In staging that is not new reach — CI already applies every migration
 and replaces every revision there — but it is a real change in what CI does.
 
+#### The phone signs in through the web sign-in, and a one-time code carries it back
+
+`POST /v1/auth/native/start`, `POST /v1/auth/native/redeem`, migration 0019,
+`ios/Sources/MotetKit/Auth/NativeSignIn.swift`. **Chosen by Tadas on 2026-09-13, in Zimmer
+session 17805, as option A of the options put to him.** The rejected alternatives: **(B)**
+native Google Sign-In, which needs a second, iOS-type Google OAuth client (a one-time human
+step under invariant 9) and a Google SDK in the app, and makes the API trust a second
+audience; **(C)** keep pasting `MOTET_API_TOKEN` into the phone, which leaves a
+non-expiring, owner-equivalent credential on a device that can be lost; and a signed-in
+"sign in on phone" code or QR on the web Settings screen, which needs the same backend work
+as A and is clumsier to use.
+
+The flow reuses everything the browser sign-in already has:
+
+1. The app makes a PKCE pair and calls `native/start` with the challenge. The API writes an
+   ordinary sign-in `oauth_states` row plus the challenge (`handoff_challenge`). It builds
+   the redirect URI from `MOTET_APP_BASE_URL` and does not take one from the caller: the app
+   knows the API's address, not the web app's.
+2. The app opens the returned URL in the system sign-in sheet (`ASWebAuthenticationSession`).
+   Google returns the sheet to the web app's `/oauth/callback`, the redirect already
+   registered on the one OAuth client, so **no new Google client exists**. The web app posts
+   the code as it always does. The ID token is verified and the allowlist checked, exactly
+   as for a browser.
+3. Because the pending row carries a challenge, `/v1/auth/google/callback` mints **no
+   session**. It stores a handoff in `auth_handoffs` and answers with
+   `handoff_url = motet://signed-in?code=…`. The SPA stores nothing, **asks the person to
+   confirm** that they just tapped Sign in in the Motet app, and only then navigates to the
+   link, on which the sheet closes.
+4. The app calls `native/redeem` with the code and its verifier, and gets an ordinary
+   session in `auth_sessions`. That session is revoked by `/v1/auth/logout`, expires in
+   thirty days and is re-checked against the allowlist on every request.
+
+What makes this safe, and each point is pinned in `api/tests/test_native_sign_in.py`:
+
+- **The session token never travels in a URL.** The link carries a code, stored only as a
+  hash and valid for two minutes, and consumed by the redeem that succeeds. A refused redeem
+  rolls back with its request and leaves the code for the app that holds the verifier, so a
+  wrong guess cannot burn the real app's sign-in.
+- **The code is worthless without the verifier.** Another app can register the `motet`
+  scheme and read a code meant for Motet. What it cannot have is Motet's verifier.
+- **What PKCE does not stop, and the confirmation is for.** Any app on the phone can call
+  `native/start` itself, hold *its own* verifier, and wait for the link, so a sign-in it
+  started ends in a session it holds. Nothing in the protocol tells that apart from Motet.
+  The web callback therefore asks before following a handoff, which is the moment a person
+  can notice they did not just tap Sign in in Motet. The stronger fix is returning through a
+  verified `https` universal link that only this app can receive. That needs an associated
+  domains entitlement and a file on the web app, so it is a question for the owner under
+  invariant 12 and is not built. The SPA also refuses any `handoff_url` that is not
+  `motet://signed-in?…`, so no value there can run as script in its origin.
+- **The browser that finished the sign-in holds nothing.** The sheet shares Safari's
+  storage, so a session left there would outlive the flow in a browser nobody is looking at.
+- **The link is the API's.** Its scheme, host and single `code` parameter are literals in
+  `main.py`, never built from anything a caller sent.
+- **The allowlist is asked twice**: at the callback, and again at redeem, which is the moment
+  the session is written. An address removed in between gets nothing.
+
+What this adds under invariant 12: two routes on the existing API, one table used the way
+`oauth_states` and `auth_sessions` are already used, and a nullable column on `oauth_states`.
+It adds no vendor, no second OAuth client, and nothing in the private infrastructure repo.
+`MOTET_API_TOKEN` still works in the app, behind "Use an API token instead". As with every
+change to sign-in, a green CI run proves nothing about the real consent screen, so a human
+signs in on a phone once after this ships.
+
 ### The operator view is the one read across users, and only a listed person gets it
 
 `GET /v1/admin/overview`, `deps.require_admin`, `web/src/screens/Admin.tsx` (motet#87).

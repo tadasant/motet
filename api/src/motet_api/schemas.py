@@ -991,15 +991,69 @@ class CompleteLoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """A session, and the token that presents it.
+    """A session and the token that presents it — or, for a sign-in the iOS app started,
+    the link that hands it back to the app.
 
     ``token`` is returned exactly once, here — the API stores only its hash, so it cannot
     be read back. A client that loses it signs in again.
+
+    Exactly one of ``token`` and ``handoff_url`` is set. A browser sign-in gets a token.
+    A sign-in started by ``POST /v1/auth/native/start`` finishes in the app's in-app
+    browser, which must not keep the session: it gets ``handoff_url`` instead, navigates
+    to it, and the app redeems the code inside it at ``POST /v1/auth/native/redeem``.
     """
 
-    token: str = Field(description="Send as 'Authorization: Bearer <token>', like the API token.")
+    token: str | None = Field(
+        default=None,
+        description=(
+            "Send as 'Authorization: Bearer <token>', like the API token. Absent when "
+            "handoff_url is set."
+        ),
+    )
     email: str = Field(description="The Google account that signed in.")
-    expires_at: datetime
+    expires_at: datetime | None = Field(
+        default=None, description="When the session expires. Absent when handoff_url is set."
+    )
+    handoff_url: str | None = Field(
+        default=None,
+        description=(
+            "Set only for a sign-in the iOS app started: a motet:// link carrying a "
+            "one-time code, built by the API. Navigate to it; do not store anything."
+        ),
+    )
+
+
+class StartNativeLoginRequest(BaseModel):
+    """Begin a Google sign-in on behalf of the iOS app."""
+
+    code_challenge: str = Field(
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+        description=(
+            "base64url(SHA-256(code_verifier)) without padding (RFC 7636 S256). The "
+            "verifier stays in the app and is presented only when the handoff is redeemed."
+        ),
+    )
+
+
+class StartNativeLoginResponse(BaseModel):
+    """Where the app's in-app browser should go."""
+
+    authorization_url: str = Field(
+        description=(
+            "Google's consent URL. It returns to this deployment's web app, which finishes "
+            "the sign-in and then navigates to a motet:// link."
+        )
+    )
+    callback_scheme: str = Field(
+        description="The URL scheme the in-app browser session should wait for."
+    )
+
+
+class RedeemNativeLoginRequest(BaseModel):
+    """The code the handoff link carried, and the verifier only the app holds."""
+
+    code: str = Field(min_length=1, max_length=128)
+    code_verifier: str = Field(pattern=r"^[A-Za-z0-9._~-]{43,128}$")
 
 
 class SessionResponse(BaseModel):

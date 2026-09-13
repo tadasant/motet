@@ -520,6 +520,7 @@ def start_oauth(
     nonce: str | None = None,
     connector_id_: str | None = None,
     oauth_client: dict[str, Any] | None = None,
+    handoff_challenge: str | None = None,
     ttl_seconds: int = 600,
 ) -> None:
     """Record an in-flight authorization so its callback can be believed.
@@ -535,6 +536,11 @@ def start_oauth(
     foreign key to ``sources`` (migration 0018). ``oauth_client`` is what that flow's
     discovery and registration produced, held here until consent completes so the connector
     itself is not touched by an authorization nobody finishes.
+
+    ``handoff_challenge`` marks a sign-in the iOS app started (migration 0019): its
+    callback hands a one-time code back to the app instead of a session to the browser,
+    and this is the PKCE challenge that code will be redeemed against. ``None`` for every
+    browser sign-in and every mailbox connection.
     """
     import json  # noqa: PLC0415
 
@@ -542,8 +548,8 @@ def start_oauth(
         """
         INSERT INTO oauth_states
             (state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-             nonce, connector_id, oauth_client, expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+             nonce, connector_id, oauth_client, handoff_challenge, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
                 now() + make_interval(secs => %s))
         """,
         (
@@ -557,6 +563,7 @@ def start_oauth(
             nonce,
             connector_id_,
             json.dumps(oauth_client) if oauth_client is not None else None,
+            handoff_challenge,
             ttl_seconds,
         ),
     )
@@ -575,7 +582,7 @@ def consume_oauth_state(conn: psycopg.Connection[Any], state: str) -> dict[str, 
         DELETE FROM oauth_states
         WHERE state = %s AND expires_at > now()
         RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-                  nonce, connector_id, oauth_client
+                  nonce, connector_id, oauth_client, handoff_challenge
         """,
         (state,),
     )
