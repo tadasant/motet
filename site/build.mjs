@@ -55,7 +55,7 @@ export function resolveApiOrigin(env) {
   } catch {
     throw new Error(`${API_BASE_ENV}=${JSON.stringify(raw)} is not a URL.`)
   }
-  if (!['http:', 'https:'].includes(url.protocol) || !/^https?:\/\/[^/]/.test(raw)) {
+  if (!['http:', 'https:'].includes(url.protocol) || !/^https?:\/\/[^/]/i.test(raw)) {
     throw new Error(`${API_BASE_ENV}=${JSON.stringify(raw)} must be an http(s) URL with a host.`)
   }
   if (url.username || url.password || url.search || url.hash || url.pathname !== '/') {

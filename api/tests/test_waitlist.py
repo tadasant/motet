@@ -10,6 +10,7 @@ more route.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 import psycopg
@@ -22,9 +23,10 @@ from motet_api.auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV
 from motet_api.config import Settings
 from motet_api.deps import reset_store
 from motet_api.main import configure_cors
-from motet_api.waitlist import MAX_BODY_BYTES, Outcome, answer, read_submission
+from motet_api.waitlist import MAX_BODY_BYTES, Outcome, Submission, answer, read_submission
 from motet_db import auth as auth_repo
 from motet_db import repo
+from motet_db import waitlist as waitlist_repo
 from motet_db.waitlist import normalize_email
 
 TOKEN = "test-api-token"
@@ -76,7 +78,7 @@ class TestJoining:
     ) -> None:
         response = api.post(
             JOIN,
-            content="email=%20Ada.Lovelace%40Example.COM%20&website=",
+            content="email=%20Ada.Lovelace%40Example.COM%20&motet_hp=",
             headers={**AS_SCRIPT, "Origin": LANDING_ORIGIN},
         )
 
@@ -121,7 +123,8 @@ class TestRefusing:
             "email=" + "a" * 65 + "%40example.com",
             "email=" + "a" * 60 + "%40" + "b" * 200 + ".com",
             "email=a%40example.com&email=b%40example.com",
-            "website=",
+            "motet_hp=",
+            "email=ada%40example.com%E2%80%8B",
             "email=%FF%40example.com",
         ],
     )
@@ -142,7 +145,7 @@ class TestRefusing:
         human = api.post(JOIN, content="email=ada%40example.com", headers=AS_SCRIPT)
         bot = api.post(
             JOIN,
-            content="email=bot%40example.com&website=https%3A%2F%2Fspam.example",
+            content="email=bot%40example.com&motet_hp=https%3A%2F%2Fspam.example",
             headers=AS_SCRIPT,
         )
 
@@ -165,6 +168,52 @@ class TestRefusing:
         )
         assert response.status_code == 413
         assert rows(db) == []
+
+    def test_a_streamed_body_over_the_cap_is_a_413(
+        self, api: TestClient, db: psycopg.Connection[Any]
+    ) -> None:
+        """No Content-Length to refuse on, so the limit has to hold while reading."""
+
+        def chunks() -> Iterator[bytes]:
+            yield b"email=ada%40example.com&note="
+            for _ in range(MAX_BODY_BYTES // 512 + 2):
+                yield b"x" * 512
+
+        response = api.post(JOIN, content=chunks(), headers=AS_SCRIPT)
+        assert "content-length" not in {k.lower() for k in response.request.headers}
+        assert response.status_code == 413
+        assert rows(db) == []
+
+    def test_a_store_that_fails_is_a_503_that_names_no_address(
+        self,
+        api: TestClient,
+        db: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The exception is caught rather than reported, and reported by type alone.
+
+        Escaping, it would reach the error reporter with the address among the frame locals,
+        and a constraint violation's message quotes the row it refused.
+        """
+
+        def refuse(_conn: object, email: str) -> bool:
+            raise psycopg.errors.CheckViolation(f"Failing row contains ({email})")
+
+        monkeypatch.setattr(waitlist_repo, "join", refuse)
+        caplog.set_level(logging.DEBUG)
+
+        response = api.post(JOIN, content="email=secret.person%40example.com", headers=AS_SCRIPT)
+
+        assert response.status_code == 503
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert "outcome=store_failed" in caplog.text
+        assert "CheckViolation" in caplog.text
+        assert "secret.person" not in caplog.text
+        assert rows(db) == []
+
+    def test_the_submission_repr_hides_the_address(self) -> None:
+        assert "ada" not in repr(Submission(email="ada@example.com", refused=None, wants_json=True))
 
     def test_an_invalid_native_post_lands_on_a_page_that_says_so(self, api: TestClient) -> None:
         response = api.post(JOIN, content="email=nope", headers=AS_NATIVE_FORM)
@@ -276,6 +325,7 @@ class TestTheAdminList:
         ("ada@example.com.", None),
         ("ad\ta@example.com", None),
         ("ad\x00a@example.com", None),
+        ("ada@example.com\u200b", None),
     ],
 )
 def test_normalize_email(raw: str, stored: str | None) -> None:

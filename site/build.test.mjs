@@ -92,7 +92,7 @@ describe('build', () => {
     for (const form of forms) {
       assert.match(form, /method="post"/)
       assert.match(form, /name="email" type="email" required/)
-      assert.match(form, /name="website"[^>]*tabindex="-1"/)
+      assert.match(form, /name="motet_hp"[^>]*tabindex="-1"/)
       assert.match(form, /data-waitlist-status/)
     }
     // The script-src and style-src 'self' policy holds only while nothing is inline.

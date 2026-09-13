@@ -2401,9 +2401,11 @@ from the repository; nothing here pushes to Cloudflare. That is what reconciles 
 decision the SPA's hosting records in the private repo, where Pages lost to Cloud Run
 because a direct upload needs an account-level `Cloudflare Pages: Edit` token in CI: the Git
 integration needs no credential in CI at all, so the reason that decided the SPA does not
-apply here, and the SPA stays where it is. Creating the project, connecting the repository
-and pointing the apex at it are one-time human steps (DNS is a named boundary); the runbook
-belongs to the private repo, not to this file.
+apply here, and the SPA stays where it is. Creating the project and connecting the
+repository (a GitHub App consent) are one-time human steps under invariant 9, and so is
+writing the apex record: the private repo's Motet invariants make DNS a named boundary of its
+own — agents read the zone, a human sets records — which overrides the "adding a DNS record"
+example invariant 9 gives above. The runbook belongs to the private repo, not to this file.
 
 - **No framework and no dependencies.** The brand allows two webfonts and nothing else, so
   the page is HTML, one stylesheet and one small script, and `build.mjs` is standard-library
@@ -2432,11 +2434,15 @@ shape `Settings.callback_uri_allowed` already declines on an unauthenticated rou
 - **One row per address, held by the database.** The address is trimmed and lowercased and
   `INSERT … ON CONFLICT` on it, so a repeat bumps `submissions` rather than adding a row.
 - **A known address and a new one get the same answer**, and so does a filled honeypot
-  field — the route is not an oracle for who is on the list, and a bot is not told what
-  caught it.
-- **No address reaches a log line or a metric.** Outcomes are counted on
-  `motet.api.waitlist_submissions{outcome}` — `joined`, `already_listed`, `honeypot`,
-  `invalid`, `too_large`, `unsupported_media_type` — and logged by outcome alone. The
+  field (`motet_hp`, a name no autofill recognises, so a real person is never quietly
+  caught by it) — the route is not an oracle for who is on the list, and a bot is not told
+  what caught it.
+- **No address reaches a log line, a metric or the error reporter.** Outcomes are counted
+  on `motet.api.waitlist_submissions{outcome}` — `joined`, `already_listed`, `honeypot`,
+  `invalid`, `too_large`, `unsupported_media_type`, `store_failed` — and logged by outcome
+  alone. A failed write is caught and logged by exception *type*, answered 503: escaping, it
+  would carry the address to GlitchTip as a frame local, and a constraint violation's message
+  quotes the row. The
   refusals are counted because a form posting somewhere wrong and a waitlist nobody joins
   are otherwise the same empty table.
 - **No rate limit**, stated rather than overlooked: there is nowhere in this stack to keep

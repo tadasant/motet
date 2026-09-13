@@ -56,7 +56,8 @@ export function AdminWaitlist() {
         >
           Older signups
         </button>
-        <button type="button" onClick={refresh}>
+        {/* Back to the newest page, where a new signup would appear. */}
+        <button type="button" onClick={() => (before === null ? refresh() : setBefore(null))}>
           Refresh waitlist
         </button>
       </div>

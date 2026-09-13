@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 
@@ -1130,7 +1130,7 @@ _WAITLIST_FORM_SCHEMA: Final = {
     "required": ["email"],
     "properties": {
         "email": {"type": "string", "format": "email", "maxLength": 254},
-        "website": {
+        "motet_hp": {
             "type": "string",
             "description": "Leave empty. A form that fills it is treated as a bot.",
         },
@@ -1154,6 +1154,7 @@ _WAITLIST_FORM_SCHEMA: Final = {
         413: {"description": "The body is larger than a waitlist form."},
         415: {"description": "The body is not `application/x-www-form-urlencoded`."},
         422: {"description": "The address is not plausibly an email address."},
+        503: {"description": "The address could not be stored; nothing was recorded."},
     },
 )
 def join_waitlist(
@@ -1167,11 +1168,21 @@ def join_waitlist(
     address, a known one and a submission that filled the honeypot all get the same 200.
     """
     if submission.refused is not None or submission.email is None:
-        outcome = submission.refused or WaitlistOutcome.INVALID
-    elif waitlist_repo.join(conn, submission.email):
-        outcome = WaitlistOutcome.JOINED
-    else:
-        outcome = WaitlistOutcome.ALREADY_LISTED
+        return waitlist_answer(
+            submission.refused or WaitlistOutcome.INVALID, wants_json=submission.wants_json
+        )
+    try:
+        joined = waitlist_repo.join(conn, submission.email)
+    except Exception as exc:
+        # Caught, and reported by type alone, because this is the one route where letting an
+        # exception escape would leak the thing it promises never to log: the error reporter
+        # captures frame locals — `email` is one, in `waitlist_repo.join` — and a constraint
+        # violation's own message quotes the failing row. The type is enough to find it.
+        with suppress(Exception):
+            conn.rollback()
+        logger.error("waitlist: storing a submission failed (%s)", type(exc).__name__)
+        return waitlist_answer(WaitlistOutcome.STORE_FAILED, wants_json=submission.wants_json)
+    outcome = WaitlistOutcome.JOINED if joined else WaitlistOutcome.ALREADY_LISTED
     return waitlist_answer(outcome, wants_json=submission.wants_json)
 
 

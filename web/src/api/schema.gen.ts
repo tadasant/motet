@@ -4132,7 +4132,7 @@ export interface operations {
                     /** Format: email */
                     email: string;
                     /** @description Leave empty. A form that fills it is treated as a bot. */
-                    website?: string;
+                    motet_hp?: string;
                 };
             };
         };
@@ -4163,6 +4163,13 @@ export interface operations {
             };
             /** @description The address is not plausibly an email address. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The address could not be stored; nothing was recorded. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import html
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 from urllib.parse import parse_qs
@@ -55,8 +55,10 @@ MAX_BODY_BYTES: Final = 4096
 FORM_CONTENT_TYPE: Final = "application/x-www-form-urlencoded"
 EMAIL_FIELD: Final = "email"
 #: Hidden from people (off-screen, ``tabindex=-1``, ``autocomplete=off``) and filled by bots
-#: that fill every input. Named for what a bot expects to find, not for what it is.
-HONEYPOT_FIELD: Final = "website"
+#: that fill every input. Deliberately a name no autofill heuristic or password manager
+#: recognises: ``website`` or ``url`` would be filled in for a real person now and then, who
+#: would be told they had joined while nothing was stored.
+HONEYPOT_FIELD: Final = "motet_hp"
 
 #: The one header that lets the landing page read the answer. See the module docstring.
 CORS_HEADERS: Final = {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"}
@@ -69,6 +71,8 @@ class Outcome(StrEnum):
     INVALID = "invalid"
     TOO_LARGE = "too_large"
     UNSUPPORTED = "unsupported_media_type"
+    #: The address was valid and the write did not happen. See ``join_waitlist``.
+    STORE_FAILED = "store_failed"
 
 
 _meter = metrics.get_meter("motet.api")
@@ -88,7 +92,9 @@ class Submission:
     """What the request said, read before the route touches the database."""
 
     #: The normalized address — ``None`` when the request was refused before one was read.
-    email: str | None
+    #: Out of the repr because an error reporter captures frame locals by their repr, and this
+    #: object is a local of the route that stores it.
+    email: str | None = field(repr=False)
     #: Set when the request is answered without a write.
     refused: Outcome | None
     #: Whether to answer in JSON (the page's script) or HTML (a native form post).
@@ -108,7 +114,9 @@ async def read_submission(request: Request) -> Submission:
         return Submission(email=None, refused=Outcome.UNSUPPORTED, wants_json=wants_json)
 
     declared = request.headers.get("content-length")
-    if declared is not None and (not declared.isdigit() or int(declared) > MAX_BODY_BYTES):
+    if declared is not None and (
+        not (declared.isascii() and declared.isdigit()) or int(declared) > MAX_BODY_BYTES
+    ):
         return Submission(email=None, refused=Outcome.TOO_LARGE, wants_json=wants_json)
 
     body = bytearray()
@@ -152,6 +160,11 @@ _ANSWERS: Final[dict[Outcome, tuple[int, str, str]]] = {
         415,
         "That form didn't come from the Motet waitlist.",
         "Go back and try again.",
+    ),
+    Outcome.STORE_FAILED: (
+        503,
+        "We couldn't save that just now.",
+        "Go back and try again in a moment.",
     ),
 }
 

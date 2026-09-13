@@ -3853,7 +3853,7 @@ paths:
                   format: email
                   maxLength: 254
                   type: string
-                website:
+                motet_hp:
                   description: Leave empty. A form that fills it is treated as a bot.
                   type: string
               required:
@@ -3874,6 +3874,8 @@ paths:
           description: The body is not `application/x-www-form-urlencoded`.
         '422':
           description: The address is not plausibly an email address.
+        '503':
+          description: The address could not be stored; nothing was recorded.
       summary: Join the waitlist
       tags:
       - waitlist

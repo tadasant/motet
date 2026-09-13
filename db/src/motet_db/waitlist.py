@@ -17,6 +17,7 @@ Two properties are the design:
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -50,6 +51,10 @@ def normalize_email(raw: str) -> str | None:
     if not email or len(email) > MAX_EMAIL_LENGTH or not _EMAIL.match(email):
         return None
     if len(email.split("@", 1)[0]) > MAX_LOCAL_PART_LENGTH:
+        return None
+    # Invisible format characters (a zero-width space pasted along with the address) would
+    # make a second, indistinguishable row for one person.
+    if any(unicodedata.category(char) == "Cf" for char in email):
         return None
     return email
 
