@@ -175,13 +175,12 @@ def _timestamp(milliseconds: int) -> str:
 
 
 #: The last line of every episode's show notes, in both forms. Brand copy
-#: (``brand/GUIDELINES.md``): it points at the two value props — the content you trust, and
-#: asking for more — and does not lead with citations, which are a property of the product
-#: rather than its pitch.
-CLOSING_LINE = (
-    "From the content you trust, as one podcast. Want more on a story? "
-    "Open this episode in Motet and just ask: it goes deeper, then picks back up."
-)
+#: (``brand/GUIDELINES.md``): it names the content you trust, and does not lead with
+#: citations, which are a property of the product rather than its pitch. It deliberately
+#: does not invite the listener to "just ask": Play Live is dormant wherever no voice service
+#: is deployed, and a podcast client cannot reach it at all, so the line would promise
+#: something the listener cannot do.
+CLOSING_LINE = "Many voices, one podcast: made from the content you trust."
 
 #: Longest source quote the show notes print under a story, in characters. The feed carries
 #: every published episode, and a podcast client re-fetches the whole document on every
