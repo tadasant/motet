@@ -105,7 +105,9 @@ def get_llm_config() -> LlmConfigResponse:
 
 
 def set_llm_config(
-    stage: Annotated[str, Field(description="An LLM stage as get_llm_config lists it, e.g. dedup.")],
+    stage: Annotated[
+        str, Field(description="An LLM stage as get_llm_config lists it, e.g. dedup.")
+    ],
     model: Annotated[
         str | None,
         Field(description="A catalogue slug to run the stage on. Omit to leave it unchanged."),
