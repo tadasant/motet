@@ -25,6 +25,13 @@ export type PostResponse<P extends keyof paths> = paths[P] extends {
       : never
   : never
 
+/** Response body of a PUT. */
+export type PutResponse<P extends keyof paths> = paths[P] extends {
+  put: { responses: { 200: { content: { 'application/json': infer R } } } }
+}
+  ? R
+  : never
+
 export type HealthResponse = GetResponse<'/internal/health'>
 export type NewsItem = GetResponse<'/v1/news-items'>[number]
 export type IngestionItem = GetResponse<'/v1/ingestion'>[number]
@@ -243,6 +250,19 @@ export async function apiPostPath<P extends keyof paths>(
   return parse<PostResponse<P>>(response, 'POST', url)
 }
 
+export async function apiPutPath<P extends keyof paths>(
+  _template: P,
+  url: string,
+  body: unknown,
+): Promise<PutResponse<P>> {
+  const response = await send(`${apiBaseUrl()}${url}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return parse<PutResponse<P>>(response, 'PUT', url)
+}
+
 export const api = {
   health: () => apiGet('/internal/health'),
   // Signing in. `startLogin` and `completeLogin` are the only two calls in this file that
@@ -285,8 +305,6 @@ export const api = {
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),
-  episode: (id: string) =>
-    apiGetPath('/v1/episodes/{episode_id}', `/v1/episodes/${encodeURIComponent(id)}`),
   setRead: (id: string, read: boolean) =>
     apiPostPath(
       '/v1/news-items/{news_item_id}/read',
@@ -308,4 +326,24 @@ export const api = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return apiGetPath('/v1/admin/overview', `/v1/admin/overview${suffix}`)
   },
+  // How far the listener has got: the position resource a syncing player writes, which
+  // is the same handler as `POST …/progress` under the name AGENTS.md gives new callers.
+  // Monotonic on the server, so a lower report is a no-op rather than a rewind, and every
+  // story whose segment has been passed is marked read.
+  setPosition: (id: string, listenedThroughMs: number) =>
+    apiPutPath(
+      '/v1/episodes/{episode_id}/position',
+      `/v1/episodes/${encodeURIComponent(id)}/position`,
+      { listened_through_ms: Math.max(0, Math.round(listenedThroughMs)) },
+    ),
+  /**
+   * The episode's audio, as a URL a media element can load directly.
+   *
+   * Not fetched: a deployed API answers this route with a 307 to a signed object-storage
+   * URL on another origin, which a `<audio>` element follows without CORS and a `fetch`
+   * does not. The route takes the *feed* token rather than the bearer header, because a
+   * media element cannot send one — the same reason the RSS enclosure carries it.
+   */
+  audioUrl: (id: string, feedToken: string) =>
+    `${apiBaseUrl()}/v1/episodes/${encodeURIComponent(id)}/audio?token=${encodeURIComponent(feedToken)}`,
 }
