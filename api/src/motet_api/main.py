@@ -18,10 +18,11 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from motet_db import (
@@ -57,6 +58,7 @@ from motet_workers import (
     enqueue_source_poll,
     queue_readiness,
 )
+from motet_workers.queues import PIPELINE
 from starlette.requests import ClientDisconnect
 
 from . import obs
@@ -90,6 +92,14 @@ from .deps import (
 from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
 from .feed import FeedMetadata, feed_url, render_feed
 from .schemas import (
+    AdminEpisodeCounts,
+    AdminJobCounts,
+    AdminJobResponse,
+    AdminNewsItemCounts,
+    AdminOverviewResponse,
+    AdminQueueResponse,
+    AdminSourceItemCounts,
+    AdminUserResponse,
     ClaimModel,
     CompleteLoginRequest,
     ConnectSourceRequest,
@@ -759,6 +769,66 @@ def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
                 blocked_keys=entry.blocked_keys,
             )
             for entry in queue_readiness(conn)
+        ],
+    )
+
+
+@app.get("/v1/admin/overview", response_model=AdminOverviewResponse, tags=["admin"])
+def admin_overview(
+    conn: Conn,
+    _caller: User,
+    user_id: Annotated[str | None, Query()] = None,
+) -> AdminOverviewResponse:
+    """The whole deployment at a glance, across every user.
+
+    Deployment state rather than user state, like ``/v1/processing``: the caller's own
+    ``user_id`` is ignored, and the route takes it only to sit behind the same lock as
+    everything else under ``/v1``. The optional ``user_id`` query filters the job list;
+    the per-user and per-queue aggregates are always for everyone.
+    """
+    users = repo.admin_overview_users(conn)
+    queues = repo.admin_overview_queues(conn, [queue.value for queue in PIPELINE])
+    jobs_ = repo.admin_overview_jobs(conn, user_id=user_id)
+    return AdminOverviewResponse(
+        generated_at=datetime.now(UTC),
+        users=[
+            AdminUserResponse(
+                user_id=user.user_id,
+                email=user.email,
+                source_items=AdminSourceItemCounts(**user.source_items),
+                news_items=AdminNewsItemCounts(**user.news_items),
+                episodes=AdminEpisodeCounts(**user.episodes),
+                jobs=AdminJobCounts(**user.jobs),
+            )
+            for user in users
+        ],
+        queues=[
+            AdminQueueResponse(
+                queue=queue.queue,
+                ready=queue.ready,
+                running=queue.running,
+                done=queue.done,
+                failed=queue.failed,
+                oldest_ready_age_s=queue.oldest_ready_age_s,
+                last_heartbeat_at=queue.last_heartbeat_at,
+            )
+            for queue in queues
+        ],
+        jobs=[
+            AdminJobResponse(
+                id=job.id,
+                queue=job.queue,
+                state=job.state,
+                attempts=job.attempts,
+                user_id=job.user_id,
+                subject=job.subject,
+                last_error=job.last_error,
+                run_at=job.run_at,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+                locked_at=job.locked_at,
+            )
+            for job in jobs_
         ],
     )
 
