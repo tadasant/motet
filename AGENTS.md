@@ -2700,10 +2700,19 @@ own handlers, behind a provider backed by Postgres.
 - **Registration is bounded per row, not in count**: ten redirect URIs and 8 KB each, with
   clients unused for a day swept on the next registration. There is no rate limit, for the
   waitlist's reason: nowhere to keep one that is not a new mechanism.
-- **Dormant until configured.** It needs `MOTET_PUBLIC_BASE_URL` (the issuer),
-  `MOTET_APP_BASE_URL` and a working sign-in. Without them the OAuth endpoints are 404s,
-  `/mcp` takes only the bearer, and `/internal/health` says `mcp_oauth_configured: false`.
-  Setting `MOTET_PUBLIC_BASE_URL` in a deployment that does not is the private-repo half of C2.
+- **It runs wherever it is configured, and that is not the same as "a human switched it
+  on".** It needs `MOTET_PUBLIC_BASE_URL` (the issuer), `MOTET_APP_BASE_URL` and a working
+  sign-in; without them the OAuth endpoints are 404s, `/mcp` takes only the bearer, and
+  `/internal/health` says `mcp_oauth_configured: false`. **None of those three is an OAuth
+  variable.** `MOTET_PUBLIC_BASE_URL` is the RSS enclosure origin (`deps.public_base_url`),
+  set in a deployed environment so the feed does not advertise `run.app` links; the other two
+  are the SPA's origin and the sign-in allowlist. So both deployed environments satisfy the
+  condition already, and the authorization server came up on the first image bump after
+  this shipped rather than on a deliberate act — which is what the merge gate held motet#111
+  to say out loud, and what the owner was asked to confirm before it merged. **A future
+  capability whose activation is a security boundary should not infer its own switch from a
+  variable set for another purpose** — give it its own, and say in the PR which environments
+  it turns on in.
 
 **What no test here can tell you** is whether a real MCP client completes discovery against a
 deployed issuer, and whether a person gets through the real Google sign-in and the Allow screen.

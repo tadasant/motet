@@ -28,11 +28,18 @@ person is at the keyboard.
 5. The client redeems the code at ``/token`` for an access token — an ``auth_sessions`` row
    with an hour's life — and a refresh token.
 
-**Dormant until configured**, like every other path here that depends on a deployment fact.
-It needs ``MOTET_PUBLIC_BASE_URL`` (the issuer: where clients reach this API),
-``MOTET_APP_BASE_URL`` (where Google returns the person) and a working sign-in. Without
-them the OAuth endpoints answer 404, ``/mcp`` still takes the ``/v1`` bearer, and
-``/internal/health`` says ``mcp_oauth_configured: false``.
+**Configured is the same as on, and none of the three variables is an OAuth variable.**
+:func:`oauth_setup` needs ``MOTET_PUBLIC_BASE_URL`` (the issuer: where clients reach this
+API), ``MOTET_APP_BASE_URL`` (where Google returns the person) and a working sign-in;
+without them the OAuth endpoints answer 404, ``/mcp`` still takes the ``/v1`` bearer, and
+``/internal/health`` says ``mcp_oauth_configured: false``. But ``MOTET_PUBLIC_BASE_URL`` is
+the *RSS enclosure* origin (:func:`motet_api.deps.public_base_url`), set in a deployed
+environment so the feed does not advertise ``run.app`` links, and the other two are the
+SPA's origin and the sign-in allowlist — so a deployed environment satisfies all three
+without anyone deciding anything about OAuth. Adding a capability here therefore turns it
+on in staging and production at the next image bump: say so in the PR, and if the
+activation itself needs a human's decision, give it a variable of its own rather than
+inheriting this condition.
 """
 
 from __future__ import annotations
