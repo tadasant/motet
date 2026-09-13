@@ -360,7 +360,7 @@ describe('App', () => {
     }
   })
 
-  it('counts what is waiting for you on the sidebar: held and failed, not in flight', async () => {
+  it('counts what needs you on the sidebar: held and failed, not in flight', async () => {
     // motet#98. A held item waits for somebody to press Ingest now, and a failed one will
     // never move again; an item a worker is carrying needs nobody. A settled one is not
     // counted either — a badge stuck at 3 after everything landed means nothing.

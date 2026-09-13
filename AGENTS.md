@@ -1093,9 +1093,9 @@ Three smaller things are decisions rather than implementation:
   being ready, so two rows disagreeing cannot produce "failed, and trying again in 30
   seconds".
 
-In the SPA it is a panel above the backlog. The sidebar's Backlog count is **what is
-waiting for a person** — held items plus failed ones, and not an item a worker is still
-carrying (motet#98) — so it is visible from every section, the paste screen included. It polls only while
+In the SPA it is a panel above the backlog. The sidebar's Backlog count is **what needs a
+person** — held items plus failed ones (Sources' "Waiting for you" and "Failed" tiles,
+summed), and not an item a worker is still carrying (motet#98) — so it is visible from every section, the paste screen included. It polls only while
 something is pending, and the fetch is **best-effort**: the backlog is the primary list and
 must not go blank because the secondary one 404s.
 

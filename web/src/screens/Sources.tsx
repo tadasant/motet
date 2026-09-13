@@ -48,8 +48,8 @@ export function Sources({
   /**
    * What Google said when it refused the last consent, if it refused one — carried here
    * from the callback page by App (motet#98). Shown once at the top, because this is the
-   * screen the flow lands back on, and the row the attempt left says only "Consent not
-   * finished" — which a Cancel, a closed tab and a flow still in progress all look like.
+   * screen the flow lands back on, and what the attempt left — the card's "Consent not
+   * finished" and a row notice hedging "you cancelled … or closed it" — cannot say which.
    */
   notice = '',
   /** Overridden only by tests: jsdom cannot navigate. */

@@ -108,8 +108,8 @@ export default function App() {
   const [callback, setCallback] = useState(readCallback)
   // What Google said when it refused, carried from the callback page to the screen the
   // flow started on (motet#98). Cancelling a consent is an answer, and until this existed
-  // the only trace of it on Sources was a row reading "Consent not finished" — which is
-  // what an *abandoned* attempt and one still in progress both look like. Cleared when
+  // the only trace of it on Sources was the card's "Consent not finished" and a row notice
+  // that cannot tell a Cancel from a closed tab. Cleared when
   // the section changes, so it is said once rather than sitting there for the rest of the
   // session.
   const [consentNotice, setConsentNotice] = useState('')
@@ -169,12 +169,13 @@ export default function App() {
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
 
-    // Best-effort and on its own, like the episode list below: an older API without the
-    // held route must cost the badge its held half, not blank the backlog.
+    // Best-effort and on its own, like the episode list below: a held route that fails must
+    // not blank the backlog. A failed read keeps the last count rather than zeroing it — a
+    // blip is not evidence that the held items went away.
     api
       .heldSourceItems()
       .then((list) => setHeldCount(list.length))
-      .catch(() => setHeldCount(0))
+      .catch(() => {})
 
     // The episode list rides the same refresh, so a Mark listened, a render finishing, or
     // a position reported from another device shows without a reload — and the shelf
@@ -230,15 +231,17 @@ export default function App() {
   const waiting =
     ingestion.some((item) => item.state === 'pending') ||
     episodes.some((entry) => IN_PROGRESS.has(entry.state))
-  // The badge counts what is waiting for *you* (motet#98): held items, which nothing will
+  // The badge counts what needs you (motet#98): held items, which nothing will
   // move until somebody picks them, and failed ones, which nothing will move at all. An
   // item a worker is still carrying is not counted — it needs nobody, and the Processing
   // panel already says it is on its way. Before motet#91 the held count was in here by
   // accident, as "pending" rows of the ingestion list; this makes it the meaning on
-  // purpose. A failure still makes the count loud: "3 to pick" and "3, one of which is
-  // never coming back" want different reactions.
-  const anyFailed = ingestion.some((item) => item.state === 'failed')
-  const waitingForYou = heldCount + ingestion.filter((item) => item.state === 'failed').length
+  // purpose. It is Sources' "Waiting for you" tile (held) plus its "Failed" tile, summed
+  // across sources. A failure still makes the count loud: "3 to pick" and "3, one of which
+  // is never coming back" want different reactions.
+  const failedCount = ingestion.filter((item) => item.state === 'failed').length
+  const anyFailed = failedCount > 0
+  const needsYou = heldCount + failedCount
   useEffect(() => {
     if (!waiting || callback || !(token || unlocked)) return
     const timer = window.setInterval(refresh, POLL_MS)
@@ -334,7 +337,13 @@ export default function App() {
 
   const finishCallback = () => {
     if (!signingIn && callback?.kind === 'denied') {
-      setConsentNotice(explainDenial(callback.error, callback.description))
+      // For a Cancel, say the one thing the Sources row cannot know — that it *was* a
+      // Cancel — rather than repeating the row's own "nothing was connected" beside it.
+      setConsentNotice(
+        callback.error === 'access_denied'
+          ? 'Google says you did not grant access: that Gmail attempt was cancelled, not left unfinished.'
+          : explainDenial(callback.error, callback.description),
+      )
     }
     setCallback(null)
     // Back to where the flow started from: a mailbox connection belongs on Sources, and a
@@ -442,7 +451,7 @@ export default function App() {
       section={section}
       sections={offered}
       onNavigate={navigate}
-      badge={{ count: waitingForYou, failed: anyFailed }}
+      badge={{ count: needsYou, failed: anyFailed }}
       account={account}
     >
       {errorLine}

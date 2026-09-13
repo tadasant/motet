@@ -161,7 +161,8 @@ def _backfill_user_email(conn: psycopg.Connection[Any], *, user_id: str, email: 
     which one the screen showed would be "whoever signed in last". The cost of that choice
     is that whichever allowlisted address signs in *first* is the label for good, and with
     no database shell (invariant 10) nothing corrects it; on a one-account deployment that
-    is the owner.
+    is the owner. In staging the first writer may well be the CI session mint rather than a
+    browser, so there the label is whichever allowlisted address that mint was handed.
 
     Here rather than in the sign-in route so that the staging mint
     (:mod:`motet_db.mint_session`) writes it too: both are a caller proving an allowlisted

@@ -26,7 +26,7 @@ type Status =
  * Exported because the same sentence is shown twice, in two places, and must not become
  * two sentences: here while the callback page is up, and again at the top of Sources once
  * this page is dismissed (motet#98). Without the second, the only trace of a cancelled
- * consent was a row reading "waiting for consent" — which says nothing about whether the
+ * consent was a card reading "Consent not finished" — which says nothing about whether the
  * grant is still coming.
  */
 export function explain(error: string, description: string): string {
