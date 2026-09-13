@@ -8,9 +8,9 @@
 // There is deliberately no player here. Phase 1 ships a private RSS feed instead, because
 // a browser cannot do background audio or offline and a dog walk needs both.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api } from '../api/client'
+import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api, apiBaseUrl } from '../api/client'
 import { ago, serverNow, workerState } from './Processing'
 
 /** States a client should keep polling through. Exported: the app polls on it too. */
@@ -42,6 +42,39 @@ export function EpisodeScreen({
 }) {
   const worker = workerState(processing)
   const [feed, setFeed] = useState<FeedInfo | null>(null)
+  // PROTOTYPE: an in-page player. The audio route takes the *feed* token, so it waits on
+  // /v1/feed the same way the feed URL below does.
+  const player = useRef<HTMLAudioElement>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  // Fetched into a blob URL rather than pointed at the route: the local storage backend
+  // serves the whole body with no Range support, which a browser treats as unseekable.
+  useEffect(() => {
+    if (!feed || episode.state !== 'ready') {
+      setAudioUrl(null)
+      return
+    }
+    let url: string | null = null
+    let cancelled = false
+    const src = `${apiBaseUrl()}/v1/episodes/${episode.id}/audio?token=${encodeURIComponent(feed.token)}`
+    fetch(src)
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(`audio → ${r.status}`))))
+      .then((blob) => {
+        if (cancelled) return
+        url = URL.createObjectURL(blob)
+        setAudioUrl(url)
+      })
+      .catch(() => setAudioUrl(null))
+    return () => {
+      cancelled = true
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [feed, episode.id, episode.state])
+  const seekTo = (ms: number) => {
+    const el = player.current
+    if (!el) return
+    el.currentTime = ms / 1000
+    void el.play()
+  }
   const [error, setError] = useState('')
   const [listened, setListened] = useState<number | null>(null)
 
@@ -114,6 +147,12 @@ export function EpisodeScreen({
         </p>
       )}
 
+      {audioUrl && (
+        <div className="player">
+          <audio ref={player} controls preload="metadata" src={audioUrl} />
+        </div>
+      )}
+
       {episode.state === 'ready' && (
         <div className="row">
           <button type="button" onClick={markListened}>
@@ -157,7 +196,16 @@ export function EpisodeScreen({
       {episode.segments.map((segment) => (
         <article key={segment.news_item_id} className="segment">
           <h3>{segment.news_item_title}</h3>
-          <p className="hint">starts at {formatDuration(segment.start_ms)}</p>
+          <p className="hint">
+            starts at{' '}
+            {audioUrl ? (
+              <button type="button" className="linkish" onClick={() => seekTo(segment.start_ms)}>
+                ▶ {formatDuration(segment.start_ms)}
+              </button>
+            ) : (
+              formatDuration(segment.start_ms)
+            )}
+          </p>
           {segment.claims.length === 0 ? (
             <p className="hint">No claims yet — the script stage has not run.</p>
           ) : (
