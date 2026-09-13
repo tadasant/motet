@@ -437,6 +437,18 @@ print(" ".join(m for m in ("motet_db", "psycopg", "motet_api", "motet_workers") 
   fi
   echo "    motet_db, psycopg, motet_api, motet_workers are absent (invariant 2)"
 
+  # And the other direction: the MCP client **is** in the image. A session's platform tools
+  # are `tools/call`s on Motet's server (motet#120), and the module that speaks them imports
+  # the SDK at module scope for the `motet-vault[kms]` reason — so a build that resolved
+  # without it fails here rather than inside a listener's turn.
+  if ! docker run --rm --entrypoint python "motet-voice:${TAG}" -c '
+import motet_voice.tools.mcp  # imports the SDK at module scope; ImportError if absent
+' >/dev/null 2>&1; then
+    echo "smoke: the voice image cannot import motet_voice.tools.mcp — the MCP client is missing" >&2
+    return 1
+  fi
+  echo "    the MCP client is in the image (motet#120)"
+
   # Real mode, the realtime arm, and still no vendor key: health must answer, and say the
   # arm is dormant, rather than the revision failing to start. That is the state a deploy
   # is in for the minutes between the service existing and its secrets being wired.

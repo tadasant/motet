@@ -6,10 +6,19 @@ this story about" and "remember that bit" are not lookups, they are calls back t
 owns the data. If a change to this service seems to need a database handle, the answer is a
 tool.
 
+**A call goes out as an MCP ``tools/call``** (motet#120), to a server this service's own
+configuration resolves from a slug. It used to be an HTTP request against a path template
+kept by hand in this package — three of the four templates named a route the API does not
+have, or a body it does not accept, and nothing could tell you until a listener asked. The
+server's tool list is now the contract, and the API's own route-table parity test is what
+keeps it current.
+
 The transport is a seam with a fake, like every other vendor-facing thing in this repo:
-``HttpToolTransport`` talks to Motet's API, ``RecordingToolTransport`` answers from a dict.
-Tests use the second one, so a tool's argument handling, its defaults merging, and its
-error mapping are all covered without a server.
+:class:`~motet_voice.tools.mcp.McpToolTransport` speaks MCP to Motet,
+``RecordingToolTransport`` answers from a dict. Tests use the second one, so a tool's
+argument handling, its defaults merging, and its error mapping are all covered without a
+server — and ``voice/tests/test_mcp_binding.py`` drives the first against a real in-process
+MCP server, because a fake cannot tell you whether the wire shape is right.
 """
 
 from __future__ import annotations
@@ -20,7 +29,22 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
+from opentelemetry import metrics
+
 logger = logging.getLogger("motet.voice.tools")
+
+_meter = metrics.get_meter("motet.voice")
+
+#: Every tool call a session makes, by outcome. Invariant 11's "never infer no errors from
+#: no data" applied to the one path that leaves this process: a binding that resolves to
+#: nothing, a credential the API refuses, and a deployment nobody has spoken to all look
+#: identical without it. ``dormant`` and ``not_granted`` are counted too, because a persona
+#: told it cannot do something says so out loud and the listener hears a product that does
+#: not work.
+_tool_calls = _meter.create_counter(
+    "motet.voice.tool_calls",
+    description="Platform tool calls, by tool and outcome.",
+)
 
 
 class ToolState(StrEnum):
@@ -79,11 +103,16 @@ class ToolResponse:
 
 @runtime_checkable
 class ToolTransport(Protocol):
-    """How a tool reaches Motet's API. Never a database, never a vendor SDK."""
+    """How a tool reaches Motet. One MCP ``tools/call``, never a database.
 
-    async def request(
-        self, method: str, path: str, *, json: Mapping[str, Any] | None = None
-    ) -> ToolResponse: ...
+    ``status`` on the way back is HTTP-shaped because that is what the platform speaks and
+    what a tool's error prose is written against: Motet's MCP tools raise a ``ToolError``
+    reading ``"404: No such episode."``, so the number survives the trip and
+    :func:`~motet_voice.tools.platform.explain` can still say "either it does not exist, or
+    …". ``599`` is this service's own "could not reach it at all".
+    """
+
+    async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolResponse: ...
 
     async def aclose(self) -> None: ...
 
@@ -146,15 +175,29 @@ class ToolRegistry:
     async def invoke(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
-            return ToolResult.failure(
-                f"'{name}' is not a tool this session was granted; "
-                f"granted: {', '.join(self.names()) or 'none'}"
+            return self._counted(
+                name,
+                "not_granted",
+                ToolResult.failure(
+                    f"'{name}' is not a tool this session was granted; "
+                    f"granted: {', '.join(self.names()) or 'none'}"
+                ),
             )
         availability = tool.availability()
         if not availability.available:
-            return ToolResult.failure(availability.reason or f"'{name}' is unavailable")
+            return self._counted(
+                name,
+                "dormant",
+                ToolResult.failure(availability.reason or f"'{name}' is unavailable"),
+            )
         try:
-            return await tool.invoke(arguments)
+            result = await tool.invoke(arguments)
         except Exception as exc:  # noqa: BLE001 — see ToolResult: errors are values here
             logger.exception("tool %s raised", name)
-            return ToolResult.failure(f"{name} failed: {exc}")
+            return self._counted(name, "raised", ToolResult.failure(f"{name} failed: {exc}"))
+        return self._counted(name, "ok" if result.ok else "failed", result)
+
+    @staticmethod
+    def _counted(name: str, outcome: str, result: ToolResult) -> ToolResult:
+        _tool_calls.add(1, {"tool": name, "outcome": outcome})
+        return result

@@ -61,10 +61,18 @@ PERSONA_INSTRUCTIONS: Final = (
     "narration can resume."
 )
 
-#: The tools a Play Live session may call. Only ``mark_read``: it is the one platform tool
-#: whose API route exists and whose arguments match it today, and a persona told it can do
-#: something that then fails spends the session apologising.
-SESSION_TOOLS: Final = ("mark_read",)
+#: The tools a Play Live session may call. Both of them now (motet#120): each is a tool on
+#: Motet's own MCP server, reached through the binding below, so "the route exists and the
+#: arguments match" is a question the server answers rather than one this file has to keep
+#: track of. It used to be ``mark_read`` alone, because ``save_highlight`` posted a body
+#: ``POST /v1/highlights`` does not accept.
+SESSION_TOOLS: Final = ("mark_read", "save_highlight")
+
+#: The MCP server the session may reach — Motet's own. A *slug*: where it points, which
+#: tool groups it asks for and what credential it presents are the voice service's own
+#: configuration, and nothing here (or in a browser) can name a URL. See
+#: ``motet_voice.tools.mcp``.
+SESSION_MCP_SERVERS: Final = ({"name": "motet", "slug": "motet"},)
 
 
 class VoiceUnavailableError(RuntimeError):
@@ -222,6 +230,15 @@ def session_config(episode: EpisodeResponse, *, spoken_through_ms: int) -> dict[
                     "start_ms": claim.start_ms,
                     "end_ms": claim.start_ms + claim.duration_ms,
                     "spoken_text": claim.text,
+                    # The span the claim was copied from (invariant 3), carried so that
+                    # `save_highlight` can send one. The voice service cannot look a span
+                    # up and `POST /v1/highlights` reads the quote out of the source text
+                    # at the span it is given, so without this a highlight saved by voice
+                    # would have to take the model's own words — which is exactly what
+                    # that route refuses to do.
+                    "source_item_id": claim.span.source_item_id,
+                    "span_start": claim.span.start,
+                    "span_end": claim.span.end,
                 }
                 for claim in segment.claims
             ],
@@ -231,7 +248,7 @@ def session_config(episode: EpisodeResponse, *, spoken_through_ms: int) -> dict[
     return {
         "persona": {"name": "Motet", "instructions": PERSONA_INSTRUCTIONS, "voice": "narrator"},
         "tools": [{"name": name} for name in SESSION_TOOLS],
-        "mcp_servers": [],
+        "mcp_servers": [dict(server) for server in SESSION_MCP_SERVERS],
         "context": {
             "episode_id": episode.id,
             "transcript": transcript,

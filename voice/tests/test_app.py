@@ -95,14 +95,26 @@ def test_health_reports_what_is_dormant(client: Any) -> None:
     assert payload["service"] == "motet-voice"
     assert payload["arm"] == "composed"
     assert payload["session_secret_configured"] is True
-    assert {tool["name"] for tool in payload["tools"]} == {
-        "save_highlight",
-        "get_item_detail",
-        "start_research",
-        "mark_read",
-    }
-    dormant = {tool["name"] for tool in payload["tools"] if tool["state"] == "dormant"}
-    assert "start_research" in dormant
+    assert {tool["name"] for tool in payload["tools"]} == {"save_highlight", "mark_read"}
+    # The probe binds whatever this deployment resolves, so the tool list says what a real
+    # session gets. With a transport wired, that is "available" for both.
+    assert {tool["state"] for tool in payload["tools"]} == {"available"}
+    assert payload["mcp_slugs"] == ["motet"]
+    assert payload["mcp_tool_groups"] == "backlog,highlights"
+    assert payload["mcp_credential"] == "none", "no token set in the test settings"
+
+
+def test_health_reports_a_deployment_that_resolves_no_mcp_server(
+    settings: VoiceSettings,
+) -> None:
+    """An unresolved binding and a binding nobody made look identical without this."""
+    app = create_app(settings, arm=build_composed_arm(settings))
+    with TestClient(app) as probe:
+        payload = probe.get(HEALTH_PATH).json()
+    assert payload["mcp_slugs"] == []
+    assert payload["mcp_tool_groups"] is None and payload["mcp_credential"] is None
+    assert {tool["state"] for tool in payload["tools"]} == {"dormant"}
+    assert all("not bound" in tool["reason"] for tool in payload["tools"])
 
 
 def test_health_separates_configured_from_exporting(client: Any) -> None:
@@ -262,12 +274,39 @@ def test_an_unknown_tool_is_refused_at_start_session(client: Any) -> None:
     assert "launch_the_missiles" in response.text
 
 
-def test_mcp_servers_are_part_of_the_contract_but_resolve_to_nothing_yet(client: Any) -> None:
+def test_a_slug_this_deployment_does_not_resolve_is_refused(client: Any) -> None:
+    """A client names what it wants; this service decides where that points, or refuses."""
     response = client.post(
         "/v1/voice/sessions",
-        json={"persona": PERSONA, "mcp_servers": [{"name": "x", "slug": "y"}]},
+        json={"persona": PERSONA, "mcp_servers": [{"name": "x", "slug": "somebody-elses"}]},
     )
     assert response.status_code == 422
+    assert "somebody-elses" in response.text
+    assert "motet" in response.text, "the refusal says which slugs this service knows"
+
+
+def test_the_motet_slug_is_resolved_and_the_session_starts(client: Any) -> None:
+    response = client.post(
+        "/v1/voice/sessions",
+        json={"persona": PERSONA, "mcp_servers": [{"name": "motet", "slug": "motet"}]},
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_a_known_slug_this_deployment_cannot_resolve_is_dormancy_not_a_refusal(
+    settings: VoiceSettings,
+) -> None:
+    """The API binds `motet` on every Play Live session. Refusing it where this deployment
+    has no API URL would take the whole conversation down to protect two tools."""
+    app = create_app(settings, arm=build_composed_arm(settings))
+    with TestClient(app) as probe:
+        response = probe.post(
+            "/v1/voice/sessions",
+            json={"persona": PERSONA, "mcp_servers": [{"name": "motet", "slug": "motet"}]},
+        )
+        assert response.status_code == 201, response.text
+        tools = probe.get(HEALTH_PATH).json()["tools"]
+    assert {tool["state"] for tool in tools} == {"dormant"}
 
 
 def test_a_socket_needs_a_token_that_matches_its_config(client: Any) -> None:

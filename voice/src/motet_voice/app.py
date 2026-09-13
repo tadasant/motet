@@ -40,7 +40,13 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconne
 from pydantic import BaseModel, ValidationError
 
 from . import obs, tokens
-from .config import START_SESSION_TOKEN_ENV, VoiceSettings, load_settings
+from .config import (
+    API_BASE_URL_ENV,
+    MOTET_MCP_SLUG,
+    START_SESSION_TOKEN_ENV,
+    VoiceSettings,
+    load_settings,
+)
 from .contract import (
     PLATFORM_TOOLS,
     ErrorEvent,
@@ -51,11 +57,17 @@ from .contract import (
 )
 from .realtime import LiveArm, RealtimeArm, build_arm, build_composed_arm
 from .session import VoiceSession
-from .tools import HttpToolTransport, ToolRegistry, ToolTransport, build_platform_tools
+from .tools import ToolRegistry, ToolTransport, build_motet_transport, build_platform_tools
 
 logger = logging.getLogger("motet.voice.app")
 
 WEBSOCKET_PATH = "/v1/voice/sessions/{session_id}/stream"
+
+#: The MCP server slugs this *service* understands, as against the ones a given
+#: deployment can currently resolve (:attr:`VoiceApp.mcp_slugs`). The difference is
+#: deliberate: it is the difference between a 422 and a dormant tool — see
+#: ``start_session``.
+KNOWN_MCP_SLUGS: tuple[str, ...] = (MOTET_MCP_SLUG,)
 
 #: Health, and deliberately **not** ``/healthz``: Cloud Run's frontend answers that path
 #: with its own 404 before the request reaches the container, so a health endpoint served
@@ -123,6 +135,18 @@ class HealthResponse(BaseModel):
     #: when it has the shape of one; ``None`` otherwise. It is what answers "is the pin
     #: bump live?" for this service, as the same field does on the API.
     revision: str | None
+    #: The MCP server slugs this deployment resolves — ``["motet"]``, or empty where no API
+    #: base URL is set. Reported for ``vault_ready``'s reason: a binding that resolves to
+    #: nothing and one nobody has bound look identical from outside, and the failure is a
+    #: listener being told "I can't do that" rather than an error anywhere.
+    mcp_slugs: list[str]
+    #: The ``?tool_groups=`` selection the ``motet`` connection asks for, and which
+    #: credential it presents: ``api_token`` (the whole-API owner token), ``scoped`` (a
+    #: credential of this connection's own), or ``none`` — which is the one an operator most
+    #: needs to see, because it only works against an API whose own token is unset. Names,
+    #: never values; ``None`` when no slug resolves.
+    mcp_tool_groups: str | None
+    mcp_credential: str | None
     tools: list[dict[str, Any]]
 
 
@@ -171,23 +195,40 @@ class VoiceApp:
             return None
 
     def _build_transport(self) -> ToolTransport | None:
-        if not self.settings.api_base_url:
-            return None
-        return HttpToolTransport(self.settings.api_base_url, self.settings.api_token)
+        return build_motet_transport(self.settings)
+
+    @property
+    def mcp_slugs(self) -> tuple[str, ...]:
+        """The slugs a caller may bind. One, and only where there is an API to reach.
+
+        A tuple rather than a bool because the refusal message has to list them, and
+        because the second entry — Zimmer's, or a connector's — arrives here rather than as
+        a new shape.
+        """
+        return (MOTET_MCP_SLUG,) if self.transport is not None else ()
 
     def registry(self, request: StartSessionRequest) -> ToolRegistry:
         """The tools this session asked for, of the ones the platform offers.
 
         Resolved at StartSession so the persona's prompt and the session's actual
         capabilities cannot disagree — see :class:`~motet_voice.tools.spec.ToolRegistry`.
+
+        **A tool reaches Motet only if the session bound the server it lives on.** An
+        unbound session still gets the tools, described as dormant with the reason: a
+        persona that is told it cannot save a highlight says so, where one that is told
+        nothing promises and then fails.
         """
         available = build_platform_tools(
             self.settings,
-            transport=self.transport,
+            transport=self.transport if self._bound(request) else None,
             defaults={binding.name: binding.defaults for binding in request.tools},
+            context=request.context,
         )
         wanted = [binding.name for binding in request.tools] or list(PLATFORM_TOOLS)
         return ToolRegistry({name: available[name] for name in wanted if name in available})
+
+    def _bound(self, request: StartSessionRequest) -> bool:
+        return any(binding.slug == MOTET_MCP_SLUG for binding in request.mcp_servers)
 
     async def aclose(self) -> None:
         await self.arm.aclose()
@@ -263,9 +304,15 @@ def create_app(
         """
         current = obs.status()
         capabilities = state.arm.capabilities()
+        # The probe binds whatever this deployment resolves, so the tool list reports what
+        # a real session would get rather than the unbound dormancy every session would
+        # show if the probe bound nothing.
         registry = state.registry(
             StartSessionRequest.model_validate(
-                {"persona": {"name": "probe", "instructions": "probe"}}
+                {
+                    "persona": {"name": "probe", "instructions": "probe"},
+                    "mcp_servers": [{"name": slug, "slug": slug} for slug in state.mcp_slugs],
+                }
             )
         )
         return HealthResponse(
@@ -283,6 +330,17 @@ def create_app(
             start_session_authenticated=state.settings.start_session_token is not None,
             origins_restricted=bool(state.settings.allowed_origins),
             revision=publishable_revision(current.service_version),
+            mcp_slugs=list(state.mcp_slugs),
+            mcp_tool_groups=state.settings.mcp_tool_groups if state.mcp_slugs else None,
+            mcp_credential=(
+                None
+                if not state.mcp_slugs
+                else (
+                    "scoped"
+                    if state.settings.mcp_token_dedicated
+                    else ("api_token" if state.settings.mcp_token else "none")
+                )
+            ),
             tools=registry.describe(),
         )
 
@@ -307,12 +365,31 @@ def create_app(
                 f"unknown tool(s): {', '.join(sorted(unknown))}. "
                 f"Available: {', '.join(PLATFORM_TOOLS)}",
             )
-        if request.mcp_servers:
+        unknown = sorted({b.slug for b in request.mcp_servers if b.slug not in KNOWN_MCP_SLUGS})
+        if unknown:
+            # Refused here rather than at call time, and by slug rather than by URL: a
+            # client names what it wants and this service decides where that points, which
+            # is the whole reason the field carries a slug (invariant 1's shape, one layer
+            # in).
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "no MCP servers are configured for voice sessions yet; the field is part of "
-                "the contract but this deployment resolves no slugs",
+                f"unknown MCP server slug(s): {', '.join(unknown)}. "
+                f"This service knows: {', '.join(KNOWN_MCP_SLUGS)}.",
             )
+        # **A known slug this deployment cannot resolve is dormancy, not a refusal**, and
+        # that direction is the decision. The API sends the `motet` binding on every Play
+        # Live session, so refusing it where `MOTET_VOICE_API_BASE_URL` is unset would take
+        # the whole conversation down to protect two tools — the same trade `load_settings`
+        # declines to make for a missing vendor key. The session runs; its platform tools
+        # say why they cannot.
+        for binding in request.mcp_servers:
+            if binding.slug not in state.mcp_slugs:
+                logger.warning(
+                    "session bound MCP slug %r, which this deployment cannot resolve (%s is "
+                    "unset): its platform tools will be dormant",
+                    binding.slug,
+                    API_BASE_URL_ENV,
+                )
 
         session_id = uuid.uuid4().hex
         token, expires_at = tokens.mint(
