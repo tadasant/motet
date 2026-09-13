@@ -235,7 +235,10 @@ class LiveBridge:
         if not self.active:
             return
         self.active = False
-        self._reply_started = False
+        if self._reply_started:
+            # Cut off by the resume rather than by speech, and just as unheard past here.
+            self._reply_started = False
+            await self._cut_reply(time.monotonic())
         await self.conversation.cancel_response()
 
     async def ask(self, text: str, position_notes: str) -> list[SessionEvent]:

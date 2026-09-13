@@ -539,3 +539,28 @@ def test_every_realtime_response_is_a_metric_split_by_token_kind(
     assert len(tokens) == 10, "a response with no usage still adds a zero per kind"
     assert all(attrs["arm"] == "test" for _, attrs in tokens)
     assert [r["outcome"] for r in replies] == ["completed", "cancelled"]
+
+
+def test_never_mind_during_a_reply_cancels_it_and_records_it_as_cut() -> None:
+    """Resuming narration mid-reply closes the gate, cancels the reply, and the reply's
+    transcript — arriving afterwards — enters history as cut rather than as spoken."""
+
+    async def scenario() -> None:
+        conversation = _Recording()
+        bridge = _bridge(conversation)
+        await bridge.engage("")
+        await bridge._handle(AssistantAudio(pcm=REPLY_CHUNK, sample_rate=24_000, item_id="r2"))
+        await bridge.disengage()
+        assert not bridge.active
+        kinds = [kind for kind, _ in conversation.calls]
+        assert kinds[-2:] == ["truncate", "cancel"]
+        # Late chunks from the cancelled reply are nobody's to play.
+        before = bridge.outbox.qsize()
+        await bridge._handle(AssistantAudio(pcm=REPLY_CHUNK, sample_rate=24_000, item_id="r2"))
+        assert bridge.outbox.qsize() == before
+        await bridge._handle(AssistantTranscript(text="Acme raised forty million.", item_id="r2"))
+        await bridge._handle(TurnDone(cancelled=True))
+        assert bridge.history[-1]["text"].endswith("[cut off by the listener]")
+        assert bridge.replies == 0
+
+    asyncio.run(scenario())
