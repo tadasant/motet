@@ -25,6 +25,11 @@
     `MOTET_DEFAULT_API_BASE_URL` build setting. It is empty in this repo and in every CI
     build; the TestFlight workflow passes it from a GitHub environment variable, so no
     hostname is written here. Settings still overrides it.
+  * `MotetAppLinkDomain` — the host this build's associated-domains entitlement names, from
+    the `MOTET_APP_LINK_DOMAIN` build setting and empty everywhere the entitlement is not
+    signed in. It is read at sign-in: asking the system sheet for an https callback on a
+    host the build is *not* entitled for is refused by iOS, so the app offers that callback
+    only for its own domain, whatever the API reports.
 -->
 <plist version="1.0">
 <dict>
@@ -52,6 +57,8 @@
 	<false/>
 	<key>MotetDefaultBaseURL</key>
 	<string>$(MOTET_DEFAULT_API_BASE_URL)</string>
+	<key>MotetAppLinkDomain</key>
+	<string>$(MOTET_APP_LINK_DOMAIN)</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

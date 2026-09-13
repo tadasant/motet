@@ -22,10 +22,14 @@
 # if export-time signing is ever refused: it signs during the archive instead, which also
 # works from the key alone but mints a development certificate per run.
 #
-# NO ENTITLEMENTS FILE IS SIGNED IN. App/Motet/Motet.entitlements asks for
-# `com.apple.developer.carplay-audio`, which Apple grants by manual review, and an ungranted
-# entitlement fails a build to sign. The script refuses to archive if CODE_SIGN_ENTITLEMENTS
-# is set at all.
+# EXACTLY ONE ENTITLEMENTS FILE MAY BE SIGNED IN, and the project names none by default.
+# App/Motet/Motet.entitlements asks for `com.apple.developer.carplay-audio`, which Apple
+# grants by manual review, and an ungranted entitlement fails a build to *sign* rather than
+# merely lack the feature — so the script refuses to archive with it. App/Motet/
+# Applinks.entitlements is the one exception: it asks only for the associated domain the
+# https sign-in handoff comes back on, which is granted by ticking Associated Domains on the
+# App ID. It is used only when MOTET_IOS_APP_DOMAIN names a host, and the guard below
+# re-reads the file to be sure it has not grown a CarPlay key since.
 #
 # `upload` reads, and never prints:
 #   APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_API_ISSUER_ID,
@@ -33,6 +37,8 @@
 # and, in both modes:
 #   MOTET_BUILD_NUMBER            CFBundleVersion, default 1
 #   MOTET_IOS_API_BASE_URL        the server the build defaults to, https only; empty in check
+#   MOTET_IOS_APP_DOMAIN          the web app's host, whose app-site-association file names
+#                                 this app; empty ships the custom-scheme handoff instead
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -73,6 +79,14 @@ signing="${MOTET_SIGNING:-export}"
   fail "MOTET_IOS_API_BASE_URL must be an https origin (it is refused by the app otherwise)"
 [[ "$signing" == export || "$signing" == archive ]] || fail "MOTET_SIGNING must be 'export' or 'archive'"
 
+# A bare host, because it goes into `applinks:<domain>` and into an Info.plist value the app
+# compares the API's answer against. A scheme, a path or a space in either would be a
+# silently dead universal link rather than an error.
+app_link_domain="${MOTET_IOS_APP_DOMAIN:-}"
+[ -z "$app_link_domain" ] || [[ "$app_link_domain" =~ ^[A-Za-z0-9.-]+$ ]] ||
+  fail "MOTET_IOS_APP_DOMAIN must be a bare host, not a URL"
+readonly APPLINKS_ENTITLEMENTS="Motet/Applinks.entitlements"
+
 work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/motet-testflight-$$"
 mkdir -p "$work"
 key_path=""
@@ -109,31 +123,62 @@ printf '==> archiving build %s (signing: %s)\n' "$build_number" "$([ "$mode" = c
 
 archive="$work/Motet.xcarchive"
 
-# The CarPlay guard is asked of the build settings, before anything is built: an unsigned
-# archive carries no entitlements to inspect, and the signed binary only exists inside the
-# upload. Captured rather than piped into `grep -q`, which under pipefail can report a match
-# as a miss when the writer dies of SIGPIPE.
-settings="$(xcodebuild -showBuildSettings -project App/Motet.xcodeproj -scheme Motet -configuration Release 2>/dev/null)"
-entitlements="$(printf '%s\n' "$settings" | awk '$1 == "CODE_SIGN_ENTITLEMENTS" { $1 = ""; $2 = ""; print }' | tr -d ' ')"
-[ -z "$entitlements" ] ||
-  fail "CODE_SIGN_ENTITLEMENTS is '$entitlements' — CarPlay is not granted, and an ungranted entitlement fails signing"
-printf '    ok  %-44s none\n' "CODE_SIGN_ENTITLEMENTS"
+# One list of build settings for the guard and the archive, so what is inspected is what is
+# built. Never empty, because macOS's bash is 3.2, where "${empty[@]}" under `set -u` is an
+# unbound-variable error.
+build_settings=(
+  CURRENT_PROJECT_VERSION="$build_number"
+  MOTET_DEFAULT_API_BASE_URL="$base_url"
+)
+if [ -n "$app_link_domain" ]; then
+  build_settings+=(
+    CODE_SIGN_ENTITLEMENTS="$APPLINKS_ENTITLEMENTS"
+    MOTET_APP_LINK_DOMAIN="$app_link_domain"
+  )
+fi
 
-# Options before build settings, and no empty array expanded: macOS's bash is 3.2, where
-# "${empty[@]}" under `set -u` is an unbound-variable error.
+# The entitlements guard is asked of the build settings, before anything is built: an
+# unsigned archive carries no entitlements to inspect, and the signed binary only exists
+# inside the upload. Captured rather than piped into `grep -q`, which under pipefail can
+# report a match as a miss when the writer dies of SIGPIPE.
+settings="$(xcodebuild -showBuildSettings -project App/Motet.xcodeproj -scheme Motet -configuration Release "${build_settings[@]}" 2>/dev/null)"
+entitlements="$(printf '%s\n' "$settings" | awk '$1 == "CODE_SIGN_ENTITLEMENTS" { $1 = ""; $2 = ""; print }' | tr -d ' ')"
+case "$entitlements" in
+  "")
+    printf '    ok  %-44s none\n' "CODE_SIGN_ENTITLEMENTS"
+    ;;
+  "$APPLINKS_ENTITLEMENTS")
+    # Asked of the file rather than of the setting: the whole point of the exception is
+    # which entitlements the file requests, and it is edited far more often than this line.
+    file="App/$APPLINKS_ENTITLEMENTS"
+    [ -f "$file" ] || fail "$file is missing"
+    ! grep -qi 'carplay' "$file" ||
+      fail "$file asks for CarPlay, which is not granted — an ungranted entitlement fails signing"
+    grep -q "applinks:" "$file" || fail "$file does not ask for an associated domain"
+    printf '    ok  %-44s %s\n' "CODE_SIGN_ENTITLEMENTS" "applinks only ($app_link_domain)"
+    ;;
+  *)
+    fail "CODE_SIGN_ENTITLEMENTS is '$entitlements' — only $APPLINKS_ENTITLEMENTS may be signed in"
+    ;;
+esac
+if [ "$mode" = upload ] && [ -z "$app_link_domain" ]; then
+  printf '    --  %-44s %s\n' "MOTET_IOS_APP_DOMAIN" "unset: the build ships the motet:// handoff"
+fi
+
+# Options before build settings.
 if [ "$mode" = upload ] && [ "$signing" = archive ]; then
   xcodebuild archive \
     -project App/Motet.xcodeproj -scheme Motet -configuration Release \
     -destination 'generic/platform=iOS' -archivePath "$archive" \
     "${auth_args[@]}" \
-    CURRENT_PROJECT_VERSION="$build_number" MOTET_DEFAULT_API_BASE_URL="$base_url" \
+    "${build_settings[@]}" \
     CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES CODE_SIGN_STYLE=Automatic \
     DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
 else
   xcodebuild archive \
     -project App/Motet.xcodeproj -scheme Motet -configuration Release \
     -destination 'generic/platform=iOS' -archivePath "$archive" \
-    CURRENT_PROJECT_VERSION="$build_number" MOTET_DEFAULT_API_BASE_URL="$base_url" \
+    "${build_settings[@]}" \
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 fi
 
@@ -167,6 +212,7 @@ present CFBundleShortVersionString
 expect ITSAppUsesNonExemptEncryption false
 expect CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName AppIcon
 expect MotetDefaultBaseURL "$base_url"
+expect MotetAppLinkDomain "$app_link_domain"
 [ -f "$app/Assets.car" ] || fail "no compiled asset catalog — the app icon is missing"
 [ -f "$app/PrivacyInfo.xcprivacy" ] || fail "no privacy manifest in the app bundle"
 if grep -aq '\$(' "$plist"; then fail "Info.plist carries a malformed \$(...) build setting"; fi

@@ -3363,8 +3363,18 @@ export interface components {
              */
             authorization_url: string;
             /**
+             * Callback Host
+             * @description Set when this deployment's web app serves an Apple app-site-association file: the host of an https handoff link, which only the app holding the matching associated-domains entitlement can receive. Absent means use callback_scheme.
+             */
+            callback_host?: string | null;
+            /**
+             * Callback Path
+             * @description The path of that https handoff link. Absent with callback_host.
+             */
+            callback_path?: string | null;
+            /**
              * Callback Scheme
-             * @description The URL scheme the in-app browser session should wait for.
+             * @description The URL scheme the sign-in sheet should wait for, and the one the handoff link uses unless callback_host is set.
              */
             callback_scheme: string;
         };

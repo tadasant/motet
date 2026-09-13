@@ -64,6 +64,9 @@ jobs:
           APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
           MOTET_IOS_API_BASE_URL: ${{ vars.MOTET_IOS_API_BASE_URL }}
+          # The web app's host, whose app-site-association file names this app. Unset, the
+          # build ships the custom-scheme handoff and signs no entitlement.
+          MOTET_IOS_APP_DOMAIN: ${{ vars.MOTET_IOS_APP_DOMAIN }}
           # Unique and increasing per upload, including a re-run of the same run.
           MOTET_BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
           MOTET_SIGNING: ${{ inputs.signing }}

@@ -265,18 +265,31 @@ release that should read differently in TestFlight.
 1. Accept any pending agreement at developer.apple.com and in App Store Connect →
    Business. Uploads are refused while one is pending.
 2. Register the App ID `com.getmotet.app` (Certificates, IDs & Profiles → Identifiers).
-   It needs no capabilities; background audio is not one. Do **not** tick CarPlay.
+   Tick **Associated Domains** — that is the https sign-in handoff, and it is granted by the
+   tick rather than by review. Background audio is not a capability. Do **not** tick CarPlay:
+   it is granted by manual review, and an ungranted entitlement fails a build to *sign*.
 3. Create the App Store Connect app record for that bundle id.
 4. Create a Team API key with **Admin** access (Users and Access → Integrations → App Store
    Connect API). Admin is what cloud-managed signing needs.
 5. In the `testflight` GitHub environment, add the secrets `APP_STORE_CONNECT_API_KEY_ID`,
    `APP_STORE_CONNECT_API_ISSUER_ID` and `APP_STORE_CONNECT_API_KEY_P8` (the whole .p8
-   file), and the variable `APPLE_TEAM_ID`. `MOTET_IOS_API_BASE_URL` is already there.
+   file), and the variables `APPLE_TEAM_ID` and `MOTET_IOS_APP_DOMAIN` (the web app's bare
+   host, e.g. `app.example.com`). `MOTET_IOS_API_BASE_URL` is already there. Leaving
+   `MOTET_IOS_APP_DOMAIN` unset is supported and ships the `motet://` handoff instead.
 6. After the first build processes, add testers under TestFlight → Internal Testing.
 
 Before it spends ten minutes archiving, the workflow checks that the variables are set and
 that the key can see the app record (`app_store_connect.py preflight`). A pending
 agreement shows up there as a 403. A wrong team id is only caught at export.
+
+**The https sign-in handoff needs all three of its parts** (AGENTS.md, "The handoff comes
+back on a verified https link"). `MOTET_IOS_APP_DOMAIN` here signs the entitlement into the
+build; `MOTET_IOS_APP_ID` on the web image makes the container serve the app-site-association
+file; `MOTET_IOS_APP_LINK=1` on the API makes it hand back the https link. Any of them
+missing falls back to `motet://signed-in`, which still works. **Deploy the API and the web
+image before the build that expects them** — the app compares the API's host against its own
+entitlement and falls back on a mismatch, so the order is safe either way, but a build that
+never sees the file is a build that silently never uses the stronger callback.
 
 **The app icon is the brand mark** from the Polyphony restyle
 ([#115](https://github.com/tadasant/motet/pull/115)),

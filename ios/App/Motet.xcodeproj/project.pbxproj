@@ -31,6 +31,7 @@
 		AA0000000000000000000030 /* Exceptions for "Motet" folder in "Motet" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Applinks.entitlements,
 				Info.plist,
 				Motet.entitlements,
 			);
@@ -215,6 +216,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
+				MOTET_APP_LINK_DOMAIN = "";
 				MOTET_DEFAULT_API_BASE_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -240,6 +242,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
+				MOTET_APP_LINK_DOMAIN = "";
 				MOTET_DEFAULT_API_BASE_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";

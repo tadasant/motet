@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
@@ -710,6 +710,25 @@ def start_login(body: StartLoginRequest, conn: Conn, config: Config) -> StartLog
 NATIVE_CALLBACK_SCHEME: Final = "motet"
 NATIVE_HANDOFF_URI: Final = f"{NATIVE_CALLBACK_SCHEME}://signed-in"
 
+#: The web app path an https handoff lands on, when MOTET_IOS_APP_LINK says the web app
+#: serves an app-site-association file naming it. Apple only lets a sheet wait for such a
+#: link if the app carries the associated-domains entitlement for that host, which is what
+#: makes it unclaimable by another app — the custom scheme's one weakness.
+NATIVE_HANDOFF_PATH: Final = "/app/signed-in"
+
+
+def _native_handoff_url(config: Settings, code: str) -> str:
+    """The link the sign-in sheet is watching for, with this code on it.
+
+    Built only from this deployment's own configured origin and the literals above; nothing
+    a caller sent ever reaches it.
+    """
+    query = urlencode({"code": code})
+    origins = config.cors_origins
+    if config.ios_app_link and origins:
+        return f"{origins[0]}{NATIVE_HANDOFF_PATH}?{query}"
+    return f"{NATIVE_HANDOFF_URI}?{query}"
+
 
 @app.post("/v1/auth/native/start", response_model=StartNativeLoginResponse, tags=["auth"])
 def start_native_login(
@@ -771,7 +790,13 @@ def start_native_login(
     except IdentityError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
-    return StartNativeLoginResponse(authorization_url=url, callback_scheme=NATIVE_CALLBACK_SCHEME)
+    host = urlsplit(origins[0]).hostname if config.ios_app_link else None
+    return StartNativeLoginResponse(
+        authorization_url=url,
+        callback_scheme=NATIVE_CALLBACK_SCHEME,
+        callback_host=host,
+        callback_path=NATIVE_HANDOFF_PATH if host else None,
+    )
 
 
 @app.post("/v1/auth/google/callback", response_model=LoginResponse, tags=["auth"])
@@ -851,9 +876,7 @@ def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> Lo
             code_challenge=handoff_challenge,
         )
         logger.info("handed a sign-in for %s back to the iOS app", identity.email)
-        return LoginResponse(
-            email=identity.email, handoff_url=f"{NATIVE_HANDOFF_URI}?{urlencode({'code': code})}"
-        )
+        return LoginResponse(email=identity.email, handoff_url=_native_handoff_url(config, code))
 
     token = auth_repo.new_session_token()
     session = auth_repo.create_session(

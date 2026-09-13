@@ -487,6 +487,39 @@ smoke_web() {
   # History fallback: a deep link must return the app, not a 404.
   curl -fsS --max-time 5 "http://127.0.0.1:${port}/episodes/ep_smoke" >/dev/null
   echo "    /episodes/ep_smoke -> index.html (history fallback)"
+
+  # Apple fetches this before it will let the iOS app receive a sign-in handoff. Unset, it
+  # must be absent rather than index.html — Apple reads a 200 of HTML as a malformed file,
+  # and the history fallback would serve exactly that.
+  local aasa_status
+  aasa_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    "http://127.0.0.1:${port}/.well-known/apple-app-site-association")"
+  [ "$aasa_status" = "404" ] || {
+    echo "smoke: app-site-association should 404 without MOTET_IOS_APP_ID (got ${aasa_status})" >&2
+    return 1
+  }
+  echo "    /.well-known/apple-app-site-association -> 404 (no MOTET_IOS_APP_ID)"
+}
+
+smoke_web_applinks() {
+  local name="motet-smoke-web-aasa-$$" port app_id="ABCDE12345.com.example.motet"
+  CONTAINERS+=("$name")
+  docker run -d --name "$name" -P -e "MOTET_API_BASE_URL=https://api.example.test" \
+    -e "MOTET_IOS_APP_ID=${app_id}" "motet-web:${TAG}" >/dev/null
+  port="$(host_port "$name")"
+  wait_for_http "http://127.0.0.1:${port}/" "$name" >/dev/null
+
+  local aasa
+  aasa="$(curl -fsS --max-time 5 "http://127.0.0.1:${port}/.well-known/apple-app-site-association")"
+  case "$aasa" in
+    *"\"${app_id}\""*"/app/signed-in"*) ;;
+    *) echo "smoke: app-site-association did not carry MOTET_IOS_APP_ID and the handoff path" >&2
+       echo "$aasa" >&2; return 1 ;;
+  esac
+  python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$aasa" || {
+    echo "smoke: app-site-association is not valid JSON" >&2; return 1
+  }
+  echo "    /.well-known/apple-app-site-association -> valid JSON for ${app_id}"
 }
 
 targets=("$@")
@@ -503,7 +536,8 @@ for target in "${targets[@]}"; do
     voice)  step "Build motet-voice:${TAG}";  build_voice
             step "Smoke motet-voice";         smoke_voice ;;
     web)    step "Build motet-web:${TAG}";    build_web
-            step "Smoke motet-web";           smoke_web ;;
+            step "Smoke motet-web";           smoke_web
+            step "Smoke motet-web app links"; smoke_web_applinks ;;
     *) echo "unknown image '$target' (expected: api, worker, voice, web)" >&2; exit 2 ;;
   esac
 done

@@ -209,7 +209,7 @@ final class AppModel: ObservableObject {
     /// Ask the server on screen — saved or only typed — to start a Google sign-in for this
     /// app. The caller opens `url` in the system sign-in sheet and hands whatever comes back
     /// to `finishSignIn`, with the same server.
-    func beginSignIn(baseURL: String) async -> (url: URL, callbackScheme: String, pkce: PKCEPair)? {
+    func beginSignIn(baseURL: String) async -> StartedSignIn? {
         signInMessage = nil
         guard let base = Self.server(baseURL) else {
             signInMessage = "Set the server first."
@@ -223,7 +223,19 @@ final class AppModel: ObservableObject {
             guard let url = URL(string: started.authorizationUrl) else {
                 throw NativeSignIn.Failure.notAHandoff
             }
-            return (url, started.callbackScheme, pkce)
+            // Both halves have to agree, and the app's is the one iOS enforces: asking the
+            // sheet for an https callback on a host this build is not entitled for is
+            // refused outright, so a deployment that turned the flag on ahead of a build
+            // falls back to the scheme rather than failing to sign in.
+            let entitled = environment.credentials.appLinkDomain
+            let host = started.callbackHost.flatMap { $0 == entitled ? $0 : nil }
+            return StartedSignIn(
+                url: url,
+                callbackScheme: started.callbackScheme,
+                appLinkHost: host,
+                appLinkPath: host == nil ? nil : started.callbackPath,
+                pkce: pkce
+            )
         } catch {
             isSigningIn = false
             signInMessage = Self.describe(error)
@@ -249,6 +261,20 @@ final class AppModel: ObservableObject {
         } catch {
             signInMessage = Self.describe(error)
         }
+    }
+
+    /// What the sign-in sheet needs: where to go, and which link closes it.
+    ///
+    /// `appLinkHost` is set only where the deployment serves an app-site-association file
+    /// naming this app *and* this build carries the matching entitlement. It is the stronger
+    /// callback — Apple hands such a link to no other app — and the scheme is what iOS 17.3
+    /// and older, an unentitled build, or a deployment without that file fall back to.
+    struct StartedSignIn {
+        let url: URL
+        let callbackScheme: String
+        let appLinkHost: String?
+        let appLinkPath: String?
+        let pkce: PKCEPair
     }
 
     /// The sheet closed without a link: cancelled (no message) or failed (say why).

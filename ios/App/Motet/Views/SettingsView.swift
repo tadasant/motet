@@ -73,14 +73,12 @@ struct SettingsView: View {
         }
     }
 
-    /// The system sheet opens the web sign-in and closes on the API's `motet://` link.
+    /// The system sheet opens the web sign-in and closes on the API's handoff link.
     private func signIn() async {
         let server = baseURL
         guard let started = await model.beginSignIn(baseURL: server) else { return }
         do {
-            let callback = try await webAuthenticationSession.authenticate(
-                using: started.url, callbackURLScheme: started.callbackScheme
-            )
+            let callback = try await open(started)
             await model.finishSignIn(callback: callback, pkce: started.pkce, baseURL: server)
             apiToken = model.currentCredentials().apiToken
         } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
@@ -90,6 +88,22 @@ struct SettingsView: View {
         } catch {
             model.abandonSignIn(error)
         }
+    }
+
+    /// Open the sheet, waiting for whichever callback this deployment and this iOS support.
+    ///
+    /// The https callback needs iOS 17.4 for the API and an app-site-association file on the
+    /// host for Apple to allow it; the custom scheme is what everything else falls back to,
+    /// and it is why the web page asks for confirmation before following a handoff.
+    private func open(_ started: AppModel.StartedSignIn) async throws -> URL {
+        if #available(iOS 17.4, *), let host = started.appLinkHost, let path = started.appLinkPath {
+            return try await webAuthenticationSession.authenticate(
+                using: started.url, callback: .https(host: host, path: path)
+            )
+        }
+        return try await webAuthenticationSession.authenticate(
+            using: started.url, callbackURLScheme: started.callbackScheme
+        )
     }
 
     private var serverSection: some View {

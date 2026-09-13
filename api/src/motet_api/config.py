@@ -27,6 +27,15 @@ PUBLIC_BASE_URL_ENV: Final = "MOTET_PUBLIC_BASE_URL"
 #: which is right on a laptop, where the Vite dev server proxies and the origin is shared.
 APP_BASE_URL_ENV: Final = "MOTET_APP_BASE_URL"
 
+#: Whether this deployment's web app serves an Apple app-site-association file, so the iOS
+#: app's sign-in sheet may wait for an https link instead of the `motet://` one.
+#:
+#: Off by default, and it has to be: the flag is a *claim about the web app*, and an app
+#: told to wait for an https callback the web app does not advertise would sit in a sheet
+#: that never closes. It is switched on per environment, beside MOTET_IOS_APP_ID on the web
+#: service, once that file is served.
+IOS_APP_LINK_ENV: Final = "MOTET_IOS_APP_LINK"
+
 #: What a podcast client shows for the feed. Configurable so an environment can tell itself
 #: apart in a podcast app; not secret, and not infrastructure. The defaults are the brand's
 #: copy (``brand/GUIDELINES.md``), which leads with the positioning line rather than with
@@ -69,6 +78,12 @@ class Settings:
     #: Who may open the operator view, ``/v1/admin/*``. Empty means nobody — see
     #: `motet_db.allowlist`. Defaulted closed for the same reason as the field above.
     admin_emails: frozenset[str] = frozenset()
+    #: Whether the phone's sign-in handoff comes back on a verified https universal link
+    #: rather than on the ``motet://`` scheme. Off unless the deployment also serves the
+    #: app-site-association file naming the app, and defaulted to off for the reason the two
+    #: fields above are defaulted closed: a `Settings` built to test something else must land
+    #: on the fallback rather than on a link nothing would verify.
+    ios_app_link: bool = False
     #: Present only so that "is sign-in actually wired" is answerable. The secret half is
     #: never read here: the API resolves it when it completes a sign-in, not at startup.
     google_client_id: str | None = None
@@ -81,6 +96,7 @@ class Settings:
             api_token=_clean(os.environ.get(API_TOKEN_ENV)),
             public_base_url=_clean(os.environ.get(PUBLIC_BASE_URL_ENV)),
             app_base_url=_clean(os.environ.get(APP_BASE_URL_ENV)),
+            ios_app_link=_truthy(os.environ.get(IOS_APP_LINK_ENV)),
             feed_title=_clean(os.environ.get(FEED_TITLE_ENV)) or DEFAULT_FEED_TITLE,
             feed_description=(
                 _clean(os.environ.get(FEED_DESCRIPTION_ENV)) or DEFAULT_FEED_DESCRIPTION
@@ -236,6 +252,11 @@ def _origin(url: str) -> str:
     if ":" in host:
         host = f"[{host}]"
     return f"{parsed.scheme}://{host}" + (f":{port}" if port is not None else "")
+
+
+def _truthy(raw: str | None) -> bool:
+    """A deployment flag, read the way every other on/off variable here is read."""
+    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _clean(value: str | None) -> str | None:

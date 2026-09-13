@@ -2232,15 +2232,26 @@ public struct StartNativeLoginRequest: Codable, Hashable, Sendable {
 /// Where the app's in-app browser should go.
 public struct StartNativeLoginResponse: Codable, Hashable, Sendable {
     public var authorizationUrl: String
+    public var callbackHost: String?
+    public var callbackPath: String?
     public var callbackScheme: String
 
-    public init(authorizationUrl: String, callbackScheme: String) {
+    public init(
+        authorizationUrl: String,
+        callbackHost: String? = nil,
+        callbackPath: String? = nil,
+        callbackScheme: String
+    ) {
         self.authorizationUrl = authorizationUrl
+        self.callbackHost = callbackHost
+        self.callbackPath = callbackPath
         self.callbackScheme = callbackScheme
     }
 
     private enum CodingKeys: String, CodingKey {
         case authorizationUrl = "authorization_url"
+        case callbackHost = "callback_host"
+        case callbackPath = "callback_path"
         case callbackScheme = "callback_scheme"
     }
 }

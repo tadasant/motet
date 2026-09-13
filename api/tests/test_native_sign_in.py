@@ -243,3 +243,52 @@ class TestStartingIsRefusedWhenItCannotFinish:
     def test_only_an_s256_challenge_is_accepted(self, api: TestClient, challenge: str) -> None:
         response = api.post("/v1/auth/native/start", json={"code_challenge": challenge})
         assert response.status_code == 422
+
+
+class TestTheUniversalLink:
+    """With MOTET_IOS_APP_LINK set, the handoff travels on the web app's own https path.
+
+    Approved by Tadas on 2026-09-13 as the stronger answer to the warning the first
+    review raised: Apple only lets a sign-in sheet wait for an https callback on a host
+    the app carries an associated-domains entitlement for, so no other app on the phone
+    can receive the link. The flag is a claim about the *web app* serving an
+    app-site-association file, which is why it is off unless an environment sets it.
+    """
+
+    @pytest.fixture
+    def linked(self, api: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+        monkeypatch.setenv("MOTET_IOS_APP_LINK", "1")
+        reset_store()
+        return api
+
+    def test_the_app_is_told_to_wait_for_the_web_apps_host(self, linked: TestClient) -> None:
+        _, challenge = pkce()
+        started = start(linked, challenge)
+        assert started["callback_host"] == "app.example.invalid"
+        assert started["callback_path"] == "/app/signed-in"
+        # The scheme is still reported: an iOS older than 17.4 cannot wait for an https
+        # callback at all, and falls back to it.
+        assert started["callback_scheme"] == "motet"
+
+    def test_the_handoff_lands_on_that_link_and_still_redeems(self, linked: TestClient) -> None:
+        verifier, challenge = pkce()
+        login = finish_in_the_web_app(linked, start(linked, challenge))
+        link = urlsplit(login["handoff_url"])
+        assert (link.scheme, link.netloc, link.path) == (
+            "https",
+            "app.example.invalid",
+            "/app/signed-in",
+        )
+        assert set(parse_qs(link.query)) == {"code"}
+
+        code = parse_qs(link.query)["code"][0]
+        assert redeem(linked, code, verifier).status_code == 200
+
+    def test_the_flag_off_is_the_custom_scheme(self, api: TestClient) -> None:
+        """The default, and what every deployment gets until its web app serves the file."""
+        _, challenge = pkce()
+        started = start(api, challenge)
+        assert started["callback_host"] is None
+        assert started["callback_path"] is None
+        login = finish_in_the_web_app(api, started)
+        assert login["handoff_url"].startswith("motet://signed-in?")

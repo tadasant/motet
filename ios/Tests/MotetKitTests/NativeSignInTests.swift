@@ -11,8 +11,20 @@ final class NativeSignInTests: XCTestCase {
         XCTAssertEqual(try NativeSignIn.handoffCode(from: link), "one-time")
     }
 
+    func testTheCodeIsReadOutOfAnHttpsHandoffLink() throws {
+        // Where the deployment serves an app-site-association file, the handoff comes back
+        // as a verified universal link instead — which no other app can be handed.
+        let link = try XCTUnwrap(URL(string: "https://app.example.invalid/app/signed-in?code=one-time"))
+        XCTAssertEqual(try NativeSignIn.handoffCode(from: link), "one-time")
+    }
+
     func testALinkThatIsNotTheHandoffIsRefused() throws {
-        for raw in ["https://example.invalid/signed-in?code=x", "motet://elsewhere?code=x"] {
+        for raw in [
+            "https://example.invalid/signed-in?code=x",
+            "https://example.invalid/app/signed-in/elsewhere?code=x",
+            "http://example.invalid/app/signed-in?code=x",
+            "motet://elsewhere?code=x",
+        ] {
             let link = try XCTUnwrap(URL(string: raw))
             XCTAssertThrowsError(try NativeSignIn.handoffCode(from: link)) { error in
                 XCTAssertEqual(error as? NativeSignIn.Failure, .notAHandoff, raw)
@@ -37,6 +49,7 @@ final class NativeSignInTests: XCTestCase {
         let started = try await client.startNativeSignIn(codeChallenge: "the-challenge")
 
         XCTAssertEqual(started.callbackScheme, "motet")
+        XCTAssertNil(started.callbackHost, "a deployment serving no association file reports none")
         let request = try XCTUnwrap(transport.recordedRequests().first)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.invalid/v1/auth/native/start")

@@ -51,7 +51,8 @@ import { McpAuthorizeCallback } from './screens/McpAuthorizeCallback'
 import { OAuthCallback, explain as explainDenial } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
-import { SignInCallback } from './screens/SignInCallback'
+import { AppHandoff } from './screens/AppHandoff'
+import { HANDOFF_PATH, SignInCallback } from './screens/SignInCallback'
 import { Sources } from './screens/Sources'
 import { Popover, Shell } from './shell/Shell'
 import { SECTIONS, sectionFor } from './shell/sections'
@@ -318,7 +319,11 @@ export default function App() {
   }, [token, saveToken])
 
   // The shell is on screen: not the callback, and not the door.
-  const inShell = !callback && Boolean(token || unlocked)
+  // The iOS app's https handoff link. Held apart from the shell and the door for the same
+  // reason /oauth/callback is: the sheet is watching for this path, and a browser that gets
+  // here instead needs one sentence rather than a section.
+  const appHandoff = path.replace(/\/+$/, '') === HANDOFF_PATH
+  const inShell = !callback && !appHandoff && Boolean(token || unlocked)
 
   // `/`, an unknown path and a trailing slash render a section; the address then says which
   // too, so the sidebar, the address bar and a reload all agree. `replace`, because the
@@ -418,6 +423,19 @@ export default function App() {
 
   // The callback and the door render without the sidebar: there is one thing to do on
   // either screen, and the screen offers it. Nothing to navigate to yet, either.
+  if (appHandoff) {
+    return (
+      <div className="door">
+        <header className="door-bar">
+          <Wordmark className="brand" />
+        </header>
+        <main className="door-main narrow">
+          <AppHandoff onDone={() => navigate('/')} />
+        </main>
+      </div>
+    )
+  }
+
   if (!inShell) {
     return (
       <div className="door">

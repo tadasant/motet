@@ -49,6 +49,19 @@ describe('SignInCallback', () => {
     expect(onSignedIn).not.toHaveBeenCalled()
   })
 
+  it('accepts the https handoff on this origin, where the deployment serves one', async () => {
+    // Apple only lets the app's sign-in sheet wait for an https callback on a host it holds
+    // an associated-domains entitlement for, which is what stops another app receiving it.
+    const link = `${window.location.origin}/app/signed-in?code=one-time`
+    answerCallbackWith({ token: null, email: 'owner@motet.test', expires_at: null, handoff_url: link })
+    const handOff = vi.fn()
+
+    render(<SignInCallback callback={GRANTED} onSignedIn={vi.fn()} onDone={() => {}} handOff={handOff} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue to the Motet app' }))
+    expect(handOff).toHaveBeenCalledWith(link)
+  })
+
   it('refuses a handoff link that is not the API’s motet:// link', async () => {
     answerCallbackWith({ token: null, email: 'owner@motet.test', expires_at: null, handoff_url: 'javascript:alert(1)' })
     const handOff = vi.fn()
