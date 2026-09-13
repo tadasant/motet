@@ -78,7 +78,8 @@ actor FakeAPI: MotetAPI {
             return newsItems[index]
         }
         return NewsItemResponse(
-            createdAt: Date(), id: id, read: read, sourceItemIds: [], summary: "", title: id
+            createdAt: Date(), id: id, read: read, sourceItemIds: [], sources: [], summary: "",
+            title: id
         )
     }
 
@@ -311,6 +312,7 @@ enum Fixture {
             id: id,
             read: read,
             sourceItemIds: ["src-1"],
+            sources: [NewsItemSourceRef(id: "src-1", title: "A newsletter")],
             summary: "A story.",
             title: id.capitalized
         )

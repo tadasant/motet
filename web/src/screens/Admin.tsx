@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { type AdminOverview, ApiError, api } from '../api/client'
 
 const POLL_MS = 3_000
-const SOURCE_STATES = ['pending', 'integrated', 'failed'] as const
+const SOURCE_STATES = ['held', 'pending', 'integrated', 'failed', 'dismissed'] as const
 const NEWS_STATES = ['unread', 'read'] as const
 const EPISODE_STATES = ['pending', 'scripting', 'rendering', 'ready', 'failed'] as const
 const JOB_STATES = ['ready', 'running', 'done', 'failed'] as const

@@ -96,3 +96,70 @@ def test_the_queue_claim_skips_locked_rows() -> None:
         finally:
             cur.execute("DELETE FROM jobs WHERE queue = 'test_skip_locked'")
             setup.commit()
+
+
+@needs_postgres
+def test_0012_backfills_received_at_from_created_at_on_existing_rows(tmp_path: Path) -> None:
+    """The one migration in motet#91 that rewrites existing rows, run against some.
+
+    Applied to a database that already holds source items from before it, as production
+    does: every existing row takes its own ``created_at`` — not the migration's timestamp,
+    which a plain ``ADD COLUMN ... DEFAULT now()`` would have stamped on all of them — and
+    the existing link rows gain decision columns that read as "not recorded".
+    """
+    import shutil
+    import uuid
+
+    assert DATABASE_URL is not None
+    before = tmp_path / "before"
+    before.mkdir()
+    for migration in discover():
+        if migration.version < "0012":
+            shutil.copy(migration.path, before / migration.path.name)
+
+    name = f"motet_mig0012_{uuid.uuid4().hex[:8]}"
+    admin = psycopg.connect(DATABASE_URL, autocommit=True)
+    admin.execute(f'CREATE DATABASE "{name}"')
+    url = psycopg.conninfo.make_conninfo(DATABASE_URL, dbname=name)
+    try:
+        migrate(url, before)
+        with psycopg.connect(url) as conn:
+            conn.execute(
+                "INSERT INTO source_items (id, user_id, source_id, title, text, created_at) "
+                "VALUES ('si_old', 'motet-owner', 'src_paste', 'Old', 'Old text.', "
+                "'2026-01-02T03:04:05Z')"
+            )
+            conn.execute(
+                "INSERT INTO news_items (id, user_id, title, summary) "
+                "VALUES ('ni_old', 'motet-owner', 'Old', 'Old.')"
+            )
+            conn.execute(
+                "INSERT INTO news_item_sources (news_item_id, source_item_id, position) "
+                "VALUES ('ni_old', 'si_old', 0)"
+            )
+
+        applied = migrate(url)
+        assert any(version.startswith("0012") for version in applied), applied
+
+        with psycopg.connect(url) as conn:
+            row = conn.execute(
+                "SELECT received_at = created_at FROM source_items WHERE id = 'si_old'"
+            ).fetchone()
+            assert row == (True,)
+            link = conn.execute(
+                "SELECT relation, basis, decided_at FROM news_item_sources "
+                "WHERE source_item_id = 'si_old'"
+            ).fetchone()
+            assert link == (None, None, None)
+            conn.execute("UPDATE source_items SET state = 'dismissed' WHERE id = 'si_old'")
+            conn.execute(
+                "INSERT INTO source_items (id, user_id, source_id, title, text) "
+                "VALUES ('si_new', 'motet-owner', 'src_paste', 'New', 'New text.')"
+            )
+            fresh = conn.execute(
+                "SELECT received_at = created_at FROM source_items WHERE id = 'si_new'"
+            ).fetchone()
+            assert fresh == (True,), "a paste takes the same transaction timestamp"
+    finally:
+        admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        admin.close()

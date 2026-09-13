@@ -462,7 +462,9 @@ buy, and the thing to preserve.
 Consent itself is started from the SPA's **Sources** screen, which is the only thing in the
 system that calls `/v1/sources/connect`. Granting a mailbox is invariant 9's human-owned
 half — a person has to look at Google's consent page and say yes — so the screen exists to
-put that click somewhere a human can reach, and everything after it is automatic.
+put that click somewhere a human can reach. Everything after it that is free — poll, fetch,
+extract — is automatic; the first model call waits for a person to press **Ingest now**
+(see "Connecting a source does the free work at once" below).
 
 **`MOTET_INFERENCE_MODE` governs Gmail too.** Gmail is a vendor, and "may this process talk
 to a vendor" is one question with one answer. A second variable would reintroduce the
@@ -1023,7 +1025,9 @@ line beside the counter is the only moment the detail exists.
 
 `GET /v1/ingestion` (`repo.list_ingestion`) is what stops content from silently
 disappearing. It reports source items that are not in the backlog yet — pending, failed,
-and for ten minutes after they succeed — each joined to its `integrate` job.
+and for ten minutes after they succeed — each joined to its `integrate` job. A *held* item
+(pending with no job, motet#91) is not on its way anywhere and is reported by
+`/v1/source-items/held` instead; see "Connecting a source does the free work at once".
 
 **The reason a failure is happening lives on the job row, and that is why this is a join.**
 `source_items.last_error` is only written when the retries run out (`_record_failure` in
@@ -1092,6 +1096,79 @@ visible from the *paste* screen, which is where somebody who has just pasted is.
 something is pending, and the fetch is **best-effort**: the backlog is the primary list and
 must not go blank because the secondary one 404s.
 
+### Connecting a source does the free work at once; inference waits for "Ingest now"
+
+`repo._HELD_WHERE`, `/v1/source-items/{held,integrate,dismiss}`, `GET
+/v1/source-items/{id}`, migration 0012. **Specified by Tadas in motet#91**, which states the
+design, the evidence and the checklists; its issue gate read it as proceeding with every
+open question left at the prototype's answer, and this section is the record of that
+choice. Connecting a mailbox used to be a
+standing authorization to spend: every message a poll found was extracted *and* queued for
+dedup, and the first real connect queued forty dedup calls before the Sources screen had
+finished re-rendering. `handle_extract` now stops after writing the source item, and a
+person picks what to brief on the Backlog's held panel.
+
+**Held is a join, not a column.** A `pending` source item with no `integrate` job *is* the
+held state. `_HELD_WHERE` spells it once, for the listing, the claim and the dismiss, and it
+is the exact negation of the condition `list_ingestion` reports a pending item on — so every
+item is on exactly one surface, and a held one is never "on the way in". Reported as
+pending, it was what made the Processing panel call a deliberately waiting item stalled.
+The anomaly that arm used to be kept for — a paste whose job row is somehow missing — now
+lands on the held list, with a checkbox that repairs it.
+
+**Paste is not held**, because pasting is asking; it still queues its job in the same
+transaction as its row.
+
+**The claim takes a per-user transaction-level advisory lock**, `pg_advisory_xact_lock(2,
+hashtext(user_id))`, and that lock is what stops two tabs from writing two integrate jobs:
+without it the second request answers its `NOT EXISTS` from a snapshot in which the item
+still looked held. The two-argument form lives in a different lock space from the worker's
+one-argument `try_lock` on the same user, so "Ingest now" never waits behind a running
+integrate job. Each job is written exactly as a paste's is — same queue, payload and
+`serialize_key` — so invariant 6 is untouched. Ids that do not qualify are skipped, never
+refused: a second tab is not an error.
+
+**Dismiss is a state, not a delete.** The `(source_id, external_id)` row is how a re-poll
+knows it has seen a message, so a deleted row would be fetched and held again on the next
+bounded resync. It takes the same lock as the claim, so a dismiss and an ingest racing for
+one item cannot both win, and only a held item can be dismissed — one that has started has
+a job a state flip would strand. Nothing un-dismisses; the SPA asks first.
+
+**`received_at` is the message's `Date:`**, clamped to the database's now, because a 60-day
+first sync stored every message inside one minute and the list read "5:04 PM today" on
+every row. Rows from before migration 0012 were backfilled from `created_at`: the header was
+read and discarded at extraction, and the raw bytes are not kept.
+
+**Dedup's decision is persisted on `news_item_sources`**, the row that already recorded
+*which* thing dedup did (`position`). `relation`, `reason`, `candidate_id` and `model` are
+the first pass's answer, carried on `IntegrationResult.decision` — optional on the seam, so
+a test double that explains nothing is still an integrator, and its absence is NULLs rather
+than an invention. `basis` is the step the outcome rests on: `first_pass`, `second_look`, or
+`title_backstop`, the last being a merge the model never asked for, which a stored
+`unrelated` beside a merge would otherwise misreport. `decided_title` and `decided_summary`
+are the news item's copy as this decision left it, because the news item's own columns are
+rewritten by every later merge. The mis-merge that motivated this was visible as `merged`
+and could not be explained; now it can.
+
+**The lifecycle view's stage 2 is a list of steps**, with dedup as the only one, so that
+enrichment steps can join it without a new shape. **Per-item spend is deliberately not
+persisted**: `handle_integrate` already logs the total beside the source item id and the
+metric carries it per stage, and motet#92's `llm_usage` design is where a per-item ledger
+would live — if it survives its design session, this becomes a join, not a column.
+`cost_recorded: false` says so on every step rather than leaving a blank.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** Taking the automatic
+extract→integrate step out and putting a person in its place changes the pipeline's shape,
+and "when in doubt, it counts" — so the sign-off this rests on is the owner's issue, not the
+size of the diff, exactly as motet#78's and motet#83's sections read theirs. What it adds is
+one enqueue removed, four routes on the existing API, nine nullable-or-defaulted columns and
+a state on existing tables used the way those tables are already used, and a lock in the
+advisory-lock family the queue already uses: no new deployable, datastore, vendor, seam,
+stage, model call or resource. `IntegrationResult`
+gains an optional field rather than a second implementation. The two things the issue
+*names* that are above the line — raw-bytes retention in object storage and agentic
+enrichment — are deferred to their own sessions.
+
 ### A queue nobody drains, and a UI that promised otherwise
 
 `motet_workers.runner`, `worker_heartbeats`, `GET /v1/processing`. Two halves of motet#38,
@@ -1144,7 +1221,7 @@ and several vendor calls more expensive.
 ### Enqueuing is an event, so the API starts the worker rather than waiting for a clock
 
 `motet_api.drain`. Every enqueue in this API traces to a person doing something — pasting
-text, asking for an episode, connecting a mailbox — so the API knows the exact moment
+text, asking for an episode, connecting a mailbox, pressing "Ingest now" — so the API knows the exact moment
 there is something to drain, and it used to do nothing with that. The `motet-worker` job
 was started by a standing Cloud Scheduler sweep that fired whether or not any work
 existed: roughly 21,900 executions a month per environment, essentially all of which found

@@ -19,16 +19,42 @@ from .types import Audio, NewsItem, Script, SourceItem
 
 
 @dataclass(frozen=True)
+class DedupDecision:
+    """Why an integrator decided what it did — the part of its answer worth keeping.
+
+    ``relation`` is ``same_event``, ``related`` or ``unrelated``; ``candidate_id`` is the
+    window item the integrator judged closest, as it named it (possibly an id that is not
+    in the window, which is a model error worth being able to see later); ``reason`` is its
+    one sentence. ``model`` is what answered — an OpenRouter slug, or ``"fake"``.
+    ``second_look`` is ``None`` when no second look was asked for, and otherwise its
+    answer, with every failure of the second look counting as ``False`` exactly as the
+    decision itself counts it.
+
+    Descriptive only: the handler persists it beside the outcome (motet#91) and decides
+    nothing from it. ``merged`` on :class:`IntegrationResult` stays the decision.
+    """
+
+    relation: str
+    reason: str
+    candidate_id: str | None
+    model: str
+    second_look: bool | None = None
+
+
+@dataclass(frozen=True)
 class IntegrationResult:
     """What integrating one source item did to the news-item window.
 
     ``news_item`` is the item the source was folded into — either a brand new one or an
     existing one that grew. ``merged`` says which of those happened, so a caller can tell
-    "deduped" from "new story" without diffing the window.
+    "deduped" from "new story" without diffing the window. ``decision`` says why, and is
+    optional so that an integrator with nothing to explain — a test double — is still an
+    integrator; the handler records its absence as "not recorded".
     """
 
     news_item: NewsItem
     merged: bool
+    decision: DedupDecision | None = None
 
 
 @runtime_checkable

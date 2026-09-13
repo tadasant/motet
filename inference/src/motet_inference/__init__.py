@@ -19,6 +19,7 @@ from .audio import (
 )
 from .fakes import first_sentence
 from .interfaces import (
+    DedupDecision,
     IntegrationResult,
     Integrator,
     ScriptGenerator,
@@ -42,6 +43,7 @@ __all__ = [
     "AudioError",
     "Briefing",
     "Claim",
+    "DedupDecision",
     "IntegrationResult",
     "Integrator",
     "Ledger",

@@ -18,8 +18,8 @@ from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV, admin_emails
 from motet_api.deps import require_admin, reset_store
+from motet_db import SourceKind, phase2, repo
 from motet_db import auth as auth_repo
-from motet_db import repo
 from motet_workers import Queue, jobs
 from starlette.routing import Route
 
@@ -224,6 +224,35 @@ def test_the_admin_list_parses_the_way_the_sign_in_list_does() -> None:
 
 
 class TestAdminOverview:
+    def test_held_and_dismissed_items_are_counted_apart_from_pending(
+        self, api: TestClient, db: psycopg.Connection[Any], as_admin: dict[str, str]
+    ) -> None:
+        """motet#91: a held item is waiting for a person, not in flight, on this view too."""
+        gmail = phase2.create_source(
+            db, user_id=repo.OWNER_USER_ID, kind=SourceKind.GMAIL.value, name="Inbox"
+        ).id
+        for message in ("held", "dismissed"):
+            phase2.insert_polled_source_item(
+                db,
+                user_id=repo.OWNER_USER_ID,
+                source_id_=gmail,
+                external_id=message,
+                title=message,
+                text="text",
+            )
+        dismissed = repo.list_held_source_items(db, repo.OWNER_USER_ID)[1].id
+        repo.dismiss_held_source_items(db, repo.OWNER_USER_ID, [dismissed])
+        db.commit()
+
+        owner = api.get(OVERVIEW, headers=as_admin).json()["users"][0]
+        assert owner["source_items"] == {
+            "held": 1,
+            "pending": 0,
+            "integrated": 0,
+            "failed": 0,
+            "dismissed": 1,
+        }
+
     def test_reports_users_queues_and_resolved_jobs(
         self, api: TestClient, db: psycopg.Connection[Any], as_admin: dict[str, str]
     ) -> None:
@@ -243,7 +272,13 @@ class TestAdminOverview:
         assert [user["user_id"] for user in body["users"]] == [repo.OWNER_USER_ID]
         owner = body["users"][0]
         assert owner["email"] is None
-        assert owner["source_items"] == {"pending": 1, "integrated": 0, "failed": 0}
+        assert owner["source_items"] == {
+            "held": 0,
+            "pending": 1,
+            "integrated": 0,
+            "failed": 0,
+            "dismissed": 0,
+        }
         assert owner["news_items"] == {"unread": 0, "read": 0}
         assert owner["episodes"] == {
             "pending": 0,

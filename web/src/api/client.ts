@@ -43,6 +43,9 @@ export type FeedInfo = GetResponse<'/v1/feed'>
 export type SourceItem = PostResponse<'/v1/sources/paste'>
 export type Source = GetResponse<'/v1/sources'>[number]
 export type Connection = PostResponse<'/v1/sources/connect'>
+export type HeldSourceItem = GetResponse<'/v1/source-items/held'>[number]
+export type SourceItemDetail = GetResponse<'/v1/source-items/{source_item_id}'>
+export type ProcessingStep = SourceItemDetail['processed'][number]
 export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
@@ -302,6 +305,19 @@ export const api = {
     }),
   completeOAuth: (state: string, code: string) =>
     apiPost('/v1/sources/callback', { state, code }),
+  // What a connected source has pulled in and is holding for an explicit "ingest now".
+  heldSourceItems: () => apiGet('/v1/source-items/held'),
+  // "Ingest now": the first call in the SPA that spends inference on a polled item. Ids
+  // that are no longer held — a second tab got there first — come back as `skipped`.
+  integrateSourceItems: (ids: string[]) => apiPost('/v1/source-items/integrate', { ids }),
+  // The other way out of the held list: discard without spending anything.
+  dismissSourceItems: (ids: string[]) => apiPost('/v1/source-items/dismiss', { ids }),
+  // One source item's life as three stages — pulled in, processed, news item.
+  sourceItem: (id: string) =>
+    apiGetPath(
+      '/v1/source-items/{source_item_id}',
+      `/v1/source-items/${encodeURIComponent(id)}`,
+    ),
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),

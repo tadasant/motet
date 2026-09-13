@@ -653,3 +653,77 @@ class TestScriptPrompt:
 
         assert "greeting" in SCRIPT_SYSTEM  # it is addressed...
         assert "no greeting or sign-off" in SCRIPT_SYSTEM  # ...by forbidding it
+
+
+class TestTheDecisionItReports:
+    """motet#91: the answer's *why* travels on the result, for the handler to persist.
+
+    The mis-merge that motivated it was visible as ``merged`` and unexplainable, because
+    ``relation``, ``reason`` and the candidate were logged and discarded here.
+    """
+
+    def _answer(self, relation: str, closest: str | None) -> dict[str, object]:
+        return {
+            "closest_news_item_id": closest,
+            "relation": relation,
+            "reason": "One round, two write-ups.",
+            "title": "Acme raises $20M Series A",
+            "summary": "Two newsletters, one round.",
+        }
+
+    def test_a_first_pass_merge_reports_its_relation_reason_candidate_and_model(self) -> None:
+        result = ClaudeIntegrator(canned(self._answer("same_event", "ni_1"))).integrate(
+            EVENING, [STORY]
+        )
+
+        assert result.decision is not None
+        assert result.decision.relation == "same_event"
+        assert result.decision.reason == "One round, two write-ups."
+        assert result.decision.candidate_id == "ni_1"
+        assert result.decision.model, "the slug that answered"
+        assert result.decision.second_look is None, "nobody looked again"
+
+    def test_a_candidate_outside_the_window_is_kept_as_named(self) -> None:
+        """The model error most worth reading back later — so it is not normalized away."""
+        result = ClaudeIntegrator(canned(self._answer("same_event", "ni_nowhere"))).integrate(
+            EVENING, [STORY]
+        )
+
+        assert not result.merged
+        assert result.decision is not None
+        assert result.decision.candidate_id == "ni_nowhere"
+
+    def test_the_second_looks_answer_is_reported_either_way(self) -> None:
+        def scripted(same: bool) -> FakeLlmClient:
+            return FakeLlmClient(
+                responses={
+                    "deduplication stage of a personal news briefing": json.dumps(
+                        self._answer("related", "ni_1")
+                    ),
+                    "second look of a news briefing": json.dumps(
+                        {"same_event": same, "reason": "r"}
+                    ),
+                }
+            )
+
+        yes = ClaudeIntegrator(scripted(True)).integrate(EVENING, [STORY])
+        no = ClaudeIntegrator(scripted(False)).integrate(EVENING, [STORY])
+
+        assert yes.merged and yes.decision is not None and yes.decision.second_look is True
+        assert not no.merged and no.decision is not None and no.decision.second_look is False
+        assert no.decision.relation == "related"
+
+
+def test_the_fake_integrator_reports_a_decision_in_the_adapters_vocabulary() -> None:
+    """So the persisting path runs in every test and golden-set run, not only in real mode."""
+    from motet_inference.fakes import FAKE_MODEL, FakeIntegrator
+
+    created = FakeIntegrator().integrate(EVENING, [])
+    assert created.decision is not None
+    assert (created.decision.relation, created.decision.candidate_id) == ("unrelated", None)
+    assert created.decision.model == FAKE_MODEL
+
+    twin = NewsItem(id="ni_9", title=EVENING.title, summary="s", source_item_ids=("si_1",))
+    merged = FakeIntegrator().integrate(EVENING, [twin])
+    assert merged.decision is not None
+    assert (merged.decision.relation, merged.decision.candidate_id) == ("same_event", "ni_9")

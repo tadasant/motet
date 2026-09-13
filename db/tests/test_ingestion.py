@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
-from motet_db import SourceItemState, SourceKind, phase2, repo
+from motet_db import SmartRule, SourceItemState, SourceKind, phase2, repo
 
 USER = repo.OWNER_USER_ID
 
@@ -26,6 +26,13 @@ USER = repo.OWNER_USER_ID
 def paste(conn: psycopg.Connection[Any], title: str = "Acme raises $20M") -> str:
     stored = repo.insert_source_item(conn, user_id=USER, title=title, text="Acme raised money.")
     return stored.id
+
+
+def queued_paste(conn: psycopg.Connection[Any], title: str = "Acme raises $20M") -> str:
+    """A paste the way the route leaves one: the row and its integrate job, together."""
+    item_id = paste(conn, title)
+    enqueue_integrate(conn, item_id)
+    return item_id
 
 
 def gmail_source(db: psycopg.Connection[Any], *, user_id: str = USER) -> str:
@@ -193,7 +200,7 @@ class TestListIngestion:
     def test_the_list_is_bounded(self, db: psycopg.Connection[Any]) -> None:
         """One poll can create hundreds of source items; the SPA polls this every 3s."""
         for index in range(repo.INGESTION_MAX_ITEMS + 5):
-            paste(db, title=f"Item {index}")
+            queued_paste(db, title=f"Item {index}")
 
         assert len(repo.list_ingestion(db, USER)) == repo.INGESTION_MAX_ITEMS
 
@@ -210,24 +217,33 @@ class TestListIngestion:
         later = datetime.now(UTC) + repo.INTEGRATED_GRACE + timedelta(minutes=1)
         assert repo.list_ingestion(db, USER, now=later) == []
 
-    def test_an_item_with_no_job_row_at_all_is_still_reported(
+    def test_an_item_with_no_job_row_is_held_rather_than_in_flight(
         self, db: psycopg.Connection[Any]
     ) -> None:
-        """The worst case, and the one an inner join would hide.
+        """A pending item with no job is *held* (motet#91), and it is reported there.
 
-        A source item with nothing queued against it will never be processed by anything.
-        It is exactly the row that must not be silently absent from a list whose job is to
-        account for everything that was pasted.
+        This used to be reported here as the worst case — nothing will ever process it — and
+        it still has to be on *some* surface. It is now the ordinary state of every message
+        a connected source extracts, so reporting it as pending made the Processing panel
+        call a deliberately waiting item stalled. The held list is the exact negation of
+        this arm, so the anomaly this test was written for — a paste whose job row is
+        somehow missing — lands there, with a checkbox that repairs it.
         """
         item_id = paste(db)
 
-        (status,) = repo.list_ingestion(db, USER)
-        assert status.id == item_id
-        assert status.attempts == 0
-        assert status.next_attempt_at is None
+        assert repo.list_ingestion(db, USER) == []
+        assert [item.id for item in repo.list_held_source_items(db, USER)] == [item_id]
+
+    def test_a_dismissed_item_is_reported_nowhere(self, db: psycopg.Connection[Any]) -> None:
+        """A decision already made, not an item in flight and not one waiting for a person."""
+        item_id = paste(db)
+        assert repo.dismiss_held_source_items(db, USER, [item_id]) == [item_id]
+
+        assert repo.list_ingestion(db, USER) == []
+        assert repo.list_held_source_items(db, USER) == []
 
     def test_it_reports_only_this_user(self, db: psycopg.Connection[Any]) -> None:
-        db.execute("INSERT INTO users (id, email) VALUES ('other', NULL)")
+        db.execute("INSERT INTO users (id, email) VALUES ('other', NULL) ON CONFLICT DO NOTHING")
         other = repo.insert_source_item(db, user_id="other", title="Theirs", text="Theirs.")
         enqueue_integrate(db, other.id)
         mine = paste(db, title="Mine")
@@ -236,8 +252,8 @@ class TestListIngestion:
         assert [status.id for status in repo.list_ingestion(db, USER)] == [mine]
 
     def test_newest_first(self, db: psycopg.Connection[Any]) -> None:
-        first = paste(db, title="First")
-        second = paste(db, title="Second")
+        first = queued_paste(db, title="First")
+        second = queued_paste(db, title="Second")
         db.execute(
             "UPDATE source_items SET created_at = created_at - interval '1 hour' WHERE id = %s",
             (first,),
@@ -363,11 +379,18 @@ class TestExtractJobsWithNoSourceItem:
     def test_a_message_that_made_it_is_reported_from_its_source_item_only(
         self, db: psycopg.Connection[Any]
     ) -> None:
-        """One message is one line. The row is the better answer, so the job stands down."""
+        """One message is one line. The row is the better answer, so the job stands down.
+
+        Extracted, the row is held and on the held list; queued, it is here — once, from
+        the row — and never from the job in either case.
+        """
         source_id = gmail_source(db)
         enqueue_extract(db, source_id, "eee", attempts=1, state="done")
         item_id = polled_item(db, source_id, "eee")
+        assert repo.list_ingestion(db, USER) == []
+        assert [item.id for item in repo.list_held_source_items(db, USER)] == [item_id]
 
+        enqueue_integrate(db, item_id)
         (status,) = repo.list_ingestion(db, USER)
         assert status.id == item_id
         assert status.title == "Acme raises $20M"
@@ -387,6 +410,9 @@ class TestExtractJobsWithNoSourceItem:
         enqueue_extract(db, source_id, "fff", attempts=2, state="running")
         item_id = polled_item(db, source_id, "fff")
 
+        # Held, so on neither arm — and in particular not on the job arm.
+        assert repo.list_ingestion(db, USER) == []
+        enqueue_integrate(db, item_id)
         statuses = repo.list_ingestion(db, USER)
         assert [status.id for status in statuses] == [item_id]
 
@@ -410,7 +436,7 @@ class TestExtractJobsWithNoSourceItem:
         """
         source_id = gmail_source(db)
         for index in range(repo.INGESTION_MAX_ITEMS):
-            paste(db, title=f"Paste {index}")
+            queued_paste(db, title=f"Paste {index}")
         # Aged, because everything a test writes shares one transaction timestamp and the
         # ordering under test is by time. In life the two arms are written minutes apart.
         db.execute("UPDATE source_items SET created_at = created_at - interval '1 hour'")
@@ -558,3 +584,103 @@ class TestWorkerHeartbeats:
         db.commit()
 
         assert [beat.queue for beat in repo.worker_heartbeats(db)[1]] == ["integrate", "tts"]
+
+
+class TestHeldSourceItems:
+    """``repo.list_held_source_items``, the claim and the dismiss — motet#91's gate.
+
+    Held is ``pending`` with no integrate job. These pin that the three share one
+    definition, that a held item is not work and not news, and that nothing ages it out.
+    """
+
+    def test_held_is_ordered_by_when_the_message_was_sent(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        source_id = gmail_source(db)
+        now = datetime.now(UTC)
+        later = phase2.insert_polled_source_item(
+            db,
+            user_id=USER,
+            source_id_=source_id,
+            external_id="later",
+            title="Later",
+            text="Sent second.",
+            received_at=now - timedelta(days=1),
+        )
+        earlier = phase2.insert_polled_source_item(
+            db,
+            user_id=USER,
+            source_id_=source_id,
+            external_id="earlier",
+            title="Earlier",
+            text="Sent first, stored second.",
+            received_at=now - timedelta(days=2),
+        )
+
+        held = repo.list_held_source_items(db, USER)
+        assert [item.id for item in held] == [earlier, later]
+        assert held[0].received_at == now - timedelta(days=2)
+
+    def test_a_held_item_never_ages_out(self, db: psycopg.Connection[Any]) -> None:
+        """Holding for days is the point. Unlike `INTEGRATED_GRACE`, nothing expires it."""
+        item_id = polled_item(db, gmail_source(db), "old")
+        db.execute(
+            "UPDATE source_items SET created_at = now() - interval '90 days', "
+            "received_at = now() - interval '90 days' WHERE id = %s",
+            (item_id,),
+        )
+
+        assert [item.id for item in repo.list_held_source_items(db, USER)] == [item_id]
+        later = datetime.now(UTC) + timedelta(days=30)
+        assert repo.list_ingestion(db, USER, now=later) == []
+
+    def test_the_held_list_is_bounded(self, db: psycopg.Connection[Any]) -> None:
+        source_id = gmail_source(db)
+        for index in range(repo.HELD_MAX_ITEMS + 3):
+            polled_item(db, source_id, f"msg-{index}")
+
+        assert len(repo.list_held_source_items(db, USER)) == repo.HELD_MAX_ITEMS
+
+    def test_a_held_item_is_not_news(self, db: psycopg.Connection[Any]) -> None:
+        """Invariant 5's side of the gate: read state is per news item, and a held item has
+        none — it is in no unread count, no backlog, and no episode's selection."""
+        polled_item(db, gmail_source(db), "held")
+
+        assert repo.list_news_items(db, USER) == []
+        assert repo.unread_news_items(db, USER) == []
+        assert phase2.select_for_rule(db, USER, SmartRule.manual()) == []
+
+    def test_a_claim_and_a_dismiss_see_only_this_users_held_items(
+        self, db: psycopg.Connection[Any]
+    ) -> None:
+        """Both act on ids the caller names, so both must refuse every id that is not theirs."""
+        db.execute("INSERT INTO users (id, email) VALUES ('other', NULL) ON CONFLICT DO NOTHING")
+        theirs = phase2.insert_polled_source_item(
+            db,
+            user_id="other",
+            source_id_=gmail_source(db, user_id="other"),
+            external_id="theirs",
+            title="Theirs",
+            text="Someone else's mailbox.",
+        )
+        assert theirs is not None
+        mine = polled_item(db, gmail_source(db), "mine")
+
+        assert repo.list_held_source_items(db, USER)[0].id == mine
+        assert repo.claim_held_source_items(db, USER, [theirs]) == []
+        assert repo.dismiss_held_source_items(db, USER, [theirs]) == []
+        assert [item.id for item in repo.list_held_source_items(db, "other")] == [theirs]
+        assert repo.source_item_lifecycle(db, USER, theirs) is None
+
+    def test_only_a_held_item_can_be_dismissed(self, db: psycopg.Connection[Any]) -> None:
+        """A queued item has a job and a pipeline; a state flip would strand both."""
+        source_id = gmail_source(db)
+        queued = polled_item(db, source_id, "queued")
+        enqueue_integrate(db, queued)
+        held = polled_item(db, source_id, "held")
+
+        assert repo.dismiss_held_source_items(db, USER, [queued, held, held]) == [held]
+        assert repo.dismiss_held_source_items(db, USER, [held]) == [], "already dismissed"
+        assert repo.claim_held_source_items(db, USER, [held]) == [], "and not claimable"
+        state = db.execute("SELECT state FROM source_items WHERE id = %s", (held,)).fetchone()
+        assert state is not None and state["state"] == SourceItemState.DISMISSED.value

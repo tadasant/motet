@@ -177,12 +177,16 @@ public struct AdminQueueResponse: Codable, Hashable, Sendable {
 }
 
 public struct AdminSourceItemCounts: Codable, Hashable, Sendable {
+    public var dismissed: Int
     public var failed: Int
+    public var held: Int
     public var integrated: Int
     public var pending: Int
 
-    public init(failed: Int, integrated: Int, pending: Int) {
+    public init(dismissed: Int, failed: Int, held: Int, integrated: Int, pending: Int) {
+        self.dismissed = dismissed
         self.failed = failed
+        self.held = held
         self.integrated = integrated
         self.pending = pending
     }
@@ -342,6 +346,68 @@ public struct CreateSmartEpisodeRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// Why dedup put this source item where it did, as recorded at the time.
+///
+/// ``relation``, ``reason``, ``candidate_id`` and ``model`` are the first pass's answer and
+/// are null when the integrator reported none. ``basis`` names the step the outcome rests
+/// on. ``title`` and ``summary`` are the news item's copy as this decision left it; the
+/// news item's own are rewritten by every later merge.
+public struct DedupDecisionResponse: Codable, Hashable, Sendable {
+    public var basis: String
+    public var candidateId: String?
+    public var candidateTitle: String?
+    public var decidedAt: Date
+    public var model: String?
+    public var reason: String?
+    public var relation: String?
+    public var summary: String?
+    public var title: String?
+
+    public init(
+        basis: String,
+        candidateId: String? = nil,
+        candidateTitle: String? = nil,
+        decidedAt: Date,
+        model: String? = nil,
+        reason: String? = nil,
+        relation: String? = nil,
+        summary: String? = nil,
+        title: String? = nil
+    ) {
+        self.basis = basis
+        self.candidateId = candidateId
+        self.candidateTitle = candidateTitle
+        self.decidedAt = decidedAt
+        self.model = model
+        self.reason = reason
+        self.relation = relation
+        self.summary = summary
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case basis
+        case candidateId = "candidate_id"
+        case candidateTitle = "candidate_title"
+        case decidedAt = "decided_at"
+        case model
+        case reason
+        case relation
+        case summary
+        case title
+    }
+}
+
+public struct DismissResponse: Codable, Hashable, Sendable {
+    public var dismissed: Int
+    public var skipped: Int
+
+    public init(dismissed: Int, skipped: Int) {
+        self.dismissed = dismissed
+        self.skipped = skipped
+    }
+}
+
 public struct EpisodeResponse: Codable, Hashable, Sendable {
     public var audioBytes: Int?
     public var audioMediaType: String?
@@ -482,6 +548,54 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// A source item that is extracted and waiting for the owner to say "ingest now".
+///
+/// A connected source polls, fetches and extracts on its own — the deterministic, free
+/// half — and stops before ``integrate``, the first stage that spends inference. Held is
+/// ``state = 'pending'`` with no integrate job, and this is the list of those. A paste
+/// never lingers here: it queues its job on arrival.
+public struct HeldSourceItemResponse: Codable, Hashable, Sendable {
+    public var chars: Int
+    public var id: String
+    public var preview: String
+    public var receivedAt: Date
+    public var sourceId: String
+    public var sourceKind: String
+    public var sourceName: String
+    public var title: String
+
+    public init(
+        chars: Int,
+        id: String,
+        preview: String,
+        receivedAt: Date,
+        sourceId: String,
+        sourceKind: String,
+        sourceName: String,
+        title: String
+    ) {
+        self.chars = chars
+        self.id = id
+        self.preview = preview
+        self.receivedAt = receivedAt
+        self.sourceId = sourceId
+        self.sourceKind = sourceKind
+        self.sourceName = sourceName
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chars
+        case id
+        case preview
+        case receivedAt = "received_at"
+        case sourceId = "source_id"
+        case sourceKind = "source_kind"
+        case sourceName = "source_name"
+        case title
+    }
+}
+
 /// A saved passage, anchored to the span of source text it quotes.
 ///
 /// The anchor is the source span and nothing else — claims are rewritten on every script
@@ -607,6 +721,16 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
     }
 }
 
+public struct IntegrateResponse: Codable, Hashable, Sendable {
+    public var queued: Int
+    public var skipped: Int
+
+    public init(queued: Int, skipped: Int) {
+        self.queued = queued
+        self.skipped = skipped
+    }
+}
+
 /// How far into an episode the listener has got.
 ///
 /// Invariant 4: we own playback position, so this is a *report* from a client that we
@@ -692,6 +816,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
     public var id: String
     public var read: Bool
     public var sourceItemIds: [String]
+    public var sources: [NewsItemSourceRef]
     public var summary: String
     public var title: String
 
@@ -700,6 +825,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         id: String,
         read: Bool,
         sourceItemIds: [String],
+        sources: [NewsItemSourceRef],
         summary: String,
         title: String
     ) {
@@ -707,6 +833,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         self.id = id
         self.read = read
         self.sourceItemIds = sourceItemIds
+        self.sources = sources
         self.summary = summary
         self.title = title
     }
@@ -716,8 +843,20 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         case id
         case read
         case sourceItemIds = "source_item_ids"
+        case sources
         case summary
         case title
+    }
+}
+
+/// A source item a news item is backed by, named so a list can show it.
+public struct NewsItemSourceRef: Codable, Hashable, Sendable {
+    public var id: String
+    public var title: String
+
+    public init(id: String, title: String) {
+        self.id = id
+        self.title = title
     }
 }
 
@@ -784,6 +923,53 @@ public struct ProcessingStatusResponse: Codable, Hashable, Sendable {
         case queues
         case readiness
         case workerLastSeenAt = "worker_last_seen_at"
+    }
+}
+
+/// One step of stage 2. Dedup is the only step today; enrichment steps will join it.
+///
+/// ``status`` follows the step's job: ``queued`` (first attempt due, or a retry backing
+/// off), ``running``, ``done`` or ``failed``. ``cost_recorded`` is false: the step's spend
+/// is logged beside the source item id and metered per stage, never stored per item.
+public struct ProcessingStepResponse: Codable, Hashable, Sendable {
+    public var costRecorded: Bool
+    public var decision: DedupDecisionResponse?
+    public var error: String?
+    public var finishedAt: Date?
+    public var job: SourceItemJobResponse?
+    public var outcome: String?
+    public var status: String
+    public var step: String
+
+    public init(
+        costRecorded: Bool,
+        decision: DedupDecisionResponse? = nil,
+        error: String? = nil,
+        finishedAt: Date? = nil,
+        job: SourceItemJobResponse? = nil,
+        outcome: String? = nil,
+        status: String,
+        step: String
+    ) {
+        self.costRecorded = costRecorded
+        self.decision = decision
+        self.error = error
+        self.finishedAt = finishedAt
+        self.job = job
+        self.outcome = outcome
+        self.status = status
+        self.step = step
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case costRecorded = "cost_recorded"
+        case decision
+        case error
+        case finishedAt = "finished_at"
+        case job
+        case outcome
+        case status
+        case step
     }
 }
 
@@ -993,6 +1179,197 @@ public struct SmartRuleModel: Codable, Hashable, Sendable {
         case sourceIds = "source_ids"
         case unreadOnly = "unread_only"
         case windowDays = "window_days"
+    }
+}
+
+/// One source item across its three stages: pulled in, processed, news item.
+///
+/// A read over ``source_items``, the newest ``integrate`` job and ``news_item_sources``.
+/// ``processed`` is a list so that enrichment steps can join dedup without a new shape;
+/// it is empty while the item is held or once it is dismissed, and ``news_items`` is
+/// empty until dedup has run.
+public struct SourceItemDetailResponse: Codable, Hashable, Sendable {
+    public var id: String
+    public var newsItems: [SourceItemNewsItemResponse]
+    public var processed: [ProcessingStepResponse]
+    public var pulled: SourceItemPulledStage
+    public var state: String
+    public var status: String
+    public var title: String
+
+    public init(
+        id: String,
+        newsItems: [SourceItemNewsItemResponse],
+        processed: [ProcessingStepResponse],
+        pulled: SourceItemPulledStage,
+        state: String,
+        status: String,
+        title: String
+    ) {
+        self.id = id
+        self.newsItems = newsItems
+        self.processed = processed
+        self.pulled = pulled
+        self.state = state
+        self.status = status
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case newsItems = "news_items"
+        case processed
+        case pulled
+        case state
+        case status
+        case title
+    }
+}
+
+/// Which held source items to act on. At most as many as the held list returns.
+public struct SourceItemIdsRequest: Codable, Hashable, Sendable {
+    public var ids: [String]
+
+    public init(ids: [String]) {
+        self.ids = ids
+    }
+}
+
+/// The newest ``integrate`` job for a source item, as the queue holds it.
+public struct SourceItemJobResponse: Codable, Hashable, Sendable {
+    public var attempts: Int
+    public var createdAt: Date
+    public var id: Int
+    public var lastError: String?
+    public var lockedAt: Date?
+    public var maxAttempts: Int
+    public var runAt: Date
+    public var state: String
+    public var updatedAt: Date
+    public var workCommitted: Bool
+
+    public init(
+        attempts: Int,
+        createdAt: Date,
+        id: Int,
+        lastError: String? = nil,
+        lockedAt: Date? = nil,
+        maxAttempts: Int,
+        runAt: Date,
+        state: String,
+        updatedAt: Date,
+        workCommitted: Bool
+    ) {
+        self.attempts = attempts
+        self.createdAt = createdAt
+        self.id = id
+        self.lastError = lastError
+        self.lockedAt = lockedAt
+        self.maxAttempts = maxAttempts
+        self.runAt = runAt
+        self.state = state
+        self.updatedAt = updatedAt
+        self.workCommitted = workCommitted
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempts
+        case createdAt = "created_at"
+        case id
+        case lastError = "last_error"
+        case lockedAt = "locked_at"
+        case maxAttempts = "max_attempts"
+        case runAt = "run_at"
+        case state
+        case updatedAt = "updated_at"
+        case workCommitted = "work_committed"
+    }
+}
+
+/// Stage 3: the deduped news item this source item feeds.
+public struct SourceItemNewsItemResponse: Codable, Hashable, Sendable {
+    public var id: String
+    public var position: Int
+    public var read: Bool
+    public var sourceCount: Int
+    public var summary: String
+    public var title: String
+
+    public init(
+        id: String,
+        position: Int,
+        read: Bool,
+        sourceCount: Int,
+        summary: String,
+        title: String
+    ) {
+        self.id = id
+        self.position = position
+        self.read = read
+        self.sourceCount = sourceCount
+        self.summary = summary
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case position
+        case read
+        case sourceCount = "source_count"
+        case summary
+        case title
+    }
+}
+
+/// Stage 1 of a source item's life: what the deterministic scrape pulled in.
+///
+/// Everything here was produced without a model — a poll, a fetch, and
+/// ``motet_sources.extract``. ``text`` is the extracted text, not the raw message: the
+/// RFC 822 bytes are never stored, which ``raw_stored`` says out loud so that the UI does
+/// not call the extracted text "the email".
+public struct SourceItemPulledStage: Codable, Hashable, Sendable {
+    public var chars: Int
+    public var externalId: String?
+    public var rawStored: Bool
+    public var receivedAt: Date
+    public var sourceId: String
+    public var sourceKind: String
+    public var sourceName: String
+    public var storedAt: Date
+    public var text: String
+
+    public init(
+        chars: Int,
+        externalId: String? = nil,
+        rawStored: Bool,
+        receivedAt: Date,
+        sourceId: String,
+        sourceKind: String,
+        sourceName: String,
+        storedAt: Date,
+        text: String
+    ) {
+        self.chars = chars
+        self.externalId = externalId
+        self.rawStored = rawStored
+        self.receivedAt = receivedAt
+        self.sourceId = sourceId
+        self.sourceKind = sourceKind
+        self.sourceName = sourceName
+        self.storedAt = storedAt
+        self.text = text
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chars
+        case externalId = "external_id"
+        case rawStored = "raw_stored"
+        case receivedAt = "received_at"
+        case sourceId = "source_id"
+        case sourceKind = "source_kind"
+        case sourceName = "source_name"
+        case storedAt = "stored_at"
+        case text
     }
 }
 
@@ -1277,6 +1654,26 @@ public enum MotetEndpoints {
     /// `GET /v1/processing` — Processing Status
     public static var processingStatus: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/processing")
+    }
+
+    /// `POST /v1/source-items/dismiss` — Dismiss Source Items
+    public static var dismissSourceItems: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/source-items/dismiss")
+    }
+
+    /// `GET /v1/source-items/held` — List Held Source Items
+    public static var listHeldSourceItems: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/source-items/held")
+    }
+
+    /// `POST /v1/source-items/integrate` — Integrate Source Items
+    public static var integrateSourceItems: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/source-items/integrate")
+    }
+
+    /// `GET /v1/source-items/{source_item_id}` — Get Source Item Detail
+    public static func getSourceItemDetail(sourceItemId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/source-items/\(MotetPathComponent(sourceItemId))")
     }
 
     /// `GET /v1/sources` — List Sources

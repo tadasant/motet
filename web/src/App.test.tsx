@@ -22,6 +22,10 @@ const NEWS_ITEM: NewsItem = {
   title: 'Acme raises $20M Series A',
   summary: 'Acme announced the round on Tuesday.',
   source_item_ids: ['si_1', 'si_2'],
+  sources: [
+    { id: 'si_1', title: 'Acme newsletter' },
+    { id: 'si_2', title: 'Acme, again' },
+  ],
   read: false,
   created_at: '2026-08-24T00:00:00Z',
 }
@@ -1362,7 +1366,7 @@ describe('the admin view', () => {
       {
         user_id: 'motet-owner',
         email: null,
-        source_items: { pending: 3, integrated: 40, failed: 2 },
+        source_items: { held: 5, pending: 3, integrated: 40, failed: 2, dismissed: 1 },
         news_items: { unread: 12, read: 20 },
         episodes: { pending: 0, scripting: 0, rendering: 0, ready: 1, failed: 0 },
         jobs: { ready: 3, running: 1, done: 40, failed: 2 },

@@ -90,8 +90,9 @@ export function OAuthCallback({
       )}
       {callback.kind === 'granted' && status.kind === 'done' && (
         <p className="ok" role="status">
-          {status.source.name} is connected. Its first poll is already queued; newsletters
-          join the backlog as the workers get to them.
+          {status.source.name} is connected. Its first poll is already queued; newsletters it
+          pulls in wait on the Backlog until you pick which to ingest — nothing is spent on them
+          before that.
         </p>
       )}
       {callback.kind === 'granted' && status.kind === 'error' && (

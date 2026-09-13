@@ -119,12 +119,13 @@ class DrainReason(StrEnum):
     """Which user action asked for the drain.
 
     A metric label, so the set is closed and small by construction: one member per
-    enqueue *helper* the API calls. There are four helpers and five routes, because
+    enqueue *helper* the API calls. There are five helpers and six routes, because
     ``enqueue_source_poll`` is reached both by completing mailbox consent and by asking a
     source to poll — and those are the same user intent, so they share a label.
     """
 
     PASTE = "paste"
+    INTEGRATE = "integrate"
     EPISODE = "episode"
     SMART_EPISODE = "smart_episode"
     SOURCE_POLL = "source_poll"

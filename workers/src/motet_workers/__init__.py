@@ -16,6 +16,7 @@ from .handlers import (
     PermanentFailure,
     apportion_claim_timings,
     enqueue_episode,
+    enqueue_integration,
     enqueue_paste,
     enqueue_smart_episode,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "drain",
     "enqueue",
     "enqueue_episode",
+    "enqueue_integration",
     "enqueue_paste",
     "enqueue_smart_episode",
     "enqueue_source_poll",

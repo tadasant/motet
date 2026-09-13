@@ -116,6 +116,195 @@ class SourceItemResponse(BaseModel):
     )
 
 
+class HeldSourceItemResponse(BaseModel):
+    """A source item that is extracted and waiting for the owner to say "ingest now".
+
+    A connected source polls, fetches and extracts on its own — the deterministic, free
+    half — and stops before ``integrate``, the first stage that spends inference. Held is
+    ``state = 'pending'`` with no integrate job, and this is the list of those. A paste
+    never lingers here: it queues its job on arrival.
+    """
+
+    id: str
+    title: str
+    source_id: str
+    source_kind: str = Field(description="'gmail' or 'paste'.")
+    source_name: str
+    received_at: datetime = Field(
+        description=(
+            "When the message says it was sent (its Date header, clamped to now); when it "
+            "was stored if it had no usable one. For a paste, when it was pasted."
+        )
+    )
+    chars: int = Field(description="Length of the extracted text.")
+    preview: str = Field(description="The first ~200 characters, whitespace collapsed.")
+
+
+class SourceItemIdsRequest(BaseModel):
+    """Which held source items to act on. At most as many as the held list returns."""
+
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class IntegrateResponse(BaseModel):
+    queued: int = Field(description="Ids that were held and now have an integrate job.")
+    skipped: int = Field(
+        description=(
+            "Ids that did not qualify: unknown, another user's, already queued, "
+            "already integrated, or dismissed. Never an error."
+        )
+    )
+
+
+class DismissResponse(BaseModel):
+    dismissed: int = Field(description="Ids that were held and are now dismissed.")
+    skipped: int = Field(
+        description=(
+            "Ids that did not qualify: unknown, another user's, already queued or "
+            "integrated, or already dismissed. Never an error."
+        )
+    )
+
+
+class SourceItemPulledStage(BaseModel):
+    """Stage 1 of a source item's life: what the deterministic scrape pulled in.
+
+    Everything here was produced without a model — a poll, a fetch, and
+    ``motet_sources.extract``. ``text`` is the extracted text, not the raw message: the
+    RFC 822 bytes are never stored, which ``raw_stored`` says out loud so that the UI does
+    not call the extracted text "the email".
+    """
+
+    source_id: str
+    source_kind: str = Field(description="'gmail' or 'paste'.")
+    source_name: str
+    external_id: str | None = Field(
+        description="The provider's own id for the message; null for a paste."
+    )
+    received_at: datetime = Field(
+        description="When the message says it was sent; see HeldSourceItemResponse."
+    )
+    stored_at: datetime = Field(description="When the source item row was written.")
+    chars: int = Field(description="Length of the extracted text.")
+    text: str = Field(description="The extracted text, in full.")
+    raw_stored: bool = Field(
+        description="Whether the raw bytes the text was extracted from are kept. Always false."
+    )
+
+
+class SourceItemJobResponse(BaseModel):
+    """The newest ``integrate`` job for a source item, as the queue holds it."""
+
+    id: int
+    state: str = Field(description="'ready', 'running', 'done' or 'failed'.")
+    attempts: int
+    max_attempts: int = Field(description="The ceiling the queue counts to.")
+    run_at: datetime = Field(description="When the job is (or was) due.")
+    locked_at: datetime | None = Field(description="When a worker last touched its lease.")
+    created_at: datetime
+    updated_at: datetime
+    last_error: str | None
+    work_committed: bool = Field(
+        description="Whether the handler's work landed durably (the work fence), even if "
+        "the job row has not been completed yet."
+    )
+
+
+class DedupDecisionResponse(BaseModel):
+    """Why dedup put this source item where it did, as recorded at the time.
+
+    ``relation``, ``reason``, ``candidate_id`` and ``model`` are the first pass's answer and
+    are null when the integrator reported none. ``basis`` names the step the outcome rests
+    on. ``title`` and ``summary`` are the news item's copy as this decision left it; the
+    news item's own are rewritten by every later merge.
+    """
+
+    relation: str | None = Field(description="'same_event', 'related' or 'unrelated'.")
+    reason: str | None = Field(description="The first pass's one-sentence comparison.")
+    candidate_id: str | None = Field(
+        description="The news item the first pass judged closest, as it named it."
+    )
+    candidate_title: str | None = Field(
+        description=(
+            "That news item's current title; null when there is no candidate or the id "
+            "named is not one of the caller's news items."
+        )
+    )
+    model: str | None = Field(description="What answered: an OpenRouter slug, or 'fake'.")
+    basis: str = Field(
+        description=(
+            "'first_pass', 'second_look' (a focused re-ask decided), or 'title_backstop' "
+            "(dedup said new, and an unread story already carried the same title)."
+        )
+    )
+    title: str | None = Field(description="The news item's title as this decision wrote it.")
+    summary: str | None = Field(description="Likewise the summary.")
+    decided_at: datetime
+
+
+class ProcessingStepResponse(BaseModel):
+    """One step of stage 2. Dedup is the only step today; enrichment steps will join it.
+
+    ``status`` follows the step's job: ``queued`` (first attempt due, or a retry backing
+    off), ``running``, ``done`` or ``failed``. ``cost_recorded`` is false: the step's spend
+    is logged beside the source item id and metered per stage, never stored per item.
+    """
+
+    step: str = Field(description="'dedup'.")
+    status: str = Field(description="'queued', 'running', 'done' or 'failed'.")
+    job: SourceItemJobResponse | None
+    finished_at: datetime | None = Field(description="When the step completed, if it has.")
+    error: str | None = Field(
+        description="The source item's recorded error, or the job's last one while retrying."
+    )
+    outcome: str | None = Field(
+        description=(
+            "'new' if this source item created its news item, 'merged' if it was folded "
+            "into one that already existed; null until done."
+        )
+    )
+    decision: DedupDecisionResponse | None = Field(
+        description="Null until done, and for items integrated before decisions were recorded."
+    )
+    cost_recorded: bool = Field(description="Whether this step's spend is stored. Always false.")
+
+
+class SourceItemNewsItemResponse(BaseModel):
+    """Stage 3: the deduped news item this source item feeds."""
+
+    id: str
+    title: str
+    summary: str
+    read: bool
+    source_count: int = Field(description="How many source items back this story.")
+    position: int = Field(description="This source item's position among them; 0 created it.")
+
+
+class SourceItemDetailResponse(BaseModel):
+    """One source item across its three stages: pulled in, processed, news item.
+
+    A read over ``source_items``, the newest ``integrate`` job and ``news_item_sources``.
+    ``processed`` is a list so that enrichment steps can join dedup without a new shape;
+    it is empty while the item is held or once it is dismissed, and ``news_items`` is
+    empty until dedup has run.
+    """
+
+    id: str
+    title: str
+    state: str = Field(description="'pending', 'integrated', 'failed' or 'dismissed'.")
+    status: str = Field(
+        description=(
+            "'held' (pending, nobody has asked for inference), 'queued', 'running', "
+            "'done', 'failed' or 'dismissed'."
+        )
+    )
+    pulled: SourceItemPulledStage
+    processed: list[ProcessingStepResponse]
+    news_items: list[SourceItemNewsItemResponse] = Field(
+        description="Zero or one today — a source item belongs to at most one news item."
+    )
+
+
 class IngestionItemResponse(BaseModel):
     """One ingested item that has not settled into the backlog yet — and why not.
 
@@ -287,6 +476,13 @@ class SourceSpanModel(BaseModel):
     end: int
 
 
+class NewsItemSourceRef(BaseModel):
+    """A source item a news item is backed by, named so a list can show it."""
+
+    id: str
+    title: str
+
+
 class NewsItemResponse(BaseModel):
     """A deduped story. Read state lives here, per invariant 5 — not per episode."""
 
@@ -294,6 +490,11 @@ class NewsItemResponse(BaseModel):
     title: str
     summary: str
     source_item_ids: list[str]
+    sources: list[NewsItemSourceRef] = Field(
+        description=(
+            "The same source items as source_item_ids, with their titles, in position order."
+        )
+    )
     read: bool
     created_at: datetime
 
@@ -665,9 +866,11 @@ class RevokedResponse(BaseModel):
 
 
 class AdminSourceItemCounts(BaseModel):
-    pending: int
+    held: int = Field(description="Pending with no integrate job: waiting for 'ingest now'.")
+    pending: int = Field(description="Pending with an integrate job: on its way in.")
     integrated: int
     failed: int
+    dismissed: int
 
 
 class AdminNewsItemCounts(BaseModel):
