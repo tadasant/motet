@@ -1,4 +1,4 @@
-# The Python half of Motet: one build, two runtime targets.
+# The Python half of Motet: one build, three runtime targets.
 #
 # `motet-api` and `motet-worker` are separate images in Artifact Registry because the
 # infrastructure pins them separately, but they are the same tree — the API writes rows
@@ -9,6 +9,11 @@
 #
 #     docker build --target api    -t motet-api    .
 #     docker build --target worker -t motet-worker .
+#     docker build --target voice  -t motet-voice  .
+#
+# `motet-voice` is the one target that is NOT the shared tree. It resolves from the same
+# lockfile in the same build stage, and then installs only `motet-voice` and what it
+# depends on — see the `voice-build` stage for why.
 #
 # Build context is the REPO ROOT, not a subdirectory. `uv.lock` describes the whole
 # workspace, so a context rooted at `api/` could not resolve it.
@@ -78,18 +83,38 @@ COPY workers workers
 RUN uv sync --frozen --no-dev
 
 # ---------------------------------------------------------------------------
-# Runtime — the venv and the source, and nothing that built them.
+# voice-build — the voice service's venv, and nothing the voice service does not import.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm AS runtime
+FROM build AS voice-build
 
-# Not root. Cloud Run does not require it, but nothing in either process needs to write
-# outside its own temp dir, and a container that cannot modify its own code is one less
-# thing to think about if a dependency is ever compromised.
+# `--package motet-voice` makes the venv exactly `motet-voice`'s dependency closure, and
+# because `uv sync` is exact it UNINSTALLS the rest: `motet-db`, `psycopg`, the API, the
+# worker. That is invariant 2 made a property of the artifact — the voice service holds no
+# database credential, and its image does not even carry a driver it could use one with.
+# `voice/tests/test_no_database_access.py` makes the claim against the source tree and
+# `bin/build-images` makes it against this image.
+#
+# `--no-editable` installs the workspace members as real wheels inside the venv, so the
+# `voice` target below copies the venv and nothing else. An editable install would point
+# back at /app/<member>/src, and copying that tree would put `db/` into the image as source.
+#
+# From the `build` stage rather than a fresh resolve, so the lockfile, the uv version and
+# the downloaded wheels are the ones the other two targets were built from. The cost is
+# caching: that stage copied every member's source, so an edit under `api/` or `db/` also
+# re-runs this step.
+RUN uv sync --frozen --no-dev --package motet-voice --no-editable
+
+# ---------------------------------------------------------------------------
+# base — what every Python image shares: the user, the interpreter settings.
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm AS base
+
+# Not root. Cloud Run does not require it, but nothing in any of these processes needs to
+# write outside its own temp dir, and a container that cannot modify its own code is one
+# less thing to think about if a dependency is ever compromised.
 RUN useradd --create-home --uid 10001 motet
 
 WORKDIR /app
-
-COPY --from=build --chown=motet:motet /app /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     # Logs must reach the log collector as they are written. Without this, Python buffers
@@ -99,6 +124,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 
 USER motet
+
+# ---------------------------------------------------------------------------
+# Runtime — the venv and the source, and nothing that built them.
+# ---------------------------------------------------------------------------
+FROM base AS runtime
+
+COPY --from=build --chown=motet:motet /app /app
 
 # ---------------------------------------------------------------------------
 # api — the HTTP service.
@@ -125,6 +157,39 @@ EXPOSE 8080
 # because Cloud Run is the only route to the container — nothing else can reach it to
 # forge one.
 CMD exec uvicorn motet_api.main:app --host 0.0.0.0 --port "$PORT" --forwarded-allow-ips='*'
+
+# ---------------------------------------------------------------------------
+# voice — the voice service: StartSession over HTTP, the session over a WebSocket.
+# ---------------------------------------------------------------------------
+FROM base AS voice
+
+COPY --from=voice-build --chown=motet:motet /app/.venv /app/.venv
+
+ENV PORT=8080
+EXPOSE 8080
+
+# `create_app --factory` because the module deliberately has no app instance: building one
+# reads the environment and builds the arm, which must not happen at import.
+#
+# WebSockets need nothing extra. uvicorn picks its WebSocket implementation from what is
+# importable, and `websockets` is a direct dependency of `motet-voice` (the realtime arm is
+# a WebSocket client too). `bin/build-images` opens a real socket against this image,
+# because "the handshake answers 404 because no implementation was found" is a warning
+# uvicorn prints once at startup and nothing else.
+#
+# `--forwarded-allow-ips='*'` for the API's reason: Cloud Run's front end is the peer, so
+# without it `X-Forwarded-Proto` and the client address are discarded. Nothing in this
+# service builds a URL from the request today — the socket URL a browser is handed is
+# built by the API from `MOTET_VOICE_BASE_URL` — so this keeps logs and spans honest and
+# keeps a future `request.url` from quietly coming back `http://`.
+#
+# `--timeout-graceful-shutdown 8`, because a socket is a request that does not end on its
+# own. Cloud Run sends SIGTERM and kills the instance ten seconds later. uvicorn closes open
+# sockets on shutdown but then waits, by default without limit, for their handlers to
+# return — and a session's close can be waiting on a vendor socket. A handler that outlived
+# the ten seconds would get the instance SIGKILLed before the lifespan's `finally` ran, and
+# that `finally` is the telemetry flush. Eight bounds the wait and leaves two for it.
+CMD exec uvicorn motet_voice.app:create_app --factory --host 0.0.0.0 --port "$PORT" --forwarded-allow-ips='*' --timeout-graceful-shutdown 8
 
 # ---------------------------------------------------------------------------
 # worker — one Cloud Run job invocation drains one queue and exits.

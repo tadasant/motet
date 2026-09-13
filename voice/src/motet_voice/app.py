@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import secrets
 import uuid
 from collections.abc import AsyncIterator
@@ -72,6 +73,16 @@ HEALTH_PATH = "/internal/health"
 #: a path added there belongs here too, and vice versa.
 PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
 
+#: The shape ``revision`` insists on before health will repeat it.
+#:
+#: A copy of ``motet_api.main.REVISION_PATTERN``, for ``PLATFORM_RESERVED_PATHS``' reason
+#: above, and it is there for the same disclosure argument: ``service.version`` is set by
+#: the private infrastructure repo, this route is unauthenticated, and this repo is public —
+#: so the route repeats a commit SHA (or the deploy's ``bootstrap`` sentinel) and refuses
+#: anything carrying ``/``, ``:``, ``.`` or ``@``, which is every topology shape there is.
+#: **Keep the two in step.**
+REVISION_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
 #: How long an accepted socket may go without authenticating. Short: a client that
 #: has just been handed a token sends it immediately.
 AUTHENTICATE_TIMEOUT_SECONDS = 10.0
@@ -108,6 +119,10 @@ class HealthResponse(BaseModel):
     #: variables set. The two were different for months on the API, which is how a service
     #: looks monitored and emits nothing.
     telemetry_exporting: bool
+    #: The commit this image was built from — ``service.version``, which the deploy sets —
+    #: when it has the shape of one; ``None`` otherwise. It is what answers "is the pin
+    #: bump live?" for this service, as the same field does on the API.
+    revision: str | None
     tools: list[dict[str, Any]]
 
 
@@ -201,7 +216,14 @@ def create_app(
         turn detection, which needs no credential at all. Refusing to boot without one
         would take the measurement offline to protect a leg nobody is using.
         """
-        obs.configure()
+        telemetry = obs.configure()
+        if telemetry.service_version and publishable_revision(telemetry.service_version) is None:
+            logger.error(
+                "service.version is not a shape %s may repeat, so it reports revision=null. "
+                "It must be letters, digits, '_' and '-' — a commit SHA, or the deploy's "
+                "bootstrap sentinel.",
+                HEALTH_PATH,
+            )
         logger.info("voice: %s", state.settings.describe())
         capabilities = state.arm.capabilities()
         if capabilities.dormant_reason:
@@ -260,6 +282,7 @@ def create_app(
             session_secret_configured=state.settings.session_secret_provided,
             start_session_authenticated=state.settings.start_session_token is not None,
             origins_restricted=bool(state.settings.allowed_origins),
+            revision=publishable_revision(current.service_version),
             tools=registry.describe(),
         )
 
@@ -330,6 +353,13 @@ def create_app(
             await session.aclose()
 
     return app
+
+
+def publishable_revision(service_version: str | None) -> str | None:
+    """The build label, when it is one a public route may repeat. See ``REVISION_PATTERN``."""
+    if service_version is None:
+        return None
+    return service_version if REVISION_PATTERN.fullmatch(service_version) else None
 
 
 def origin_allowed(settings: VoiceSettings, origin: str | None) -> bool:

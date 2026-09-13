@@ -498,6 +498,9 @@ PLATFORM_RESERVED_PATHS = ("/healthz", "/_ah")
 #: asking the other repo to be careful. Setting ``service.version`` to the full image
 #: reference is the realistic accident, and it would publish a project id and a registry
 #: host to anyone on the internet.
+#:
+#: Copied — not shared — in ``motet_voice.app``, whose health reports ``revision`` too;
+#: ``voice/tests/test_app.py`` reads this line to keep the two in step.
 REVISION_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
