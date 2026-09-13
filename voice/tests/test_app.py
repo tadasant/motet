@@ -7,11 +7,19 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from motet_voice.app import HEALTH_PATH, PLATFORM_RESERVED_PATHS, _abandon, create_app
+from motet_obs import RESOURCE_ATTRIBUTES_ENV
+from motet_voice.app import (
+    HEALTH_PATH,
+    PLATFORM_RESERVED_PATHS,
+    REVISION_PATTERN,
+    _abandon,
+    create_app,
+)
 from motet_voice.config import VoiceSettings
 from motet_voice.harness import synthesize_walk
 from motet_voice.realtime import build_composed_arm
@@ -106,6 +114,52 @@ def test_health_separates_configured_from_exporting(client: Any) -> None:
     payload = client.get(HEALTH_PATH).json()
     assert payload["telemetry_configured"] is False
     assert payload["telemetry_exporting"] is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "d1177570148f58d30657015ab972d63892700519",  # the deploy's usual value
+        "bootstrap",  # the deploy's own sentinel
+        "abc1234",  # a short SHA
+    ],
+)
+def test_health_reports_the_build_it_was_made_from(
+    client: Any, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``service.version`` read back, as on the API: is the pin bump live on this service?"""
+    monkeypatch.setenv(RESOURCE_ATTRIBUTES_ENV, f"service.name=motet-voice,service.version={value}")
+    assert client.get(HEALTH_PATH).json()["revision"] == value
+
+
+def test_an_unnamed_build_reports_null(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(RESOURCE_ATTRIBUTES_ENV, raising=False)
+    payload = client.get(HEALTH_PATH).json()
+    assert "revision" in payload
+    assert payload["revision"] is None
+
+
+def test_a_build_label_that_is_not_a_commit_is_refused(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The realistic accident is the full image reference, which names a project and a
+    registry host — on an unauthenticated route in a public repo."""
+    monkeypatch.setenv(
+        RESOURCE_ATTRIBUTES_ENV,
+        "service.version=europe-west1-docker.pkg.dev/a-project/motet/voice:abc123",
+    )
+    payload = client.get(HEALTH_PATH).json()
+    assert payload["revision"] is None
+    assert "a-project" not in json.dumps(payload)
+
+
+def test_the_revision_pattern_is_the_apis() -> None:
+    """Two copies, because invariant 2 keeps this service from importing ``motet_api``.
+
+    Read out of the API's source rather than imported, for the same reason.
+    """
+    api_main = Path(__file__).resolve().parents[2] / "api" / "src" / "motet_api" / "main.py"
+    assert f're.compile(r"{REVISION_PATTERN.pattern}")' in api_main.read_text(encoding="utf-8")
 
 
 def test_the_closed_frame_is_the_last_one_a_client_sees(settings: VoiceSettings) -> None:

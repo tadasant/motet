@@ -749,14 +749,23 @@ take that reading. This section is the record.
 
 ### The container images
 
-Cloud Run runs three: `motet-api`, `motet-worker`, `motet-web`. The first two are the same
-tree — one root `Dockerfile` with two targets, because a second Dockerfile would be a
-second copy of one dependency graph. The SPA is `web/Dockerfile`.
+Cloud Run runs four: `motet-api`, `motet-worker`, `motet-voice`, `motet-web`. The first
+three come from one root `Dockerfile` with three targets (`api`, `worker`, `voice`), because
+a second Dockerfile would be a second copy of one dependency graph. The SPA is
+`web/Dockerfile`.
 
 ```bash
-bin/build-images              # all three, then smoke-test each
+bin/build-images              # all four, then smoke-test each
 bin/build-images api web      # a subset
 ```
+
+**`motet-voice` is built from the same lockfile but is not the same tree.** Its stage runs
+`uv sync --package motet-voice --no-editable`, which leaves the venv holding only the voice
+service's dependency closure and copies nothing else, so `motet_db` and `psycopg` are not
+in the image at all — invariant 2 as a property of the artifact, which the smoke test
+asserts. The smoke also mints a session on one container and opens its WebSocket on a
+second that shares the secret, because Cloud Run gives a socket no affinity and a secret
+that differs between instances fails only there.
 
 **Both build contexts are the repo root**: `uv.lock` describes the whole workspace, so a
 context rooted at `api/` could not resolve it.
@@ -2010,9 +2019,11 @@ alternatives. That choice is what this builds; **the design session invariant 12
 is still owed**, and the questions it has to settle are listed at the end of this section
 with the default each currently runs on. None of the defaults is a decision.
 
-**Nothing is deployed, and that is the state this ships in.** Staging and production run
-the API, the worker and the web app and no voice service; deploying one is its own
-sign-off. So `MOTET_VOICE_BASE_URL` and `MOTET_VOICE_START_SESSION_TOKEN` are unset there,
+**It shipped with nothing deployed, and deploying it was a sign-off of its own**: Tadas
+approved a `motet-voice` service in staging and production on 2026-09-13, relayed by the
+release orchestrator (Zimmer session 17607). The image is the root `Dockerfile`'s `voice`
+target; the service, its secrets and the API's two variables are the private repo's. Until
+an environment sets `MOTET_VOICE_BASE_URL` and `MOTET_VOICE_START_SESSION_TOKEN`,
 `GET /v1/voice` answers `configured: false` with the reason, and the episode screen shows
 a disabled **Play Live** with that sentence beside it — no request to a host that does not
 exist, and `POST /v1/episodes/{id}/voice-session` is a 503 rather than a 500 for anyone

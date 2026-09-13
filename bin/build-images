@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build the three container images Cloud Run runs — motet-api, motet-worker, motet-web —
-# and prove each one actually serves, rather than merely that it built.
+# Build the four container images Cloud Run runs — motet-api, motet-worker, motet-voice,
+# motet-web — and prove each one actually serves, rather than merely that it built.
 #
 # Separate from bin/ci because it needs a Docker daemon, and bin/ci deliberately needs
 # only Postgres: a laptop without Docker must still be able to run the full check suite.
@@ -10,7 +10,7 @@
 # It does NOT push. This repo is public and holds no cloud credential of any kind (see
 # AGENTS.md); publishing is the private infrastructure repo's job.
 #
-#     bin/build-images              # build and smoke-test all three
+#     bin/build-images              # build and smoke-test all four
 #     bin/build-images api web      # a subset
 #     TAG=v1 bin/build-images       # pin the tag instead of the per-run default
 #     REVISION=<sha> bin/build-images   # name the build when git cannot be read
@@ -280,6 +280,151 @@ smoke_worker() {
   echo "    google-cloud-kms is in the image (the vault's decrypt side)"
 }
 
+# --- voice -----------------------------------------------------------------
+build_voice() {
+  IMAGES+=("motet-voice:${TAG}")
+  docker build --target voice -t "motet-voice:${TAG}" -f Dockerfile .
+}
+
+# The session socket, driven from inside a container rather than from this shell: the
+# runner is not guaranteed a WebSocket client, and the image already carries one
+# (`websockets`, which the realtime arm uses). Prints the first frame the server sends.
+VOICE_SOCKET_CLIENT='
+import json, sys
+from websockets.sync.client import connect
+url, origin, token, config = sys.argv[1:5]
+with connect(url, additional_headers={"Origin": origin}, open_timeout=10) as socket:
+    socket.send(json.dumps({"type": "authenticate", "token": token, "config": json.loads(config)}))
+    print(socket.recv(timeout=10))
+'
+
+smoke_voice() {
+  # Two instances, one shared secret, and the session minted on one and streamed on the
+  # other. That is the Cloud Run shape this service is built for — no session affinity, so
+  # the socket may land anywhere — and it is the one property of the deployment a single
+  # container cannot show: a secret that is not identical on every instance fails exactly
+  # here, as a refused socket, and nowhere earlier.
+  #
+  # No vendor key and no API base URL, on purpose: health, StartSession and the socket must
+  # all answer without them (fake mode). The secret and the start token are throwaway
+  # strings; the origin is a name that resolves nowhere.
+  local mint="motet-smoke-voice-a-$$" stream="motet-smoke-voice-b-$$" port origin="https://app.example.test"
+  local secret="smoke-session-secret-$$" start_token="smoke-start-token-$$"
+  CONTAINERS+=("$mint" "$stream")
+  local name
+  for name in "$mint" "$stream"; do
+    docker run -d --name "$name" -P \
+      -e "MOTET_VOICE_SESSION_SECRET=${secret}" \
+      -e "MOTET_VOICE_START_SESSION_TOKEN=${start_token}" \
+      -e "MOTET_VOICE_ALLOWED_ORIGINS=${origin}" \
+      -e "OTEL_RESOURCE_ATTRIBUTES=service.name=motet-voice,service.version=${REVISION}" \
+      "motet-voice:${TAG}" >/dev/null
+  done
+  port="$(host_port "$mint")"
+
+  local body
+  body="$(wait_for_http "http://127.0.0.1:${port}${API_HEALTH_PATH}" "$mint")"
+  echo "    ${API_HEALTH_PATH} -> ${body:0:200}..."
+  case "$body" in
+    *'"status":"ok"'*'"service":"motet-voice"'*) ;;
+    *) echo "smoke: voice ${API_HEALTH_PATH} did not report ok as motet-voice" >&2; return 1 ;;
+  esac
+  case "$body" in
+    *'"session_secret_configured":true'*'"start_session_authenticated":true'*'"origins_restricted":true'*) ;;
+    *) echo "smoke: voice health does not report the secret, the start token and the origins it was given" >&2
+       return 1 ;;
+  esac
+  case "$body" in
+    *"\"revision\":\"${REVISION}\""*)
+      echo "    revision -> ${REVISION} (the build this image was made from)" ;;
+    *) echo "smoke: voice ${API_HEALTH_PATH} did not report the build's revision (${REVISION})" >&2
+       return 1 ;;
+  esac
+
+  local reserved code
+  for reserved in "${PLATFORM_RESERVED_PATHS[@]}"; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://127.0.0.1:${port}${reserved}" || true)"
+    echo "    ${reserved} -> ${code} (reserved by the platform; must not be ours)"
+    if [ "$code" != "404" ]; then
+      echo "smoke: the voice container answers ${reserved}, which Cloud Run 404s before it arrives" >&2
+      return 1
+    fi
+  done
+
+  # StartSession is the API's call, server to server, and it is refused without the token.
+  local config='{"persona":{"name":"smoke","instructions":"smoke"},"tools":[{"name":"mark_read"}]}'
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' -d "$config" \
+    "http://127.0.0.1:${port}/v1/voice/sessions" || true)"
+  echo "    POST /v1/voice/sessions without the start token -> ${code}"
+  if [ "$code" != "401" ]; then
+    echo "smoke: StartSession did not refuse a caller without the start token" >&2; return 1
+  fi
+  local started
+  started="$(curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${start_token}" -d "$config" \
+    "http://127.0.0.1:${port}/v1/voice/sessions")"
+  local session_path session_token
+  # sed rather than a JSON parser, because this shell needs nothing but curl and Docker.
+  # Both values are URL-safe by construction, so neither can contain a quote.
+  session_path="$(printf '%s' "$started" | sed -n 's/.*"websocket_path":"\([^"]*\)".*/\1/p')"
+  session_token="$(printf '%s' "$started" | sed -n 's/.*"session_token":"\([^"]*\)".*/\1/p')"
+  if [ -z "$session_path" ] || [ -z "$session_token" ]; then
+    echo "smoke: StartSession answered without a socket path and a token: ${started}" >&2
+    return 1
+  fi
+  echo "    POST /v1/voice/sessions with the start token -> 201, ${session_path}"
+
+  # Streamed on the OTHER instance. Waiting for its health first, so a slow second start is
+  # not mistaken for a refused socket.
+  wait_for_http "http://127.0.0.1:$(host_port "$stream")${API_HEALTH_PATH}" "$stream" >/dev/null
+  local frame
+  frame="$(docker exec "$stream" python -c "$VOICE_SOCKET_CLIENT" \
+    "ws://127.0.0.1:8080${session_path}" "$origin" "$session_token" "$config" 2>&1 || true)"
+  echo "    WS ${session_path} on the second instance -> ${frame:0:160}"
+  case "$frame" in
+    *'"type":"session_state"'*'"state":"ready"'*) ;;
+    *) echo "smoke: a session minted on one instance did not open on another over a WebSocket" >&2
+       docker logs "$stream" 2>&1 | tail -20 >&2 || true
+       return 1 ;;
+  esac
+
+  # And a page from any other origin is refused at the handshake — the socket is the one
+  # cross-origin surface the service has, and this is its control.
+  if docker exec "$stream" python -c "$VOICE_SOCKET_CLIENT" \
+    "ws://127.0.0.1:8080${session_path}" "https://elsewhere.example.test" "$session_token" "$config" \
+    >/dev/null 2>&1; then
+    echo "smoke: the voice socket accepted a browser origin it was not configured for" >&2
+    return 1
+  fi
+  echo "    WS from an unlisted origin -> refused"
+
+  # Invariant 2, against the artifact: the voice image does not carry the database layer at
+  # all, so there is nothing in it that could be handed a credential.
+  local module
+  for module in motet_db psycopg motet_api motet_workers; do
+    if docker run --rm --entrypoint python "motet-voice:${TAG}" -c "import ${module}" >/dev/null 2>&1; then
+      echo "smoke: ${module} is importable in the voice image (invariant 2)" >&2; return 1
+    fi
+  done
+  echo "    motet_db, psycopg, motet_api, motet_workers are absent (invariant 2)"
+
+  # Real mode, the realtime arm, and still no vendor key: health must answer, and say the
+  # arm is dormant, rather than the revision failing to start. That is the state a deploy
+  # is in for the minutes between the service existing and its secrets being wired.
+  local real="motet-smoke-voice-real-$$"
+  CONTAINERS+=("$real")
+  docker run -d --name "$real" -P -e MOTET_INFERENCE_MODE=real -e MOTET_VOICE_ARM=openai_realtime \
+    "motet-voice:${TAG}" >/dev/null
+  body="$(wait_for_http "http://127.0.0.1:$(host_port "$real")${API_HEALTH_PATH}" "$real")"
+  case "$body" in
+    *'"status":"ok"'*'"inference_mode":"real"'*'"arm":"openai_realtime"'*) ;;
+    *) echo "smoke: voice health did not answer in real mode without vendor keys" >&2; return 1 ;;
+  esac
+  echo "    real mode, openai_realtime arm, no vendor keys -> health ok, arm dormant"
+}
+
 # --- web -------------------------------------------------------------------
 build_web() {
   IMAGES+=("motet-web:${TAG}")
@@ -319,7 +464,7 @@ smoke_web() {
 
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
-  targets=(api worker web)
+  targets=(api worker voice web)
 fi
 
 for target in "${targets[@]}"; do
@@ -328,9 +473,11 @@ for target in "${targets[@]}"; do
             step "Smoke motet-api";           smoke_api ;;
     worker) step "Build motet-worker:${TAG}"; build_worker
             step "Smoke motet-worker";        smoke_worker ;;
+    voice)  step "Build motet-voice:${TAG}";  build_voice
+            step "Smoke motet-voice";         smoke_voice ;;
     web)    step "Build motet-web:${TAG}";    build_web
             step "Smoke motet-web";           smoke_web ;;
-    *) echo "unknown image '$target' (expected: api, worker, web)" >&2; exit 2 ;;
+    *) echo "unknown image '$target' (expected: api, worker, voice, web)" >&2; exit 2 ;;
   esac
 done
 
