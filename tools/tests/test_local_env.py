@@ -467,6 +467,50 @@ class TestTheWholeScript:
         assert "MOTET_DRAIN_TRIGGER" in capsys.readouterr().out
         assert "MOTET_DRAIN_TRIGGER=" not in out.read_text(encoding="utf-8")
 
+    def test_a_stale_export_is_warned_about_by_name_only(
+        self,
+        key: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """motet#85: a shell export beats the file once UV_ENV_FILE is set; say so now."""
+        stale = "sk-or-v1-stalefromzshrc111111111111"
+        monkeypatch.setenv("OPENROUTER_API_KEY", stale)
+        out = tmp_path / ".env"
+
+        assert run(["--output", str(out)], FakeSecrets(SECRETS)) == 0
+
+        captured = capsys.readouterr()
+        warning = next(line for line in captured.out.splitlines() if "precedence" in line)
+        assert "OPENROUTER_API_KEY" in warning
+        for stream in (captured.out, captured.err):
+            assert stale not in stream
+            for value in SECRETS.values():
+                assert value not in stream
+        # Warn only: the file still carries the value Secret Manager holds.
+        assert f"OPENROUTER_API_KEY={SECRETS['OPENROUTER_API_KEY']}" in out.read_text(
+            encoding="utf-8"
+        )
+
+    def test_no_warning_when_nothing_collides(
+        self,
+        key: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # bin/ci and conftest export some of the override names; this test is about none.
+        for name in (*SECRETS, *OVERRIDE_NAMES):
+            monkeypatch.delenv(name, raising=False)
+        # Exported with the file's own value, which changes nothing that runs.
+        monkeypatch.setenv("CARTESIA_API_KEY", SECRETS["CARTESIA_API_KEY"])
+        out = tmp_path / ".env"
+
+        assert run(["--output", str(out)], FakeSecrets(SECRETS)) == 0
+
+        assert "precedence" not in capsys.readouterr().out
+
     def test_a_missing_key_exits_2_and_writes_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

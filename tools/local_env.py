@@ -49,6 +49,8 @@ from google.api_core import exceptions as api_exceptions
 from google.auth import exceptions as auth_exceptions
 from google.cloud import secretmanager
 
+from tools.dev import shadow_warning, shadowed_names
+
 #: What the SDK raises that this script should report as a sentence. Everything Google
 #: throws on a first run descends from one of these: a malformed key file and an unusable
 #: identity from ``google.auth``, and a refused, missing or unreachable API from
@@ -443,6 +445,11 @@ def run(argv: Sequence[str], reader: SecretReader | None = None) -> int:
             f"Dropped {len(dropped)} labelled secret(s) that a local override owns: "
             + ", ".join(dropped)
         )
+    # Checked against the file as written, with the parser `bin/dev` uses, so the two tools
+    # cannot disagree about which names collide (motet#85). Names only, like everything above.
+    shadowed = shadowed_names([args.output])
+    if shadowed:
+        print("Warning: " + shadow_warning(shadowed, str(args.output)))
     print(f"Load it with `export UV_ENV_FILE={args.output}`, then run the API and the worker.")
     return 0
 

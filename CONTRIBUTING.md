@@ -222,6 +222,16 @@ writes the file `0600`. Re-run it with `--force` after a rotation or a roster ch
 that variable is what makes every `uv run` below pick the file up. Set it once per shell,
 or pass `--env-file .env` to each command.
 
+**An exported variable beats the file, silently.** `uv run --env-file` never overrides a
+name already in the environment, so an `OPENROUTER_API_KEY` your `~/.zshrc` exports for
+another project wins over the one `bin/local-env` wrote — and the first sign is every
+`integrate` job failing with `OpenRouter returned 401: User not found` while every health
+field says real mode is armed (motet#85). `bin/local-env` and `bin/dev` both print a
+warning naming any `.env` variable your shell already exports with a different value (names
+only, never values); `unset` each one it names. An exported `DATABASE_URL` is reported on
+`bin/dev`'s own database line instead, since pointing at another Postgres that way is
+deliberate.
+
 ### The loop
 
 ```bash
