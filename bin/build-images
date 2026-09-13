@@ -197,10 +197,12 @@ smoke_api() {
   # *image* is the same kind of claim as the SDK checks above: the workspace's venv reads it
   # from the source tree and cannot answer for the container. No database is needed.
   local artwork
-  artwork="$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' --max-time 5 \
+  artwork="$(curl -fsS -o /dev/null -w '%{http_code} %{content_type} %{size_download}' --max-time 5 \
     "http://127.0.0.1:${port}/v1/feed/artwork.png" || true)"
   echo "    /v1/feed/artwork.png -> ${artwork}"
-  if [ "$artwork" != "200 image/png" ]; then
+  # A status and a type are not the bytes: an empty file would answer both, so the size is
+  # part of the claim.
+  if [ "${artwork% *}" != "200 image/png" ] || [ "${artwork##* }" = "0" ]; then
     echo "smoke: the image does not serve the podcast artwork — the PNG is missing" >&2
     return 1
   fi

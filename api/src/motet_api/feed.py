@@ -31,6 +31,7 @@ hand-rolled escaping is exactly the kind of thing that works until the first amp
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
@@ -245,7 +246,27 @@ def render_feed(
     # they contain no character the writer would escape.
     for token, markup in pending.items():
         document = document.replace(token.encode(), b"<![CDATA[" + markup.encode() + b"]]>")
-    return document
+    return _xml_safe(document)
+
+
+#: Characters XML 1.0 does not allow anywhere in a document, escaped or not.
+_NOT_XML = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def _xml_safe(document: bytes) -> bytes:
+    """The document with every character XML 1.0 forbids removed.
+
+    Titles, quotes and summaries are text a newsletter or a paste supplied, and nothing
+    upstream promises they are free of control characters — `extract` repairs the C1 block
+    and nothing else, and a paste is stored as sent. `ElementTree` writes such a character
+    without complaint, and one of them anywhere makes the *whole* document unparseable:
+    every episode in it stops updating in every client, for as long as that episode is
+    published. Removing them at the one place the document is finished covers every text
+    node and every CDATA body at once.
+    """
+    text = document.decode("utf-8")
+    cleaned = _NOT_XML.sub("", text)
+    return document if cleaned == text else cleaned.encode("utf-8")
 
 
 def _episode_item(

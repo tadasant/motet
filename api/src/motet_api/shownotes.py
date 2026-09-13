@@ -188,15 +188,19 @@ CLOSING_LINE = "Many voices, one podcast: made from the content you trust."
 #: word and marked with an ellipsis rather than silently shortened.
 MAX_QUOTE_CHARS = 280
 
-# The brand's type and colour as inline CSS (brand/GUIDELINES.md). Inline because a podcast
-# client that honours styling at all honours only this: `<style>` blocks are stripped, and a
-# webfont link would be a third-party request from a private feed that no client makes
-# anyway — hence the fallback stacks, which are what a listener will actually see.
+# The brand's type as inline CSS (brand/GUIDELINES.md). Inline because a podcast client that
+# honours styling at all honours only this: `<style>` blocks are stripped, and a webfont link
+# would be a third-party request from a private feed that no client makes anyway — hence the
+# fallback stacks, which are what a listener will actually see.
+#
+# **No colour is set, only opacity.** A client that keeps inline styles renders them over its
+# own theme, and a dark theme with ink text set on it is dark on dark. The brand's ink-soft is
+# ink at .66, so "the client's text colour at .66" is the same rule on either ground; the
+# hairline is the text colour too, at the rule's .14 on top of that.
 _SERIF = "font-family: Fraunces, 'Iowan Old Style', Palatino, Georgia, serif"
 _SANS = "font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif"
-_INK = "#1B1A2E"
-_INK_SOFT = "rgba(27,26,46,.66)"
-_RULE = "rgba(27,26,46,.14)"
+_SOFT = "opacity: .66"
+_RULE = "rgba(128,128,128,.35)"
 
 
 @dataclass(frozen=True)
@@ -251,34 +255,34 @@ def show_notes_html(
     inside a CDATA section: the whole point of ``content:encoded`` is that its markup
     survives, so the writer must not escape it and *this* must.
     """
-    closing = f'<p style="{_SANS}; color: {_INK_SOFT}">{_escape(CLOSING_LINE)}</p>'
+    closing = f'<p style="{_SANS}; {_SOFT}">{_escape(CLOSING_LINE)}</p>'
     if not episode.segments:
-        return f'<p style="{_SANS}; color: {_INK}">No stories in this episode.</p>' + closing
+        return f'<p style="{_SANS}">No stories in this episode.</p>' + closing
 
     quotes = excerpts or {}
     items = []
     for index, segment in enumerate(episode.segments):
         title = _escape(titles.get(segment.news_item_id) or f"Story {index + 1}")
         stamp = (
-            f' <span style="{_SANS}; font-size: .8em; color: {_INK_SOFT}; '
+            f' <span style="{_SANS}; font-size: .8em; {_SOFT}; '
             f'font-variant-numeric: tabular-nums">{_clock(segment.start_ms)}</span>'
             if segment.duration_ms > 0
             else ""
         )
         heading = (
             f'<h3 style="{_SERIF}; font-weight: 400; font-size: 1.1em; margin: 0; '
-            f'color: {_INK}">{title}{stamp}</h3>'
+            f'">{title}{stamp}</h3>'
         )
-        lead = next((quotes[c.id] for c in segment.claims if c.id in quotes), None)
+        # The lead claim is the story's first, and only its span is quoted — the same claim
+        # the feed route looks up, so a story whose lead source is gone gets no quote rather
+        # than a later claim's.
+        lead = quotes.get(segment.claims[0].id) if segment.claims else None
         quote = _quote_html(lead) if lead is not None else ""
         items.append(f'<li style="margin: 0 0 1.1em">{heading}{quote}</li>')
     return (
-        f'<h2 style="{_SERIF}; font-weight: 400; font-size: 1.3em; color: {_INK}">'
+        f'<h2 style="{_SERIF}; font-weight: 400; font-size: 1.3em">'
         "In this episode</h2>"
-        f'<ol style="{_SANS}; color: {_INK}; padding-left: 1.4em">'
-        + "".join(items)
-        + "</ol>"
-        + closing
+        f'<ol style="{_SANS}; padding-left: 1.4em">' + "".join(items) + "</ol>" + closing
     )
 
 
@@ -294,7 +298,7 @@ def _quote_html(excerpt: SourceExcerpt) -> str:
     )
     return (
         f'<blockquote style="{_SANS}; margin: .4em 0 0; padding: 0 0 0 .9em; '
-        f'border-left: 2px solid {_RULE}; color: {_INK_SOFT}">'
+        f'border-left: 2px solid {_RULE}; {_SOFT}">'
         f'<p style="margin: 0">{_escape(text)}</p>{cite}</blockquote>'
     )
 

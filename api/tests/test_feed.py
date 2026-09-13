@@ -199,6 +199,25 @@ class TestRenderedFeed:
         assert parsed.bozo is False
         assert parsed.entries[0].title == 'Deals & <Mergers> — "Q3"'
 
+    def test_a_control_character_in_source_text_does_not_break_the_document(self) -> None:
+        """One stray control character in a title or a quote used to make the whole feed
+        unparseable — every episode in it stopped updating in every client."""
+        hostile = episode(title="Deals\x01 today")
+        segment_ = hostile.segments[0] if hostile.segments else None
+        titles = {segment_.news_item_id: "Story\x02 title"} if segment_ else {}
+        excerpts = (
+            {segment_.claims[0].id: SourceExcerpt("Source\x0b", "A quote\x1b here.")}
+            if segment_ and segment_.claims
+            else {}
+        )
+        xml = render_feed(METADATA, [hostile], titles, excerpts)
+
+        import xml.etree.ElementTree as StrictET
+
+        StrictET.fromstring(xml)  # raises on any character XML 1.0 forbids
+        assert feedparser.parse(xml).bozo is False
+        assert "Deals today" in xml.decode()
+
     def test_an_empty_feed_is_still_valid(self) -> None:
         """A brand new account subscribes before the first episode exists."""
         parsed = feedparser.parse(render_feed(METADATA, []).decode())
@@ -408,7 +427,7 @@ class TestBrandCopy:
         from motet_api.config import DEFAULT_FEED_DESCRIPTION
 
         assert DEFAULT_FEED_DESCRIPTION == (
-            "Motet turns content you trust into an interactive podcast you can listen to on the go."
+            "Motet turns content you trust into a podcast you can listen to on the go."
         )
 
     def test_the_channel_has_a_subtitle(self) -> None:
@@ -454,9 +473,11 @@ class TestShowNotesMarkup:
 
         assert "font-family: Fraunces, 'Iowan Old Style', Palatino, Georgia, serif" in markup
         assert "font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif" in markup
-        assert "#1B1A2E" in markup
-        assert "rgba(27,26,46,.66)" in markup
-        assert "border-left: 2px solid rgba(27,26,46,.14)" in markup
+        # No colour, so a dark-themed client that keeps inline styles is not dark on dark;
+        # secondary text is the client's own colour at ink-soft's .66.
+        assert "color:" not in markup
+        assert "opacity: .66" in markup
+        assert "border-left: 2px solid" in markup
         assert "<style" not in markup
         assert "<link" not in markup
         assert "http" not in markup  # no font, image or stylesheet fetched from anywhere

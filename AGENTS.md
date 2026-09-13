@@ -2611,7 +2611,13 @@ Where clients actually look, which is not always where the spec says:
 with a `<blockquote>` of the span its lead claim cites and the source's title in a `<cite>`
 — one claim beside its source, not the whole transcript, because the feed carries every
 episode on every poll. Most clients strip styling, so it must read as bare HTML; the few
-that keep inline `style` attributes get `brand/GUIDELINES.md`'s type stacks, ink and rule.
+that keep inline `style` attributes get `brand/GUIDELINES.md`'s type stacks and nothing
+else of the palette. **No colour is set, only opacity**, because a client that keeps
+inline styles paints them over its own theme, and ink on a dark theme is dark on dark.
+Ink-soft is ink at .66, so the client's text colour at .66 follows the same rule on either
+ground. **The finished document has every character XML 1.0 forbids stripped**
+(`feed._xml_safe`). Titles and quotes are text a newsletter or a paste supplied, and one
+control character anywhere made the whole feed unparseable.
 Never a `<style>` block or a webfont link: clients drop the first, and the second would be a
 third-party request from a private feed. Copy follows the guidelines too — "podcast" and
 "episode", and citations are not the closing line.
