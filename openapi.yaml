@@ -951,6 +951,13 @@ components:
           description: '''fake'' or ''real''. ''fake'' means no vendor is ever called.'
           title: Inference Mode
           type: string
+        ios_app_link:
+          description: "Whether this deployment hands the iOS app its sign-in back on an https link on\
+            \ the web app's own host, rather than on the 'motet://' scheme. Reported for 'login_configured's\
+            \ reason: a flag that is set but cannot take effect \u2014 a non-https or ported MOTET_APP_BASE_URL\
+            \ \u2014 looks exactly like one nobody set, and the fallback it lands on is silent by design."
+          title: Ios App Link
+          type: boolean
         llm_overrides_in_force:
           anyOf:
           - type: boolean
@@ -1046,6 +1053,7 @@ components:
       - errors_configured
       - authenticated
       - login_configured
+      - ios_app_link
       - vault_backend
       - vault_ready
       - drain_trigger
@@ -2680,6 +2688,17 @@ components:
     StartNativeLoginRequest:
       description: Begin a Google sign-in on behalf of the iOS app.
       properties:
+        app_link_domain:
+          anyOf:
+          - maxLength: 253
+            type: string
+          - type: 'null'
+          description: "The host this build may receive an https sign-in handoff on \u2014 the associated\
+            \ domain its entitlement names \u2014 or null where it can only receive callback_scheme. Sent\
+            \ rather than inferred because only the app knows whether its build carries the entitlement\
+            \ and whether its iOS is new enough to wait for an https callback; an https handoff to an\
+            \ app watching for the scheme would leave the sign-in sheet open forever."
+          title: App Link Domain
         code_challenge:
           description: base64url(SHA-256(code_verifier)) without padding (RFC 7636 S256). The verifier
             stays in the app and is presented only when the handoff is redeemed.
@@ -2698,8 +2717,24 @@ components:
             sign-in and then navigates to a motet:// link.
           title: Authorization Url
           type: string
+        callback_host:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Set when the handoff will come back on an https link rather than on callback_scheme:
+            the host of that link. Only ever the host the caller asked for in app_link_domain, and only
+            when this deployment serves an Apple app-site-association file naming the app. Absent means
+            use callback_scheme.'
+          title: Callback Host
+        callback_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The path of that https handoff link. Absent with callback_host.
+          title: Callback Path
         callback_scheme:
-          description: The URL scheme the in-app browser session should wait for.
+          description: The URL scheme the sign-in sheet should wait for, and the one the handoff link
+            uses unless callback_host is set.
           title: Callback Scheme
           type: string
       required:

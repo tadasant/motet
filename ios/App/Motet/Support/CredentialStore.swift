@@ -61,6 +61,17 @@ final class CredentialStore {
         return URL(string: trimmed)
     }()
 
+    /// The host this build may be handed an https sign-in handoff on, or nil where the
+    /// entitlement was not signed in — which is every build but a TestFlight one.
+    var appLinkDomain: String? { Self.buildAppLinkDomain }
+
+    private static let buildAppLinkDomain: String? = {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "MotetAppLinkDomain") as? String
+        else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }()
+
     func save(baseURL: String, apiToken: String) {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if URL(string: trimmed) != (storedBaseURL() ?? Self.buildDefaultBaseURL) {

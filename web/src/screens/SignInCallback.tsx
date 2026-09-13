@@ -14,13 +14,18 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { type OAuthCallback as Callback, beginConsent, stateMatches, takeState } from '../oauth'
 
+/** The web app path an https handoff lands on. Keep in step with the API's NATIVE_HANDOFF_PATH. */
+export const HANDOFF_PATH = '/app/signed-in'
+
 /**
- * Whether a handoff link is the API's `motet://signed-in?code=…` and nothing else. The API
- * builds it from literals, so this refuses nothing real; it is here so that no value in that
- * field could ever run as script in this origin, where the web session token lives.
+ * Whether a handoff link is one of the two the API builds — `motet://signed-in?code=…`, or
+ * this origin's own `/app/signed-in?code=…` where the deployment serves an
+ * app-site-association file. The API builds both from literals, so this refuses nothing
+ * real; it is here so that no value in that field could ever run as script in this origin,
+ * where the web session token lives.
  */
-export function isHandoffUrl(url: string): boolean {
-  return url.startsWith('motet://signed-in?')
+export function isHandoffUrl(url: string, origin: string = window.location.origin): boolean {
+  return url.startsWith('motet://signed-in?') || url.startsWith(`${origin}${HANDOFF_PATH}?`)
 }
 
 type Status =

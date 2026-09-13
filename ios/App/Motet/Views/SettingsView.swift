@@ -73,10 +73,43 @@ struct SettingsView: View {
         }
     }
 
-    /// The system sheet opens the web sign-in and closes on the API's `motet://` link.
+    /// The system sheet opens the web sign-in and closes on the API's handoff link.
     private func signIn() async {
         let server = baseURL
         guard let started = await model.beginSignIn(baseURL: server) else { return }
+        do {
+            let callback = try await open(started)
+            await model.finishSignIn(
+                callback: callback,
+                pkce: started.pkce,
+                baseURL: server,
+                appLinkHost: started.appLinkHost
+            )
+            apiToken = model.currentCredentials().apiToken
+        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
+            model.abandonSignIn(nil)
+        } catch is CancellationError {
+            model.abandonSignIn(nil)
+        } catch {
+            if started.appLinkHost != nil {
+                // The https callback is refused when the entitlement is not in force — the
+                // association file not fetched yet, a build that lost it at export, the
+                // capability not ticked on the App ID — and it is refused when the sheet
+                // *opens*, so nothing has happened yet and retrying costs one round trip.
+                // The server committed to the https link for this sign-in, so the retry has
+                // to start a new one rather than reuse it.
+                await signInWithTheScheme(server: server)
+                return
+            }
+            model.abandonSignIn(error)
+        }
+    }
+
+    /// Second attempt, with the custom scheme both sides always support.
+    private func signInWithTheScheme(server: String) async {
+        guard let started = await model.beginSignIn(baseURL: server, allowAppLink: false) else {
+            return
+        }
         do {
             let callback = try await webAuthenticationSession.authenticate(
                 using: started.url, callbackURLScheme: started.callbackScheme
@@ -90,6 +123,27 @@ struct SettingsView: View {
         } catch {
             model.abandonSignIn(error)
         }
+    }
+
+    /// Open the sheet, waiting for whichever callback this sign-in was started for.
+    ///
+    /// The https callback needs iOS 17.4, an entitlement for the host, and an
+    /// app-site-association file Apple has fetched from it. `beginSignIn` has already
+    /// agreed which one with the server, so this only carries out that decision.
+    private func open(_ started: AppModel.StartedSignIn) async throws -> URL {
+        if #available(iOS 17.4, *), let host = started.appLinkHost, let path = started.appLinkPath {
+            // `additionalHeaderFields` is spelled out because the overload taking a
+            // `callback:` declares no default for it, unlike the `callbackURLScheme:` one
+            // below. Empty: the sign-in is a plain web sign-in and needs no extra headers.
+            return try await webAuthenticationSession.authenticate(
+                using: started.url,
+                callback: .https(host: host, path: path),
+                additionalHeaderFields: [:]
+            )
+        }
+        return try await webAuthenticationSession.authenticate(
+            using: started.url, callbackURLScheme: started.callbackScheme
+        )
     }
 
     private var serverSection: some View {

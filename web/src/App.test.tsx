@@ -1449,6 +1449,8 @@ describe('the generated contract', () => {
       errors_configured: false,
       authenticated: true,
       login_configured: true,
+      // Off unless this deployment serves an app-site-association file naming the app.
+      ios_app_link: false,
       vault_backend: 'kms',
       vault_ready: true,
       drain_trigger: true,

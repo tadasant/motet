@@ -59,8 +59,11 @@ def pkce() -> tuple[str, str]:
     return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def start(api: TestClient, challenge: str) -> dict[str, Any]:
-    response = api.post("/v1/auth/native/start", json={"code_challenge": challenge})
+def start(api: TestClient, challenge: str, app_link_domain: str | None = None) -> dict[str, Any]:
+    body_out: dict[str, Any] = {"code_challenge": challenge}
+    if app_link_domain is not None:
+        body_out["app_link_domain"] = app_link_domain
+    response = api.post("/v1/auth/native/start", json=body_out)
     assert response.status_code == 200, response.text
     body: dict[str, Any] = response.json()
     return body
@@ -243,3 +246,95 @@ class TestStartingIsRefusedWhenItCannotFinish:
     def test_only_an_s256_challenge_is_accepted(self, api: TestClient, challenge: str) -> None:
         response = api.post("/v1/auth/native/start", json={"code_challenge": challenge})
         assert response.status_code == 422
+
+
+class TestTheUniversalLink:
+    """With MOTET_IOS_APP_LINK set, the handoff travels on the web app's own https path.
+
+    Approved by Tadas on 2026-09-13 as the stronger answer to the warning the first
+    review raised: Apple only lets a sign-in sheet wait for an https callback on a host
+    the app carries an associated-domains entitlement for, so no other app on the phone
+    can receive the link. The flag is a claim about the *web app* serving an
+    app-site-association file, which is why it is off unless an environment sets it.
+    """
+
+    @pytest.fixture
+    def linked(self, api: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+        monkeypatch.setenv("MOTET_IOS_APP_LINK", "1")
+        reset_store()
+        return api
+
+    def test_the_app_is_told_to_wait_for_the_web_apps_host(self, linked: TestClient) -> None:
+        _, challenge = pkce()
+        started = start(linked, challenge, app_link_domain="app.example.invalid")
+        assert started["callback_host"] == "app.example.invalid"
+        assert started["callback_path"] == "/app/signed-in"
+        # The scheme is still reported: an iOS older than 17.4 cannot wait for an https
+        # callback at all, and falls back to it.
+        assert started["callback_scheme"] == "motet"
+
+    def test_the_handoff_lands_on_that_link_and_still_redeems(self, linked: TestClient) -> None:
+        verifier, challenge = pkce()
+        login = finish_in_the_web_app(
+            linked, start(linked, challenge, app_link_domain="app.example.invalid")
+        )
+        link = urlsplit(login["handoff_url"])
+        assert (link.scheme, link.netloc, link.path) == (
+            "https",
+            "app.example.invalid",
+            "/app/signed-in",
+        )
+        assert set(parse_qs(link.query)) == {"code"}
+
+        code = parse_qs(link.query)["code"][0]
+        assert redeem(linked, code, verifier).status_code == 200
+
+    def test_an_app_that_cannot_take_the_link_gets_the_scheme(self, linked: TestClient) -> None:
+        """The flag is on and the app says it cannot receive an https handoff.
+
+        An iOS older than 17.4, or any build whose entitlement does not name this host —
+        which is every build made before the deployment set MOTET_IOS_APP_DOMAIN. The
+        sign-in sheet is watching for `motet://`, and a deployment that answered from its
+        own flag alone would navigate to an https link the sheet never intercepts, leaving
+        it open forever. This is the regression test for that.
+        """
+        verifier, challenge = pkce()
+        started = start(linked, challenge)
+        assert started["callback_host"] is None
+        assert started["callback_path"] is None
+
+        login = finish_in_the_web_app(linked, started)
+        assert login["handoff_url"].startswith("motet://signed-in?")
+        assert redeem(linked, handoff_code(login), verifier).status_code == 200
+
+    def test_an_app_naming_another_host_gets_the_scheme(self, linked: TestClient) -> None:
+        """Agreement is on one host, not on the idea of one."""
+        _, challenge = pkce()
+        started = start(linked, challenge, app_link_domain="somewhere.else.invalid")
+        assert started["callback_host"] is None
+        assert finish_in_the_web_app(linked, started)["handoff_url"].startswith("motet://")
+
+    def test_a_web_app_that_cannot_carry_it_falls_back(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`Callback.https(host:path:)` has nowhere to put a scheme or a port.
+
+        So an http origin, or one carrying an explicit port, cannot be waited for however
+        the flag is set — and answering with one would hang the sheet.
+        """
+        monkeypatch.setenv("MOTET_IOS_APP_LINK", "1")
+        monkeypatch.setenv("MOTET_APP_BASE_URL", "http://localhost:5173")
+        reset_store()
+        _, challenge = pkce()
+        started = start(api, challenge, app_link_domain="localhost")
+        assert started["callback_host"] is None
+        assert finish_in_the_web_app(api, started)["handoff_url"].startswith("motet://")
+
+    def test_the_flag_off_is_the_custom_scheme(self, api: TestClient) -> None:
+        """The default, and what every deployment gets until its web app serves the file."""
+        _, challenge = pkce()
+        started = start(api, challenge, app_link_domain="app.example.invalid")
+        assert started["callback_host"] is None
+        assert started["callback_path"] is None
+        login = finish_in_the_web_app(api, started)
+        assert login["handoff_url"].startswith("motet://signed-in?")

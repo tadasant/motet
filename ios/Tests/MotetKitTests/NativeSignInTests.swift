@@ -11,10 +11,40 @@ final class NativeSignInTests: XCTestCase {
         XCTAssertEqual(try NativeSignIn.handoffCode(from: link), "one-time")
     }
 
+    func testTheCodeIsReadOutOfAnHttpsHandoffLink() throws {
+        // Where the deployment serves an app-site-association file naming this app, the
+        // handoff comes back on a verified https link instead — one no other app can be
+        // handed, because the entitlement is what Apple checks before allowing it.
+        let link = try XCTUnwrap(URL(string: "https://app.example.invalid/app/signed-in?code=one-time"))
+        let code = try NativeSignIn.handoffCode(from: link, appLinkHost: "app.example.invalid")
+        XCTAssertEqual(code, "one-time")
+    }
+
+    func testAnHttpsHandoffIsRefusedUnlessThisSignInAskedForOne() throws {
+        // A sign-in started on the custom scheme must not accept an https link: the app is
+        // not entitled for that host, so nothing verified it.
+        let link = try XCTUnwrap(URL(string: "https://app.example.invalid/app/signed-in?code=one-time"))
+        XCTAssertThrowsError(try NativeSignIn.handoffCode(from: link)) { error in
+            XCTAssertEqual(error as? NativeSignIn.Failure, .notAHandoff)
+        }
+        XCTAssertThrowsError(
+            try NativeSignIn.handoffCode(from: link, appLinkHost: "somewhere.else.invalid")
+        ) { error in
+            XCTAssertEqual(error as? NativeSignIn.Failure, .notAHandoff)
+        }
+    }
+
     func testALinkThatIsNotTheHandoffIsRefused() throws {
-        for raw in ["https://example.invalid/signed-in?code=x", "motet://elsewhere?code=x"] {
+        for raw in [
+            "https://app.example.invalid/signed-in?code=x",
+            "https://app.example.invalid/app/signed-in/elsewhere?code=x",
+            "http://app.example.invalid/app/signed-in?code=x",
+            "motet://elsewhere?code=x",
+        ] {
             let link = try XCTUnwrap(URL(string: raw))
-            XCTAssertThrowsError(try NativeSignIn.handoffCode(from: link)) { error in
+            XCTAssertThrowsError(
+                try NativeSignIn.handoffCode(from: link, appLinkHost: "app.example.invalid")
+            ) { error in
                 XCTAssertEqual(error as? NativeSignIn.Failure, .notAHandoff, raw)
             }
         }
@@ -37,12 +67,38 @@ final class NativeSignInTests: XCTestCase {
         let started = try await client.startNativeSignIn(codeChallenge: "the-challenge")
 
         XCTAssertEqual(started.callbackScheme, "motet")
+        XCTAssertNil(started.callbackHost, "a deployment serving no association file reports none")
         let request = try XCTUnwrap(transport.recordedRequests().first)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.invalid/v1/auth/native/start")
         XCTAssertNil(request.headers["Authorization"])
         let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.body)) as? [String: String]
+        // No domain declared: this build cannot receive an https handoff, and says so rather
+        // than leaving the server to guess. The server then commits to the scheme.
         XCTAssertEqual(body, ["code_challenge": "the-challenge"])
+    }
+
+    func testAnEntitledBuildDeclaresItsDomainWhenStarting() async throws {
+        // The server has to commit to one shape of handoff before the sign-in opens, and the
+        // browser that later calls the callback knows nothing about this phone — so the app
+        // says up front which callback it can receive. See AGENTS.md, "The handoff comes back
+        // on a verified https link".
+        let transport = StubTransport()
+        transport.enqueueJSON(#"""
+        {"authorization_url":"https://accounts.example.invalid/o","callback_scheme":"motet",
+         "callback_host":"app.example.invalid","callback_path":"/app/signed-in"}
+        """#)
+        let client = MotetHTTPClient(configuration: MotetConfiguration(baseURL: base), transport: transport)
+
+        let started = try await client.startNativeSignIn(
+            codeChallenge: "the-challenge", appLinkDomain: "app.example.invalid"
+        )
+
+        XCTAssertEqual(started.callbackHost, "app.example.invalid")
+        XCTAssertEqual(started.callbackPath, "/app/signed-in")
+        let request = try XCTUnwrap(transport.recordedRequests().first)
+        let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.body)) as? [String: String]
+        XCTAssertEqual(body, ["code_challenge": "the-challenge", "app_link_domain": "app.example.invalid"])
     }
 
     func testRedeemingSendsTheCodeWithTheVerifierAndReturnsTheSession() async throws {

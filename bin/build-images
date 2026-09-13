@@ -487,6 +487,61 @@ smoke_web() {
   # History fallback: a deep link must return the app, not a 404.
   curl -fsS --max-time 5 "http://127.0.0.1:${port}/episodes/ep_smoke" >/dev/null
   echo "    /episodes/ep_smoke -> index.html (history fallback)"
+
+  # Apple fetches this before it will let the iOS app receive a sign-in handoff. Unset, it
+  # must be absent rather than index.html — Apple reads a 200 of HTML as a malformed file,
+  # and the history fallback would serve exactly that.
+  local aasa_status
+  aasa_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    "http://127.0.0.1:${port}/.well-known/apple-app-site-association")"
+  [ "$aasa_status" = "404" ] || {
+    echo "smoke: app-site-association should 404 without MOTET_IOS_APP_ID (got ${aasa_status})" >&2
+    return 1
+  }
+  echo "    /.well-known/apple-app-site-association -> 404 (no MOTET_IOS_APP_ID)"
+}
+
+smoke_web_applinks() {
+  local name="motet-smoke-web-aasa-$$" port app_id="ABCDE12345.com.example.motet"
+  CONTAINERS+=("$name")
+  docker run -d --name "$name" -P -e "MOTET_API_BASE_URL=https://api.example.test" \
+    -e "MOTET_IOS_APP_ID=${app_id}" "motet-web:${TAG}" >/dev/null
+  port="$(host_port "$name")"
+  wait_for_http "http://127.0.0.1:${port}/" "$name" >/dev/null
+
+  # Apple requires application/json, and `default_type` in nginx.conf is exactly the kind
+  # of line a later edit loses silently — the body alone would still look right.
+  local content_type
+  content_type="$(curl -fsS --max-time 5 -o /dev/null -w '%{content_type}' \
+    "http://127.0.0.1:${port}/.well-known/apple-app-site-association")"
+  case "$content_type" in
+    application/json*) ;;
+    *) echo "smoke: app-site-association served as '${content_type}', not application/json" >&2
+       return 1 ;;
+  esac
+
+  local aasa
+  aasa="$(curl -fsS --max-time 5 "http://127.0.0.1:${port}/.well-known/apple-app-site-association")"
+  # `webcredentials`, which is what an ASWebAuthenticationSession https callback is verified
+  # through — NOT `applinks`, which would be both insufficient for it and would route every
+  # tap on a Motet URL into an app that has no handler for one.
+  case "$aasa" in
+    *'"webcredentials"'*"\"${app_id}\""*) ;;
+    *) echo "smoke: app-site-association did not carry webcredentials for MOTET_IOS_APP_ID" >&2
+       echo "$aasa" >&2; return 1 ;;
+  esac
+  case "$aasa" in
+    *applinks*) echo "smoke: app-site-association claims applinks; see the entrypoint's note" >&2
+                return 1 ;;
+  esac
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$aasa" || {
+      echo "smoke: app-site-association is not valid JSON" >&2; return 1
+    }
+  else
+    echo "    (no python3: JSON well-formedness not checked)" >&2
+  fi
+  echo "    /.well-known/apple-app-site-association -> webcredentials for ${app_id}"
 }
 
 targets=("$@")
@@ -503,7 +558,8 @@ for target in "${targets[@]}"; do
     voice)  step "Build motet-voice:${TAG}";  build_voice
             step "Smoke motet-voice";         smoke_voice ;;
     web)    step "Build motet-web:${TAG}";    build_web
-            step "Smoke motet-web";           smoke_web ;;
+            step "Smoke motet-web";           smoke_web
+            step "Smoke motet-web app links"; smoke_web_applinks ;;
     *) echo "unknown image '$target' (expected: api, worker, voice, web)" >&2; exit 2 ;;
   esac
 done

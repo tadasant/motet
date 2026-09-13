@@ -18,6 +18,9 @@ public enum NativeSignIn {
     /// The scheme the sign-in sheet waits for. The API builds the link from the same literal.
     public static let callbackScheme = "motet"
     static let handoffHost = "signed-in"
+    /// The path an https handoff lands on, where the deployment serves an
+    /// app-site-association file. Keep in step with the API's `NATIVE_HANDOFF_PATH`.
+    public static let handoffPath = "/app/signed-in"
 
     public enum Failure: Error, Equatable, CustomStringConvertible {
         /// The sheet returned something that is not the API's handoff link.
@@ -37,8 +40,20 @@ public enum NativeSignIn {
     }
 
     /// The one-time code out of the link the web app navigated to.
-    public static func handoffCode(from url: URL) throws -> String {
-        guard url.scheme == callbackScheme, url.host == handoffHost,
+    ///
+    /// Two shapes are the API's: `motet://signed-in?code=…`, and — where the deployment
+    /// serves an app-site-association file naming this app — `https://<host>/app/signed-in?
+    /// code=…`, which only an app entitled for that host can be handed.
+    ///
+    /// `appLinkHost` is the host this sign-in asked for, and the https shape is refused
+    /// without it. In practice the system hands back only the host the session named, so
+    /// this is defence in depth — but it is a public entry point, and the custom-scheme arm
+    /// has always checked its host.
+    public static func handoffCode(from url: URL, appLinkHost: String? = nil) throws -> String {
+        let isCustomScheme = url.scheme == callbackScheme && url.host == handoffHost
+        let isAppLink = url.scheme == "https" && url.path == handoffPath
+            && appLinkHost != nil && url.host == appLinkHost
+        guard isCustomScheme || isAppLink,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { throw Failure.notAHandoff }
         guard let code = components.queryItems?.first(where: { $0.name == "code" })?.value,

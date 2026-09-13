@@ -2082,6 +2082,11 @@ export interface components {
              */
             inference_mode: string;
             /**
+             * Ios App Link
+             * @description Whether this deployment hands the iOS app its sign-in back on an https link on the web app's own host, rather than on the 'motet://' scheme. Reported for 'login_configured's reason: a flag that is set but cannot take effect — a non-https or ported MOTET_APP_BASE_URL — looks exactly like one nobody set, and the fallback it lands on is silent by design.
+             */
+            ios_app_link: boolean;
+            /**
              * Llm Overrides In Force
              * @description Whether any `settings` row is changing what a worker's job runs on right now. Reported because an override and a clean environment look identical from outside, and the worker's boot log no longer describes what a job runs once one exists. Always false where settings_writable is false, without a database read; null when the table could not be read. Which stage and which model are not reported here — that is the admin screen's.
              */
@@ -3347,6 +3352,11 @@ export interface components {
          */
         StartNativeLoginRequest: {
             /**
+             * App Link Domain
+             * @description The host this build may receive an https sign-in handoff on — the associated domain its entitlement names — or null where it can only receive callback_scheme. Sent rather than inferred because only the app knows whether its build carries the entitlement and whether its iOS is new enough to wait for an https callback; an https handoff to an app watching for the scheme would leave the sign-in sheet open forever.
+             */
+            app_link_domain?: string | null;
+            /**
              * Code Challenge
              * @description base64url(SHA-256(code_verifier)) without padding (RFC 7636 S256). The verifier stays in the app and is presented only when the handoff is redeemed.
              */
@@ -3363,8 +3373,18 @@ export interface components {
              */
             authorization_url: string;
             /**
+             * Callback Host
+             * @description Set when the handoff will come back on an https link rather than on callback_scheme: the host of that link. Only ever the host the caller asked for in app_link_domain, and only when this deployment serves an Apple app-site-association file naming the app. Absent means use callback_scheme.
+             */
+            callback_host?: string | null;
+            /**
+             * Callback Path
+             * @description The path of that https handoff link. Absent with callback_host.
+             */
+            callback_path?: string | null;
+            /**
              * Callback Scheme
-             * @description The URL scheme the in-app browser session should wait for.
+             * @description The URL scheme the sign-in sheet should wait for, and the one the handoff link uses unless callback_host is set.
              */
             callback_scheme: string;
         };

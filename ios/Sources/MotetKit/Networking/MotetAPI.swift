@@ -104,10 +104,14 @@ public struct MotetHTTPClient: MotetAPI {
 
     /// Begin the web sign-in on this app's behalf (see `NativeSignIn`). Unauthenticated:
     /// it is how an app that holds nothing gets something.
-    public func startNativeSignIn(codeChallenge: String) async throws -> StartNativeLoginResponse {
+    public func startNativeSignIn(
+        codeChallenge: String, appLinkDomain: String? = nil
+    ) async throws -> StartNativeLoginResponse {
         try await send(
             MotetEndpoints.startNativeLogin,
-            body: StartNativeLoginRequest(codeChallenge: codeChallenge),
+            body: StartNativeLoginRequest(
+                appLinkDomain: appLinkDomain, codeChallenge: codeChallenge
+            ),
             as: StartNativeLoginResponse.self
         )
     }
