@@ -2594,6 +2594,137 @@ the check in front of it the part to get right.
   into the last hour. The aggregates are always for everyone; job → user is a join on the
   payload per queue kind, fine while `jobs.prune` bounds the table.
 
+### Motet is an MCP server, and the route table is what keeps it at parity
+
+`api/src/motet_api/mcp/`, `/mcp` on `motet-api`, migration 0020,
+`web/src/screens/McpAuthorizeCallback.tsx`. **Decided by Tadas, 2026-09-13, on motet#111.**
+The issue laid out the options and recommended one of each. The implementing session put them
+to him as a one-line list (the design comment on the issue), and he answered in Zimmer session
+17819: *"Take the recs, except C2, H2,"*. That reads as A1 B1 C2 D1 E1 F1 G1 H2 I1. His go
+on the batch had been *"I have a few more issues coming in - monitor for and get started on
+em"*, which started the work and chose nothing — which is why the list was asked.
+
+What was chosen, and what was rejected with it:
+
+| | Chosen | Rejected |
+|---|---|---|
+| Where | **A1**: mounted on `motet-api` at `/mcp` | a separate `motet-mcp` service calling the API over HTTP (a deployable, an image, IAM, a second copy of every route's shape: zimmer's shape before zimmer#129 replaced it); doing nothing |
+| Tools | **B1**: hand-written, in-process, one module per group, held at parity by a test | tools generated from OpenAPI with the third-party `fastmcp` package (HTTP-shaped names, two tools for one fact, and it still needs the exclusion list); a capability registry that routes and tools are both built from (rewriting every working route for one new client) |
+| Auth | **C2**: per-user OAuth now, *against* the recommendation | the `/v1` bearer as the only way in — it still works, below |
+| Admin | **D1**: an opt-in group, `?tool_groups=admin` | a separate `/mcp/admin` mount |
+| Surface | **E1, F1**: tools only | MCP resources for episodes and transcripts; a `make_todays_briefing` prompt |
+| Voice | **G1**: the voice service's binding and credential are a follow-up issue | minting a scoped voice credential now |
+| New routes | **I1**: the voice-session route is an exclusion | a tool for it |
+
+**The parity rule: a route without a registry entry or an exclusion is a red run.**
+`api/tests/test_mcp_parity.py` walks `app.routes` and fails on any operation that is neither in
+a tool's `covers` in `mcp/registry.py` nor in `EXCLUDED` with a written reason, and on any entry
+naming an operation that no longer exists. Zimmer's MCP server has no such test — its parity is a
+pre-PR skill and a hand-written table, and its drift is a standing list of issues — and this is
+the part of zimmer's precedent that was deliberately *not* copied. Adding a route therefore means
+deciding its MCP counterpart in the same PR. The server also refuses to build when the registry
+and the functions in `mcp/tools/` disagree, so a tool cannot be half-added either.
+
+**A tool calls its route's handler, not a copy of its logic.** The issue proposed moving the
+logic out of the handlers that hold it (paste, episodes, connect, integrate) into functions both
+callers share. Calling the handler itself is the stronger form of the same rule — there is
+nothing in a tool to drift — and it needed no refactor of a single route. `mcp/context.run` gives
+the handler `deps.connection` itself, so the commit, the rollback and the post-commit drain nudge
+(motet#71) happen for a tool call exactly as for a request, and an `HTTPException` becomes a tool
+error in the route's own words: `404: No such episode.` A limit a route enforces with FastAPI's
+`Query` is the one thing a direct call skips, and the tools that take one check it themselves.
+
+**Stateless, JSON, and three traps**, each verified against the installed SDK rather than taken
+from its docs:
+
+- **DNS-rebinding protection is off.** On, every request whose `Host` is not localhost is a
+  `421 Misdirected Request`. Cloud Run's frontend owns `Host`, the credential is an explicit
+  header rather than a cookie, and the hostnames are a private-repo fact this public repo cannot
+  allowlist. The tests use a non-localhost `Host` so that a regression is a failure.
+- **A session manager runs once per instance**, and a process starts the app's lifespan many
+  times — every test that opens a `TestClient` does. So `McpMount.running()` builds a fresh
+  transport inside each lifespan, and `/mcp` answers 503 outside one.
+- **`/mcp` is a `Route`, not a `Mount`.** A mount answers `POST /mcp` with a 307 to `/mcp/`,
+  which the SDK's own client follows and plenty of clients do not.
+
+`stateless_http` and `json_response` mean no request depends on the instance that served the one
+before, which is what several Cloud Run instances need; a test alternates every request between
+two freshly built apps. `/mcp` and the OAuth endpoints are plain Starlette routes, so `openapi.yaml`
+does not describe them — it gains only the SPA's callback route below and two health fields.
+
+**Who gets in is `deps.require_caller`, run before the transport sees a byte.** The shared API
+token in constant time, else a session row with the allowlist re-checked. The feed token is
+refused — a URL in a podcast app must not be the whole API. Groups come from `?tool_groups=` in
+the query string and never the body, an unknown group is a 400 rather than a quietly smaller
+surface, every group has a `<group>_readonly` variant, and an admin tool still answers only a
+caller its route's guard would. That makes the admin group reachable only with a signed-in
+browser's session token: the shared token is never an admin and neither is an MCP grant (below).
+`motet.mcp.tool_calls{tool,outcome}` counts every call, and `/internal/health` reports
+`mcp_tools`.
+
+**A guard that is a person reading something is not a tool argument.** `POST /v1/connectors`
+refuses an MCP-server row without `acknowledge_risk`, and that checkbox exists because the agent
+the server is handed to reads untrusted pages. An MCP client is exactly such an agent, so
+`create_connector` refuses `kind="mcp"` outright rather than passing the flag through; sites
+still go through it. A future route whose control is "a person saw this" gets the same treatment.
+
+#### C2: Motet is its own OAuth issuer, and Google only says who is at the keyboard
+
+`mcp/oauth.py`, `motet_db.mcp_oauth`. Per-user auth needs something that issues tokens a client
+can obtain by itself, and Google cannot be it: its access tokens are not bound to Motet as an
+audience, and it offers no dynamic client registration, so a generic MCP client could not even
+start. So Motet runs the authorization server the MCP spec describes — RFC 9728 and 8414
+metadata, RFC 7591 registration, PKCE, RFC 8707 resource indicators, revocation — on the SDK's
+own handlers, behind a provider backed by Postgres.
+
+- **An access token is an `auth_sessions` row** with `mcp_client_id` set and an hour's life, so
+  `require_caller` verifies it without knowing MCP exists, and the allowlist is re-checked on
+  every request as it is for a browser. A refresh token is a row in `mcp_oauth_refresh_tokens`,
+  rotated on every use with the old access token deleted beside it, and the allowlist is checked
+  again at every issue. `/v1/auth/logout-all` deletes refresh tokens as well as sessions.
+- **Google returns the person to the SPA's registered `/oauth/callback`**, with an `mcp.` state
+  beside sign-in's `login.`, so no redirect URI had to be registered on the Google OAuth client
+  (a human-owned step, invariant 9). The SPA posts the code to `POST /v1/auth/mcp/callback`,
+  which verifies the identity exactly as sign-in does and mints the client's authorization code.
+- **The consent screen is the security control.** The callback's answer carries the code inside
+  the URL that sends the person back to the client, and the SPA navigates there only after the
+  person has seen which client is asking, where the grant will go and which account it acts as,
+  and pressed Allow. Registration is unauthenticated by design, so without that step a link to
+  `/authorize` with anyone's registered client would complete silently for somebody already
+  signed in to Google. So a redirect URI carrying a username or password is refused on both
+  sides, and the screen names the host rather than `netloc`: `https://claude.ai@attacker.example`
+  would otherwise read as claude.ai. The client's name is its own claim and proves nothing.
+- **Scopes limit nothing.** A client's requested scopes are stored and echoed, and an access
+  token is a session row, so it reaches all of `/v1` as well as `/mcp`. What bounds a grant is
+  that it is never an operator and that the allowlist decides who may approve one.
+- **Registration is bounded per row, not in count**: ten redirect URIs and 8 KB each, with
+  clients unused for a day swept on the next registration. There is no rate limit, for the
+  waitlist's reason: nowhere to keep one that is not a new mechanism.
+- **It runs wherever it is configured, and that is not the same as "a human switched it
+  on".** It needs `MOTET_PUBLIC_BASE_URL` (the issuer), `MOTET_APP_BASE_URL` and a working
+  sign-in; without them the OAuth endpoints are 404s, `/mcp` takes only the bearer, and
+  `/internal/health` says `mcp_oauth_configured: false`. **None of those three is an OAuth
+  variable.** `MOTET_PUBLIC_BASE_URL` is the RSS enclosure origin (`deps.public_base_url`),
+  set in a deployed environment so the feed does not advertise `run.app` links; the other two
+  are the SPA's origin and the sign-in allowlist. So both deployed environments satisfy the
+  condition already, and the authorization server came up on the first image bump after
+  this shipped rather than on a deliberate act — which is what the merge gate held motet#111
+  to say out loud, and what the owner was asked to confirm before it merged. **A future
+  capability whose activation is a security boundary should not infer its own switch from a
+  variable set for another purpose** — give it its own, and say in the PR which environments
+  it turns on in.
+
+**What no test here can tell you** is whether a real MCP client completes discovery against a
+deployed issuer, and whether a person gets through the real Google sign-in and the Allow screen.
+An agent cannot sign in with Google (see the sign-in section), so the first real connection is a
+human's.
+
+**What this adds, read against invariant 12:** a second contract on the existing API (`/mcp`
+and the authorization server's endpoints), one SDK on `motet-api` only (`mcp>=2.2,<3`, and
+`bin/build-images` asserts it is in the image), three tables and two columns used for exactly one
+thing each (migration 0020), and one route. No deployable, datastore, queue mechanism, stage or
+model call.
+
 ### The landing page is a static site Cloudflare builds, and its one write is the waitlist
 
 `site/`, `POST /v1/waitlist` (`motet_api.waitlist`), `GET /v1/admin/waitlist`, migration

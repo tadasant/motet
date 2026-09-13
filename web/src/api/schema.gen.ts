@@ -291,6 +291,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/mcp/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Complete Mcp Authorization
+         * @description Finish the Google half of an MCP client's authorization (motet#111).
+         *
+         *     Unauthenticated, like the sign-in callback, and for the same reason: the browser that
+         *     arrives holds nothing yet. The identity is verified and the allowlist checked exactly as
+         *     signing in does; what comes back is not a session for this browser but the client's
+         *     authorization code, wrapped in the URLs the SPA offers the person as Allow and Deny.
+         */
+        post: operations["complete_mcp_authorization_v1_auth_mcp_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/native/redeem": {
         parameters: {
             query?: never;
@@ -2067,6 +2092,16 @@ export interface components {
              */
             login_configured: boolean;
             /**
+             * Mcp Oauth Configured
+             * @description Whether MCP clients can authorize themselves with OAuth (motet#111). False means /mcp takes only the API's bearer: MOTET_PUBLIC_BASE_URL, MOTET_APP_BASE_URL or sign-in is not configured.
+             */
+            mcp_oauth_configured: boolean;
+            /**
+             * Mcp Tools
+             * @description How many tools the MCP server at /mcp registers. Zero would mean the mount is there and serves nothing.
+             */
+            mcp_tools: number;
+            /**
              * Revision
              * @description The tadasant/motet commit SHA this build was made from — the deploy's image tag, read back out of the OTel 'service.version' resource attribute. Not a Cloud Run revision name. null means nothing set it — a laptop or a bare 'docker run' rather than a deployment — or that what was set is not a shape this public route will repeat, which the process says at ERROR on startup. Reported because 'is the pin bump actually live' is the first question asked after a deploy, and until now the only answers were diffing the served OpenAPI document — which cannot see a commit that changed only behaviour — or querying the obs stack for a log line this service does not emit per request.
              */
@@ -2613,6 +2648,41 @@ export interface components {
             episode_id: string;
             /** News Items Marked Read */
             news_items_marked_read: number;
+        };
+        /**
+         * McpAuthorizationResponse
+         * @description An MCP client's authorization, verified by Google sign-in and waiting for a person's yes.
+         *
+         *     motet#111. The code is already minted and bound to the client, but it reaches the client
+         *     only if the SPA navigates to ``redirect_url``, which it does after the person has seen
+         *     ``client_name`` and ``redirect_host`` and pressed Allow. ``deny_url`` tells the client no.
+         */
+        McpAuthorizationResponse: {
+            /**
+             * Client Name
+             * @description What the MCP client registered itself as.
+             */
+            client_name: string;
+            /**
+             * Deny Url
+             * @description Refuse: the client's redirect URI with access_denied.
+             */
+            deny_url: string;
+            /**
+             * Email
+             * @description The allowlisted account the client will act as.
+             */
+            email: string;
+            /**
+             * Redirect Host
+             * @description Where approving sends the grant: the client's host.
+             */
+            redirect_host: string;
+            /**
+             * Redirect Url
+             * @description Approve: the client's redirect URI with the code.
+             */
+            redirect_url: string;
         };
         /**
          * NewsItemResponse
@@ -3749,6 +3819,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RevokedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    complete_mcp_authorization_v1_auth_mcp_callback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CompleteLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpAuthorizationResponse"];
                 };
             };
             /** @description Validation Error */

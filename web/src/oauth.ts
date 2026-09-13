@@ -50,6 +50,56 @@ export function isConnectorState(state: string): boolean {
 }
 
 /**
+ * The fourth flow on this path: an MCP client's authorization (motet#111).
+ *
+ * **This tab did not start it.** The client sent the person to the API's `/authorize`,
+ * which sent them to Google, so there is no remembered state in sessionStorage to compare
+ * with — the API's single-use state row is the only check, and the screen does not call
+ * `takeState` for it. Same dot, same reason as the sign-in prefix above.
+ *
+ * Keep in step with `MCP_STATE_PREFIX` in `motet_api.mcp.oauth`.
+ */
+const MCP_STATE_PREFIX = 'mcp.'
+
+/** Whether a callback's `state` belongs to an MCP client's authorization. */
+export function isMcpState(state: string): boolean {
+  return state.startsWith(MCP_STATE_PREFIX)
+}
+
+/** Schemes that run or render content in this origin's place, rather than hand off to a client. */
+const REFUSED_REDIRECT_SCHEMES = new Set(['javascript:', 'data:', 'vbscript:', 'file:', 'blob:', 'about:'])
+
+/**
+ * Whether the SPA may send the browser to an MCP client's redirect URI (motet#111).
+ *
+ * **The navigation is the grant, so the target is checked before either button exists.**
+ * Registration is unauthenticated, so the URI is whatever a stranger registered, and
+ * `location.assign('javascript:…')` would run that stranger's script on this origin, where
+ * the session token lives, whichever button was pressed. The API refuses such a client at
+ * registration and again when it mints the code; this is the third check, on the origin it
+ * protects. `https` anywhere, `http` only on a loopback address (RFC 8252's native-app
+ * redirect), and a private-use scheme such as `vscode:` so a desktop client can be handed
+ * back to.
+ *
+ * Keep in step with `redirect_uri_allowed` in `motet_api.mcp.oauth`.
+ */
+export function isSafeClientRedirect(url: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  const scheme = parsed.protocol.toLowerCase()
+  if (REFUSED_REDIRECT_SCHEMES.has(scheme)) return false
+  // `https://claude.ai@attacker.example/cb` goes to attacker.example and reads as claude.ai.
+  if (parsed.username || parsed.password) return false
+  if (scheme === 'https:') return true
+  if (scheme === 'http:') return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+  return /^[a-z][a-z0-9+.-]*:$/.test(scheme)
+}
+
+/**
  * Where Google sends the user back to.
  *
  * Derived from the origin rather than configured, which is what makes one bundle serve

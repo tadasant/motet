@@ -55,6 +55,7 @@ export type SourceItemDetail = GetResponse<'/v1/source-items/{source_item_id}'>
 export type ProcessingStep = SourceItemDetail['processed'][number]
 export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
+export type McpAuthorization = PostResponse<'/v1/auth/mcp/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
 export type AdminOverview = GetResponse<'/v1/admin/overview'>
 export type AdminWaitlist = GetResponse<'/v1/admin/waitlist'>
@@ -302,6 +303,10 @@ export const api = {
     apiPost('/v1/auth/google/start', { redirect_uri: redirectUri }),
   completeLogin: (state: string, code: string) =>
     apiPost('/v1/auth/google/callback', { state, code }),
+  // The third call that works without a token: an MCP client's authorization comes back
+  // through Google to a browser that may hold nothing (motet#111).
+  completeMcpAuthorization: (state: string, code: string) =>
+    apiPost('/v1/auth/mcp/callback', { state, code }),
   session: () => apiGet('/v1/auth/session'),
   logout: () => apiPostNoContent('/v1/auth/logout'),
   // Every session, from any device. The answer to a lost phone: `logout` needs the token

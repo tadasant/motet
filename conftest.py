@@ -62,6 +62,9 @@ TABLES = (
     "oauth_states",
     "highlights",
     "auth_sessions",
+    "mcp_oauth_codes",
+    "mcp_oauth_refresh_tokens",
+    "mcp_oauth_clients",
     # Not user data: one row per queue saying a worker was there. Truncated all the same,
     # so a test that drains a queue cannot make a later test think one is running.
     "worker_heartbeats",

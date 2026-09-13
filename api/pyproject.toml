@@ -23,6 +23,7 @@ dependencies = [
     # optional extra because a *worker* in fake mode needs no HTTP client; the API's
     # dependency on it is not optional, and the image is built with default extras only.
     "httpx>=0.28",
+    "mcp>=2.2,<3",
     "motet-db",
     "motet-inference",
     "motet-obs",

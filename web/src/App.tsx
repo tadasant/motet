@@ -16,8 +16,8 @@
 // rather than back into a running app. It is handled exactly as before: `location` is
 // read once at boot (see oauth.ts) and the callback renders instead of the app, with no
 // sidebar. Three flows come back on that one path — signing in, connecting a mailbox, and
-// authorizing an MCP server from Credentials — and the `state` says which, because it is
-// the only thing that survives the round trip.
+// authorizing an MCP server from Credentials, and an MCP client's authorization of Motet —
+// and the `state` says which, because it is the only thing that survives the round trip.
 //
 // **A browser holding no token sees the door and nothing else.** That is the whole point
 // of Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN"
@@ -40,13 +40,14 @@ import {
   setToken,
 } from './api/client'
 import { Wordmark } from './brand/Brand'
-import { forgetCallbackUrl, isConnectorState, isLoginState, readCallback } from './oauth'
+import { forgetCallbackUrl, isConnectorState, isLoginState, isMcpState, readCallback } from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
 import { Credentials } from './screens/Credentials'
 import { ConnectorCallback } from './screens/credentials/ConnectorCallback'
 import { IN_PROGRESS } from './screens/EpisodeScreen'
 import { Episodes, newestFirst } from './screens/Episodes'
+import { McpAuthorizeCallback } from './screens/McpAuthorizeCallback'
 import { OAuthCallback, explain as explainDenial } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
@@ -138,6 +139,10 @@ export default function App() {
   // A sign-in and a mailbox connection come back on the same path. Only `state` can tell
   // them apart, because it is the one value Google echoes back verbatim.
   const signingIn = callback !== null && callback.kind !== 'empty' && isLoginState(callback.state)
+  // The third flow on that path: an MCP client's authorization, which this tab did not
+  // start and which ends in a question rather than a result (motet#111).
+  const authorizingMcp =
+    callback !== null && callback.kind !== 'empty' && isMcpState(callback.state)
 
   const saveToken = useCallback((value: string) => {
     setToken(value)
@@ -350,7 +355,9 @@ export default function App() {
       navigate('/credentials', { replace: true })
       return
     }
-    if (!signingIn && callback?.kind === 'denied') {
+    // Only a mailbox consent has a Sources row to explain; a refused sign-in or MCP
+    // authorization said its sentence on the callback page.
+    if (!signingIn && !authorizingMcp && callback?.kind === 'denied') {
       // For a Cancel, say the one thing the Sources row cannot know — that it *was* a
       // Cancel — rather than repeating the row's own "nothing was connected" beside it.
       setConsentNotice(
@@ -363,8 +370,9 @@ export default function App() {
     // Back to where the flow started from: a mailbox connection belongs on Sources, and a
     // sign-in belongs at the front of the app the person was trying to reach. `replace`,
     // because `forgetCallbackUrl` has already swapped the callback's entry for `/`, and a
-    // second entry would put a spent code's page one Back away.
-    navigate(signingIn ? '/' : '/sources', { replace: true })
+    // second entry would put a spent code's page one Back away. An MCP authorization that
+    // did not finish started at an agent, not in this app, so it goes to the front too.
+    navigate(signingIn || authorizingMcp ? '/' : '/sources', { replace: true })
   }
 
   // "Make an episode" on the backlog: straight to the new one's detail, skipping the shelf,
@@ -420,7 +428,11 @@ export default function App() {
             so it gets a reading column. */}
         <main className={`door-main${callback ? ' narrow' : ''}`}>
           {errorLine}
-          {callback && signingIn ? (
+          {/* The MCP branch first: its state is neither a sign-in's nor a mailbox's, and
+              sending it to either route would burn it. */}
+          {callback && authorizingMcp ? (
+            <McpAuthorizeCallback callback={callback} onDone={finishCallback} />
+          ) : callback && signingIn ? (
             <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
           ) : callback && authorizingConnector ? (
             <ConnectorCallback callback={callback} onDone={finishCallback} />

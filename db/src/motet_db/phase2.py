@@ -26,6 +26,7 @@ from typing import Any
 
 import psycopg
 from motet_vault import DekWrapper, KeyManager, SealedSecret, aad, open_sealed, seal
+from psycopg.types.json import Jsonb
 
 from .ids import highlight_id, new_id, source_id
 from .models import (
@@ -522,6 +523,7 @@ def start_oauth(
     oauth_client: dict[str, Any] | None = None,
     handoff_challenge: str | None = None,
     ttl_seconds: int = 600,
+    mcp_request: dict[str, Any] | None = None,
 ) -> None:
     """Record an in-flight authorization so its callback can be believed.
 
@@ -537,6 +539,10 @@ def start_oauth(
     discovery and registration produced, held here until consent completes so the connector
     itself is not touched by an authorization nobody finishes.
 
+    ``mcp_request`` is an MCP client's own authorization request, for a sign-in that is
+    authorizing one (motet#111): it has to survive the round trip through Google to be
+    honoured after it. ``None`` on every other flow.
+
     ``handoff_challenge`` marks a sign-in the iOS app started (migration 0019): its
     callback hands a one-time code back to the app instead of a session to the browser,
     and this is the PKCE challenge that code will be redeemed against. ``None`` for every
@@ -548,8 +554,8 @@ def start_oauth(
         """
         INSERT INTO oauth_states
             (state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-             nonce, connector_id, oauth_client, handoff_challenge, expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+             nonce, connector_id, oauth_client, mcp_request, handoff_challenge, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
                 now() + make_interval(secs => %s))
         """,
         (
@@ -563,6 +569,7 @@ def start_oauth(
             nonce,
             connector_id_,
             json.dumps(oauth_client) if oauth_client is not None else None,
+            None if mcp_request is None else Jsonb(mcp_request),
             handoff_challenge,
             ttl_seconds,
         ),
@@ -582,7 +589,7 @@ def consume_oauth_state(conn: psycopg.Connection[Any], state: str) -> dict[str, 
         DELETE FROM oauth_states
         WHERE state = %s AND expires_at > now()
         RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-                  nonce, connector_id, oauth_client, handoff_challenge
+                  nonce, connector_id, oauth_client, mcp_request, handoff_challenge
         """,
         (state,),
     )

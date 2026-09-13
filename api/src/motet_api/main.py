@@ -14,6 +14,7 @@ the blast radius for no functional gain.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import re
@@ -140,6 +141,9 @@ from .feed import (
     feed_url,
     render_feed,
 )
+from .mcp import registry as mcp_registry
+from .mcp.oauth import complete_authorization as complete_mcp_oauth
+from .mcp.oauth import oauth_setup as mcp_oauth_setup
 from .schemas import (
     AdminEpisodeCounts,
     AdminJobCounts,
@@ -180,6 +184,7 @@ from .schemas import (
     LlmStageConfigUpdate,
     LoginResponse,
     MarkListenedResponse,
+    McpAuthorizationResponse,
     NewsItemResponse,
     NewsItemSourceRef,
     OAuthCallbackRequest,
@@ -257,7 +262,7 @@ Nudge = Annotated[DrainNudge, Depends(drain_nudge)]
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(target: FastAPI) -> AsyncIterator[None]:
     """Refuse to serve at all rather than serve a request we cannot fulfil.
 
     An unknown model slug or a nonsense effort stops the process here, where Cloud Run
@@ -327,8 +332,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             "run rather than starting one immediately",
             ENABLED_ENV,
         )
+    # Said once at startup for the reason every line above is: a mount that registered
+    # nothing and an authorization server that is switched off both look, from outside,
+    # exactly like an MCP server nobody has connected to yet (invariant 11's trap).
+    obs.logger.info(
+        "mcp: /mcp serves %d tools; OAuth for MCP clients is %s",
+        len(mcp_registry.ALL_TOOLS),
+        "on" if mcp_oauth_setup(current) else "off (the /v1 bearer only)",
+    )
     try:
-        yield
+        # The MCP transport's task group. Without it the first /mcp request fails with
+        # "Task group is not initialized" — the step every mounted MCP server forgets.
+        async with target.state.mcp.running():
+            yield
     finally:
         # Cloud Run stops a revision with SIGTERM, and the OTel SDK's own `atexit` hook
         # does not save us: measured locally, a terminate immediately after a request
@@ -349,6 +365,18 @@ app = FastAPI(
         "the TypeScript client is generated from it in turn. Do not hand-edit either."
     ),
 )
+
+#: The MCP server at `/mcp`, and the OAuth endpoints MCP clients authorize with (motet#111).
+#: Plain Starlette routes rather than `APIRoute`s, so they add nothing to `openapi.yaml`;
+#: `api/tests/test_mcp_parity.py` is what holds the tools to the routes below.
+# Imported here rather than at the top, and by name rather than by `import`: the tool
+# modules call this module's handlers, so a static import would make `main` and the tools
+# one import cycle, and a type checker resolves a cycle in whatever order it likes.
+MCP: Any = importlib.import_module("motet_api.mcp.server").mount(app.router.routes)
+# The lifespan runs the mount that belongs to *its* app, not whatever `MCP` names now: a
+# reload of this module re-runs it in the same globals, so `MCP` would name a new mount
+# while an app built before the reload kept routing to the old one, which never starts.
+app.state.mcp = MCP
 
 
 def configure_cors(target: FastAPI, config: Settings) -> None:
@@ -589,6 +617,8 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         settings_writable=settings_repo.settings_writable(os.environ),
         # Only where settings are writable — never in production — and cached for 30s.
         llm_overrides_in_force=admin_llm.overrides_in_force(config.database_url, os.environ),
+        mcp_tools=len(mcp_registry.ALL_TOOLS),
+        mcp_oauth_configured=mcp_oauth_setup(config) is not None,
     )
 
 
@@ -832,6 +862,20 @@ def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> Lo
     logger.info("signed in %s until %s", session.email, session.expires_at.isoformat())
     # The only time the token is ever readable. Only its hash is stored.
     return LoginResponse(token=token, email=session.email, expires_at=session.expires_at)
+
+
+@app.post("/v1/auth/mcp/callback", response_model=McpAuthorizationResponse, tags=["auth"])
+def complete_mcp_authorization(
+    body: CompleteLoginRequest, conn: Conn, config: Config
+) -> McpAuthorizationResponse:
+    """Finish the Google half of an MCP client's authorization (motet#111).
+
+    Unauthenticated, like the sign-in callback, and for the same reason: the browser that
+    arrives holds nothing yet. The identity is verified and the allowlist checked exactly as
+    signing in does; what comes back is not a session for this browser but the client's
+    authorization code, wrapped in the URLs the SPA offers the person as Allow and Deny.
+    """
+    return complete_mcp_oauth(conn, config, state=body.state.strip(), code=body.code)
 
 
 @app.post("/v1/auth/native/redeem", response_model=LoginResponse, tags=["auth"])

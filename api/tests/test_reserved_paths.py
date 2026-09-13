@@ -80,3 +80,28 @@ def test_the_generated_document_advertises_the_health_path() -> None:
     assert HEALTH_PATH in paths
     for reserved in PLATFORM_RESERVED_PATHS:
         assert reserved not in paths
+
+
+def test_the_mcp_server_and_its_oauth_endpoints_are_walked_and_not_reserved() -> None:
+    """motet#111 added `/mcp` and the OAuth endpoints as plain Starlette routes.
+
+    The duck-typed walk above covers them already; this pins that they are there to be
+    walked, so the collision motet#16 was is checked for the new entries too. `/.well-known`
+    is where the SDK's discovery documents live, and it is not a path the frontend claims.
+    """
+    paths = declared_paths()
+    for expected in (
+        "/mcp",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/authorize",
+        "/token",
+        "/register",
+        "/revoke",
+    ):
+        assert expected in paths, expected
+        assert not [
+            reserved
+            for reserved in PLATFORM_RESERVED_PATHS
+            if expected == reserved or expected.startswith(reserved + "/")
+        ], expected
