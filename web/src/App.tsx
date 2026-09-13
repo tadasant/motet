@@ -15,8 +15,9 @@
 // OAuth is the one path that was always forced on us, because Google redirects to a URL
 // rather than back into a running app. It is handled exactly as before: `location` is
 // read once at boot (see oauth.ts) and the callback renders instead of the app, with no
-// sidebar. Two flows come back on that one path — signing in, and connecting a mailbox —
-// and the `state` says which, because it is the only thing that survives the round trip.
+// sidebar. Three flows come back on that one path — signing in, connecting a mailbox, and
+// authorizing an MCP server from Credentials — and the `state` says which, because it is
+// the only thing that survives the round trip.
 //
 // **A browser holding no token sees the door and nothing else.** That is the whole point
 // of Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN"
@@ -39,9 +40,11 @@ import {
   setToken,
 } from './api/client'
 import { Wordmark } from './brand/Brand'
-import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
+import { forgetCallbackUrl, isConnectorState, isLoginState, readCallback } from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
+import { Credentials } from './screens/Credentials'
+import { ConnectorCallback } from './screens/credentials/ConnectorCallback'
 import { IN_PROGRESS } from './screens/EpisodeScreen'
 import { Episodes, newestFirst } from './screens/Episodes'
 import { OAuthCallback, explain as explainDenial } from './screens/OAuthCallback'
@@ -336,7 +339,17 @@ export default function App() {
     document.title = inShell ? `${section.label} · Motet` : 'Motet'
   }, [inShell, section.label])
 
+  // The third flow on the callback path: an MCP server's consent, begun on Credentials.
+  const authorizingConnector =
+    callback !== null && callback.kind !== 'empty' && isConnectorState(callback.state)
+
   const finishCallback = () => {
+    if (authorizingConnector) {
+      // Its own screen says what happened, including a Cancel; Credentials shows the row.
+      setCallback(null)
+      navigate('/credentials', { replace: true })
+      return
+    }
     if (!signingIn && callback?.kind === 'denied') {
       // For a Cancel, say the one thing the Sources row cannot know — that it *was* a
       // Cancel — rather than repeating the row's own "nothing was connected" beside it.
@@ -409,6 +422,8 @@ export default function App() {
           {errorLine}
           {callback && signingIn ? (
             <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
+          ) : callback && authorizingConnector ? (
+            <ConnectorCallback callback={callback} onDone={finishCallback} />
           ) : callback ? (
             <OAuthCallback callback={callback} onDone={finishCallback} />
           ) : (
@@ -480,6 +495,7 @@ export default function App() {
         />
       )}
       {section.id === 'sources' && <Sources notice={consentNotice} />}
+      {section.id === 'credentials' && <Credentials />}
       {section.id === 'admin' &&
         (isAdmin ? (
           <Admin />

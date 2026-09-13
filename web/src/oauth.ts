@@ -16,7 +16,8 @@ const CALLBACK_PATH = '/oauth/callback'
 /**
  * How a callback says which flow it belongs to.
  *
- * **Two flows land on this one path**: signing in, and connecting a mailbox. They finish
+ * **Three flows land on this one path**: signing in, connecting a mailbox, and authorizing
+ * an MCP server (below). They finish
  * at different API routes and spend a single-use `state` doing it, so sending one to the
  * other's route burns the authorization and the user has to start again for no visible
  * reason.
@@ -34,6 +35,18 @@ const LOGIN_STATE_PREFIX = 'login.'
 /** Whether a callback's `state` belongs to a sign-in rather than to a mailbox. */
 export function isLoginState(state: string): boolean {
   return state.startsWith(LOGIN_STATE_PREFIX)
+}
+
+/**
+ * The third flow on this path: authorizing an MCP server from the Credentials screen
+ * (motet#102). Same discriminator, same reason. Keep in step with `CONNECTOR_STATE_PREFIX`
+ * in `motet_api.connectors`.
+ */
+const CONNECTOR_STATE_PREFIX = 'connector.'
+
+/** Whether a callback's `state` belongs to a connector's authorization. */
+export function isConnectorState(state: string): boolean {
+  return state.startsWith(CONNECTOR_STATE_PREFIX)
 }
 
 /**
@@ -69,7 +82,12 @@ export function beginConsent(url: string): void {
 
 /** What Google put in the query string when it sent the user back. */
 export type OAuthCallback =
-  | { kind: 'granted'; code: string; state: string }
+  /**
+   * `iss` is RFC 9207's issuer identifier. An MCP authorization server that supports it
+   * sends one and Google does not; it is carried so the connector callback can refuse a
+   * code that arrived under a different issuer than discovery found.
+   */
+  | { kind: 'granted'; code: string; state: string; iss?: string }
   /**
    * The user said no, or Google refused. `error` is its own code, e.g. access_denied.
    *
@@ -104,7 +122,8 @@ export function readCallback(location: Location = window.location): OAuthCallbac
 
   const code = params.get('code')
   const state = params.get('state')
-  if (code && state) return { kind: 'granted', code, state }
+  const iss = params.get('iss')
+  if (code && state) return iss ? { kind: 'granted', code, state, iss } : { kind: 'granted', code, state }
 
   return { kind: 'empty' }
 }
