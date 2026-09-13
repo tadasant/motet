@@ -158,7 +158,10 @@ def _backfill_user_email(conn: psycopg.Connection[Any], *, user_id: str, email: 
     **Only ever fills a NULL**, and never rewrites an address — the row is the account,
     not this session. A second person on the allowlist signing into the same account would
     otherwise flip the label back and forth between two sessions of equal standing, and
-    which one the screen showed would be "whoever signed in last".
+    which one the screen showed would be "whoever signed in last". The cost of that choice
+    is that whichever allowlisted address signs in *first* is the label for good, and with
+    no database shell (invariant 10) nothing corrects it; on a one-account deployment that
+    is the owner.
 
     Here rather than in the sign-in route so that the staging mint
     (:mod:`motet_db.mint_session`) writes it too: both are a caller proving an allowlisted

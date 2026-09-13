@@ -7,6 +7,7 @@ import type {
   AdminOverview,
   Episode,
   HealthResponse,
+  HeldSourceItem,
   IngestionItem,
   NewsItem,
   SessionInfo,
@@ -128,6 +129,18 @@ const PASTE_SOURCE: Source = {
   items_integrated: 0,
 }
 
+/** A held source item, as `/v1/source-items/held` reports one (motet#91). */
+const HELD_ITEM: HeldSourceItem = {
+  id: 'si_held_1',
+  title: 'Weekly wire',
+  source_id: 'src_gmail',
+  source_kind: 'gmail',
+  source_name: 'Newsletters',
+  received_at: '2026-08-19T10:30:00Z',
+  chars: 4_200,
+  preview: 'This week in widgets.',
+}
+
 /**
  * Route a fake fetch by URL, so a test asserts on what the SPA actually requested.
  *
@@ -139,18 +152,6 @@ const PASTE_SOURCE: Source = {
  * list, so the polling path the episode screen runs on would be tested against a shape it
  * never sees.
  */
-/** A held source item, as `/v1/source-items/held` reports one (motet#91). */
-const HELD_ITEM = {
-  id: 'si_held_1',
-  title: 'Weekly wire',
-  source_id: 'src_gmail',
-  source_kind: 'gmail',
-  source_name: 'Newsletters',
-  received_at: '2026-08-19T10:30:00Z',
-  chars: 4_200,
-  preview: 'This week in widgets.',
-}
-
 function mockApi(overrides: Record<string, unknown> = {}) {
   const calls: { url: string; method: string; body: unknown }[] = []
   const routes: Record<string, unknown> = {
@@ -378,7 +379,7 @@ describe('App', () => {
     expect(link.querySelector('.tab-count.failed')).not.toBeNull()
   })
 
-  it('counts held items on the sidebar from another section, so a synced mailbox is noticed', async () => {
+  it('counts held items on the sidebar from another section', async () => {
     mockApi({ '/v1/source-items/held': [HELD_ITEM] })
     window.history.replaceState({}, '', '/paste')
     render(<App />)

@@ -112,7 +112,8 @@ describe('Held', () => {
     })
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
     const onQueued = vi.fn()
-    render(<Held onQueued={onQueued} />)
+    const onDismissed = vi.fn()
+    render(<Held onQueued={onQueued} onDismissed={onDismissed} />)
 
     fireEvent.click(await screen.findByLabelText('Select all'))
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
@@ -126,6 +127,8 @@ describe('Held', () => {
       { url: '/v1/source-items/dismiss', method: 'POST', body: { ids: ['si_a', 'si_b'] } },
     ])
     expect(onQueued).not.toHaveBeenCalled()
+    // But the app is told, so the sidebar's held count does not stay stale (motet#98).
+    expect(onDismissed).toHaveBeenCalledOnce()
   })
 
   it('says so when the list cannot be read, rather than rendering an empty panel', async () => {

@@ -470,9 +470,7 @@ export default function App() {
           onChanged={refresh}
         />
       )}
-      {section.id === 'sources' && (
-        <Sources notice={consentNotice} />
-      )}
+      {section.id === 'sources' && <Sources notice={consentNotice} />}
       {section.id === 'admin' &&
         (isAdmin ? (
           <Admin />

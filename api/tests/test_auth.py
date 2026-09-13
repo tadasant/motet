@@ -765,15 +765,11 @@ class TestTheOwnerRowLearnsItsAddress:
         self, api: TestClient, db: psycopg.Connection[Any]
     ) -> None:
         """The row is the account, not this session — see ``_backfill_user_email``."""
-        db.execute(
-            "UPDATE users SET email = %s WHERE id = %s",
-            ("first@motet.test", repo.OWNER_USER_ID),
-        )
+        self._owner_email(db, "first@motet.test")
 
         sign_in(api)
 
-        row = db.execute("SELECT email FROM users WHERE id = %s", (repo.OWNER_USER_ID,)).fetchone()
-        assert row is not None and row["email"] == "first@motet.test"
+        assert self._read_owner_email(db) == "first@motet.test"
 
     def test_a_minted_staging_session_fills_it_too(
         self,
