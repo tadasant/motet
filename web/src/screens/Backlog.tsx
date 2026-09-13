@@ -85,7 +85,7 @@ export function Backlog({
           older stories is an answer nobody scrolls to. It renders nothing when there is
           nothing in flight. */}
       {/* What has been pulled in but not yet paid for (motet#91). */}
-      <Held onQueued={onChanged} onJumpToNewsItem={setFlash} />
+      <Held onQueued={onChanged} onDismissed={onChanged} onJumpToNewsItem={setFlash} />
 
       <Processing items={ingestion} unavailable={ingestionUnavailable} processing={processing} />
 

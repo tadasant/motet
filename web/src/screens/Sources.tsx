@@ -45,11 +45,19 @@ function navigateTo(path: string): void {
 const REFRESH_MS = 10_000
 
 export function Sources({
+  /**
+   * What Google said when it refused the last consent, if it refused one — carried here
+   * from the callback page by App (motet#98). Shown once at the top, because this is the
+   * screen the flow lands back on, and what the attempt left — the card's "Consent not
+   * finished" and a row notice hedging "you cancelled … or closed it" — cannot say which.
+   */
+  notice = '',
   /** Overridden only by tests: jsdom cannot navigate. */
   navigate = beginConsent,
   /** Overridden only by tests, so relative times are deterministic. */
   now,
 }: {
+  notice?: string
   navigate?: (url: string) => void
   now?: number
 }) {
@@ -146,6 +154,14 @@ export function Sources({
         Where your reading comes from. Connect a source and Motet pulls new items in on its
         own; <strong>nothing is processed until you ingest it</strong> from the Backlog.
       </p>
+
+      {/* `role="status"` and not `alert`: pressing Cancel on Google's page is a supported
+          answer, and the sentence says what was *not* changed rather than what broke. */}
+      {notice && (
+        <p className="hint consent-notice" role="status">
+          {notice}
+        </p>
+      )}
 
       {error && (
         <p className="error" role="alert">

@@ -138,9 +138,9 @@ export function Processing({
 /**
  * The headline, counting each state as the thing it actually is.
  *
- * A settled item is not "on the way in": a just-added item is finished, and a failed one
- * is never arriving. Rolling all three into one number would put "3 items on the way in"
- * over a list where nothing is moving.
+ * A settled item is not "processing": a just-added item is finished, and a failed one
+ * is never arriving. Rolling all three into one number would put "3 processing" over a
+ * list where nothing is moving.
  */
 function summarise(items: IngestionItem[]): string {
   const counts = {
@@ -149,9 +149,12 @@ function summarise(items: IngestionItem[]): string {
     integrated: items.filter((item) => item.state === 'integrated').length,
   }
   const parts: string[] = []
-  if (counts.pending) parts.push(`${counts.pending} on the way in`)
-  if (counts.failed) parts.push(`${counts.failed} stuck`)
-  if (counts.integrated) parts.push(`${counts.integrated} just added`)
+  // The same words as the per-item badges below and the API's own states — processing,
+  // failed, added — rather than a second vocabulary for one fact (motet#98). "Stuck" in
+  // particular read as "might still come unstuck", which a failed item will not.
+  if (counts.pending) parts.push(`${counts.pending} processing`)
+  if (counts.failed) parts.push(`${counts.failed} failed`)
+  if (counts.integrated) parts.push(`${counts.integrated} added`)
   return `${parts.join(', ')}.`
 }
 

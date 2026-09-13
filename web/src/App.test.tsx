@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,6 +7,7 @@ import type {
   AdminOverview,
   Episode,
   HealthResponse,
+  HeldSourceItem,
   IngestionItem,
   NewsItem,
   SessionInfo,
@@ -126,6 +127,18 @@ const PASTE_SOURCE: Source = {
   disconnected_at: null,
   items_pulled_in: 0,
   items_integrated: 0,
+}
+
+/** A held source item, as `/v1/source-items/held` reports one (motet#91). */
+const HELD_ITEM: HeldSourceItem = {
+  id: 'si_held_1',
+  title: 'Weekly wire',
+  source_id: 'src_gmail',
+  source_kind: 'gmail',
+  source_name: 'Newsletters',
+  received_at: '2026-08-19T10:30:00Z',
+  chars: 4_200,
+  preview: 'This week in widgets.',
 }
 
 /**
@@ -270,7 +283,7 @@ describe('App', () => {
     expect(screen.getByText('Queued')).toBeDefined()
   })
 
-  it('tells a retrying item apart from a stuck one, and says why for both', async () => {
+  it('tells a retrying item apart from a failed one, and says why for both', async () => {
     mockApi({
       '/v1/ingestion': [
         {
@@ -302,7 +315,7 @@ describe('App', () => {
     expect(screen.getByText(/Attempt 3 of 5 failed/)).toBeDefined()
     expect(screen.getByText(/Gave up after 5 attempts/)).toBeDefined()
     // Counted as what each of them is, rather than rolled into one "in flight" number.
-    expect(screen.getByText('1 on the way in, 1 stuck.')).toBeDefined()
+    expect(screen.getByText('1 processing, 1 failed.')).toBeDefined()
     // And the reason, verbatim — enough to decide whether to wait, re-paste, or report it.
     expect(screen.getByText(/ReasoningNotAppliedError/)).toBeDefined()
     expect(screen.getByText(/402 insufficient credits/)).toBeDefined()
@@ -347,28 +360,42 @@ describe('App', () => {
     }
   })
 
-  it('counts only what is unsettled on the sidebar', async () => {
-    // A badge stuck at 3 for the ten minutes after everything landed means nothing.
+  it('counts what needs you on the sidebar: held and failed, not in flight', async () => {
+    // motet#98. A held item waits for somebody to press Ingest now, and a failed one will
+    // never move again; an item a worker is carrying needs nobody. A settled one is not
+    // counted either — a badge stuck at 3 after everything landed means nothing.
     mockApi({
       '/v1/ingestion': [
         { ...QUEUED, id: 'si_done', state: 'integrated' },
         { ...QUEUED, id: 'si_open' },
+        { ...QUEUED, id: 'si_failed', state: 'failed', attempts: 5 },
       ],
+      '/v1/source-items/held': [HELD_ITEM, { ...HELD_ITEM, id: 'si_held_2' }],
     })
     render(<App />)
 
-    expect(await screen.findByRole('link', { name: 'Backlog 1' })).toBeDefined()
+    const link = await screen.findByRole('link', { name: 'Backlog 3' })
+    // Loud, because one of the three is never coming back.
+    expect(link.querySelector('.tab-count.failed')).not.toBeNull()
   })
 
-  it('counts what is in flight on the sidebar, so it is visible from the paste screen', async () => {
-    mockApi({ '/v1/ingestion': [QUEUED] })
+  it('counts held items on the sidebar from another section', async () => {
+    mockApi({ '/v1/source-items/held': [HELD_ITEM] })
     window.history.replaceState({}, '', '/paste')
     render(<App />)
 
-    // Still on Paste in: someone who has just pasted has no reason to go to the backlog
-    // unless something there tells them to.
+    // Still on Paste in: nothing on this screen says a mailbox has pulled anything in, so
+    // the badge is the only thing that tells somebody to go and pick.
     await screen.findByRole('heading', { name: 'Paste in', level: 1 })
     expect(await screen.findByRole('link', { name: 'Backlog 1' })).toBeDefined()
+  })
+
+  it('does not count an item a worker is still carrying', async () => {
+    mockApi({ '/v1/ingestion': [QUEUED] })
+    render(<App />)
+
+    await screen.findByText('1 processing.')
+    expect(screen.getByRole('link', { name: 'Backlog' })).toBeDefined()
   })
 
   it('creates an episode from the backlog and opens it', async () => {
@@ -893,6 +920,30 @@ describe('the /oauth/callback landing', () => {
 
     expect(await screen.findByText(/did not grant access/)).toBeDefined()
     expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
+  })
+
+  it('says a cancelled consent once, at the top of Sources, after the callback page', async () => {
+    // motet#98. Otherwise the only trace of pressing Cancel is a row reading "waiting for
+    // consent" — which is what a live attempt looks like too.
+    mockApi()
+    window.history.replaceState({}, '', '/oauth/callback?error=access_denied&state=st_1')
+    render(<App />)
+
+    await screen.findByText(/did not grant access/)
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Motet' }))
+
+    const sources = await screen.findByRole('region', { name: 'Sources' })
+    expect(window.location.pathname).toBe('/sources')
+    // The first status on the screen, above the catalog's own per-row notices.
+    const [first] = within(sources).getAllByRole('status')
+    expect(first?.textContent).toMatch(/did not grant access/)
+
+    // Once: leaving the section takes it down, and coming back does not bring it back.
+    fireEvent.click(screen.getByRole('link', { name: /^Backlog/ }))
+    await screen.findByRole('region', { name: 'Backlog' })
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
+    await screen.findByRole('region', { name: 'Sources' })
+    expect(screen.queryByText(/did not grant access/)).toBeNull()
   })
 
   it('refuses a callback belonging to a different authorization', async () => {

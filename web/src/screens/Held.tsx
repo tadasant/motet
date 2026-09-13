@@ -29,9 +29,11 @@ function message(err: unknown): string {
 
 export function Held({
   onQueued,
+  onDismissed,
   onJumpToNewsItem,
 }: {
   onQueued: () => void
+  onDismissed?: (() => void) | undefined
   onJumpToNewsItem?: ((newsItemId: string) => void) | undefined
 }) {
   const [items, setItems] = useState<HeldSourceItem[] | null>(null)
@@ -113,6 +115,10 @@ export function Held({
       return
     return act(async () => {
       const result = await api.dismissSourceItems([...selected])
+      // A refresh above this panel too: the sidebar badge counts held items (motet#98), and
+      // a dismiss that left it at "Backlog 3" would read as three items still waiting.
+      // Not `onQueued` — nothing was queued, and that callback means exactly that.
+      onDismissed?.()
       return `${result.dismissed} dismissed${result.skipped ? ` (${result.skipped} skipped)` : ''}.`
     })
   }

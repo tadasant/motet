@@ -21,7 +21,7 @@ export function Shell({
   /** The sections the sidebar offers — every one this caller can use. */
   sections: Section[]
   onNavigate: (path: string) => void
-  /** A count on the Backlog item: what has been pasted and is not a news item yet. */
+  /** A count on the Backlog item: what is waiting for a person — held, or failed. */
   badge?: { count: number; failed: boolean } | null
   /** The right-hand end of the top bar. */
   account: ReactNode
