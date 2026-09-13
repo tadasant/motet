@@ -99,7 +99,9 @@ FROM build AS voice-build
 # back at /app/<member>/src, and copying that tree would put `db/` into the image as source.
 #
 # From the `build` stage rather than a fresh resolve, so the lockfile, the uv version and
-# the downloaded wheels are the ones the other two targets were built from.
+# the downloaded wheels are the ones the other two targets were built from. The cost is
+# caching: that stage copied every member's source, so an edit under `api/` or `db/` also
+# re-runs this step.
 RUN uv sync --frozen --no-dev --package motet-voice --no-editable
 
 # ---------------------------------------------------------------------------

@@ -132,6 +132,17 @@ def test_health_reports_the_build_it_was_made_from(
     assert client.get(HEALTH_PATH).json()["revision"] == value
 
 
+def test_the_build_is_reported_even_when_telemetry_is_not_wired(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read from the resource attributes, not off an exporter, so a broken obs wiring cannot
+    also take away the answer to "which build am I asking?"."""
+    monkeypatch.setenv(RESOURCE_ATTRIBUTES_ENV, "service.version=abc123")
+    payload = client.get(HEALTH_PATH).json()
+    assert payload["telemetry_configured"] is False
+    assert payload["revision"] == "abc123"
+
+
 def test_an_unnamed_build_reports_null(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(RESOURCE_ATTRIBUTES_ENV, raising=False)
     payload = client.get(HEALTH_PATH).json()
@@ -159,7 +170,8 @@ def test_the_revision_pattern_is_the_apis() -> None:
     Read out of the API's source rather than imported, for the same reason.
     """
     api_main = Path(__file__).resolve().parents[2] / "api" / "src" / "motet_api" / "main.py"
-    assert f're.compile(r"{REVISION_PATTERN.pattern}")' in api_main.read_text(encoding="utf-8")
+    line = f'REVISION_PATTERN = re.compile(r"{REVISION_PATTERN.pattern}")'
+    assert line in api_main.read_text(encoding="utf-8").splitlines()
 
 
 def test_the_closed_frame_is_the_last_one_a_client_sees(settings: VoiceSettings) -> None:

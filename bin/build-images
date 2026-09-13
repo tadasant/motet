@@ -293,7 +293,7 @@ VOICE_SOCKET_CLIENT='
 import json, sys
 from websockets.sync.client import connect
 url, origin, token, config = sys.argv[1:5]
-with connect(url, additional_headers={"Origin": origin}, open_timeout=10) as socket:
+with connect(url, origin=origin, open_timeout=10) as socket:
     socket.send(json.dumps({"type": "authenticate", "token": token, "config": json.loads(config)}))
     print(socket.recv(timeout=10))
 '
@@ -362,9 +362,11 @@ smoke_voice() {
     echo "smoke: StartSession did not refuse a caller without the start token" >&2; return 1
   fi
   local started
-  started="$(curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
+  # `|| true` and no `-f`, so a refusal reaches the check below with its body rather than
+  # aborting the script with curl's exit code.
+  started="$(curl -sS --max-time 5 -X POST -H 'Content-Type: application/json' \
     -H "Authorization: Bearer ${start_token}" -d "$config" \
-    "http://127.0.0.1:${port}/v1/voice/sessions")"
+    "http://127.0.0.1:${port}/v1/voice/sessions" || true)"
   local session_path session_token
   # sed rather than a JSON parser, because this shell needs nothing but curl and Docker.
   # Both values are URL-safe by construction, so neither can contain a quote.
@@ -392,22 +394,32 @@ smoke_voice() {
 
   # And a page from any other origin is refused at the handshake — the socket is the one
   # cross-origin surface the service has, and this is its control.
-  if docker exec "$stream" python -c "$VOICE_SOCKET_CLIENT" \
+  # The refusal has to be the handshake's: a close before `accept` is an HTTP 403, which the
+  # client raises as InvalidStatus. Any other failure — a timeout, a broken snippet — is
+  # not evidence of a refusal and must not pass as one.
+  frame="$(docker exec "$stream" python -c "$VOICE_SOCKET_CLIENT" \
     "ws://127.0.0.1:8080${session_path}" "https://elsewhere.example.test" "$session_token" "$config" \
-    >/dev/null 2>&1; then
-    echo "smoke: the voice socket accepted a browser origin it was not configured for" >&2
-    return 1
-  fi
-  echo "    WS from an unlisted origin -> refused"
+    2>&1 || true)"
+  case "$frame" in
+    *InvalidStatus*403*) echo "    WS from an unlisted origin -> 403 at the handshake" ;;
+    *) echo "smoke: the voice socket did not refuse an unlisted origin at the handshake: ${frame:0:300}" >&2
+       return 1 ;;
+  esac
 
   # Invariant 2, against the artifact: the voice image does not carry the database layer at
   # all, so there is nothing in it that could be handed a credential.
-  local module
-  for module in motet_db psycopg motet_api motet_workers; do
-    if docker run --rm --entrypoint python "motet-voice:${TAG}" -c "import ${module}" >/dev/null 2>&1; then
-      echo "smoke: ${module} is importable in the voice image (invariant 2)" >&2; return 1
-    fi
-  done
+  # One interpreter that must find the service and must not find any of the four, so a
+  # container that failed to start cannot pass as one where the modules are absent.
+  local present
+  present="$(docker run --rm --entrypoint python "motet-voice:${TAG}" -c '
+import importlib.util as u
+assert u.find_spec("motet_voice") is not None, "motet_voice itself is not importable"
+print(" ".join(m for m in ("motet_db", "psycopg", "motet_api", "motet_workers") if u.find_spec(m)) or "none")
+' 2>&1 || true)"
+  if [ "$present" != "none" ]; then
+    echo "smoke: the voice image carries what invariant 2 forbids, or could not be asked: ${present}" >&2
+    return 1
+  fi
   echo "    motet_db, psycopg, motet_api, motet_workers are absent (invariant 2)"
 
   # Real mode, the realtime arm, and still no vendor key: health must answer, and say the
@@ -419,7 +431,7 @@ smoke_voice() {
     "motet-voice:${TAG}" >/dev/null
   body="$(wait_for_http "http://127.0.0.1:$(host_port "$real")${API_HEALTH_PATH}" "$real")"
   case "$body" in
-    *'"status":"ok"'*'"inference_mode":"real"'*'"arm":"openai_realtime"'*) ;;
+    *'"status":"ok"'*'"inference_mode":"real"'*'"arm":"openai_realtime"'*'"arm_dormant_reason":"OPENAI_API_KEY'*) ;;
     *) echo "smoke: voice health did not answer in real mode without vendor keys" >&2; return 1 ;;
   esac
   echo "    real mode, openai_realtime arm, no vendor keys -> health ok, arm dormant"

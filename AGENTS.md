@@ -198,7 +198,7 @@ one whose silence costs money — and it could not reach a module inside `api/`,
 the API can reach is telemetry the interesting half of the system does not have.
 `motet-obs` therefore depends on **no `motet-*` package** and must not start: every
 deployable imports it, and each passes its own fallback service name
-(`motet-api`, `motet-worker`) because that label is what an operator filters on.
+(`motet-api`, `motet-worker`, `motet-voice`) because that label is what an operator filters on.
 
 **"Configured" and "exporting" are two questions.** `telemetry_configured` says somebody
 set the variables; `telemetry_exporting` says this process built a provider and is batching
@@ -542,8 +542,8 @@ If word-level timing is ever needed, the upgrade is Cartesia's own timestamp out
 than more calls.
 
 **Out, and still out:** X bookmarks (verify the API tier first — Tadas's spend decision)
-and the iOS app. The voice/interaction path is built and **dormant** — no voice service is
-deployed — see "Play Live" below.
+and the iOS app. The voice/interaction path is built, and **dormant** in any
+environment that has not wired a voice service to the API — see "Play Live" below.
 
 ---
 
@@ -624,7 +624,7 @@ bin/local-env                 # needs a service account key, and the network
 bin/dev                       # needs a Docker daemon, and never returns
 ```
 
-`bin/build-images` builds and smoke-tests the three container images, and it is its own
+`bin/build-images` builds and smoke-tests the four container images, and it is its own
 script because it needs a **Docker daemon** — `bin/ci` needs only Postgres, and a laptop
 without Docker must still be able to run every check in it. It is still a script rather
 than YAML, for the same reason `bin/ci` is. CI runs it as a second job.
