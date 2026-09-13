@@ -998,7 +998,7 @@ describe('signing in', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
-    expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Start listening' })).toBeDefined()
     expect(screen.queryByRole('navigation', { name: 'Screens' })).toBeNull()
   })
 
@@ -1022,7 +1022,7 @@ describe('signing in', () => {
     const navigate = vi.fn()
     render(<SignIn navigate={navigate} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start listening' }))
 
     await waitFor(() => expect(navigate).toHaveBeenCalled())
     const started = calls.find((call) => call.url.includes('/v1/auth/google/start'))
@@ -1047,7 +1047,7 @@ describe('signing in', () => {
     )
     render(<SignIn navigate={vi.fn()} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start listening' }))
 
     expect(await screen.findByText(/MOTET_ALLOWED_EMAILS is unset/)).toBeDefined()
   })

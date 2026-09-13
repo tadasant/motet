@@ -332,3 +332,60 @@ describe('Mark listened on the detail', () => {
     expect(onBacklogChanged).toHaveBeenCalled()
   })
 })
+
+describe('the player transport (motet#110)', () => {
+  it('plays and pauses the element from the ink play circle', async () => {
+    mockApi()
+    renderScreen()
+    const audio = await findAudio()
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+
+    Object.defineProperty(audio, 'paused', { configurable: true, get: () => true })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' }))
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
+
+    // The circle follows the element's own events, not the click.
+    fireEvent.play(audio)
+    Object.defineProperty(audio, 'paused', { configurable: true, get: () => false })
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    expect(pause).toHaveBeenCalled()
+  })
+
+  it('steps the playback rate from the speed pill', async () => {
+    mockApi()
+    renderScreen()
+    const audio = await findAudio()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Playback speed 1×' }))
+    expect(audio.playbackRate).toBe(1.2)
+    expect(screen.getByRole('button', { name: 'Playback speed 1.2×' }).textContent).toBe('1.2×')
+  })
+
+  it('seeks from the scrubber without claiming anything was heard', async () => {
+    const calls = mockApi()
+    renderScreen()
+    const audio = await findAudio()
+
+    fireEvent.change(screen.getByRole('slider', { name: 'Seek' }), { target: { value: '1500000' } })
+    expect(audio.currentTime).toBe(1500)
+    fireEvent.pause(audio)
+    expect(positionWrites(calls)).toHaveLength(0)
+  })
+
+  it('draws Play Live as the mic pill inside the transport, once', async () => {
+    mockApi()
+    renderScreen()
+    await findAudio()
+
+    const transport = await screen.findByRole('group', { name: 'Player' })
+    const pill = await waitFor(() => {
+      const found = transport.querySelector('button.mic')
+      expect(found).not.toBeNull()
+      return found as HTMLButtonElement
+    })
+    expect(pill.textContent).toBe('Play Live')
+    // No voice service answers in this test, so it is disabled — and not drawn twice.
+    await waitFor(() => expect(pill.disabled).toBe(true))
+    expect(screen.getAllByRole('button', { name: 'Play Live' })).toHaveLength(1)
+  })
+})

@@ -1,7 +1,7 @@
 // The sections of the app: one row per sidebar item, and the path each one owns.
 //
 // Icons are inline SVGs on `currentColor`, 18px, stroke only — no icon font, no
-// dependency. Structure, not brand: AGENTS.md defers colour and typography to Phase 3.
+// dependency. They take the ink they sit in; the brand's colour is the wordmark's.
 
 import type { ReactElement } from 'react'
 

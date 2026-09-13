@@ -110,7 +110,7 @@ export function Held({
     // Nothing brings a dismissed item back, so this is the one click that asks first.
     const count = selected.size
     if (
-      !window.confirm(`Dismiss ${count} item${count === 1 ? '' : 's'}? They will not be briefed.`)
+      !window.confirm(`Dismiss ${count} item${count === 1 ? '' : 's'}? They will not be in an episode.`)
     )
       return
     return act(async () => {
@@ -136,7 +136,7 @@ export function Held({
             {all.length >= HELD_PAGE ? `${HELD_PAGE}+` : all.length}
           </span>
         </h3>
-        <button type="button" onClick={ingestNow} disabled={busy || !someSelected}>
+        <button type="button" className="primary" onClick={ingestNow} disabled={busy || !someSelected}>
           {busy ? 'Working…' : someSelected ? `Ingest ${selected.size} now` : 'Ingest now'}
         </button>
         <button type="button" onClick={dismiss} disabled={busy || !someSelected}>
@@ -160,7 +160,7 @@ export function Held({
       )}
       <p className="hint">
         Pulled from your sources but not yet deduped into the backlog. Nothing here has cost
-        inference. Pick what you want briefed; dismiss what you do not.
+        inference. Pick what you want in your next episode; dismiss what you do not.
       </p>
       {all.length > 0 && (
         <table className="grid held-table">

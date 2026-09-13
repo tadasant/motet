@@ -1,35 +1,139 @@
-/* Plain on purpose. Brand identity is Phase 3 — with one user it reduces zero risk, and
-   an hour spent on colour here is an hour not spent on the factory. This is legibility
-   and nothing else.
+/* The Polyphony brand (brand/GUIDELINES.md; brand/polyphony/index.html is the reference and
+   wins on any value). Parchment and ink carry nearly every surface; the four voice hues
+   appear together or not at all, and they mean *which source is singing*, never a status.
+   Pending, done, disabled and empty are ink at opacity. Vermilion is the one hue that may
+   double as the error red, because it is the natural one.
 
-   The top of this file is the app shell — a sidebar, a top bar and a content area — in
-   neutral greys and one accent variable, so the active item and the badge have *a*
-   colour. Structure only; the colour and type decisions are still deferred. Everything
-   below the shell block is the screens' own styling. */
+   A restyle, not a redesign (motet#110): every class below is the one a screen already
+   used, so layouts, information architecture and interactions are what they were.
 
-:root {
-  --fg: #1a1a1a;
-  --muted: #666;
-  --line: #ddd;
-  --bad: #a11;
-  --good: #161;
-  /* The shell's palette: three greys and one accent. */
-  --bg: #fff;
-  --surface: #f7f7f8;
-  --hover: #ececee;
-  --accent: #2f5fd0;
-  --accent-soft: #e8eefb;
-  --sidebar-w: 14rem;
-  --topbar-h: 3.25rem;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, sans-serif;
-  line-height: 1.5;
-  color: var(--fg);
+   The top of this file is the tokens and the two faces, then the app shell, then the
+   screens' own styling. Dark mode is not designed; nothing here tries to guess one. */
+
+/* ---- Faces ------------------------------------------------------------------------
+
+   Self-hosted rather than loaded from Google Fonts: the SPA then makes no third-party
+   request, which is the property a private, authenticated app should keep, and the files
+   are fingerprinted and cached with the rest of the bundle. Latin subsets of the variable
+   fonts, OFL (licences beside them in fonts/). `font-display: swap`, so text renders in the
+   fallback stacks below first and changes face when the file lands. */
+
+@font-face {
+  font-family: "Fraunces";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("./fonts/Fraunces-normal-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Fraunces";
+  font-style: italic;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("./fonts/Fraunces-italic-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./fonts/InstrumentSans-normal-latin.woff2") format("woff2");
 }
 
-body { margin: 0; background: var(--bg); }
-h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
-h2 { font-size: 1.15rem; }
-h3 { font-size: 1rem; margin-bottom: .25rem; }
+:root {
+  --parchment: #F4EFE6;
+  --surface: #EAE3D6;
+  --ink: #1B1A2E;
+  --ink-soft: rgba(27, 26, 46, 0.66);
+  --ink-mute: rgba(27, 26, 46, 0.42);
+  --rule: rgba(27, 26, 46, 0.14);
+  --vermilion: #D64B2A;
+  --ochre: #D9A441;
+  --teal: #2A7F86;
+  --plum: #6B3E86;
+  /* The chord: a blend for a played portion, hard stops for a hairline. */
+  --voices: linear-gradient(90deg, var(--vermilion), var(--ochre), var(--teal), var(--plum));
+  --voices-stops: linear-gradient(90deg, var(--vermilion) 0 25%, var(--ochre) 25% 50%, var(--teal) 50% 75%, var(--plum) 75%);
+  --display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --body: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --shadow-ink: 0 1px 0 rgba(27, 26, 46, .2), 0 12px 32px -14px rgba(27, 26, 46, .6);
+
+  /* The names the screens were written against, pointed at the brand. */
+  --fg: var(--ink);
+  --muted: var(--ink-soft);
+  --line: var(--rule);
+  --bad: var(--vermilion);
+  --good: var(--ink);
+  --bg: var(--parchment);
+  --hover: rgba(27, 26, 46, 0.05);
+
+  --sidebar-w: 15rem;
+  --topbar-h: 72px;
+  --gutter: clamp(20px, 3.2vw, 44px);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--parchment);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+::selection { background: rgba(217, 164, 65, .35); }
+a { color: var(--ink); text-decoration-color: var(--rule); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--ink); }
+code { font-family: var(--mono); font-size: .88em; background: var(--surface); border-radius: 6px; padding: .05em .35em; }
+
+h1, h2, h3, h4 {
+  font-family: var(--display);
+  font-weight: 400;
+  font-variation-settings: "SOFT" 100, "opsz" 36;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  color: var(--ink);
+}
+h1 { font-size: 1.9rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.5rem; margin: 1.75rem 0 .5rem; }
+h3 { font-size: 1.25rem; margin: 1.5rem 0 .35rem; }
+h4 { font-size: 1.05rem; margin: 1rem 0 .3rem; }
+h1 em, h2 em, h3 em { font-style: italic; }
+
+/* ---- Brand pieces (web/src/brand/) ------------------------------------------------- */
+
+.wordmark {
+  display: inline-flex; align-items: center; gap: .3em;
+  font-family: var(--display); font-style: italic; font-weight: 500;
+  font-variation-settings: "SOFT" 100, "opsz" 72;
+  letter-spacing: -0.03em; line-height: 1;
+  color: var(--ink); text-decoration: none;
+}
+.wordmark .glyph { display: block; flex: none; }
+
+/* Four voice dots, then a small-caps label. */
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 12px;
+  font-size: 13px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink-soft); margin: 0 0 30px;
+}
+.voices { display: inline-flex; gap: 4px; }
+.voices i { display: block; width: 6px; height: 6px; border-radius: 50%; }
+.voices i:nth-child(1) { background: var(--vermilion); }
+.voices i:nth-child(2) { background: var(--ochre); }
+.voices i:nth-child(3) { background: var(--teal); }
+.voices i:nth-child(4) { background: var(--plum); }
+
+/* A label in the UI's own register: small caps, tracked, muted. */
+.label, .claims th, .grid th {
+  font-family: var(--body); font-size: 11px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--ink-mute);
+}
 
 /* ---- App shell ------------------------------------------------------------------- */
 
@@ -37,316 +141,603 @@ h3 { font-size: 1rem; margin-bottom: .25rem; }
 
 /* The sidebar: fixed on the left at desktop width, a bar across the top below it. */
 .sidebar {
-  position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-w); box-sizing: border-box;
+  position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-w);
   display: flex; flex-direction: column;
-  background: var(--surface); border-right: 1px solid var(--line);
+  background: var(--parchment); border-right: 1px solid var(--rule);
 }
-.brand-row { display: flex; align-items: center; justify-content: space-between; height: var(--topbar-h); padding: 0 1rem; box-sizing: border-box; }
-.brand { font-weight: 700; font-size: 1.05rem; letter-spacing: .01em; color: var(--fg); text-decoration: none; }
-.menu-button { display: none; background: none; border: 1px solid var(--line); border-radius: 6px; padding: .25rem .4rem; line-height: 0; color: var(--fg); }
+.brand-row { display: flex; align-items: center; justify-content: space-between; height: var(--topbar-h); padding: 0 1.25rem; border-bottom: 1px solid var(--rule); }
+.brand { font-size: 28px; }
+.menu-button {
+  display: none; background: none; border: 1px solid var(--rule); border-radius: 999px;
+  width: 40px; height: 40px; padding: 0; align-items: center; justify-content: center; color: var(--ink);
+}
+.menu-button:hover { border-color: var(--ink); background: var(--surface); }
 
-.sidebar nav { display: flex; flex-direction: column; flex: 1; padding: .5rem .5rem 1rem; gap: 0; }
+.sidebar nav { display: flex; flex-direction: column; flex: 1; padding: 1rem .75rem 1.25rem; gap: 0; }
 .nav-group { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 /* The bottom group: separated, and pushed to the foot of the sidebar. */
-.nav-group.system { margin-top: auto; padding-top: .5rem; border-top: 1px solid var(--line); }
+.nav-group.system { margin-top: auto; padding-top: .75rem; border-top: 1px solid var(--rule); }
 .nav-group a {
-  display: flex; align-items: center; gap: .6rem; padding: .45rem .65rem; border-radius: 6px;
-  color: var(--fg); text-decoration: none; font-size: .95rem;
+  position: relative;
+  display: flex; align-items: center; gap: .7rem; padding: .55rem .8rem; border-radius: 12px;
+  color: var(--ink-soft); text-decoration: none; font-size: 15px; font-weight: 500;
+  transition: background .2s ease, color .2s ease;
 }
-.nav-group a:hover { background: var(--hover); }
-.nav-group a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.nav-group .icon { flex: none; opacity: .8; }
-.nav-label { flex: 1; }
+.nav-group a:hover { background: var(--hover); color: var(--ink); }
+/* The active section: ink on the tinted surface, with the chord as a hairline under its
+   label — the reference nav's hover underline, held. */
+.nav-group a[aria-current="page"] { background: var(--surface); color: var(--ink); font-weight: 600; }
+.nav-group a[aria-current="page"] .nav-label { background: var(--voices) left bottom / 100% 2px no-repeat; padding-bottom: 2px; }
+.nav-group .icon { flex: none; opacity: .85; }
+.nav-label { flex: 1 0 auto; max-width: max-content; margin-right: auto; }
 
 /* The frame beside the sidebar: a top bar, then the content. */
 .frame { flex: 1; min-width: 0; margin-left: var(--sidebar-w); display: flex; flex-direction: column; }
 .topbar {
-  position: sticky; top: 0; z-index: 5; height: var(--topbar-h); box-sizing: border-box;
+  position: sticky; top: 0; z-index: 5; height: var(--topbar-h);
   display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-  padding: 0 1.5rem; background: var(--bg); border-bottom: 1px solid var(--line);
+  padding: 0 var(--gutter); background: rgba(244, 239, 230, .94); border-bottom: 1px solid var(--rule);
+  backdrop-filter: blur(6px);
 }
-.page-title { font-size: 1.05rem; font-weight: 600; margin: 0; }
-.topbar-right { display: flex; align-items: center; gap: .75rem; }
+.page-title { font-size: 30px; margin: 0; font-variation-settings: "SOFT" 100, "opsz" 72; }
+.topbar-right { display: flex; align-items: center; gap: .75rem; min-width: 0; }
 
 /* The content area. Its width is the open section's `layout` (shell/sections.tsx): a
    reading column, or `wide` for a screen made of tables, whose tables then scroll inside
    the content area rather than the page. A screen's title is the top bar's h1, so no
    screen repeats it. */
-main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.5rem 4rem; box-sizing: border-box; }
-.frame > main.wide { max-width: 90rem; overflow-x: auto; }
+main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter) 5rem; }
+.frame > main.wide { max-width: 92rem; overflow-x: auto; }
 /* The top bar's h1 is the page, so a screen's own headings start at h2 — sized as the
    subheadings they are rather than as the page titles h2 was sized for. */
-.frame > main h2 { font-size: 1rem; margin-bottom: .25rem; }
+.frame > main h2 { font-size: 1.45rem; margin: 2rem 0 .4rem; }
+.frame > main > section > h2:first-child, .frame > main > section > h3:first-child { margin-top: 0; }
 
 /* The account menu, right end of the top bar. */
-.popover-root { position: relative; }
-.popover-button { display: flex; align-items: center; gap: .35rem; background: none; border: 1px solid var(--line); border-radius: 999px; padding: .25rem .75rem; font-size: .9rem; max-width: 18rem; }
-.popover-button > .chevron { flex: none; opacity: .6; }
-.popover-button[aria-expanded="true"] { background: var(--hover); }
-.popover {
-  position: absolute; right: 0; top: calc(100% + .4rem); z-index: 10; width: 22rem; max-width: calc(100vw - 2rem);
-  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: .75rem 1rem;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, .08);
+.popover-root { position: relative; min-width: 0; }
+.popover-button {
+  display: flex; align-items: center; gap: .4rem; background: none;
+  border: 1px solid var(--rule); border-radius: 999px; padding: 9px 14px 9px 16px;
+  font-size: 14px; font-weight: 500; color: var(--ink); max-width: 18rem;
 }
-.popover .hint { margin: 0 0 .5rem; }
-.popover .token { margin: .75rem 0 0; padding-top: .75rem; border-top: 1px solid var(--line); }
-.popover .token summary { font-size: .9rem; cursor: pointer; }
+.popover-button > .chevron { flex: none; opacity: .6; }
+.popover-button:hover, .popover-button[aria-expanded="true"] { border-color: var(--ink); background: var(--surface); }
+.popover {
+  position: absolute; right: 0; top: calc(100% + .5rem); z-index: 10; width: 23rem; max-width: calc(100vw - 2rem);
+  background: var(--parchment); border: 1px solid var(--rule); border-radius: 20px; padding: 1rem 1.2rem;
+  box-shadow: 0 18px 40px -20px rgba(27, 26, 46, .45);
+}
+.popover .hint { margin: 0 0 .6rem; }
+.popover .token { margin: .9rem 0 0; padding-top: .9rem; border-top: 1px solid var(--rule); }
 
 /* The door and the OAuth callback: no sidebar, one thing to do. */
 .door { min-height: 100vh; display: flex; flex-direction: column; }
-.door-bar .brand { margin: 0; }
-.door-bar { height: var(--topbar-h); display: flex; align-items: center; padding: 0 1.5rem; border-bottom: 1px solid var(--line); background: var(--surface); }
-.door-main { max-width: 34rem; width: 100%; margin: 3rem auto; padding: 0 1.5rem; box-sizing: border-box; }
-.door-main .token { margin-bottom: 1.5rem; }
-.door-main .token summary { font-size: .9rem; color: var(--muted); cursor: pointer; }
+.door-bar {
+  height: 88px; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 clamp(20px, 5vw, 72px); border-bottom: 1px solid var(--rule);
+}
+.door-bar .brand { margin: 0; font-size: 30px; }
+.door-main { width: 100%; max-width: none; margin: 0; padding: 0; }
+/* A callback is a message and a button, not a landing page: a reading column. */
+.door-main.narrow { max-width: 40rem; margin: 4rem auto; padding: 0 clamp(20px, 5vw, 72px); }
+.door-main > .error { max-width: 40rem; margin: 1.5rem auto 0; padding: 0 clamp(20px, 5vw, 72px); }
 
 /* Below ~800px the sidebar is a bar across the top and the nav is behind a menu button. */
 @media (max-width: 800px) {
   .shell { flex-direction: column; }
-  .sidebar { position: sticky; top: 0; z-index: 6; width: auto; bottom: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sidebar { position: sticky; top: 0; z-index: 6; width: auto; bottom: auto; border-right: 0; border-bottom: 1px solid var(--rule); }
+  .brand-row { border-bottom: 0; padding: 0 1rem; }
+  .brand { font-size: 26px; }
   .menu-button { display: inline-flex; }
-  .sidebar nav { display: none; padding: .25rem .5rem .75rem; }
+  .sidebar nav { display: none; padding: .25rem .75rem 1rem; }
   .sidebar.open nav { display: flex; }
-  .nav-group.system { margin-top: .25rem; }
+  .nav-group.system { margin-top: .5rem; }
   .frame { margin-left: 0; }
-  .topbar { position: static; padding: 0 1rem; }
-  main { padding: 1rem 1rem 3rem; }
+  .topbar { position: static; height: 64px; padding: 0 1rem; }
+  .page-title { font-size: 26px; }
+  .popover-button { max-width: 11rem; }
+  .popover-button > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  main { padding: 1.25rem 1rem 3.5rem; }
+  .door-bar { height: 72px; }
+  .door-bar .brand { font-size: 26px; }
 }
+
+/* ---- The landing: the reference hero (SignIn.tsx) ----------------------------------- */
+
+.hero {
+  min-height: calc(100vh - 88px);
+  display: grid;
+  grid-template-columns: minmax(0, 11fr) minmax(0, 12fr);
+  gap: clamp(32px, 5vw, 80px);
+  align-items: center;
+  padding: 40px clamp(20px, 5vw, 72px);
+  position: relative;
+  overflow: hidden;
+}
+.hero-copy { max-width: 600px; position: relative; z-index: 1; }
+.headline {
+  font-size: clamp(46px, 5.4vw, 78px);
+  line-height: 1.02;
+  letter-spacing: -0.015em;
+  font-variation-settings: "SOFT" 100, "opsz" 144;
+  text-wrap: balance;
+  margin: 0 0 30px;
+}
+.headline em { font-style: italic; }
+.subhead {
+  font-size: clamp(17px, 1.35vw, 20px); line-height: 1.55; color: var(--ink-soft);
+  max-width: 30em; margin: 0 0 40px; text-wrap: pretty;
+}
+.ctas { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+.hero-copy .error { margin: 1.25rem 0 0; }
+.hero-meta {
+  margin-top: 52px; display: flex; gap: 32px; flex-wrap: wrap;
+  font-size: 13.5px; color: var(--ink-mute);
+}
+.hero-meta span { display: inline-flex; align-items: center; gap: 9px; }
+.hero-meta span::before { content: ""; width: 14px; height: 1.5px; background: currentColor; opacity: .6; }
+/* A soft acoustic glow behind the motif. */
+.hero::after {
+  content: ""; position: absolute; z-index: 0; right: -8%; top: 10%; width: 60%; height: 80%;
+  background:
+    radial-gradient(closest-side, rgba(217, 164, 65, .14), transparent 70%),
+    radial-gradient(closest-side at 70% 60%, rgba(42, 127, 134, .10), transparent 70%);
+  filter: blur(20px); pointer-events: none;
+}
+
+/* The motif: four waveforms on staves converging into one ink line (brand/Motif.tsx). */
+.motif { position: relative; z-index: 1; margin: 0; width: 100%; display: flex; flex-direction: column; }
+.motif .score { width: 100%; aspect-ratio: 5 / 3.1; max-height: 440px; }
+.motif .score svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.motif .voice { fill: none; stroke-width: 5; stroke-linecap: round; mix-blend-mode: multiply; }
+.motif .voice.v1 { stroke: var(--vermilion); }
+.motif .voice.v2 { stroke: var(--ochre); }
+.motif .voice.v3 { stroke: var(--teal); }
+.motif .voice.v4 { stroke: var(--plum); }
+.motif .one { fill: none; stroke: var(--ink); stroke-width: 5; stroke-linecap: round; }
+.motif .score-label { font-family: var(--body); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; fill: var(--ink-mute); }
+.motif .score-label.ink { fill: var(--ink); opacity: .7; }
+.motif .transport { margin-top: 22px; }
+.now-playing, .motif-caption {
+  font-family: var(--display); font-style: italic; font-size: 15px;
+  font-variation-settings: "SOFT" 100, "opsz" 14;
+}
+.now-playing { margin: 14px 0 0; color: var(--ink-soft); }
+.motif-caption { margin-top: 22px; text-align: right; color: var(--ink-mute); }
+/* Smaller, on an empty backlog: the motif without its player. */
+.motif.quiet { max-width: 30rem; margin: 1.5rem 0 0; }
+.motif.quiet .score { max-height: 220px; }
+.motif.quiet .motif-caption { text-align: left; margin-top: 10px; }
+/* At this size the stave labels are specks, so the quiet score goes without them. */
+.motif.quiet .score-label { display: none; }
+
+/* Below the fold on the landing: what "Start listening" does, and the other key. */
+.door-panel {
+  border-top: 1px solid var(--rule);
+  padding: 64px clamp(20px, 5vw, 72px) 80px;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 80px);
+}
+.door-panel h2 { margin: 0 0 .75rem; font-size: clamp(30px, 3vw, 42px); }
+.door-panel .kicker {
+  display: flex; align-items: center; gap: 12px; margin: 0 0 14px;
+  font-size: 12px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-mute);
+}
+.door-panel .kicker::before { content: ""; width: 28px; height: 1px; background: var(--ink); opacity: .35; }
+.door-panel .hint { max-width: 34em; }
+.door-panel .token { margin: 0; background: var(--surface); border-radius: 20px; padding: 1.4rem 1.6rem; align-self: start; }
+
+@media (max-width: 860px) {
+  .hero { grid-template-columns: 1fr; min-height: 0; padding-top: 56px; padding-bottom: 48px; gap: 48px; }
+  .hero::after { display: none; }
+  .headline { font-size: clamp(40px, 11vw, 56px); }
+  .hero-meta { margin-top: 36px; gap: 18px; }
+  .motif .score { max-height: none; }
+  .motif .score-label { font-size: 14px; }
+  .motif .voice, .motif .one { stroke-width: 6; }
+  .door-panel { grid-template-columns: 1fr; padding-top: 48px; padding-bottom: 56px; }
+}
+@media (max-width: 420px) {
+  :root { font-size: 16px; }
+  .ctas { gap: 18px; }
+  .btn-primary { padding: 15px 22px; font-size: 15px; }
+}
+
+/* ---- Controls ----------------------------------------------------------------------
+
+   One primary action per screen as an ink pill with the chord along its foot; everything
+   else is a pill with a hairline border; a secondary choice is a text link. No outlined
+   rectangles. */
+
+button {
+  font: inherit; font-size: 14px; font-weight: 500; line-height: 1.2;
+  color: var(--ink); background: transparent;
+  border: 1px solid var(--rule); border-radius: 999px; padding: 8px 16px;
+  cursor: pointer; transition: border-color .2s ease, background .2s ease, transform .2s ease, box-shadow .2s ease;
+}
+button:hover:not(:disabled) { border-color: var(--ink); background: var(--surface); }
+button:disabled { color: var(--ink-mute); border-color: var(--rule); cursor: default; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
+
+.btn-primary, button.primary {
+  position: relative; overflow: hidden;
+  display: inline-flex; align-items: center; gap: 12px;
+  background: var(--ink); color: var(--parchment); border: 0;
+  border-radius: 999px; font-weight: 600; font-size: 15px; letter-spacing: .005em;
+  padding: 11px 22px 12px;
+  box-shadow: var(--shadow-ink);
+  text-decoration: none;
+}
+.btn-primary { padding: 17px 28px 17px 26px; font-size: 16px; }
+.btn-primary::before, button.primary::before {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+  background: var(--voices-stops); opacity: .95;
+}
+.btn-primary:hover:not(:disabled), button.primary:hover:not(:disabled) {
+  background: var(--ink); transform: translateY(-1px);
+  box-shadow: 0 1px 0 rgba(27, 26, 46, .2), 0 18px 36px -14px rgba(27, 26, 46, .7);
+}
+.btn-primary:disabled, button.primary:disabled { color: rgba(244, 239, 230, .7); opacity: .6; box-shadow: none; }
+/* The play glyph in a parchment circle. */
+.btn-primary .play-glyph { width: 22px; height: 22px; border-radius: 50%; background: var(--parchment); position: relative; flex: none; }
+.btn-primary .play-glyph::after {
+  content: ""; position: absolute; left: 9px; top: 6px;
+  border-left: 7px solid var(--ink); border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+}
+
+.btn-text, .linkish {
+  background: none; border: 0; border-radius: 0; padding: 0 0 2px;
+  font-weight: 500; color: var(--ink); text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+}
+.btn-text { font-size: 16px; }
+.btn-text:hover, .linkish:hover:not(:disabled) { background: none; border-bottom-color: var(--ink); }
+.linkish:disabled { border-bottom-color: transparent; }
+
+button.danger { color: var(--vermilion); border-color: rgba(214, 75, 42, .45); }
+button.danger:hover:not(:disabled) { border-color: var(--vermilion); background: rgba(214, 75, 42, .07); }
+
+input, textarea, select {
+  font: inherit; font-size: 15px; color: var(--ink);
+  background: rgba(255, 255, 255, .45); border: 1px solid var(--rule); border-radius: 12px;
+  padding: .6rem .8rem; width: 100%;
+  transition: border-color .2s ease, background .2s ease;
+}
+input:hover, textarea:hover, select:hover { border-color: rgba(27, 26, 46, .3); }
+input:focus, textarea:focus, select:focus { border-color: var(--ink); background: rgba(255, 255, 255, .7); }
+input::placeholder, textarea::placeholder { color: var(--ink-mute); }
+input[type="number"] { width: 6rem; font-variant-numeric: tabular-nums; }
+input[type="checkbox"] { width: 1rem; height: 1rem; accent-color: var(--ink); }
+textarea { line-height: 1.55; }
+form { display: grid; gap: .4rem; max-width: 46rem; }
+form button { justify-self: start; margin-top: .6rem; }
+label { font-weight: 600; font-size: 13px; color: var(--ink-soft); }
+
+details > summary { cursor: pointer; color: var(--ink-soft); font-size: 14px; font-weight: 500; }
+details > summary:hover { color: var(--ink); }
 
 /* ---- Screens ---------------------------------------------------------------------- */
 
-button { font: inherit; padding: .35rem .7rem; cursor: pointer; }
-input, textarea { font: inherit; padding: .4rem; width: 100%; box-sizing: border-box; }
-input[type="number"] { width: 6rem; }
-form { display: grid; gap: .35rem; max-width: 46rem; }
-form button { justify-self: start; margin-top: .5rem; }
-label { font-weight: 600; font-size: .9rem; }
-
-.row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .75rem 0; }
-.hint { color: var(--muted); font-size: .9rem; }
-.error { color: var(--bad); }
-.ok { color: var(--good); }
+.row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .9rem 0; }
+.hint { color: var(--ink-soft); font-size: 14px; }
+.error { color: var(--vermilion); }
+.ok { color: var(--ink); }
 .token { margin-bottom: 1rem; }
 .feed-url { word-break: break-all; }
 
-.items { list-style: none; padding: 0; }
-.items li { border-top: 1px solid var(--line); padding: .75rem 0; }
-.items li.read strong { color: var(--muted); font-weight: 400; }
+.items { list-style: none; padding: 0; margin: .5rem 0 0; }
+.items li { border-top: 1px solid var(--rule); padding: 1.1rem 0; }
+.items > li > p { margin: .35rem 0; }
+.items > li > .item-head strong { font-family: var(--display); font-weight: 400; font-size: 1.2rem; font-variation-settings: "SOFT" 100, "opsz" 36; line-height: 1.25; }
+.items > li.read > .item-head strong { color: var(--ink-mute); }
+.items li.read > p:not(.hint) { color: var(--ink-soft); }
 .item-head { display: flex; gap: 1rem; justify-content: space-between; align-items: baseline; }
+.item-head button { flex: none; }
 
-.segment { border-top: 1px solid var(--line); padding-top: 1rem; margin-top: 1rem; }
-.claims { border-collapse: collapse; width: 100%; }
-.claims th { text-align: left; font-size: .8rem; color: var(--muted); text-transform: uppercase; }
-.claims th, .claims td { border-bottom: 1px solid var(--line); padding: .5rem; vertical-align: top; width: 50%; }
-.claims blockquote { margin: 0 0 .25rem; padding-left: .6rem; border-left: 3px solid var(--line); color: #333; }
+.segment { border-top: 1px solid var(--rule); padding-top: 1.5rem; margin-top: 1.75rem; }
+.segment h2 { margin-top: 0; }
+.claims { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+.claims th { text-align: left; padding: .5rem .75rem .5rem 0; }
+.claims th, .claims td { border-bottom: 1px solid var(--rule); padding: .75rem .75rem .75rem 0; vertical-align: top; width: 50%; }
+.claims td:first-child { font-size: 16px; line-height: 1.6; }
+.claims tbody tr:last-child td { border-bottom: 0; }
+/* The episode's own line above the player: its title in the display face. */
+.episode-heading { margin: 0 0 .25rem; font-variant-numeric: tabular-nums; }
+.episode-heading strong { font-family: var(--display); font-weight: 400; font-variation-settings: "SOFT" 100, "opsz" 72; font-size: 2rem; color: var(--ink); display: block; line-height: 1.1; margin-bottom: .2rem; }
+.claims blockquote {
+  margin: 0 0 .35rem; padding-left: .85rem; border-left: 2px solid var(--rule); color: var(--ink-soft);
+  font-family: var(--display); font-style: italic; font-variation-settings: "SOFT" 100, "opsz" 14; font-size: 15px;
+}
 
 /* The processing list. Boxed and set apart from the backlog below it because it answers a
    different question — "where did what I just pasted go" rather than "what is there to
    listen to" — and because a queued item that reads as a backlog entry is exactly the
    confusion this whole surface exists to remove. */
-.processing { border: 1px solid var(--line); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1.25rem; }
+.processing { border: 1px solid var(--rule); border-radius: 20px; padding: 1.1rem 1.4rem; margin-bottom: 1.5rem; background: var(--surface); }
 /* "Nothing is draining the queue." Loud enough to be read before the list under it, and
-   not an error: the deployment is misconfigured or idle, not broken (motet#38). */
-.stalled { border-left: 3px solid var(--bad); background: #fdf6f6; padding: .5rem .75rem; margin: .5rem 0 0; font-size: .9rem; }
+   not an error: the deployment is misconfigured or idle, not broken (motet#38) — so ink,
+   not vermilion. */
+.stalled { border-left: 3px solid var(--ink); background: rgba(27, 26, 46, .05); border-radius: 0 12px 12px 0; padding: .6rem .9rem; margin: .6rem 0 0; font-size: 14px; }
 /* Something that happened and is worth saying once — a consent that was cancelled. The
-   same shape as `.stalled` in a neutral colour, because it is news rather than a fault. */
-.consent-notice { border-left: 3px solid var(--line); background: #f6f6f6; padding: .5rem .75rem; margin: .5rem 0 1rem; }
-/* A button that reads as a link, for choosing between things rather than doing one. */
-.linkish { background: none; border: 0; padding: 0; color: var(--fg); text-decoration: underline; }
-.processing h2 { margin-top: 0; }
+   same shape as `.stalled`, lighter, because it is news rather than a fault. */
+.consent-notice { border-left: 3px solid var(--rule); background: var(--surface); border-radius: 0 12px 12px 0; padding: .6rem .9rem; margin: .5rem 0 1.25rem; }
+.processing h2, .processing h3, .frame > main .processing h2, .frame > main .held h3 { margin-top: 0; }
 .processing .items li:first-child { border-top: none; }
-.badge { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .5rem; white-space: nowrap; }
-.badge.failed { color: var(--bad); border-color: var(--bad); }
-.badge.integrated { color: var(--good); border-color: var(--good); }
-/* The reason, monospaced: it is a vendor error string, and it is read to be copied. */
-.label-sync { border-top: 1px dashed var(--line); margin-top: .75rem; padding-top: .75rem; }
+.badge {
+  display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--ink-soft); border: 1px solid var(--rule); border-radius: 999px; padding: 3px 9px; white-space: nowrap;
+  font-family: var(--body); line-height: 1.3;
+}
+.badge.failed { color: var(--vermilion); border-color: rgba(214, 75, 42, .5); }
+.badge.integrated { color: var(--ink); border-color: var(--ink); }
+.label-sync { border-top: 1px dashed var(--rule); margin-top: 1rem; padding-top: 1rem; }
 .label-sync .stalled { margin-bottom: .75rem; }
 .label-sync .stalled p { margin-top: 0; }
-.reason { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; background: #f6f6f6; border-left: 3px solid var(--line); padding: .4rem .6rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
-.ingestion.failed .reason { border-left-color: var(--bad); }
+/* The reason, monospaced: it is a vendor error string, and it is read to be copied. */
+.reason { font-family: var(--mono); font-size: 12.5px; background: rgba(27, 26, 46, .05); border-left: 2px solid var(--rule); border-radius: 0 8px 8px 0; padding: .45rem .7rem; margin: .3rem 0 0; overflow-wrap: anywhere; }
+.ingestion.failed .reason { border-left-color: var(--vermilion); }
 
-.tab-count { margin-left: .35rem; font-size: .75rem; border-radius: 999px; border: 1px solid var(--line); padding: 0 .35rem; }
-.tab-count.failed { color: var(--bad); border-color: var(--bad); }
+/* The sidebar count: what needs a person. Ink when it is only waiting; vermilion when one of
+   them is never coming back on its own. */
+.tab-count {
+  margin-left: .4rem; min-width: 1.4rem; text-align: center;
+  font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+  border-radius: 999px; padding: 1px 7px; background: var(--ink); color: var(--parchment);
+}
+.tab-count.failed { background: var(--vermilion); }
 
-/* The Admin screen. */
+/* The Admin screen: the operator view. Tokens and type, no motif. */
 .admin-bar { justify-content: flex-start; margin-top: 0; }
-.grid { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: .9rem; }
-.grid th { text-align: left; font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--line); padding: .35rem .5rem; }
-.grid th.sub { font-size: .7rem; border-bottom: 2px solid var(--line); }
-.grid td { border-bottom: 1px solid var(--line); padding: .35rem .5rem; vertical-align: top; }
+.grid { border-collapse: collapse; width: 100%; margin-bottom: 1.75rem; font-size: 14px; }
+.grid th { text-align: left; border-bottom: 1px solid var(--rule); padding: .45rem .6rem; font-size: 10.5px; white-space: nowrap; }
+.grid th.sub { border-bottom: 1px solid var(--ink); opacity: .9; }
+.grid td { border-bottom: 1px solid var(--rule); padding: .45rem .6rem; vertical-align: top; }
 .grid th.num, .grid td.num { text-align: right; font-variant-numeric: tabular-nums; width: 4rem; }
-.grid td.zero { color: #bbb; }
-.grid td.bad, .grid td.err { color: var(--bad); }
-.grid td.live { color: #06c; font-weight: 600; }
-.grid td.ok { color: var(--good); }
-.grid tbody tr:hover { background: #f6f6f6; cursor: pointer; }
-.grid tr.selected { background: #eef4ff; }
+.grid td.zero { color: var(--ink-mute); }
+.grid td.bad, .grid td.err { color: var(--vermilion); }
+.grid td.live { color: var(--ink); font-weight: 700; }
+.grid td.ok { color: var(--ink); }
+.grid tbody tr:hover { background: var(--hover); cursor: pointer; }
+.grid tr.selected { background: var(--surface); }
 .grid.jobs tbody tr { cursor: default; }
-.grid.jobs tr.failed { background: #fdf6f6; }
-.grid.jobs tr.running { background: #f0f6ff; }
-.grid td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; white-space: nowrap; }
-.grid td.err { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; max-width: 28rem; overflow-wrap: anywhere; }
-.badge.running { color: #06c; border-color: #06c; }
-.badge.done { color: var(--muted); }
-.admin select { font: inherit; padding: .3rem; }
+.grid.jobs tr.failed { background: rgba(214, 75, 42, .06); }
+.grid.jobs tr.running { background: rgba(27, 26, 46, .04); }
+.grid td.mono { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.grid td.err { font-family: var(--mono); font-size: 12px; max-width: 28rem; overflow-wrap: anywhere; }
+.badge.running { color: var(--ink); border-color: var(--ink); }
+.badge.done { color: var(--ink-mute); }
+.admin select { width: auto; padding: .35rem .6rem; border-radius: 999px; }
 
 /* The Episodes shelf (Episodes.tsx): every episode, what is still to be heard above what
    has been, and the detail a click away. */
-.back-row { margin: 0 0 .75rem; }
-.back-row .linkish { text-decoration: none; color: var(--muted); font-size: .9rem; }
-.back-row .linkish:hover { color: var(--fg); text-decoration: underline; }
-.episode-group { margin-top: 1.25rem; }
-.episodes > .episode-group:first-child { margin-top: 0; }
-.episode-group h3 { margin: 0 0 .25rem; font-size: 1rem; }
-.episode-group summary { cursor: pointer; list-style: revert; }
+.back-row { margin: 0 0 1.25rem; }
+.back-row .linkish { color: var(--ink-soft); font-size: 14px; }
+.back-row .linkish:hover { color: var(--ink); }
+.episode-group { margin-top: 2rem; }
+.episodes > .episode-group:first-child, .episodes > .hint + .episode-group { margin-top: 0; }
+.episode-group h3 { margin: 0 0 .5rem; font-size: 1.45rem; }
+.episode-group h3 .hint { font-family: var(--body); font-size: 14px; font-variant-numeric: tabular-nums; }
+.episode-group summary { cursor: pointer; list-style: revert; color: var(--ink); }
 .episode-group summary h3 { display: inline; }
 .episode-list { list-style: none; padding: 0; margin: 0; }
-.episode-row { display: flex; gap: 1rem; align-items: flex-start; border-top: 1px solid var(--line); padding: .75rem .5rem; cursor: pointer; }
-.episode-row:hover { background: var(--surface); }
-.episode-row.listened .episode-title { color: var(--muted); font-weight: 400; }
-.episode-row.failed .episode-title { color: var(--bad); }
+.episode-row {
+  display: flex; gap: 1.25rem; align-items: flex-start;
+  border-top: 1px solid var(--rule); padding: 1.1rem .75rem; margin: 0 -.75rem;
+  border-radius: 12px; cursor: pointer; transition: background .2s ease;
+}
+.episode-row:hover { background: var(--hover); }
+.episode-row + .episode-row { border-top-color: var(--rule); }
+.episode-row.listened .episode-title { color: var(--ink-soft); }
+.episode-row.failed .episode-title { color: var(--ink); }
 .episode-main { flex: 1; min-width: 0; }
-.episode-head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-.episode-title { font-weight: 600; text-decoration: none; text-align: left; font-size: 1rem; }
-.episode-title:hover { text-decoration: underline; }
-.episode-meta { margin: .15rem 0 0; }
-.episode-error { margin: .25rem 0 0; color: var(--bad); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; overflow-wrap: anywhere; }
-.episode-progress { display: flex; align-items: center; gap: .75rem; margin-top: .4rem; }
-.progress { flex: 1; max-width: 18rem; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.progress-fill { height: 100%; background: var(--accent); }
+.episode-head { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.episode-title {
+  font-family: var(--display); font-weight: 400; font-variation-settings: "SOFT" 100, "opsz" 36;
+  font-size: 1.3rem; line-height: 1.2; text-align: left; border-bottom: 0; padding: 0;
+}
+.episode-title:hover { border-bottom: 0; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 4px; }
+.episode-meta { margin: .25rem 0 0; font-variant-numeric: tabular-nums; }
+.episode-error { margin: .35rem 0 0; color: var(--vermilion); font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.episode-progress { display: flex; align-items: center; gap: .9rem; margin-top: .6rem; }
+/* How far in: the played portion of a scrubber, in miniature. */
+.progress { flex: 1; max-width: 18rem; height: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--voices); border-radius: 6px; }
 .progress-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.episode-actions { display: flex; flex-direction: column; align-items: flex-end; gap: .35rem; flex: none; }
-.episode-actions .play { border: 1px solid var(--accent); color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: .3rem .9rem; font-weight: 600; white-space: nowrap; }
-.episode-actions .play:hover { background: var(--accent); color: #fff; }
-.badge.working { color: var(--accent); border-color: var(--accent); }
-.badge.listened { color: var(--muted); }
+.episode-actions { display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; flex: none; }
+.episode-actions .play {
+  background: var(--ink); color: var(--parchment); border: 0; border-radius: 999px;
+  padding: 8px 16px; font-weight: 600; white-space: nowrap; box-shadow: var(--shadow-ink);
+}
+.episode-actions .play:hover:not(:disabled) { background: var(--ink); transform: translateY(-1px); }
+.episode-actions .linkish.hint { font-size: 13px; }
+.badge.working { color: var(--ink); border-color: var(--ink); }
+.badge.listened { color: var(--ink-mute); }
 
-/* The in-page player on the episode detail. */
-.player { margin: .75rem 0 1rem; }
-.player audio { width: 100%; max-width: 46rem; display: block; }
-.player .hint { margin: .25rem 0 0; }
+/* The in-page player on the episode detail: the reference transport. An ink play circle; a
+   surface track whose played portion is the chord, with an ink knob; tabular times; a
+   speed pill and the mic pill. The <audio> element itself has no controls of its own. */
+.player { margin: 1.25rem 0 1rem; max-width: 46rem; }
+.player audio { display: none; }
+.player .hint { margin: .5rem 0 0; }
+.transport { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 16px; }
+.transport .play {
+  width: 46px; height: 46px; border-radius: 50%; padding: 0; border: 0;
+  background: var(--ink); color: var(--parchment); position: relative; flex: none;
+  box-shadow: var(--shadow-ink);
+}
+.transport .play:hover:not(:disabled) { background: var(--ink); transform: translateY(-1px); }
+.transport .play::after {
+  content: ""; position: absolute; left: 19px; top: 15px;
+  border-left: 13px solid var(--parchment); border-top: 8px solid transparent; border-bottom: 8px solid transparent;
+}
+.transport .play.playing::after {
+  left: 16px; top: 15px; width: 14px; height: 16px; border: 0;
+  background: linear-gradient(90deg, var(--parchment) 0 5px, transparent 5px 9px, var(--parchment) 9px 14px);
+}
+.scrub { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; }
+.scrub .t { font-size: 13px; font-weight: 500; color: var(--ink-soft); font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.track { position: relative; height: 6px; border-radius: 6px; background: var(--surface); }
+.track .played { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 6px; background: var(--voices); }
+.track .knob {
+  position: absolute; top: 50%; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--ink); border: 2.5px solid var(--parchment); transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgba(27, 26, 46, .18), 0 4px 10px -4px rgba(27, 26, 46, .5);
+  pointer-events: none;
+}
+/* The real control: a range input laid over the drawn track, invisible, so the keyboard,
+   the screen reader and a drag all reach one native slider. */
+.track input[type="range"] {
+  position: absolute; inset: -10px -8px; width: calc(100% + 16px); height: 26px;
+  margin: 0; padding: 0; opacity: 0; cursor: pointer; border: 0;
+}
+.track:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 6px; }
+.transport .pills { display: inline-flex; gap: 8px; align-items: center; }
+.pill-button, .transport .pills button {
+  display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px;
+  font-size: 13px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.transport .pills .mic, .live .mic { background: var(--surface); border-color: transparent; }
+.transport .pills .mic:hover:not(:disabled), .live .mic:hover:not(:disabled) { border-color: var(--ink); }
+.transport .pills .mic svg, .live .mic svg { display: block; flex: none; }
+.transport .pills .mic:disabled svg { opacity: .45; }
+@media (max-width: 640px) {
+  .transport { grid-template-columns: auto minmax(0, 1fr); gap: 14px; }
+  .transport .pills { grid-column: 1 / -1; justify-content: flex-end; }
+}
+
+/* Play Live, under the player. */
+.live { margin: .5rem 0 1rem; max-width: 46rem; }
+.live .row { margin: .5rem 0; }
+.live-log { list-style: none; padding: .75rem 1rem; margin: .75rem 0 0; background: var(--surface); border-radius: 12px; font-size: 15px; }
+.live-log li { padding: .2rem 0; }
 
 /* Held items — pulled in, waiting for "ingest now" (Held.tsx). */
-.held { border: 1px solid var(--line); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1.25rem; }
+.held { border: 1px solid var(--rule); border-radius: 20px; padding: 1.1rem 1.4rem; margin-bottom: 1.5rem; overflow-x: auto; }
 .held h3 { margin: 0; }
 .held .row { margin-top: 0; }
 .held-table th.check, .held-table td.check { width: 1.5rem; }
 .held-table tbody tr { cursor: pointer; }
-.held-table tr.preview-row td { background: #fafafa; font-size: .85rem; cursor: default; }
-.held-table tr.preview-row:hover { background: #fafafa; }
-.linkish.hint { font-size: .8rem; }
+.held-table tr.preview-row td { background: var(--surface); font-size: 13.5px; cursor: default; }
+.held-table tr.preview-row:hover { background: var(--surface); }
+.linkish.hint { font-size: 13px; color: var(--ink-soft); }
 
-/* The three-stage source item lifecycle (SourceItemDetail.tsx). Plain like
-   the rest: a numbered card per stage so that the empty stage 2 of a held item is still
-   visibly a stage. */
-.lifecycle { border: 1px solid var(--line); border-radius: 4px; padding: .5rem .9rem .75rem; margin: .5rem 0; background: #fafafa; font-weight: 400; color: var(--fg); }
+/* The three-stage source item lifecycle (SourceItemDetail.tsx): a numbered card per stage
+   so that the empty stage 2 of a held item is still visibly a stage. */
+.lifecycle { border: 1px solid var(--rule); border-radius: 12px; padding: .6rem 1.1rem .9rem; margin: .75rem 0; background: var(--surface); font-weight: 400; color: var(--ink); }
 .lifecycle-head { margin: .25rem 0 .5rem; }
-.stage { border-top: 1px solid var(--line); padding: .5rem 0 .6rem; }
-.stage h4 { margin: 0 0 .1rem; font-size: .95rem; }
-.stage-number { display: inline-block; min-width: 1.3rem; height: 1.3rem; line-height: 1.3rem; text-align: center; border: 1px solid var(--fg); border-radius: 50%; font-size: .8rem; margin-right: .2rem; }
-.stage-what { margin: 0 0 .5rem; font-size: .85rem; }
-.facts { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .9rem; margin: .35rem 0; font-size: .9rem; }
-.facts dt { color: var(--muted); }
+.stage { border-top: 1px solid var(--rule); padding: .7rem 0 .75rem; }
+.stage h4 { margin: 0 0 .15rem; font-size: 1.05rem; }
+.stage-number {
+  display: inline-block; min-width: 1.45rem; height: 1.45rem; line-height: 1.4rem; text-align: center;
+  border: 1px solid var(--ink); border-radius: 50%; font-size: .8rem; margin-right: .25rem;
+  font-family: var(--display); font-style: italic; font-variant-numeric: tabular-nums;
+}
+.stage-what { margin: 0 0 .5rem; font-size: 13.5px; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; margin: .4rem 0; font-size: 14px; }
+.facts dt { color: var(--ink-mute); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
-.extracted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; border: 1px solid var(--line); padding: .5rem; font-size: .85rem; background: #fff; }
-.stage-status { margin: .25rem 0; }
-.stage-status.status-failed strong { color: var(--bad); }
-.stage-status.status-done strong { color: var(--good); }
-.stage-gaps { margin: .35rem 0 0; font-size: .8rem; }
+.mono { font-family: var(--mono); font-size: 13px; }
+.extracted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; border: 1px solid var(--rule); border-radius: 12px; padding: .75rem; font-size: 13.5px; background: var(--parchment); }
+.stage-status { margin: .3rem 0; }
+.stage-status.status-failed strong { color: var(--vermilion); }
+.stage-status.status-done strong { color: var(--ink); }
+.stage-gaps { margin: .4rem 0 0; font-size: 13px; }
 .linked-news { list-style: none; padding: 0; margin: 0; }
 .linked-news p { margin: .2rem 0; }
 /* The news item a stage-3 link points at, for a moment. */
-.items li.flash { background: #fff8d6; transition: background 1s; }
+.items li.flash { background: rgba(217, 164, 65, .2); transition: background 1s; }
 .held-table .preview-row td { padding-top: 0; }
-.step + .step { border-top: 1px dashed var(--line); margin-top: .4rem; padding-top: .4rem; }
-/* PROTOTYPE — the Sources screen as an integrations catalog (screens/sources/). Neutral
-   greys; the pills carry the only colour and they carry it as a dot, so a row of cards
-   reads as a set. */
-.sources .lead { margin: 0 0 1.25rem; color: var(--fg); }
-.integration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.step + .step { border-top: 1px dashed var(--rule); margin-top: .5rem; padding-top: .5rem; }
+
+/* The Sources screen as an integrations catalog (screens/sources/). A card per
+   integration; the pills carry a dot, in ink at opacity, because a connection's state is a
+   status and the voice hues are not. */
+.sources .lead { margin: 0 0 1.5rem; color: var(--ink-soft); font-size: 17px; max-width: 36em; }
+.integration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 @media (max-width: 640px) { .integration-grid { grid-template-columns: 1fr; } }
 .integration-card {
-  display: flex; flex-direction: column; gap: .5rem; box-sizing: border-box;
-  border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem; background: var(--bg);
+  display: flex; flex-direction: column; gap: .6rem;
+  border: 1px solid var(--rule); border-radius: 20px; padding: 1.25rem 1.4rem; background: var(--parchment);
+  transition: border-color .2s ease, background .2s ease;
 }
-.integration-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.integration-card.highlighted:not(.selected) { border-color: #999; background: var(--surface); }
-.integration-card.unavailable { color: var(--muted); background: var(--surface); }
-.integration-card.unavailable .integration-icon { opacity: .5; }
-.integration-head { display: flex; gap: .75rem; align-items: flex-start; }
-.integration-icon { flex: none; color: var(--fg); margin-top: .1rem; }
-.integration-title { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
-.integration-title h3 { margin: 0; font-size: 1.02rem; }
-.integration-desc { margin: 0; font-size: .9rem; color: var(--muted); flex: 1; }
-.integration-foot { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-top: .25rem; }
+.integration-card.selected { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.integration-card.highlighted:not(.selected) { border-color: rgba(27, 26, 46, .35); background: var(--surface); }
+.integration-card.unavailable { color: var(--ink-soft); background: transparent; border-style: dashed; }
+.integration-card.unavailable .integration-icon { opacity: .45; }
+.integration-head { display: flex; gap: .85rem; align-items: flex-start; }
+.integration-icon { flex: none; color: var(--ink); margin-top: .15rem; }
+.integration-title { display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+.integration-title h3 { margin: 0; font-size: 1.3rem; }
+.integration-desc { margin: 0; font-size: 14px; color: var(--ink-soft); flex: 1; }
+.integration-foot { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-top: .35rem; }
 .integration-foot .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .integration-foot button { flex: none; }
 
-/* Buttons: one primary, one danger, the rest as they were. */
-button.primary { background: var(--fg); color: var(--bg); border: 1px solid var(--fg); border-radius: 6px; }
-button.primary:disabled { opacity: .5; cursor: default; }
-button.danger { color: var(--bad); border-color: var(--bad); }
-.integration-card button, .integration-panel button:not(.linkish) { border-radius: 6px; }
-
-/* Status pills. The dot is the colour; the text stays the text colour so the pill is
-   legible without it. */
-.pill { display: inline-flex; align-items: center; gap: .4rem; font-size: .75rem; letter-spacing: .02em; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .55rem .1rem .45rem; white-space: nowrap; color: var(--fg); background: var(--bg); align-self: flex-start; }
-.pill-dot { width: .5rem; height: .5rem; border-radius: 50%; background: #bbb; flex: none; }
-.pill-connected .pill-dot { background: var(--good); }
-.pill-error .pill-dot { background: var(--bad); }
-.pill-error { border-color: var(--bad); color: var(--bad); }
-.pill-paused .pill-dot, .pill-disconnected .pill-dot { background: #999; }
-.pill-awaiting_consent .pill-dot { background: #d9a400; }
-.pill-not_connected .pill-dot { background: transparent; border: 1px solid #999; box-sizing: border-box; }
-.pill-always_on .pill-dot { background: var(--good); }
-.pill-coming_soon { color: var(--muted); border-style: dashed; }
-.pill-coming_soon .pill-dot { background: transparent; border: 1px dashed #999; box-sizing: border-box; }
+/* Status pills. The dot is the state; the text stays ink so the pill is legible without it. */
+.pill {
+  display: inline-flex; align-items: center; gap: .45rem; font-size: 12px; font-weight: 500; letter-spacing: .02em;
+  border: 1px solid var(--rule); border-radius: 999px; padding: 3px 10px 3px 8px; white-space: nowrap;
+  color: var(--ink); background: var(--parchment); align-self: flex-start;
+}
+.pill-dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--ink-mute); flex: none; }
+.pill-connected .pill-dot, .pill-always_on .pill-dot { background: var(--ink); }
+.pill-error { border-color: rgba(214, 75, 42, .5); color: var(--vermilion); }
+.pill-error .pill-dot { background: var(--vermilion); }
+.pill-paused .pill-dot, .pill-disconnected .pill-dot { background: var(--ink-mute); }
+.pill-awaiting_consent .pill-dot { background: transparent; border: 2px solid var(--ink); }
+.pill-not_connected .pill-dot { background: transparent; border: 1px solid var(--ink-mute); }
+.pill-coming_soon { color: var(--ink-soft); border-style: dashed; background: transparent; }
+.pill-coming_soon .pill-dot { background: transparent; border: 1px dashed var(--ink-mute); }
 
 /* The panel under the grid: one integration in full. */
-.integration-panel { margin-top: 1rem; border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem 1.25rem; background: var(--surface); }
-.integration-panel-head { display: flex; gap: .75rem; align-items: flex-start; padding-bottom: .75rem; border-bottom: 1px solid var(--line); }
+.integration-panel { margin-top: 1.25rem; border: 1px solid var(--rule); border-radius: 20px; padding: 1.25rem 1.5rem 1.5rem; background: var(--surface); }
+.integration-panel-head { display: flex; gap: .85rem; align-items: flex-start; padding-bottom: .9rem; border-bottom: 1px solid var(--rule); }
 .integration-panel-head > div { flex: 1; min-width: 0; }
 .integration-panel-head h3 { margin: 0; }
-.integration-panel-head .hint { margin: .1rem 0 0; }
-.integration-panel-head .close { color: var(--muted); }
-.integration-panel h4 { margin: 1rem 0 .35rem; font-size: .95rem; }
+.integration-panel-head .hint { margin: .15rem 0 0; }
+.integration-panel-head .close { color: var(--ink-soft); }
+.integration-panel h4 { margin: 1.1rem 0 .4rem; }
 
 .source-rows { list-style: none; padding: 0; margin: 0; }
 .source-rows li { padding: 0; border: 0; }
-.source-detail { padding: 1rem 0; border-bottom: 1px solid var(--line); }
+.source-detail { padding: 1.1rem 0; border-bottom: 1px solid var(--rule); }
 .source-detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
-.source-account { font-size: 1.02rem; overflow-wrap: anywhere; }
-.source-detail .notice { margin: .6rem 0 0; padding: .5rem .75rem; border-left: 3px solid #d9a400; background: #fffaf0; font-size: .9rem; }
-.row-status-disconnected .notice { border-left-color: #999; background: #f4f4f4; }
+.source-account { font-size: 1.1rem; overflow-wrap: anywhere; }
+.source-detail .notice { margin: .7rem 0 0; padding: .55rem .85rem; border-left: 3px solid var(--ink); background: rgba(27, 26, 46, .05); border-radius: 0 12px 12px 0; font-size: 14px; }
+.row-status-disconnected .notice { border-left-color: var(--ink-mute); background: transparent; }
 .source-detail .error p { margin: .25rem 0; }
-.source-facts { margin: .75rem 0; column-gap: 1.25rem; }
-.source-facts dd .hint { font-size: .85rem; }
+.source-facts { margin: .85rem 0; column-gap: 1.25rem; }
+.source-facts dd .hint { font-size: 13px; }
 
 /* Counts: four tiles, the one that needs the person's attention set heavier. */
-.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: .5rem; margin: .75rem 0 .25rem; }
-.stat { display: flex; flex-direction: column; padding: .55rem .75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
-.stat-value { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
-.stat-label { font-size: .78rem; color: var(--muted); }
-.stat.zero .stat-value { color: #999; font-weight: 400; }
-.stat.emphasis { border-color: var(--fg); }
-.stat.bad .stat-value { color: var(--bad); }
-.stat-note { margin: .25rem 0 0; font-size: .8rem; }
-.waiting-hint { margin: .6rem 0 0; font-size: .95rem; }
-.waiting-hint .linkish { color: var(--accent); }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: .6rem; margin: .85rem 0 .3rem; }
+.stat { display: flex; flex-direction: column; padding: .7rem .9rem; border: 1px solid var(--rule); border-radius: 12px; background: var(--parchment); }
+.stat-value { font-family: var(--display); font-size: 1.9rem; font-weight: 400; font-variation-settings: "SOFT" 100, "opsz" 48; font-variant-numeric: tabular-nums lining-nums; line-height: 1.1; }
+.stat-label { font-size: 12px; color: var(--ink-soft); }
+.stat.zero .stat-value { color: var(--ink-mute); }
+.stat.emphasis { border-color: var(--ink); }
+.stat.bad .stat-value { color: var(--vermilion); }
+.stat-note { margin: .3rem 0 0; font-size: 13px; }
+.waiting-hint { margin: .7rem 0 0; font-size: 15px; }
+.waiting-hint .linkish { color: var(--ink); font-weight: 600; }
 
-.source-detail .actions { margin: .9rem 0 0; }
-.danger-zone { margin-top: .5rem; font-size: .9rem; }
-.danger-zone .linkish { color: var(--muted); }
+.source-detail .actions { margin: 1rem 0 0; }
+.danger-zone { margin-top: .6rem; font-size: 14px; }
+.danger-zone .linkish { color: var(--ink-soft); }
 
 /* The connect form inside the panel. */
 .connect-gmail { padding-top: .5rem; }
-.connect-gmail h4 { margin-top: 1rem; }
-.connect-explainer { margin: 0 0 .5rem; }
-.connect-gmail form { margin-top: .5rem; }
-.connect-gmail input { background: var(--bg); }
+.connect-gmail h4 { margin-top: 1.1rem; }
+.connect-explainer { margin: 0 0 .6rem; }
+.connect-gmail form { margin-top: .6rem; }
+.connect-gmail input { background: var(--parchment); }
 .connect-error p { margin: .25rem 0; }
-.redirect-note { margin-top: .75rem; font-size: .8rem; }
-.connect-another .row { justify-content: space-between; margin: .75rem 0 0; }
+.redirect-note { margin-top: .85rem; font-size: 13px; }
+.connect-another .row { justify-content: space-between; margin: .85rem 0 0; }
 .connect-another .row h4 { margin: 0; }
-.connect-another-hint { margin: .75rem 0 0; }
+.connect-another-hint { margin: .85rem 0 0; }
+
+/* A pill drawn rather than pressed — the landing's picture of the transport. */
+.pill-static { border: 1px solid var(--rule); border-radius: 999px; color: var(--ink); }
+.wordmark-link { text-decoration: none; }

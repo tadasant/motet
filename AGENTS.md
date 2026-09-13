@@ -1820,10 +1820,53 @@ shape of motet#44 one level up.
   `aria-controls`). The nav is one element either way, so there is one list of sections
   and one active state.
 
-This is structure so the screens are reachable, not the start of a design system: the
-three greys and one accent exist so the active item and the badge have *a* colour, and
-brand is still Phase 3. If the next SPA issue is about the shell rather than about a
-screen's job, that is the tripwire above firing.
+This is structure so the screens are reachable, not the start of a design system. It
+wears the brand now (next section), but the brand is tokens, two faces and a handful of
+drawn pieces, not a component library. If the next SPA issue is about the shell rather than
+about a screen's job, that is the tripwire above firing.
+
+### The SPA wears the Polyphony brand, and adds two webfonts and nothing else
+
+`web/src/styles.css`, `web/src/brand/`, `web/src/fonts/`, motet#110. **Tadas chose the
+brand on 2026-09-12**: "Polyphony", variant A. `brand/GUIDELINES.md` is the decision and
+`brand/polyphony/index.html` is the reference; where they disagree on a value, the page
+wins. This was a restyle rather than a redesign. Every class a screen used before is the
+class it uses now, and no layout, section or interaction moved, except where the list below
+says otherwise.
+
+- **Self-hosted fonts, not Google Fonts.** Fraunces and Instrument Sans are served as latin
+  subsets of the variable woff2 files, OFL, with their licences alongside them. Vite
+  fingerprints them with the bundle. The issue left the choice open. Self-hosting means a
+  private, authenticated app makes no third-party request, and the fonts are cached with the
+  assets they belong to. `font-display: swap`, over the guidelines' fallback stacks.
+- **The voice hues are never a status.** A connection state, a stage and a badge are ink at
+  opacity. Only vermilion doubles as the error red. Vermilion, ochre, teal and plum appear
+  together — in the eyebrow, the motif, the primary button's hairline, and the played part
+  of a scrubber or progress bar. The previous palette's green "done" and yellow "awaiting"
+  are gone for that reason, not by accident.
+- **The old variable names are aliases.** `--fg`, `--muted`, `--line` and `--bad` point at
+  the brand tokens, so a screen written against them did not need touching.
+- **The landing is the reference hero.** It has the headline, the positioning, the motif
+  and **Start listening**, which starts the Google sign-in the door always offered. The
+  motif's path data is lifted verbatim into `brand/scoreData.ts`, not redrawn. The
+  landing's transport under the score is a picture (`aria-hidden`), as it is on the
+  reference page.
+- **Dark mode is not designed**, so nothing here derives one.
+
+**The web player's transport replaced the browser's own controls.** The ink play circle,
+the scrubber with the four-hue gradient, the tabular times and the speed pill all drive the
+same `<audio>` element, and the listening-frontier rules below are unchanged. The scrubber
+is a native range input laid invisibly over the drawn track, so a keyboard and a screen
+reader reach one real slider. **The speed pill is a control the page did not draw
+before**; the browser's native controls offered speed only on some platforms.
+
+**The mic pill is Play Live's existing control, not hold-to-ask.** The guidelines' pill
+reads "hold to ask". The web player has no push-to-talk: Play Live starts on a press, a
+press while narrating interrupts (`barge_in`), and the voice service ends the turn. So
+`Live` renders into the transport's pill slot through a portal, and the pill says
+*Play Live* or *just ask*. Hold-and-release semantics would be new capability, and it is
+not built. The landing's picture says "hold to ask" because it copies the reference, and
+the reference is a picture too.
 
 ### The episode screen reflects server state, not this page's lifetime
 
