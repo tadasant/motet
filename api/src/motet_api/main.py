@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 
@@ -40,6 +40,7 @@ from motet_db import (
     repo,
 )
 from motet_db import auth as auth_repo
+from motet_db import waitlist as waitlist_repo
 from motet_inference.llm import load_config as load_llm_config
 from motet_sources import (
     GMAIL_MODIFY_SCOPE,
@@ -119,6 +120,8 @@ from .schemas import (
     AdminQueueResponse,
     AdminSourceItemCounts,
     AdminUserResponse,
+    AdminWaitlistResponse,
+    AdminWaitlistSignupResponse,
     ClaimModel,
     CompleteLoginRequest,
     ConnectSourceRequest,
@@ -168,6 +171,7 @@ from .schemas import (
     StartVoiceSessionRequest,
     VoiceSessionResponse,
     VoiceStatusResponse,
+    WaitlistJoinResponse,
 )
 from .shownotes import chapters_json, transcript_vtt
 from .voice import (
@@ -177,6 +181,9 @@ from .voice import (
     build_starter,
     session_config,
 )
+from .waitlist import Outcome as WaitlistOutcome
+from .waitlist import Submission, read_submission
+from .waitlist import answer as waitlist_answer
 
 logger = logging.getLogger("motet.api")
 
@@ -1107,6 +1114,113 @@ def admin_overview(
             for job in jobs_
         ],
         jobs_next_before=jobs_[-1].id if more else None,
+    )
+
+
+# --- the landing page's waitlist --------------------------------------------------------
+#
+# The public half is the only `/v1` route with no caller at all: the static site on the
+# apex domain posts a form to it cross-origin. `motet_api.waitlist` says why it needs no
+# CORS configuration, why it answers HTML as well as JSON, and why no address reaches a
+# log line. The read half is an admin route like the overview above, and the route walk in
+# `test_admin_overview.py` holds it to `Admin` along with every other `/v1/admin` path.
+
+_WAITLIST_FORM_SCHEMA: Final = {
+    "type": "object",
+    "required": ["email"],
+    "properties": {
+        "email": {"type": "string", "format": "email", "maxLength": 254},
+        "motet_hp": {
+            "type": "string",
+            "description": "Leave empty. A form that fills it is treated as a bot.",
+        },
+    },
+}
+
+
+@app.post(
+    "/v1/waitlist",
+    response_model=WaitlistJoinResponse,
+    tags=["waitlist"],
+    summary="Join the waitlist",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/x-www-form-urlencoded": {"schema": _WAITLIST_FORM_SCHEMA}},
+        }
+    },
+    responses={
+        200: {"content": {"text/html": {}}},
+        413: {"description": "The body is larger than a waitlist form."},
+        415: {"description": "The body is not `application/x-www-form-urlencoded`."},
+        422: {"description": "The address is not plausibly an email address."},
+        503: {"description": "The address could not be stored; nothing was recorded."},
+    },
+)
+def join_waitlist(
+    conn: Conn, submission: Annotated[Submission, Depends(read_submission)]
+) -> Response:
+    """Put an address on the landing page's waitlist. Public; no credential.
+
+    Sent as a form, so that the landing page's request is a CORS simple request and needs
+    no preflight. Answers JSON when the caller's ``Accept`` asks for it and a small HTML
+    page otherwise, which is what a form posted without JavaScript lands on. A new
+    address, a known one and a submission that filled the honeypot all get the same 200.
+    """
+    if submission.refused is not None or submission.email is None:
+        return waitlist_answer(
+            submission.refused or WaitlistOutcome.INVALID, wants_json=submission.wants_json
+        )
+    try:
+        joined = waitlist_repo.join(conn, submission.email)
+    except Exception as exc:
+        # Caught, and reported by type alone, because this is the one route where letting an
+        # exception escape would leak the thing it promises never to log: the error reporter
+        # captures frame locals — `email` is one, in `waitlist_repo.join` — and a constraint
+        # violation's own message quotes the failing row. The type is enough to find it.
+        with suppress(Exception):
+            conn.rollback()
+        logger.error("waitlist: storing a submission failed (%s)", type(exc).__name__)
+        return waitlist_answer(WaitlistOutcome.STORE_FAILED, wants_json=submission.wants_json)
+    outcome = WaitlistOutcome.JOINED if joined else WaitlistOutcome.ALREADY_LISTED
+    return waitlist_answer(outcome, wants_json=submission.wants_json)
+
+
+@app.get("/v1/admin/waitlist", response_model=AdminWaitlistResponse, tags=["admin"])
+def admin_waitlist(
+    conn: Conn,
+    _admin: Admin,
+    before: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            description=(
+                "Only list signups with an id below this one — the previous page's "
+                "`next_before`. Omit for the newest page."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=ADMIN_JOBS_MAX_LIMIT, description="How many signups to list."),
+    ] = ADMIN_JOBS_DEFAULT_LIMIT,
+) -> AdminWaitlistResponse:
+    """Everyone who asked to join from the landing page, newest first. Admins only."""
+    page = waitlist_repo.list_signups(conn, before=before, limit=limit + 1)
+    signups, more = page[:limit], len(page) > limit
+    return AdminWaitlistResponse(
+        total=waitlist_repo.count(conn),
+        signups=[
+            AdminWaitlistSignupResponse(
+                id=signup.id,
+                email=signup.email,
+                created_at=signup.created_at,
+                last_submitted_at=signup.last_submitted_at,
+                submissions=signup.submissions,
+            )
+            for signup in signups
+        ],
+        next_before=signups[-1].id if more else None,
     )
 
 

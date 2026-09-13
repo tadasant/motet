@@ -9,7 +9,7 @@ slightly differently, and a slight difference in the definition of "unread" is h
 invariant 5 stops being true.
 """
 
-from . import allowlist, auth, phase2, repo
+from . import allowlist, auth, phase2, repo, waitlist
 from .auth import AuthSession
 from .migrations import MIGRATIONS_DIR, Migration, MigrationError, discover, migrate
 from .models import (
@@ -70,4 +70,5 @@ __all__ = [
     "migrate",
     "phase2",
     "repo",
+    "waitlist",
 ]

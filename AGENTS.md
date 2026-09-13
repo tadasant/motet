@@ -558,6 +558,7 @@ deployed — see "Play Live" below.
 | Schema + migrations | library | `db/` |
 | Object storage | library | `storage/` |
 | Web SPA | Vite + React, static files on Cloud Run | `web/` |
+| Landing page (getmotet.com) | static HTML/CSS, Cloudflare Pages | `site/` |
 | Voice service | Pipecat, Cloud Run — **Phase 2** | `voice/` |
 | iOS app | Swift — **Phase 2** | `ios/` |
 | Golden set | CI harness | `goldens/` |
@@ -2382,6 +2383,84 @@ the check in front of it the part to get right.
   list the screen polls; not a time window, because one Gmail backfill puts a thousand rows
   into the last hour. The aggregates are always for everyone; job → user is a join on the
   payload per queue kind, fine while `jobs.prune` bounds the table.
+
+### The landing page is a static site Cloudflare builds, and its one write is the waitlist
+
+`site/`, `POST /v1/waitlist` (`motet_api.waitlist`), `GET /v1/admin/waitlist`, migration
+0017, `web/src/screens/AdminWaitlist.tsx`. **Asked for by Tadas, 2026-09-13, in Zimmer
+session 17816's goal**: *"a homepage landing page for motet, in accordance with the
+in-flight brand guidelines · deploy it on cloudflare pages, similar to how we do e.g. Zimmer
+docs · signup is just a waitlist for now. have it submit to an endpoint that collects the
+form and shows any submissions in the admin screen for now."* That names the deployable,
+the host, the endpoint and where submissions are read, which is invariant 12's sign-off for
+each of them; the choices below are the ones it left open.
+
+**The site is Cloudflare Pages' Git integration building `site/`, the way `tadasant/zimmer`'s
+`docs/` is built** — root directory `site`, `npm run build`, output `dist`. Cloudflare pulls
+from the repository; nothing here pushes to Cloudflare. That is what reconciles it with the
+decision the SPA's hosting records in the private repo, where Pages lost to Cloud Run
+because a direct upload needs an account-level `Cloudflare Pages: Edit` token in CI: the Git
+integration needs no credential in CI at all, so the reason that decided the SPA does not
+apply here, and the SPA stays where it is. Creating the project and connecting the
+repository (a GitHub App consent) are one-time human steps under invariant 9, and so is
+writing the apex record: the private repo's Motet invariants make DNS a named boundary of its
+own — agents read the zone, a human sets records — which overrides the "adding a DNS record"
+example invariant 9 gives above. The runbook belongs to the private repo, not to this file.
+
+- **No framework and no dependencies.** The brand allows two webfonts and nothing else, so
+  the page is HTML, one stylesheet and one small script, and `build.mjs` is standard-library
+  Node. `bin/ci` runs the same `npm run build` Cloudflare does, plus the build's own tests.
+- **The API origin is the build's one input**, `MOTET_API_BASE_URL`, set per Pages
+  environment — the same reason `web/`'s container reads it at start: no deployment's
+  hostname lives in this public repo. It is filled into the form's `action` and into the
+  Content-Security-Policy in `_headers`. **On Cloudflare an unset value fails the build**,
+  because a form posting to localhost looks perfect and collects nothing.
+- **The page works without its script.** Each form is a real `<form>`; the script only
+  keeps the visitor on the page.
+
+**The endpoint needs no CORS configuration, and that is the design rather than a shortcut.**
+The form posts `application/x-www-form-urlencoded` with no custom header — a CORS simple
+request, sent cross-origin with no preflight — and the route answers with
+`Access-Control-Allow-Origin: *`. A wildcard is wrong everywhere else in `/v1` and right
+here, because nothing on this route is credentialed: a hostile page can do nothing through
+a visitor's browser that `curl` cannot do directly. So the API gains no variable naming the
+landing page's origin, and a Pages preview posts to staging unchanged. JSON is refused with
+a 415, because a JSON body would be preflighted and the SPA's exact-origin policy would
+refuse that preflight. A caller that does not ask for JSON — a form posted without
+JavaScript — gets a small HTML page, deliberately not a redirect back: knowing where "back"
+is means an origin variable or echoing a caller-supplied URL into `Location`, which is the
+shape `Settings.callback_uri_allowed` already declines on an unauthenticated route.
+
+- **One row per address, held by the database.** The address is trimmed and lowercased and
+  `INSERT … ON CONFLICT` on it, so a repeat bumps `submissions` rather than adding a row.
+- **A known address and a new one get the same answer**, and so does a filled honeypot
+  field (`motet_hp`, a name no autofill recognises, so a real person is never quietly
+  caught by it) — the route is not an oracle for who is on the list, and a bot is not told
+  what caught it.
+- **No address reaches a log line, a metric or the error reporter.** Outcomes are counted
+  on `motet.api.waitlist_submissions{outcome}` — `joined`, `already_listed`, `honeypot`,
+  `invalid`, `too_large`, `unsupported_media_type`, `store_failed` — and logged by outcome
+  alone. A failed write is caught and logged by exception *type*, answered 503: escaping, it
+  would carry the address to GlitchTip as a frame local, and a constraint violation's message
+  quotes the row. The
+  refusals are counted because a form posting somewhere wrong and a waitlist nobody joins
+  are otherwise the same empty table.
+- **No rate limit**, stated rather than overlooked: there is nowhere in this stack to keep
+  one that is not a new mechanism, nothing is sent or granted, and a flood of fresh
+  addresses costs rows. The body is capped at 4 KB.
+- **`waitlist_signups` is not `users`.** Signup is still out of scope; an address here is a
+  request to be told, and nothing references the table.
+
+**It is read on the operator view, under the operator view's guard.** `/v1/admin/waitlist`
+takes `Admin` like every `/v1/admin` route, is keyset-paged on the id like the jobs list,
+and is fetched when the screen opens rather than on its three-second poll. It is its own
+component so that `Admin.tsx` gains one line.
+
+**What this adds, read against invariant 12:** one deployable (the static site, on a host
+the owner named), one table, one public and one admin route on the existing API, and no
+vendor, seam, queue mechanism, model call or resource in the private infrastructure repo
+beyond the Pages project and its DNS, which are human-owned. Deliberately not added: a
+confirmation email (a vendor), a redirect variable, and a rate limiter.
 
 ### The vault is the seam to a credential that is not ours
 

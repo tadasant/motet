@@ -26,6 +26,7 @@ build/
 # Node / web
 node_modules/
 web/dist/
+site/dist/
 *.tsbuildinfo
 
 # Where the local object-store backend writes audio when nothing else is configured
