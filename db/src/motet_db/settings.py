@@ -1,6 +1,6 @@
 """Runtime settings, and the one switch that decides whether they exist at all.
 
-The ``settings`` table (migration 0013) holds per-stage LLM model and effort overrides the
+The ``settings`` table (migration 0015) holds per-stage LLM model and effort overrides the
 admin screen writes (motet#92). Every setting before it was an environment variable owned
 by the private infrastructure repo's service definitions, validated at startup — and "an
 unknown slug is a startup crash" is the property a row that changes what the next job runs
