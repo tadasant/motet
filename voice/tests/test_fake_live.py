@@ -175,3 +175,32 @@ def test_a_socket_from_another_origin_is_refused_before_it_is_accepted() -> None
             )
             assert json.loads(socket.receive_text())["state"] == "ready"
             socket.send_text(json.dumps({"type": "close"}))
+
+
+def test_the_fake_reads_a_title_with_an_apostrophe_back_whole() -> None:
+    """Found in the browser run: "Helion's reactor timeline" came back as "Helion"."""
+    import asyncio  # noqa: PLC0415
+
+    from motet_voice.contract import TimedSegment  # noqa: PLC0415
+    from motet_voice.position import position_notes  # noqa: PLC0415
+
+    notes = position_notes(
+        [
+            TimedSegment.model_validate(
+                {
+                    "title": "Helion's reactor timeline",
+                    "start_ms": 0,
+                    "end_ms": 5_000,
+                    "claims": [{"start_ms": 0, "end_ms": 5_000, "spoken_text": "It's 2028."}],
+                }
+            )
+        ],
+        1_700,
+    )
+
+    async def run() -> str:
+        fake = FakeLiveConversation()
+        await fake.add_context(notes)
+        return fake._reply_text(None)  # noqa: SLF001
+
+    assert "in 'Helion's reactor timeline'." in asyncio.run(run())

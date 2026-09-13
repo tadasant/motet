@@ -57,8 +57,12 @@ REPLY_MS: Final = 1_500
 #: does against the vendor.
 CHUNK_PACING_SECONDS: Final = 0.04
 
+#: Reads the clock and the story back out of :func:`~motet_voice.position.position_notes`.
+#: The title runs to the quote that closes the first sentence, not to the first quote — a
+#: title such as "Helion's timeline" carries one of its own.
 _POSITION = re.compile(
-    r"interrupted the briefing at (?P<clock>\d+:\d\d), during the story '(?P<title>[^']*)'"
+    r"interrupted the briefing at (?P<clock>\d+:\d\d), during the story "
+    r"'(?P<title>.*?)'(?:, while|\.)"
 )
 
 _FRAME_BYTES: Final = TARGET_SAMPLE_RATE * DEFAULT_FRAME_MS // 1000 * 2

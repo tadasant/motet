@@ -458,7 +458,7 @@ class VoiceSession:
         live = self._live_channel()
         return "vendor+detector" if live is not None and live.active else "detector"
 
-    def _log_listener_audio(self, why: str) -> None:
+    def _log_listener_audio(self, why: str, *, heard_ms: int | None = None) -> None:
         """What the detector is hearing, and where the audio is going.
 
         A session where the listener spoke and nothing fired used to close with
@@ -475,7 +475,7 @@ class VoiceSession:
             why,
             self._route(),
             self.clock.playing,
-            self._frames_seen * DEFAULT_FRAME_MS,
+            heard_ms if heard_ms is not None else self._frames_seen * DEFAULT_FRAME_MS,
             f"{reading.rms_dbfs:.1f}" if reading else "-",
             f"{reading.noise_floor_dbfs:.1f}" if reading else "-",
             f"{reading.snr_db:.1f}" if reading else "-",
@@ -497,7 +497,8 @@ class VoiceSession:
             decision.snr_db,
             decision.speech_probability,
         )
-        self._log_listener_audio("barge_in")
+        # The decision's own offset: mid-packet, the frame counter has not caught up yet.
+        self._log_listener_audio("barge_in", heard_ms=decision.at_ms)
 
     # -- narration ----------------------------------------------------------------------
 
