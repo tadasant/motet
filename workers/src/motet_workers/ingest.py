@@ -417,7 +417,7 @@ def check_mailbox(
             f"than read. Reconnect it with {expected}."
         )
         phase2.delete_source_credentials(conn, source.id)
-        phase2.set_source_active(conn, source.id, active=False)
+        phase2.mark_source_disconnected(conn, source.id)
         phase2.set_source_error(conn, source.id, reason)
         return reason, {}
     return None, {MAILBOX_ADDRESS_KEY: address, MAILBOX_VERIFIED_FOR_KEY: stamp}

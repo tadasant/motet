@@ -29,6 +29,9 @@ const MAILBOX: Source = {
   query: 'category:updates OR category:promotions',
   first_sync_days: null,
   last_sync: null,
+  disconnected_at: null,
+  items_pulled_in: 0,
+  items_integrated: 0,
   label_sync: OFF,
 }
 

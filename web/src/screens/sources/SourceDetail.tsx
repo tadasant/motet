@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react'
 
 import { ApiError, type ProcessingStatus, type Source, api } from '../../api/client'
+import { LabelSync } from '../LabelSync'
 import { workerState } from '../Processing'
 import { DEFAULT_QUERY } from './ConnectGmail'
 import { StatusPill } from './IntegrationCard'
@@ -20,7 +21,6 @@ import {
   relativeTime,
   rowStatus,
 } from './status'
-import { LabelSync } from '../LabelSync'
 
 /** How long "Sync now" watches for the poll to land before saying it is still queued. */
 const SYNC_WATCH_MS = 120_000

@@ -268,6 +268,7 @@ def remove_unused_source(
     conn.execute("DELETE FROM sources WHERE id = %s AND user_id = %s", (source_id_, user_id))
     return SourceRemoval.REMOVED
 
+
 def set_source_error(conn: psycopg.Connection[Any], source_id_: str, error: str | None) -> None:
     """Say what is wrong with a source, without touching its cursor or its poll time."""
     conn.execute(
@@ -1066,7 +1067,6 @@ __all__ = [
     "list_sources",
     "load_source_credential",
     "mark_source_disconnected",
-
     "merge_source_sync_state",
     "purge_expired_oauth_states",
     "record_label_writeback",
