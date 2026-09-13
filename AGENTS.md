@@ -1085,8 +1085,8 @@ Three smaller things are decisions rather than implementation:
   being ready, so two rows disagreeing cannot produce "failed, and trying again in 30
   seconds".
 
-In the SPA it is a panel above the backlog and a count on the tab — visible from the
-*paste* screen, which is where somebody who has just pasted is. It polls only while
+In the SPA it is a panel above the backlog and a count on the sidebar's Backlog item —
+visible from the *paste* screen, which is where somebody who has just pasted is. It polls only while
 something is pending, and the fetch is **best-effort**: the backlog is the primary list and
 must not go blank because the secondary one 404s.
 
@@ -1703,7 +1703,47 @@ which file the record lives in. This section is now that record. Sections 3 and 
 the same issue says the shape "is the owner's call and needs a session before anything is
 built", are left alone.
 
-### The episode tab reflects server state, not this page's lifetime
+### The SPA is a shell with a URL per section, and still not a router
+
+`web/src/shell/`. A fixed sidebar, a top bar holding the page title and the account menu,
+and one path per section — `/backlog`, `/episodes`, `/sources`, `/paste`, `/admin` — kept in
+React state by `usePath()`, about forty lines of `pushState` and `popstate` (motet#88). It
+replaced a tab strip held in component state, which lost its place on every reload: the
+shape of motet#44 one level up.
+
+- **Not a router, and the trigger for revisiting that is named.** One string, no matching,
+  no nesting, no link component. If a nested path is ever wanted — an episode id, a
+  source item id — that is the moment to ask whether forty lines are still enough, not
+  before.
+- **`/` and any unknown path are the Backlog**, which is where "what is waiting for me" is
+  answered — the Processing panel and the badge are both there. The shell then *replaces*
+  the address with the section's own path (a trailing slash too), so the sidebar and the
+  address bar agree and Back does not return to a path that was never a place. That is the issue gate's reading
+  of the owner's open question and one constant, `HOME`, in `shell/sections.tsx`.
+- **The door and `/oauth/callback` render without the shell**, and the shell does not
+  rewrite the address while either is up. On the callback that leaves the address to
+  `forgetCallbackUrl`; on the door it keeps a deep link, so pasting a token at `/episodes`
+  opens Episodes. The door and the shell are different trees, so the API token field
+  saves on submit rather than per keystroke — one that saved as it was typed would swap the
+  door for the app on the first character.
+- **The sidebar offers Admin only to a caller `/v1/auth/session` says is an admin**, which
+  is the operator view's own rule below, carried into the shell. `/admin` is still a
+  section for everybody else: typed in, it says why and asks for nobody's data.
+- **A section declares its own layout** (`layout: 'reading' | 'wide'`). Wide is a screen
+  made of tables, which scroll inside the content area rather than the page — a property
+  of the section, not a class one screen happened to carry.
+- **A screen does not title itself.** The top bar's `<h1>` is the title; each screen's
+  `<section>` is `aria-label`led instead of carrying an `<h2>` that says the same word.
+- **Under 800px the sidebar is a sticky bar with a Menu button** (`aria-expanded`,
+  `aria-controls`). The nav is one element either way, so there is one list of sections
+  and one active state.
+
+This is structure so the screens are reachable, not the start of a design system: the
+three greys and one accent exist so the active item and the badge have *a* colour, and
+brand is still Phase 3. If the next SPA issue is about the shell rather than about a
+screen's job, that is the tripwire above firing.
+
+### The episode screen reflects server state, not this page's lifetime
 
 `web/src/App.tsx`. Nothing loaded episode state on mount, so a reload — the realistic thing
 to do while a multi-minute pipeline runs — emptied the tab and left a finished episode
@@ -1712,7 +1752,7 @@ an episode takes, the more likely it is to be lost**, and the first one is the s
 because the backlog is fullest.
 
 `GET /v1/episodes` is loaded once the app has a way in, and it **seeds** rather than
-assigns: `current ?? list[0]`, so a tab already opened from the backlog is not dragged back
+assigns: `current ?? list[0]`, so an episode already opened from the backlog is not dragged back
 to the newest episode, and the three-second backlog poll does not do it either. The list is
 kept as well as the newest item, because "make an episode" is the only other way into this
 screen and it always makes a *new* one — one loaded episode would leave yesterday's just as
@@ -1764,11 +1804,13 @@ Two things learned there that are worth not rediscovering:
   as declared puts a control character in a news item title, an RSS document, and a
   text-to-speech request. Browsers have mandated this same substitution since HTML5.
 
-**`/oauth/callback` is the SPA's one and only path, and it is not a router.** Google hands
+**`/oauth/callback` is read once at boot, apart from the shell's paths.** Google hands
 consent back by navigating to a URL, so the browser arrives with a fresh page load and no
 memory of the app it left. `web/src/oauth.ts` reads `window.location` once at boot and
-`App.tsx` renders the callback instead of the tab strip — a few lines, against a routing
-dependency that would then be available for every future "shouldn't this be a route?".
+`App.tsx` renders the callback instead of the shell. Finishing hands over to `/sources`
+(a mailbox) or `/` (a sign-in) with `replace`, so the callback's own history entry
+becomes the section and Back cannot return to a spent code. The section paths are the
+shell's and can change freely; this one cannot.
 Three registered redirect URIs, one per environment, are each that environment's own
 origin plus that path; **the path is the part that must not drift**, because the
 registrations live in the private repo and nothing in this one can tell you it broke.

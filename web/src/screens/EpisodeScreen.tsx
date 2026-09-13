@@ -74,8 +74,7 @@ export function EpisodeScreen({
   }
 
   return (
-    <section aria-labelledby="episode-heading">
-      <h2 id="episode-heading">Episode</h2>
+    <section aria-label="Episode">
       <p className="hint">
         <strong>{episode.title}</strong> · {episode.state}
         {episode.state === 'ready' && ` · ${formatDuration(episode.duration_ms)}`}
@@ -156,7 +155,7 @@ export function EpisodeScreen({
 
       {episode.segments.map((segment) => (
         <article key={segment.news_item_id} className="segment">
-          <h3>{segment.news_item_title}</h3>
+          <h2>{segment.news_item_title}</h2>
           <p className="hint">starts at {formatDuration(segment.start_ms)}</p>
           {segment.claims.length === 0 ? (
             <p className="hint">No claims yet — the script stage has not run.</p>

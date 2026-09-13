@@ -107,8 +107,7 @@ export function Sources({
   }
 
   return (
-    <section aria-labelledby="sources-heading">
-      <h2 id="sources-heading">Sources</h2>
+    <section aria-label="Sources">
       <p className="hint">
         Where source items come from. Pasting in needs nothing; a mailbox needs your
         consent, which Google asks for on its own page.
@@ -158,7 +157,7 @@ export function Sources({
         </ul>
       )}
 
-      <h3>Connect Gmail</h3>
+      <h2>Connect Gmail</h2>
       <p className="hint">
         Motet asks for read-only access to your mail and stores only a refresh token,
         sealed — nothing in the API can read it back. The source row is created before you
