@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
@@ -42,12 +42,25 @@ from motet_db import (
 from motet_db import auth as auth_repo
 from motet_inference.llm import load_config as load_llm_config
 from motet_sources import (
+    GMAIL_MODIFY_SCOPE,
     GMAIL_READONLY_SCOPE,
+    LABEL_SYNC_SCOPES,
     PROVIDER,
+    LabelSettings,
+    LabelSettingsError,
     SourceError,
     build_oauth_client,
     new_oauth_state,
     new_pkce_pair,
+)
+from motet_sources.labels import (
+    CONFIG_KEY as LABEL_SYNC_CONFIG_KEY,
+)
+from motet_sources.labels import (
+    MAILBOX_ADDRESS_KEY,
+    catalog_fetched_at,
+    catalog_from_sync_state,
+    pickable,
 )
 from motet_storage import ObjectStore, StorageError
 from motet_vault import DekWrapper, VaultError, vault_status
@@ -121,6 +134,8 @@ from .schemas import (
     HighlightResponse,
     IngestionItemResponse,
     IntegrateResponse,
+    LabelSyncRequest,
+    LabelSyncResponse,
     ListenProgressRequest,
     ListenProgressResponse,
     LoginResponse,
@@ -134,6 +149,7 @@ from .schemas import (
     QueueHeartbeatResponse,
     QueueReadinessResponse,
     ReadStateRequest,
+    ReauthorizeSourceRequest,
     RevokedResponse,
     SaveHighlightRequest,
     SegmentResponse,
@@ -1515,6 +1531,7 @@ def _source_response(
         items_pulled_in=counts.pulled_in,
         items_integrated=counts.integrated,
         **sync_facts(source),
+        label_sync=_label_sync(conn, source, credential.scopes if credential else ()),
     )
 
 
@@ -1643,7 +1660,14 @@ def oauth_callback(
             "kept alive. Revoke Motet's access in your account settings and try again.",
         )
 
-    scopes = grant.scopes or (GMAIL_READONLY_SCOPE,)
+    # What this authorization asked for, intersected with what came back (motet#96). A
+    # provider that folded an earlier, wider grant into this token cannot make a source that
+    # asked for read-only access *look* writable: the worker decides whether to write from
+    # these recorded scopes, so a scope nobody asked for on this source is never one it acts on.
+    asked = set((pending.get("scopes") or "").split())
+    scopes = tuple(scope for scope in grant.scopes if not asked or scope in asked) or (
+        GMAIL_READONLY_SCOPE,
+    )
     try:
         phase2.store_source_credential(
             conn,
@@ -1670,6 +1694,10 @@ def oauth_callback(
         ) from exc
 
     phase2.set_source_active(conn, source.id, active=True)
+    # Storing the grant rewrites its `updated_at`, which is what makes a worker check which
+    # account it reaches before reading or writing with it (`ingest.check_mailbox`): a
+    # label-sync re-consent replaces an existing source's grant, and the account chooser can
+    # return a different account's.
     enqueue_source_poll(conn, source.id)
     nudge.arm(DrainReason.SOURCE_POLL)
 
@@ -1695,6 +1723,129 @@ def poll_source(
     enqueue_source_poll(conn, source.id)
     nudge.arm(DrainReason.SOURCE_POLL)
     return _source_response(conn, source)
+
+
+@app.put("/v1/sources/{source_id}/label-sync", response_model=SourceResponse, tags=["sources"])
+def set_label_sync(
+    body: LabelSyncRequest, conn: Conn, user_id: User, source_id: Annotated[str, Path()]
+) -> SourceResponse:
+    """Choose the label a message leaves and the label it joins when its owner ingests it.
+
+    motet#96. Stored on the source's ``config`` — the owner's intent — and read by the
+    worker after each *deliberate* ingest; nothing on the poll path reads it. Both empty
+    turns label sync off, and off means no mailbox write of any kind.
+
+    **Setting labels widens nothing.** A mailbox connected read-only stays read-only and
+    reports ``needs_reauthorization``; the wider grant is a separate, explicit step —
+    ``POST /v1/sources/{id}/reauthorize`` — which only a source with labels set may take.
+    A system label that could hide mail (TRASH, SPAM, and the rest outside INBOX, UNREAD,
+    STARRED and IMPORTANT) is refused here, and refused again by the worker.
+    """
+    source = phase2.get_source(conn, source_id, user_id=user_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
+    if source.kind != SourceKind.GMAIL.value:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a mailbox has labels to sync.")
+    try:
+        chosen = LabelSettings.parse(remove=body.remove_label, add=body.add_label)
+    except LabelSettingsError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    phase2.set_source_config_key(
+        conn, source.id, LABEL_SYNC_CONFIG_KEY, chosen.to_config() if chosen else None
+    )
+    updated = phase2.get_source(conn, source.id, user_id=user_id)
+    assert updated is not None
+    return _source_response(conn, updated)
+
+
+@app.post(
+    "/v1/sources/{source_id}/reauthorize",
+    response_model=ConnectSourceResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["sources"],
+)
+def reauthorize_source(
+    body: ReauthorizeSourceRequest, conn: Conn, user_id: User, source_id: Annotated[str, Path()]
+) -> ConnectSourceResponse:
+    """Ask the owner to let this mailbox's labels be changed — the label-sync re-consent.
+
+    **The only route that ever asks Google for ``gmail.modify``, and only for a source that
+    has label sync set.** Connecting asks for ``gmail.readonly`` alone, so a mailbox whose
+    owner never turns label sync on is never shown a consent screen that mentions changing
+    mail, and never holds a grant that could. Refused with 409 until labels are set, so the
+    wider scope is always asked for *because of* a setting the owner chose.
+
+    The consent itself is the owner's click (invariant 9) and finishes on the same
+    ``/v1/sources/callback`` a first connect does, against the same source: the new grant
+    replaces the stored one, and the worker refreshes any access token minted under the old
+    one before it writes. The URL carries a ``login_hint`` for the address the source was
+    first seen to reach, and the worker refuses — and disconnects — a grant that reaches a
+    different one, because Google's account chooser does not stop the owner picking another.
+    """
+    source = phase2.get_source(conn, source_id, user_id=user_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
+    if source.kind != SourceKind.GMAIL.value:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a mailbox has labels to sync.")
+    if LabelSettings.from_config(source.config) is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Choose a label to add or remove first. Motet asks a mailbox for permission to "
+            "change labels only when label sync is set up for it.",
+        )
+
+    verifier, challenge = new_pkce_pair()
+    state = new_oauth_state()
+    phase2.start_oauth(
+        conn,
+        state=state,
+        user_id=user_id,
+        provider=PROVIDER,
+        source_id_=source.id,
+        code_verifier=verifier,
+        redirect_uri=body.redirect_uri,
+        scopes=LABEL_SYNC_SCOPES,
+    )
+    try:
+        address = source.sync_state.get(MAILBOX_ADDRESS_KEY)
+        url = build_oauth_client().authorization_url(
+            redirect_uri=body.redirect_uri,
+            state=state,
+            code_challenge=challenge,
+            scopes=LABEL_SYNC_SCOPES,
+            # Preselects the account this source already reads; the worker still checks.
+            login_hint=address if isinstance(address, str) else None,
+        )
+    except SourceError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return ConnectSourceResponse(source_id=source.id, authorization_url=url, state=state)
+
+
+def _label_sync(
+    conn: psycopg.Connection[Any], source: StoredSource, scopes: Sequence[str]
+) -> LabelSyncResponse | None:
+    """What a Sources screen shows about label sync — read without decrypting anything.
+
+    Whether the grant can write is the credential row's recorded scopes, which is metadata
+    (invariant 8); the label names come from the catalog the last poll cached.
+    """
+    if source.kind != SourceKind.GMAIL.value:
+        return None
+    chosen = LabelSettings.from_config(source.config)
+    granted = GMAIL_MODIFY_SCOPE in scopes
+    summary = phase2.label_writeback_summary(conn, source.id)
+    return LabelSyncResponse(
+        status="off" if chosen is None else ("on" if granted else "needs_reauthorization"),
+        remove_label=chosen.remove if chosen else None,
+        add_label=chosen.add if chosen else None,
+        modify_granted=granted,
+        available_labels=pickable(catalog_from_sync_state(source.sync_state)),
+        labels_read_at=catalog_fetched_at(source.sync_state),
+        last_synced_at=summary.last_synced_at,
+        failed_items=summary.failed,
+        last_error=summary.last_error,
+    )
 
 
 @app.delete(

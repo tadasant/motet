@@ -12,6 +12,12 @@ unsubscribe footers. That is the point — the part of Gmail ingestion that can 
 wrong is :mod:`motet_sources.extract`, and it must be exercised against the shapes it will
 meet rather than against something convenient.
 
+**The fake mailbox records every write.** :attr:`FakeMailClient.modify_calls` is the
+list a test asserts on — "exactly this call after a deliberate ingest, and none after a
+poll" is the whole contract of label sync (motet#96), and a fake that merely accepted the
+call would let either half of it break silently. It answers an unknown message or label id
+the way Gmail does, with :class:`~motet_sources.interfaces.StaleReferenceError`.
+
 **The fake OAuth provider issues tokens that are obviously fake and obviously secret.**
 They are sealed and unsealed by the same vault path a real token takes, so the
 envelope-encryption invariant is exercised end to end before a single real credential
@@ -26,18 +32,38 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .interfaces import (
+    Label,
     MailClient,
     MessagePage,
     MessageRef,
     OAuthClient,
     RawMessage,
     SourceError,
+    StaleReferenceError,
     TokenGrant,
 )
 
 #: Where the fake mailbox reads its messages from. One `.eml` per message, applied in
 #: filename order, which is also arrival order.
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "mailbox"
+
+
+#: The fake mailbox's labels: Gmail's system set, plus the owner's own workflow pair —
+#: ``Newsletters`` and ``Completed`` — so the settings UI and the write-back have something
+#: real-shaped to resolve against in every environment that runs the fake.
+FAKE_LABELS: tuple[Label, ...] = (
+    Label(id="INBOX", name="INBOX", system=True),
+    Label(id="UNREAD", name="UNREAD", system=True),
+    Label(id="STARRED", name="STARRED", system=True),
+    Label(id="IMPORTANT", name="IMPORTANT", system=True),
+    Label(id="SENT", name="SENT", system=True),
+    Label(id="TRASH", name="TRASH", system=True),
+    Label(id="SPAM", name="SPAM", system=True),
+    Label(id="CATEGORY_UPDATES", name="CATEGORY_UPDATES", system=True),
+    Label(id="Label_101", name="Newsletters"),
+    Label(id="Label_102", name="Completed"),
+    Label(id="Label_103", name="Reading/Later"),
+)
 
 
 def load_fixture_messages(directory: Path = FIXTURES_DIR) -> list[RawMessage]:
@@ -80,6 +106,13 @@ class FakeMailClient:
     #: can see that the source's filter rode on an incremental poll and not only a first
     #: sync (motet#95).
     searches: list[str] = field(default_factory=list)
+    labels: list[Label] = field(default_factory=lambda: list(FAKE_LABELS))
+    #: Every ``modify_labels`` call, in order, as ``(message_id, add, remove)``.
+    modify_calls: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = field(default_factory=list)
+    #: How many times ``list_labels`` was asked — the cache-miss path is a count.
+    label_lists: int = 0
+    #: Which mailbox this is, as ``users.getProfile`` would say.
+    address: str = "owner@example.invalid"
 
     def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
         from .gmail import first_sync_days, search_query  # noqa: PLC0415
@@ -113,6 +146,24 @@ class FakeMailClient:
                 return message
         raise SourceError(f"no such message in the fake mailbox: {message_id!r}")
 
+    def list_labels(self) -> tuple[Label, ...]:
+        self.label_lists += 1
+        return tuple(self.labels)
+
+    def mailbox_address(self) -> str | None:
+        return self.address
+
+    def modify_labels(self, message_id: str, *, add: Sequence[str], remove: Sequence[str]) -> None:
+        if not any(message.id == message_id for message in self.messages):
+            raise StaleReferenceError(
+                f"Requested entity was not found: {message_id!r}", target="message"
+            )
+        known = {label.id for label in self.labels}
+        unknown = [label_id for label_id in (*add, *remove) if label_id not in known]
+        if unknown:
+            raise StaleReferenceError(f"Invalid label: {', '.join(unknown)}", target="label")
+        self.modify_calls.append((message_id, tuple(add), tuple(remove)))
+
 
 def _fake_cursor(cursor: str | None) -> tuple[int, int | None, int] | None:
     """``(after, started, offset)`` out of a cursor this fake wrote, or None for any other."""
@@ -141,9 +192,19 @@ class FakeOAuthClient:
     #: What a real provider would host. Only ever rendered, never fetched.
     authorization_endpoint: str = "https://accounts.example.invalid/o/oauth2/v2/auth"
     expires_in_seconds: int = 3600
+    #: What the fake says was granted. Read-only unless a test says otherwise, because that
+    #: is what every real connect grants — a label-sync re-consent is the one flow that
+    #: comes back wider, and a test of it has to say so rather than get it by default.
+    granted_scopes: tuple[str, ...] | None = None
 
     def authorization_url(
-        self, *, redirect_uri: str, state: str, code_challenge: str, scopes: Sequence[str]
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        code_challenge: str,
+        scopes: Sequence[str],
+        login_hint: str | None = None,
     ) -> str:
         from urllib.parse import urlencode  # noqa: PLC0415
 
@@ -158,6 +219,7 @@ class FakeOAuthClient:
                 "code_challenge_method": "S256",
                 "access_type": "offline",
                 "prompt": "consent",
+                **({"login_hint": login_hint} if login_hint else {}),
             }
         )
         return f"{self.authorization_endpoint}?{query}"
@@ -169,7 +231,7 @@ class FakeOAuthClient:
             access_token=_fake_token("access", code),
             refresh_token=_fake_token("refresh", code),
             expires_in_seconds=self.expires_in_seconds,
-            scopes=(GMAIL_READONLY_SCOPE,),
+            scopes=self.granted_scopes or (GMAIL_READONLY_SCOPE,),
         )
 
     def refresh(self, *, refresh_token: str) -> TokenGrant:
@@ -182,7 +244,7 @@ class FakeOAuthClient:
             access_token=_fake_token("access", refresh_token),
             refresh_token=None,
             expires_in_seconds=self.expires_in_seconds,
-            scopes=(GMAIL_READONLY_SCOPE,),
+            scopes=self.granted_scopes or (GMAIL_READONLY_SCOPE,),
         )
 
 

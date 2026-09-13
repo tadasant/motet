@@ -900,6 +900,105 @@ components:
       - skipped
       title: IntegrateResponse
       type: object
+    LabelSyncRequest:
+      description: 'Set, change, or clear a mailbox''s label-sync settings.
+
+
+        Both empty turns label sync off. Setting a label does **not** widen the grant: a mailbox
+
+        connected read-only reports ``needs_reauthorization`` until its owner re-consents.'
+      properties:
+        add_label:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          title: Add Label
+        remove_label:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          title: Remove Label
+      title: LabelSyncRequest
+      type: object
+    LabelSyncResponse:
+      description: "One mailbox's label-sync settings, whether they can act, and what they have done.\n\
+        \n``status`` is the one field a screen branches on. ``off`` \u2014 no labels set, and nothing\
+        \ is\never written. ``needs_reauthorization`` \u2014 labels are set, but the mailbox was connected\n\
+        read-only, so nothing is written until its owner re-consents; the write-back records\nthat on\
+        \ every deliberate ingest rather than calling Gmail. ``on`` \u2014 labels are set and\nthe grant\
+        \ carries ``gmail.modify``."
+      properties:
+        add_label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Label put on a message when it is ingested.
+          title: Add Label
+        available_labels:
+          description: 'Label names read from the mailbox by its last poll, for the pickers: the user''s
+            own labels, then the system labels Motet will write (INBOX, UNREAD, STARRED, IMPORTANT). Empty
+            until a poll has read them.'
+          items:
+            type: string
+          title: Available Labels
+          type: array
+        failed_items:
+          description: "Ingested items whose message could not be moved, and never was since \u2014 counted\
+            \ from when this mailbox was last authorized, so a re-consent clears the failures it resolves."
+          title: Failed Items
+          type: integer
+        labels_read_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When the label list was last read from the mailbox.
+          title: Labels Read At
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Why the newest of those could not be moved.
+          title: Last Error
+        last_synced_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: The newest time a message from this mailbox was moved.
+          title: Last Synced At
+        modify_granted:
+          description: Whether this mailbox's grant can change labels at all. False for every mailbox
+            that has not re-consented for label sync, which is the default.
+          title: Modify Granted
+          type: boolean
+        remove_label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Label taken off a message when it is ingested.
+          title: Remove Label
+        status:
+          enum:
+          - 'off'
+          - needs_reauthorization
+          - 'on'
+          title: Status
+          type: string
+      required:
+      - status
+      - remove_label
+      - add_label
+      - modify_granted
+      - available_labels
+      - labels_read_at
+      - last_synced_at
+      - failed_items
+      - last_error
+      title: LabelSyncResponse
+      type: object
     ListenProgressRequest:
       description: 'How far into an episode the listener has got.
 
@@ -1260,6 +1359,18 @@ components:
       required:
       - read
       title: ReadStateRequest
+      type: object
+    ReauthorizeSourceRequest:
+      description: Ask the owner to grant a connected mailbox the scope label sync needs.
+      properties:
+        redirect_uri:
+          description: Where the provider sends the user back to. See ConnectSourceRequest.
+          minLength: 1
+          title: Redirect Uri
+          type: string
+      required:
+      - redirect_uri
+      title: ReauthorizeSourceRequest
       type: object
     RevokedResponse:
       description: How many sessions a revoke-everywhere took out.
@@ -1705,6 +1816,12 @@ components:
           description: '''paste'' or ''gmail''.'
           title: Kind
           type: string
+        label_sync:
+          anyOf:
+          - $ref: '#/components/schemas/LabelSyncResponse'
+          - type: 'null'
+          description: Moving a message between Gmail labels when its owner ingests it (motet#96). null
+            for any source that is not a mailbox.
         last_error:
           anyOf:
           - type: string
@@ -3417,6 +3534,55 @@ paths:
       summary: Disconnect Source
       tags:
       - sources
+  /v1/sources/{source_id}/label-sync:
+    put:
+      description: "Choose the label a message leaves and the label it joins when its owner ingests it.\n\
+        \nmotet#96. Stored on the source's ``config`` \u2014 the owner's intent \u2014 and read by the\n\
+        worker after each *deliberate* ingest; nothing on the poll path reads it. Both empty\nturns label\
+        \ sync off, and off means no mailbox write of any kind.\n\n**Setting labels widens nothing.**\
+        \ A mailbox connected read-only stays read-only and\nreports ``needs_reauthorization``; the wider\
+        \ grant is a separate, explicit step \u2014\n``POST /v1/sources/{id}/reauthorize`` \u2014 which\
+        \ only a source with labels set may take.\nA system label that could hide mail (TRASH, SPAM, and\
+        \ the rest outside INBOX, UNREAD,\nSTARRED and IMPORTANT) is refused here, and refused again by\
+        \ the worker."
+      operationId: set_label_sync_v1_sources__source_id__label_sync_put
+      parameters:
+      - in: path
+        name: source_id
+        required: true
+        schema:
+          title: Source Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LabelSyncRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Set Label Sync
+      tags:
+      - sources
   /v1/sources/{source_id}/poll:
     post:
       description: 'Queue a poll now, rather than waiting for the scheduler.
@@ -3455,6 +3621,58 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Poll Source
+      tags:
+      - sources
+  /v1/sources/{source_id}/reauthorize:
+    post:
+      description: "Ask the owner to let this mailbox's labels be changed \u2014 the label-sync re-consent.\n\
+        \n**The only route that ever asks Google for ``gmail.modify``, and only for a source that\nhas\
+        \ label sync set.** Connecting asks for ``gmail.readonly`` alone, so a mailbox whose\nowner never\
+        \ turns label sync on is never shown a consent screen that mentions changing\nmail, and never\
+        \ holds a grant that could. Refused with 409 until labels are set, so the\nwider scope is always\
+        \ asked for *because of* a setting the owner chose.\n\nThe consent itself is the owner's click\
+        \ (invariant 9) and finishes on the same\n``/v1/sources/callback`` a first connect does, against\
+        \ the same source: the new grant\nreplaces the stored one, and the worker refreshes any access\
+        \ token minted under the old\none before it writes. The URL carries a ``login_hint`` for the address\
+        \ the source was\nfirst seen to reach, and the worker refuses \u2014 and disconnects \u2014 a\
+        \ grant that reaches a\ndifferent one, because Google's account chooser does not stop the owner\
+        \ picking another."
+      operationId: reauthorize_source_v1_sources__source_id__reauthorize_post
+      parameters:
+      - in: path
+        name: source_id
+        required: true
+        schema:
+          title: Source Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReauthorizeSourceRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectSourceResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Reauthorize Source
       tags:
       - sources
   /v1/voice:

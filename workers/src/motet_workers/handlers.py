@@ -16,8 +16,8 @@ dedup call must never re-synthesize twenty minutes of audio that was already pai
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
@@ -38,6 +38,7 @@ from motet_inference import (
 )
 from motet_storage import ObjectStore, episode_audio_key
 
+from . import labels
 from .ingest import handle_extract, handle_poll, record_poll_failure
 from .jobs import enqueue
 from .queues import Queue
@@ -83,11 +84,21 @@ class Context:
     Deliberately small. A handler gets a connection, the inference stages, and object
     storage — it does not get the environment, an HTTP client, or a vendor SDK, because
     anything it could reach directly is something the fakes could not stand in for.
+
+    ``after_commit`` is the one addition, and it exists for one caller: a step that must
+    happen only once the handler's work has durably landed, and must never be able to undo
+    it — motet#96's label write-back, which moves a Gmail message after its item is
+    integrated. ``loop.drain`` runs what a handler appends here after the work *and* the
+    job's completion have committed and the job's serialization lock is released, once,
+    swallowing anything it raises. It is discarded unrun when the handler fails. It is not
+    a retry mechanism, not persisted, and not a queue: a worker that dies before it runs
+    simply does not run it, and a caller that needs more than that needs a job instead.
     """
 
     conn: psycopg.Connection[Any]
     stages: Stages
     store: ObjectStore
+    after_commit: list[Callable[[], object]] = field(default_factory=list)
 
 
 # --- integrate -----------------------------------------------------------------------
@@ -99,6 +110,10 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
     Runs under the user's serialization key (invariant 6), so this is the only ingestion
     touching this user's window right now — which is what makes "read the window, decide,
     write the result" safe without any further locking.
+
+    A payload carrying ``labels.DELIBERATE_KEY`` is the owner's own ingest, and for a Gmail
+    source with label sync set it also moves the message between labels — after this
+    transaction commits, never inside it. See :mod:`motet_workers.labels`.
     """
     source_item_id = _require(payload, "source_item_id")
     stored = repo.get_source_item(context.conn, source_item_id)
@@ -165,6 +180,10 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
         ),
     )
     repo.mark_source_item(context.conn, stored.id, SourceItemState.INTEGRATED)
+    # Registered, not run: the write-back moves a real message in a real mailbox, so it
+    # waits for this transaction to commit, and it is only registered at all for a
+    # deliberate ingest from a Gmail source with label sync set (motet#96).
+    labels.schedule(context, stored, dict(payload))
 
 
 def _decision_record(
@@ -731,12 +750,23 @@ def enqueue_integration(
     of this stage (``motet_workers.ingest`` says why), so this is the *only* way a polled
     item reaches dedup. Each id is checked to be the caller's, ``pending`` and without an
     integrate job before a job is written for it; the rest are dropped without comment,
-    and the ids actually queued come back so the caller can count both. Same queue, same
-    payload and same serialization key as a paste — invariant 6 lives on this stage.
+    and the ids actually queued come back so the caller can count both. Same queue and same
+    serialization key as a paste — invariant 6 lives on this stage.
+
+    **The payload also carries** :data:`labels.DELIBERATE_KEY`, and that flag is the whole
+    trigger for label sync (motet#96): a Gmail source with labels set moves the message once
+    the item is in. This is the only writer of it, so nothing automatic — a paste, a stale
+    job queued before the ingest gate, a future "always ingest from this sender" — can reach
+    a mailbox.
     """
     claimed = repo.claim_held_source_items(conn, user_id, source_item_ids)
     for item_id in claimed:
-        enqueue(conn, Queue.INTEGRATE, {"source_item_id": item_id}, serialize_key=user_id)
+        enqueue(
+            conn,
+            Queue.INTEGRATE,
+            {"source_item_id": item_id, labels.DELIBERATE_KEY: True},
+            serialize_key=user_id,
+        )
     return claimed
 
 

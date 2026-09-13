@@ -244,13 +244,15 @@ class TestIntegrate:
         assert response.json() == {"queued": 2, "skipped": 1}
         assert recorder.fired == [DrainReason.INTEGRATE]
 
-        # Exactly a paste's job: same queue, same payload, same serialization key.
+        # A paste's job — same queue, same serialization key — plus the flag that makes it
+        # a deliberate ingest, which is what label sync keys on (motet#96).
         with db.cursor() as cur:
             cur.execute(
                 "SELECT payload, serialize_key FROM jobs WHERE queue = 'integrate' ORDER BY id"
             )
             rows = cur.fetchall()
         assert {row["payload"]["source_item_id"] for row in rows} == {one, two}
+        assert all(row["payload"]["deliberate"] is True for row in rows)
         assert {row["serialize_key"] for row in rows} == {repo.OWNER_USER_ID}
 
         # And they are no longer held.

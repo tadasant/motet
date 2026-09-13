@@ -268,6 +268,70 @@ def remove_unused_source(
     conn.execute("DELETE FROM sources WHERE id = %s AND user_id = %s", (source_id_, user_id))
     return SourceRemoval.REMOVED
 
+def set_source_error(conn: psycopg.Connection[Any], source_id_: str, error: str | None) -> None:
+    """Say what is wrong with a source, without touching its cursor or its poll time."""
+    conn.execute(
+        "UPDATE sources SET last_error = %s WHERE id = %s",
+        (error[:2000] if error else None, source_id_),
+    )
+
+
+def set_source_config_key(
+    conn: psycopg.Connection[Any], source_id_: str, key: str, value: Any | None
+) -> None:
+    """Set one key of a source's ``config`` — the owner's intent — or drop it with ``None``.
+
+    One key rather than the whole document, so that a settings change cannot clobber a
+    setting it did not mean to touch.
+    """
+    import json  # noqa: PLC0415
+
+    if value is None:
+        conn.execute("UPDATE sources SET config = config - %s WHERE id = %s", (key, source_id_))
+        return
+    conn.execute(
+        "UPDATE sources SET config = config || jsonb_build_object(%s::text, %s::jsonb) "
+        "WHERE id = %s",
+        (key, json.dumps(value), source_id_),
+    )
+
+
+def carry_source_sync_state_key(
+    conn: psycopg.Connection[Any], source_id_: str, key: str, *, old: str, new: str
+) -> None:
+    """Replace one ``sync_state`` string value, but only if it is still ``old``.
+
+    A compare-and-set on one key, for a value that is *derived* from another row: the mailbox
+    check's grant stamp, carried to a refresh token the same grant just rotated into.
+    """
+    import json  # noqa: PLC0415
+
+    conn.execute(
+        "UPDATE sources SET sync_state = jsonb_set(sync_state, ARRAY[%s::text], %s::jsonb) "
+        "WHERE id = %s AND sync_state ->> %s = %s",
+        (key, json.dumps(new), source_id_, key, old),
+    )
+
+
+def merge_source_sync_state(
+    conn: psycopg.Connection[Any], source_id_: str, key: str, value: Any
+) -> None:
+    """Set one key of a source's ``sync_state`` without touching the rest of it.
+
+    **Not** :func:`set_source_sync_state`, and the difference is load-bearing. That one
+    replaces the whole document and stamps ``last_polled_at``, which is right for the poll
+    that owns the cursor — and would be a lost cursor if anything else did it. The label
+    write-back runs under the *user's* serialization key, not the poll's, so it can overlap a
+    poll of the same mailbox: a merge of its one key is what lets the two not race.
+    """
+    import json  # noqa: PLC0415
+
+    conn.execute(
+        "UPDATE sources SET sync_state = sync_state || jsonb_build_object(%s::text, %s::jsonb) "
+        "WHERE id = %s",
+        (key, json.dumps(value), source_id_),
+    )
+
 
 # --- the credential vault ------------------------------------------------------------
 
@@ -291,6 +355,9 @@ class StoredCredential:
     expires_at: datetime | None
     backend: str
     key_name: str
+    #: When this credential was last written — every consent rewrites the refresh grant, so
+    #: for ``refresh`` it identifies *which* grant this is (motet#96's mailbox check).
+    updated_at: datetime | None = None
 
     def expired(self, *, now: datetime, skew_seconds: int = 120) -> bool:
         """Whether this token should be refreshed before use.
@@ -349,7 +416,7 @@ def store_source_credential(
             expires_at = EXCLUDED.expires_at,
             updated_at = now()
         RETURNING id, user_id, source_id, provider, purpose, scopes, expires_at,
-                  backend, key_name
+                  backend, key_name, updated_at
         """,
         (
             new_id("cred"),
@@ -370,15 +437,21 @@ def store_source_credential(
 
 
 def get_source_credential(
-    conn: psycopg.Connection[Any], *, source_id_: str, purpose: str
+    conn: psycopg.Connection[Any], *, source_id_: str, purpose: str, lock: bool = False
 ) -> StoredCredential | None:
-    """Credential metadata without opening it — no key manager, no decrypt permission."""
+    """Credential metadata without opening it — no key manager, no decrypt permission.
+
+    ``lock`` takes the row lock (``FOR UPDATE``) for the caller's transaction, which waits
+    out a consent that has written a new grant and not yet committed it — so the read sees
+    the grant that will be current, not the one being replaced.
+    """
     row = _maybe_one(
         conn,
-        """
+        f"""
         SELECT id, user_id, source_id, provider, purpose, scopes, expires_at,
-               backend, key_name
+               backend, key_name, updated_at
         FROM source_credentials WHERE source_id = %s AND purpose = %s
+        {"FOR UPDATE" if lock else ""}
         """,
         (source_id_, purpose),
     )
@@ -598,6 +671,89 @@ def insert_polled_source_item(
         (source_item_id(), user_id, source_id_, title, text, external_id, received_at),
     )
     return row["id"] if row else None
+
+
+# --- label write-back (motet#96) -------------------------------------------------------
+
+
+def source_item_external_id(conn: psycopg.Connection[Any], source_item_id_: str) -> str | None:
+    """The provider's id for a source item — the Gmail message id — or ``None`` for a paste."""
+    row = _maybe_one(conn, "SELECT external_id FROM source_items WHERE id = %s", (source_item_id_,))
+    return row["external_id"] if row else None
+
+
+def record_label_writeback(
+    conn: psycopg.Connection[Any], source_item_id_: str, *, error: str | None
+) -> None:
+    """Record how moving this item's message between labels went.
+
+    Success stamps ``label_synced_at`` and clears any earlier error; a failure writes the
+    reason and leaves ``label_synced_at`` as it was, so a message that *was* moved once is
+    never reported as never moved.
+    """
+    if error is None:
+        conn.execute(
+            "UPDATE source_items SET label_synced_at = now(), label_error = NULL, "
+            "label_attempted_at = now() WHERE id = %s",
+            (source_item_id_,),
+        )
+        return
+    conn.execute(
+        "UPDATE source_items SET label_error = %s, label_attempted_at = now() WHERE id = %s",
+        (error[:2000], source_item_id_),
+    )
+
+
+@dataclass(frozen=True)
+class LabelWritebackSummary:
+    """What label sync has done for one source, for the Sources screen.
+
+    ``failed`` counts items whose write-back failed and never later succeeded, **since the
+    mailbox was last authorized** — the refresh credential's ``updated_at``, which every
+    consent rewrites. A failure recorded before that is either resolved by the consent (the
+    grant was read-only) or about a grant that no longer exists, and counting it would keep
+    "re-authorize" on screen after the owner had. ``last_error`` is the newest such reason.
+    Read off ``source_items`` because that is the only place the outcome is kept — the
+    write-back is not a job and leaves no row anywhere else.
+    """
+
+    last_synced_at: datetime | None
+    failed: int
+    last_error: str | None
+
+
+def label_writeback_summary(
+    conn: psycopg.Connection[Any], source_id_: str
+) -> LabelWritebackSummary:
+    row = _one(
+        conn,
+        """
+        WITH authorized AS (
+            SELECT coalesce(
+                (SELECT updated_at FROM source_credentials
+                 WHERE source_id = %(source)s AND purpose = 'refresh'),
+                '-infinity'::timestamptz
+            ) AS since
+        ),
+        failures AS (
+            SELECT si.label_error, si.label_attempted_at, si.id
+            FROM source_items si, authorized
+            WHERE si.source_id = %(source)s AND si.label_error IS NOT NULL
+              AND si.label_synced_at IS NULL AND si.label_attempted_at >= authorized.since
+        )
+        SELECT (SELECT max(label_synced_at) FROM source_items WHERE source_id = %(source)s)
+                   AS last_synced_at,
+               (SELECT count(*) FROM failures) AS failed,
+               (SELECT label_error FROM failures
+                ORDER BY label_attempted_at DESC, id DESC LIMIT 1) AS last_error
+        """,
+        {"source": source_id_},
+    )
+    return LabelWritebackSummary(
+        last_synced_at=row["last_synced_at"],
+        failed=int(row["failed"] or 0),
+        last_error=row["last_error"],
+    )
 
 
 # --- smart episode selection ---------------------------------------------------------
@@ -868,6 +1024,7 @@ def _credential(row: dict[str, Any]) -> StoredCredential:
         expires_at=row["expires_at"],
         backend=row["backend"],
         key_name=row["key_name"],
+        updated_at=row.get("updated_at"),
     )
 
 
@@ -888,12 +1045,14 @@ def _highlight(row: dict[str, Any]) -> Highlight:
 
 
 __all__ = [
+    "LabelWritebackSummary",
     "Ranking",
     "SmartRule",
     "SourceItemCounts",
     "SourceItemState",
     "SourceRemoval",
     "StoredCredential",
+    "carry_source_sync_state_key",
     "consume_oauth_state",
     "create_source",
     "delete_highlight",
@@ -901,22 +1060,29 @@ __all__ = [
     "get_source",
     "get_source_credential",
     "insert_polled_source_item",
+    "label_writeback_summary",
     "list_highlights",
     "list_pollable_sources",
     "list_sources",
     "load_source_credential",
     "mark_source_disconnected",
+
+    "merge_source_sync_state",
     "purge_expired_oauth_states",
+    "record_label_writeback",
     "record_listen_progress",
     "remove_unused_source",
     "save_highlight",
     "select_for_rule",
     "set_claim_timings",
     "set_source_active",
+    "set_source_config_key",
+    "set_source_error",
     "set_source_sync_state",
     "source_item_counts",
     "source_item_exists",
-    "unqueued_message_ids",
+    "source_item_external_id",
     "start_oauth",
     "store_source_credential",
+    "unqueued_message_ids",
 ]

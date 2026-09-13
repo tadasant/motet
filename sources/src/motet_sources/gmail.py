@@ -12,12 +12,19 @@ object wants to hold and refresh tokens itself — which would put a plaintext r
 somewhere other than the vault. Refreshing is ours (see :meth:`GmailOAuthClient.refresh`),
 so the token's whole lifetime stays inside invariant 8.
 
-**Read-only, and incremental.** The only scope asked for is
-``gmail.readonly``, requested on its own rather than bundled with anything else, so that
-the consent screen says exactly one true thing. A later feature that needs more asks for
-more *then*, against the same stored grant — which is what ``include_granted_scopes`` is
-for and why ``source_credentials.scopes`` records what was actually granted rather than
-what was asked.
+**Read-only by default, and incremental.** Connecting a mailbox asks for
+``gmail.readonly`` and nothing else, so that the consent screen says exactly one true
+thing. The one feature that needs more — moving a message between labels when its owner
+ingests it (motet#96) — asks for ``gmail.modify`` *then*, for that one source, through a
+second consent the owner starts by turning the feature on, which names both scopes itself.
+
+**No authorization sends ``include_granted_scopes``, and that is what keeps the first half
+true.** With it, Google folds every scope the account has ever granted this OAuth client
+into the new token — so connecting a *second* mailbox on an account that had re-consented
+another source for label sync would hand the new source ``gmail.modify`` with no consent
+for it. Without it, a token carries what its own authorization asked for. The callback
+also records only the granted scopes that authorization asked for, so a provider that
+widened anyway still cannot make a source *look* writable.
 """
 
 from __future__ import annotations
@@ -33,11 +40,13 @@ from typing import Any, Final
 from urllib.parse import urlencode
 
 from .interfaces import (
+    Label,
     MessagePage,
     MessageRef,
     RawMessage,
     SourceAuthError,
     SourceError,
+    StaleReferenceError,
     TokenGrant,
 )
 
@@ -45,9 +54,20 @@ logger = logging.getLogger("motet.sources.gmail")
 
 PROVIDER: Final = "gmail"
 
-#: The one scope. Read-only, and the narrowest read-only scope Gmail offers that can
-#: actually fetch a message body — `gmail.metadata` cannot, and `gmail.modify` is write.
+#: The scope every mailbox is connected with. Read-only, and the narrowest read-only scope
+#: Gmail offers that can actually fetch a message body — `gmail.metadata` cannot.
 GMAIL_READONLY_SCOPE: Final = "https://www.googleapis.com/auth/gmail.readonly"
+
+#: The write scope, and only for a mailbox whose owner turned label sync on (motet#96).
+#: The narrowest one that can change a message's labels: `gmail.labels` manages the labels
+#: themselves but cannot apply one to a message. It is also a scope that could archive or
+#: trash mail, which is why nothing asks for it on connect, and why the worker refuses to
+#: touch any system label outside ``motet_sources.labels.WRITABLE_SYSTEM_LABELS``.
+GMAIL_MODIFY_SCOPE: Final = "https://www.googleapis.com/auth/gmail.modify"
+
+#: What a label-sync re-consent asks for. Read-only is named again because nothing asks the
+#: provider to merge in an earlier grant: the token that comes back must still poll.
+LABEL_SYNC_SCOPES: Final = (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE)
 
 CLIENT_ID_ENV: Final = "GOOGLE_OAUTH_CLIENT_ID"
 CLIENT_SECRET_ENV: Final = "GOOGLE_OAUTH_CLIENT_SECRET"
@@ -221,30 +241,37 @@ class GmailOAuthClient:
         self._transport = transport
 
     def authorization_url(
-        self, *, redirect_uri: str, state: str, code_challenge: str, scopes: Sequence[str]
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        code_challenge: str,
+        scopes: Sequence[str],
+        login_hint: str | None = None,
     ) -> str:
-        query = urlencode(
-            {
-                "client_id": self._client_id,
-                "redirect_uri": redirect_uri,
-                "response_type": "code",
-                "scope": " ".join(scopes),
-                "state": state,
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256",
-                # Without `offline` Google issues no refresh token, and the connection
-                # silently dies an hour later.
-                "access_type": "offline",
-                # Forces the consent screen even on a re-connect. Without it, a user who
-                # has consented before gets no refresh token on the second grant — the
-                # single most common way an OAuth integration breaks on re-authorization.
-                "prompt": "consent",
-                # Incremental consent: a later feature asking for another scope keeps the
-                # ones already granted rather than replacing them.
-                "include_granted_scopes": "true",
-            }
-        )
-        return f"{self._authorization_endpoint}?{query}"
+        params = {
+            "client_id": self._client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(scopes),
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            # Without `offline` Google issues no refresh token, and the connection
+            # silently dies an hour later.
+            "access_type": "offline",
+            # Forces the consent screen even on a re-connect. Without it, a user who
+            # has consented before gets no refresh token on the second grant — the
+            # single most common way an OAuth integration breaks on re-authorization.
+            "prompt": "consent",
+            # Deliberately no `include_granted_scopes` — see the module docstring. It
+            # would fold a label-sync grant on one source into every later connect.
+        }
+        if login_hint:
+            # Preselects the mailbox a re-consent is for, so the account chooser does not
+            # invite picking a different one. A hint, not a control: the callback checks.
+            params["login_hint"] = login_hint
+        return f"{self._authorization_endpoint}?{urlencode(params)}"
 
     def exchange_code(self, *, code: str, redirect_uri: str, code_verifier: str) -> TokenGrant:
         return self._token_request(
@@ -429,6 +456,12 @@ class GmailMailClient:
             params["pageToken"] = state.page_token
         return self._get(f"{self._base_url}/users/me/messages", params)
 
+    def mailbox_address(self) -> str | None:
+        """``users.getProfile``'s ``emailAddress``: which mailbox this token reaches."""
+        body = self._json(self._get(f"{self._base_url}/users/me/profile", {}), "profile")
+        address = body.get("emailAddress")
+        return str(address) if isinstance(address, str) and address else None
+
     def fetch_message(self, message_id: str) -> RawMessage:
         """The message as RFC 822 bytes.
 
@@ -444,6 +477,50 @@ class GmailMailClient:
         # URL-safe base64, and Gmail omits the padding.
         return RawMessage(id=message_id, raw=base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
 
+    def list_labels(self) -> tuple[Label, ...]:
+        """Every label in the mailbox, system and user alike. One request, readonly scope."""
+        body = self._json(self._get(f"{self._base_url}/users/me/labels", {}), "labels")
+        return tuple(
+            Label(
+                id=item["id"],
+                name=str(item.get("name") or item["id"]),
+                system=item.get("type") == "system",
+            )
+            for item in (body.get("labels") or [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
+
+    def modify_labels(self, message_id: str, *, add: Sequence[str], remove: Sequence[str]) -> None:
+        """``users.messages.modify`` on one message — the connector's only write.
+
+        The *message*, not the thread: ``source_items.external_id`` is a message id, and
+        Gmail shows a thread's labels as the union of its messages', which is what a person
+        expects to see. 400 and 404 both become :class:`StaleReferenceError`: Gmail answers
+        an unknown label id with the first and an unknown message with the second, and the
+        error says which, because only the first is repaired by re-reading the labels.
+
+        **The last guard on what may be written.** An id outside
+        ``labels.WRITABLE_SYSTEM_LABELS`` among Gmail's system labels is refused here,
+        before any request, whatever the caller resolved — so no bug upstream of this line
+        can move a message into ``TRASH`` or ``SPAM``.
+        """
+        from .labels import FORBIDDEN_LABEL_IDS  # noqa: PLC0415 — labels imports interfaces only
+
+        forbidden = sorted({*add, *remove} & FORBIDDEN_LABEL_IDS)
+        if forbidden:
+            raise SourceError(f"refusing to change system label(s) {', '.join(forbidden)}")
+        response = self._post_json(
+            f"{self._base_url}/users/me/messages/{message_id}/modify",
+            {"addLabelIds": list(add), "removeLabelIds": list(remove)},
+        )
+        if response.status_code in (400, 404):
+            raise StaleReferenceError(
+                f"Gmail did not recognise message {message_id} or one of its label ids "
+                f"({response.status_code}): {_error_detail(response)}",
+                target="message" if response.status_code == 404 else "label",
+            )
+        self._json(response, f"a label change on message {message_id}")
+
     def _get(self, url: str, params: dict[str, str]) -> Any:
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         if self._transport is not None:
@@ -452,6 +529,15 @@ class GmailMailClient:
 
         with httpx.Client(timeout=self._timeout) as client:
             return client.get(url, params=params, headers=headers)
+
+    def _post_json(self, url: str, body: dict[str, Any]) -> Any:
+        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        if self._transport is not None:
+            return self._transport.post(url, json=body, headers=headers)
+        import httpx  # noqa: PLC0415
+
+        with httpx.Client(timeout=self._timeout) as client:
+            return client.post(url, json=body, headers=headers)
 
     def _json(self, response: Any, what: str) -> dict[str, Any]:
         status = response.status_code

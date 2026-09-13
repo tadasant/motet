@@ -20,6 +20,7 @@ import {
   relativeTime,
   rowStatus,
 } from './status'
+import { LabelSync } from '../LabelSync'
 
 /** How long "Sync now" watches for the poll to land before saying it is still queued. */
 const SYNC_WATCH_MS = 120_000
@@ -281,6 +282,13 @@ export function SourceDetail({
             </span>
           )}
         </div>
+      )}
+
+      {/* Label sync (motet#96) — settings, and the one consent that asks for more than
+          read-only access. It hands back the updated source; re-fetching everything keeps
+          this panel's derived counts in step rather than patching one row. */}
+      {isPollable(source) && source.connected && source.label_sync && (
+        <LabelSync source={source} onChange={() => void onRefresh()} />
       )}
 
       {isPollable(source) && source.connected && (

@@ -20,16 +20,19 @@ from .extract import (
     extract_newsletter,
     html_to_text,
 )
-from .fakes import FakeMailClient, FakeOAuthClient, load_fixture_messages
+from .fakes import FAKE_LABELS, FakeMailClient, FakeOAuthClient, load_fixture_messages
 from .gmail import (
     DEFAULT_QUERY,
+    GMAIL_MODIFY_SCOPE,
     GMAIL_READONLY_SCOPE,
+    LABEL_SYNC_SCOPES,
     PROVIDER,
     GmailConfigError,
     GmailMailClient,
     GmailOAuthClient,
 )
 from .interfaces import (
+    Label,
     MailClient,
     MessagePage,
     MessageRef,
@@ -37,13 +40,18 @@ from .interfaces import (
     RawMessage,
     SourceAuthError,
     SourceError,
+    StaleReferenceError,
     TokenGrant,
 )
+from .labels import LabelSettings, LabelSettingsError
 from .registry import build_mail_client, build_oauth_client, new_oauth_state, new_pkce_pair
 
 __all__ = [
     "DEFAULT_QUERY",
+    "FAKE_LABELS",
+    "GMAIL_MODIFY_SCOPE",
     "GMAIL_READONLY_SCOPE",
+    "LABEL_SYNC_SCOPES",
     "MAX_TEXT_CHARS",
     "MIN_TEXT_CHARS",
     "PROVIDER",
@@ -54,6 +62,9 @@ __all__ = [
     "GmailConfigError",
     "GmailMailClient",
     "GmailOAuthClient",
+    "Label",
+    "LabelSettings",
+    "LabelSettingsError",
     "MailClient",
     "MessagePage",
     "MessageRef",
@@ -61,6 +72,7 @@ __all__ = [
     "RawMessage",
     "SourceAuthError",
     "SourceError",
+    "StaleReferenceError",
     "TokenGrant",
     "build_mail_client",
     "build_oauth_client",

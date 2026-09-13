@@ -12,7 +12,7 @@ details never leak into these models.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -642,6 +642,48 @@ class SourceSyncResult(BaseModel):
     )
 
 
+class LabelSyncResponse(BaseModel):
+    """One mailbox's label-sync settings, whether they can act, and what they have done.
+
+    ``status`` is the one field a screen branches on. ``off`` — no labels set, and nothing is
+    ever written. ``needs_reauthorization`` — labels are set, but the mailbox was connected
+    read-only, so nothing is written until its owner re-consents; the write-back records
+    that on every deliberate ingest rather than calling Gmail. ``on`` — labels are set and
+    the grant carries ``gmail.modify``.
+    """
+
+    status: Literal["off", "needs_reauthorization", "on"]
+    remove_label: str | None = Field(description="Label taken off a message when it is ingested.")
+    add_label: str | None = Field(description="Label put on a message when it is ingested.")
+    modify_granted: bool = Field(
+        description=(
+            "Whether this mailbox's grant can change labels at all. False for every mailbox "
+            "that has not re-consented for label sync, which is the default."
+        )
+    )
+    available_labels: list[str] = Field(
+        description=(
+            "Label names read from the mailbox by its last poll, for the pickers: the "
+            "user's own labels, then the system labels Motet will write (INBOX, UNREAD, "
+            "STARRED, IMPORTANT). Empty until a poll has read them."
+        )
+    )
+    labels_read_at: datetime | None = Field(
+        description="When the label list was last read from the mailbox."
+    )
+    last_synced_at: datetime | None = Field(
+        description="The newest time a message from this mailbox was moved."
+    )
+    failed_items: int = Field(
+        description=(
+            "Ingested items whose message could not be moved, and never was since — counted "
+            "from when this mailbox was last authorized, so a re-consent clears the failures "
+            "it resolves."
+        )
+    )
+    last_error: str | None = Field(description="Why the newest of those could not be moved.")
+
+
 class SourceResponse(BaseModel):
     """A place source items come from — pasted text, or a connected mailbox.
 
@@ -700,6 +742,33 @@ class SourceResponse(BaseModel):
     )
     items_integrated: int = Field(
         description="Of those, how many have been integrated into a news item, all time."
+    )
+    label_sync: LabelSyncResponse | None = Field(
+        default=None,
+        description=(
+            "Moving a message between Gmail labels when its owner ingests it (motet#96). "
+            "null for any source that is not a mailbox."
+        ),
+    )
+
+
+class LabelSyncRequest(BaseModel):
+    """Set, change, or clear a mailbox's label-sync settings.
+
+    Both empty turns label sync off. Setting a label does **not** widen the grant: a mailbox
+    connected read-only reports ``needs_reauthorization`` until its owner re-consents.
+    """
+
+    remove_label: str | None = Field(default=None, max_length=500)
+    add_label: str | None = Field(default=None, max_length=500)
+
+
+class ReauthorizeSourceRequest(BaseModel):
+    """Ask the owner to grant a connected mailbox the scope label sync needs."""
+
+    redirect_uri: str = Field(
+        min_length=1,
+        description="Where the provider sends the user back to. See ConnectSourceRequest.",
     )
 
 

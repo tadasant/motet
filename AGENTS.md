@@ -2000,9 +2000,10 @@ adapter, and deterministic fakes — the same shape as the inference seam, readi
 `MOTET_INFERENCE_MODE`.
 
 **The interface is deliberately smaller than Gmail's API**: list what arrived since a
-cursor, and fetch one message's raw RFC 822 bytes. A narrow interface is what makes the fake
-honest; a fake that had to model Gmail's search syntax would be a worse Gmail rather than a
-better test.
+cursor, and fetch one message's raw RFC 822 bytes — plus, since motet#96, list the labels
+and move one message between them (the section below). A narrow interface is what makes the
+fake honest; a fake that had to model Gmail's search syntax would be a worse Gmail rather
+than a better test.
 
 **Every listing is a `messages.list` search carrying the source's filter, first sync or
 not** — `(<filter>) after:<epoch seconds>`, paged with `pageToken`. Incremental polls used to
@@ -2089,6 +2090,120 @@ row with a `DELETE ... RETURNING`, and a second exchange would overwrite a succe
 spent code. And **`error=access_denied` is an answer, not a failure** — someone pressed
 Cancel, which is a supported response to being asked for a mailbox, and it must not read
 like a crash.
+
+#### Label sync is the connector's one write, and it is opt-in per mailbox
+
+`motet_workers.labels`, `motet_sources.labels`, `PUT /v1/sources/{id}/label-sync`, `POST
+/v1/sources/{id}/reauthorize`, migration 0014. The owner's mailbox workflow is
+`Newsletters → Completed`, and ingesting an item into Motet *is* reading it — so a Gmail
+source can carry two optional label names, one to remove and one to add, applied to the
+item's message when the owner deliberately ingests it (motet#96). The names are personal,
+so either may be empty.
+
+**The scope is the design, and the gate on it is structural.** Connecting still asks for
+`gmail.readonly` and nothing else. `gmail.modify` — which could also archive or trash mail —
+is asked for by exactly one route, `reauthorize`, which refuses with 409 until the source
+has labels set, and which binds the consent to that one source. So a mailbox that never
+turns label sync on is never shown a consent screen that mentions changing mail and never
+holds a grant that could; `api/tests/test_label_sync_api.py` pins the connect URL's scope as
+*exactly* readonly rather than merely including it. The worker then asks the stored grant,
+without decrypting anything, whether it carries the scope, and a read-only grant is recorded
+as `needs_reauthorization` with no Gmail call at all. Setting labels is a setting, not a
+consent: it widens nothing. **No authorization sends `include_granted_scopes`**, which is
+what keeps the opt-in per *source* rather than per Google account: with it, Google folds
+every scope the account ever granted this OAuth client into each new token, so connecting a
+second mailbox on an account that had re-consented another would hand the new source
+`gmail.modify` unasked. The callback also records only the granted scopes that authorization
+asked for, and the worker decides from the recorded scopes, so a provider that widened a
+token anyway still cannot make a source act writable. **Turning label sync off stops every
+write and does not narrow the grant** — disconnecting forgets the token, and only revoking
+Motet in the Google account withdraws Google's side of it.
+
+**A re-consent is checked against the mailbox the source already is.** Re-authorizing
+replaces an existing source's grant, and Google's account chooser returns whichever
+account was picked. So `sync_state` records `mailbox_address` and `mailbox_verified_for` —
+the refresh grant's `updated_at`, which every consent rewrites — and before a poll or a
+write uses a grant it has not been checked for, `ingest.check_mailbox` asks Gmail which
+mailbox that grant reaches. **Bound to the credential, not to a flag a consent sets**, so a
+stale `sync_state` write can only cause a re-check, never skip one; and asked **with a token
+minted from the grant stored now** (`ingest.mint_token`), because an access token from the
+previous grant stays valid for up to an hour and would answer for the old account. The same
+function will not *store* a token whose grant was replaced while the refresh was in flight —
+it re-reads the grant's stamp after the network call and retries instead — so no caller,
+extraction included, can cache a token for a grant that is gone. A rotated refresh token
+keeps the scopes its grant was recorded with, and carries the check's stamp with it. A different address **disconnects** the source — its credentials are the other
+account's, so they are deleted, the source is paused, and `last_error` names both addresses —
+rather than reading one inbox under another's cursor; a profile naming no address blocks
+rather than passes. The `reauthorize` URL carries a `login_hint` for the recorded address
+as well; that is convenience, and the check is the control. The residual gap, stated: a
+source re-consented before any poll recorded its address has nothing to be compared with,
+and records whatever it sees.
+
+**Only a deliberate ingest writes, and that is a flag on the job rather than an inference.**
+`handlers.enqueue_integration` — "Ingest now", the held-item claim above — is the one
+writer of `deliberate: true` on an integrate job; `labels.schedule` registers a write only
+when the flag is set, the source is Gmail, and it has labels. Absent — as on a paste's job,
+or one extraction queued before the ingest gate — means no write. That makes a poll, an
+extract, a stale job, a paste, and any future "always ingest from this sender" unable to
+reach a mailbox by construction rather than by which enqueue paths happen to exist. A poll does *read* the label list under the readonly scope, so the pickers
+have names to offer — only when the cached catalog is missing or a day old, so a mailbox
+that never uses label sync pays one read a day — plus one profile read per consent.
+
+**After the commit, never inside it.** The write-back runs from `Context.after_commit`,
+which `_execute` hands back once the dedup transaction *and* `jobs.complete` have committed,
+and which `drain` runs only after releasing the job's serialization lock. So a Gmail outage
+cannot roll back an integrate, a slow Gmail call holds neither the dedup transaction's row
+locks nor that user's next integrate job, and an integrate that rolled back never moved a
+label for a story that does not exist. After `complete` rather than between the two
+commits, because that window is the one the work fence exists to cover and a network call
+inside it would widen it. The Sources screen counts a failure only if it was recorded
+since the mailbox was last authorized (`source_items.label_attempted_at` against the refresh
+credential's `updated_at`), so "re-authorize" does not outlive the re-authorization. **It never fails the job**: every outcome is written to
+`source_items.label_synced_at` / `label_error` and counted on
+`motet.gmail.label_writeback{outcome}` — `applied`, `needs_reauthorization`,
+`label_not_found`, `message_not_found`, `failed` — which is what makes "it silently stopped
+working" visible. A Gmail outage logs at WARNING; only a bug in the step is an ERROR.
+
+**Names are resolved to ids through a cache the poll keeps.** `sync_state.label_catalog`,
+written by the poll and merged — one key, never the whole document, because the write-back
+runs under the user's key and can overlap a poll that owns the cursor. A name the cache
+does not have is re-read once; a modify Gmail answers with 400 or 404 is re-resolved and
+retried once, which is how a label deleted and recreated under the same name recovers.
+**Only four system labels may be written** — `INBOX`, `UNREAD`, `STARRED`, `IMPORTANT` —
+refused at input by the settings route, again by the resolver (by id, whatever the cached
+catalog claims), and a third time by `GmailMailClient.modify_labels` before any request, so
+no row or bug upstream can move a newsletter into `TRASH` or `SPAM`. Removing `INBOX` is
+archiving, which is reversible from All Mail, and is the `Inbox → Archive` workflow.
+
+**Un-ingesting does not put the label back, and that is decided rather than deferred by
+accident.** There is no un-ingest to hang it on, and a dismissed held item was never
+written to. A restore would also need to know what the message carried *before* — a blind
+re-add of `Newsletters` could add a label the message never had — and nothing records that
+today. If it is ever built, the modify response's `labelIds` is where the before-state comes
+from.
+
+**What no test here can tell you is whether Google grants it.** `gmail.modify` is a
+restricted scope, like `gmail.readonly`, and the fake OAuth provider grants whatever a test
+tells it to. Whether the OAuth client's consent screen has to list the scope before Google
+will offer it is a one-time human-owned step (invariant 9), and the first real re-consent
+is the owner's click.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** Two methods on an existing
+Protocol, two columns on an existing table used the way `last_error` already is, a key in
+each of `config` and `sync_state` used as they already are, a step inside an existing
+handler, and two routes on the existing API: no deployable, datastore, queue, vendor or
+resource in the private repo. The one piece that touches the job runner is
+`Context.after_commit`, and the judgement taken is that **motet#96 is its design session**.
+It is written as a list any handler could append to, which is wider than the one step that
+uses it; `handle_integrate` is its only caller, and a second caller is the moment to ask
+again rather than a use this reading already covers:
+the owner's issue specifies "a post-commit step at the end of `handle_integrate` — after the
+dedup transaction commits", names the alternative (a `label` job) and rejects it as "a new
+mechanism in the job queue … not worth one API call". A post-commit step needs somewhere
+after the commit to run, and that list is the narrowest such place: not persisted, not
+retried, not a queue, discarded when the handler fails. A worker that dies between the
+commit and the step leaves the message where it was, with neither column set — the cost of
+not being a job, stated rather than discovered.
 
 ### The Sources screen is a catalog, and a source row says what it did
 
