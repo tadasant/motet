@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motet — Polyphony A · Waveform score</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..700,0..100;1,9..144,300..700,0..100&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --parchment: #F4EFE6;
+    --surface: #EAE3D6;
+    --ink: #1B1A2E;
+    --ink-soft: rgba(27, 26, 46, 0.66);
+    --ink-mute: rgba(27, 26, 46, 0.42);
+    --rule: rgba(27, 26, 46, 0.14);
+    --vermilion: #D64B2A;
+    --ochre: #D9A441;
+    --teal: #2A7F86;
+    --plum: #6B3E86;
+    --nav-h: 88px;
+    --gutter: clamp(20px, 5vw, 72px);
+    --display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    --body: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--parchment);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "ss01", "cv05";
+  }
+  a { color: inherit; text-decoration: none; }
+  p { margin: 0; }
+  h1, h2, h3 { margin: 0; font-weight: 400; }
+  ul { margin: 0; padding: 0; list-style: none; }
+
+  .display {
+    font-family: var(--display);
+    font-variation-settings: "SOFT" 100, "opsz" 144;
+    font-weight: 400;
+    letter-spacing: -0.015em;
+  }
+  .wordmark {
+    font-family: var(--display);
+    font-style: italic;
+    font-weight: 500;
+    font-variation-settings: "SOFT" 100, "opsz" 72;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.28em;
+  }
+  .wordmark .glyph { align-self: center; display: block; }
+
+  /* ---------- Nav ---------- */
+  .nav {
+    height: var(--nav-h);
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: 0 var(--gutter);
+    border-bottom: 1px solid var(--rule);
+  }
+  .nav .wordmark { font-size: 30px; }
+  .nav-links { display: flex; gap: 36px; justify-self: center; font-size: 15px; font-weight: 500; color: var(--ink-soft); }
+  .nav-links a { position: relative; padding: 6px 0; }
+  .nav-links a::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: linear-gradient(90deg, var(--vermilion), var(--ochre), var(--teal), var(--plum));
+    transform: scaleX(0); transform-origin: left; transition: transform .25s ease;
+  }
+  .nav-links a:hover::after { transform: scaleX(1); }
+  .nav-links a:hover { color: var(--ink); }
+  .signin {
+    justify-self: end;
+    font-size: 14px; font-weight: 500;
+    padding: 9px 16px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    color: var(--ink);
+    transition: border-color .2s ease, background .2s ease;
+  }
+  .signin:hover { border-color: var(--ink); background: var(--surface); }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    min-height: calc(100vh - var(--nav-h));
+    display: grid;
+    grid-template-columns: minmax(0, 11fr) minmax(0, 12fr);
+    gap: clamp(32px, 5vw, 80px);
+    align-items: center;
+    padding: 40px var(--gutter) 40px;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero-copy { max-width: 600px; position: relative; z-index: 1; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 12px;
+    font-size: 13px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 30px;
+  }
+  .eyebrow .voices { display: inline-flex; gap: 4px; }
+  .eyebrow .voices i { display: block; width: 6px; height: 6px; border-radius: 50%; }
+  .headline {
+    font-size: clamp(46px, 5.4vw, 78px);
+    line-height: 1.02;
+    text-wrap: balance;
+    margin-bottom: 30px;
+  }
+  .headline em {
+    font-style: italic;
+    font-variation-settings: "SOFT" 100, "opsz" 144;
+    color: var(--ink);
+  }
+  .subhead {
+    font-size: clamp(17px, 1.35vw, 20px);
+    line-height: 1.55;
+    color: var(--ink-soft);
+    max-width: 30em;
+    margin-bottom: 40px;
+    text-wrap: pretty;
+  }
+  .ctas { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+  .btn-primary {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 12px;
+    padding: 17px 28px 17px 26px;
+    background: var(--ink);
+    color: var(--parchment);
+    border-radius: 999px;
+    font-weight: 600; font-size: 16px;
+    letter-spacing: 0.005em;
+    overflow: hidden;
+    transition: transform .2s ease, box-shadow .2s ease;
+    box-shadow: 0 1px 0 rgba(27,26,46,.2), 0 12px 32px -14px rgba(27,26,46,.6);
+  }
+  .btn-primary::before {
+    content: "";
+    position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+    background: linear-gradient(90deg, var(--vermilion) 0 25%, var(--ochre) 25% 50%, var(--teal) 50% 75%, var(--plum) 75%);
+    opacity: .95;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(27,26,46,.2), 0 18px 36px -14px rgba(27,26,46,.7); }
+  .btn-primary .play {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--parchment);
+    position: relative; flex: none;
+  }
+  .btn-primary .play::after {
+    content: ""; position: absolute; left: 9px; top: 6px;
+    border-left: 7px solid var(--ink);
+    border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+  }
+  .btn-text {
+    font-weight: 500; font-size: 16px; color: var(--ink);
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 2px;
+    transition: border-color .2s ease;
+  }
+  .btn-text:hover { border-color: var(--ink); }
+
+  .hero-meta {
+    margin-top: 52px;
+    display: flex; gap: 32px; flex-wrap: wrap;
+    font-size: 13.5px; color: var(--ink-mute);
+  }
+  .hero-meta span { display: inline-flex; align-items: center; gap: 9px; }
+  .hero-meta span::before { content: ""; width: 14px; height: 1.5px; background: currentColor; opacity: .6; }
+
+  /* ---------- Motif: a waveform score ---------- */
+  .motif {
+    position: relative;
+    margin: 0;
+    width: 100%;
+    display: flex; flex-direction: column;
+  }
+  .motif .score { width: 100%; aspect-ratio: 5 / 3.1; max-height: 440px; }
+  .motif svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .motif .voice { fill: none; stroke-width: 5; stroke-linecap: round; mix-blend-mode: multiply; }
+  .motif .voice.v1 { stroke: var(--vermilion); }
+  .motif .voice.v2 { stroke: var(--ochre); }
+  .motif .voice.v3 { stroke: var(--teal); }
+  .motif .voice.v4 { stroke: var(--plum); }
+  .motif .one { fill: none; stroke: var(--ink); stroke-width: 5; stroke-linecap: round; }
+  .motif .label {
+    font-family: var(--body); font-size: 11px; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; fill: var(--ink-mute);
+  }
+  .motif .label.ink { fill: var(--ink); opacity: .7; }
+
+  /* transport: the score is something you play */
+  .transport {
+    margin-top: 22px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 16px;
+  }
+  .transport .play {
+    width: 46px; height: 46px; border-radius: 50%;
+    background: var(--ink); color: var(--parchment);
+    position: relative; flex: none;
+    box-shadow: 0 1px 0 rgba(27,26,46,.2), 0 12px 32px -14px rgba(27,26,46,.6);
+  }
+  .transport .play::after {
+    content: ""; position: absolute; left: 19px; top: 15px;
+    border-left: 13px solid var(--parchment);
+    border-top: 8px solid transparent; border-bottom: 8px solid transparent;
+  }
+  .scrub { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; min-width: 0; }
+  .scrub .t {
+    font-size: 13px; font-weight: 500; color: var(--ink-soft);
+    font-variant-numeric: tabular-nums; letter-spacing: .02em;
+  }
+  .scrub .track {
+    position: relative; height: 6px; border-radius: 6px;
+    background: var(--surface);
+  }
+  .scrub .played {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 13.3%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--vermilion), var(--ochre), var(--teal), var(--plum));
+  }
+  .scrub .knob {
+    position: absolute; left: 13.3%; top: 50%;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--ink); border: 2.5px solid var(--parchment);
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 1px rgba(27,26,46,.18), 0 4px 10px -4px rgba(27,26,46,.5);
+  }
+  .transport .pills { display: inline-flex; gap: 8px; }
+  .transport .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 32px; padding: 0 12px;
+    border: 1px solid var(--rule); border-radius: 999px;
+    font-size: 13px; font-weight: 500; color: var(--ink);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .transport .pill.mic { background: var(--surface); border-color: transparent; }
+  .transport .pill svg { display: block; }
+  .now-playing {
+    margin-top: 14px;
+    font-family: var(--display); font-style: italic; font-size: 15px;
+    font-variation-settings: "SOFT" 100, "opsz" 14;
+    color: var(--ink-soft);
+  }
+  .motif-caption {
+    margin-top: 22px; text-align: right;
+    font-family: var(--display); font-style: italic; font-size: 15px;
+    color: var(--ink-mute);
+    font-variation-settings: "SOFT" 100, "opsz" 14;
+  }
+
+  /* soft acoustic glow behind the motif */
+  .hero::after {
+    content: "";
+    position: absolute; z-index: 0;
+    right: -8%; top: 10%; width: 60%; height: 80%;
+    background:
+      radial-gradient(closest-side, rgba(217,164,65,.14), transparent 70%),
+      radial-gradient(closest-side at 70% 60%, rgba(42,127,134,.10), transparent 70%);
+    filter: blur(20px);
+    pointer-events: none;
+  }
+  .motif { z-index: 1; }
+
+  /* ---------- Sections ---------- */
+  .section { padding: 96px var(--gutter); border-top: 1px solid var(--rule); }
+  .section-head {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: end;
+    margin-bottom: 64px;
+  }
+  .section-kicker {
+    font-size: 12px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--ink-mute); margin-bottom: 14px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .section-kicker::before { content: ""; width: 28px; height: 1px; background: var(--ink); opacity: .35; }
+  .section-title { font-size: clamp(34px, 3.4vw, 48px); line-height: 1.05; }
+  .section-lede { font-size: 18px; line-height: 1.6; color: var(--ink-soft); max-width: 34em; text-wrap: pretty; }
+  .section-lede strong { color: var(--ink); font-weight: 600; }
+  .section-idea {
+    font-family: var(--display); font-style: italic;
+    font-variation-settings: "SOFT" 100, "opsz" 36;
+    font-size: clamp(20px, 1.7vw, 24px); line-height: 1.3;
+    color: var(--ink); max-width: 26em; text-wrap: balance;
+    margin-bottom: 20px;
+  }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 24px;
+  }
+  .card {
+    background: var(--surface);
+    border-radius: 20px;
+    padding: 36px;
+    position: relative;
+  }
+  .card-label {
+    font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-mute); margin-bottom: 26px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .card-label small { font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 12.5px; }
+
+  /* palette */
+  .palette { grid-column: span 7; }
+  .swatches { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; }
+  .swatch { display: flex; flex-direction: column; gap: 10px; }
+  .swatch .chip {
+    height: 112px; border-radius: 12px;
+    border: 1px solid rgba(27,26,46,.10);
+  }
+  .swatch .name { font-size: 13px; font-weight: 600; }
+  .swatch .hex { font-size: 12px; color: var(--ink-mute); font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+  .swatch.voice .chip { position: relative; overflow: hidden; }
+  .swatch.voice .chip::after {
+    content: ""; position: absolute; left: 12px; right: 12px; top: 50%; height: 3px;
+    border-radius: 3px; background: rgba(244,239,230,.75);
+    transform: translateY(-50%) rotate(-8deg);
+  }
+  .palette-note { margin-top: 26px; font-size: 14px; color: var(--ink-soft); line-height: 1.55; max-width: 44em; }
+
+  /* rule */
+  .rule-card { grid-column: span 5; display: flex; flex-direction: column; }
+  .rule-list { display: flex; flex-direction: column; gap: 0; font-size: 15px; }
+  .rule-list li {
+    display: grid; grid-template-columns: 26px 1fr; gap: 14px;
+    padding: 16px 0; border-top: 1px solid var(--rule);
+    line-height: 1.5; color: var(--ink-soft);
+  }
+  .rule-list li:last-child { border-bottom: 1px solid var(--rule); }
+  .rule-list b { color: var(--ink); font-weight: 600; }
+  .rule-list .n {
+    font-family: var(--display); font-style: italic; font-size: 20px; line-height: 1.1;
+    font-variation-settings: "SOFT" 100, "opsz" 24; color: var(--ink);
+  }
+
+  /* type */
+  .type-card { grid-column: span 12; }
+  .type-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 56px; align-items: start; }
+  .specimen-display { font-size: clamp(56px, 7vw, 104px); line-height: .98; margin-bottom: 8px; }
+  .specimen-display em { font-style: italic; }
+  .specimen-meta { font-size: 12.5px; color: var(--ink-mute); margin-bottom: 36px; display: flex; gap: 24px; flex-wrap: wrap; }
+  .specimen-meta span::before { content: "— "; opacity: .6; }
+  .numerals {
+    font-family: var(--display);
+    font-variation-settings: "SOFT" 60, "opsz" 48;
+    font-size: clamp(30px, 3.4vw, 46px);
+    letter-spacing: .04em;
+    font-variant-numeric: proportional-nums oldstyle-nums;
+    color: var(--ink);
+    display: flex; flex-wrap: wrap; gap: .1em .5em;
+    padding-top: 26px; border-top: 1px solid var(--rule);
+  }
+  .numerals small {
+    font-family: var(--body); font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-mute); align-self: center; width: 100%; margin-bottom: 6px;
+  }
+  .specimen-body h3 { font-family: var(--display); font-variation-settings: "SOFT" 100, "opsz" 36; font-size: 26px; line-height: 1.2; margin-bottom: 16px; }
+  .specimen-body p { font-size: 16.5px; line-height: 1.6; color: var(--ink-soft); margin-bottom: 18px; text-wrap: pretty; }
+  .specimen-body p .said {
+    color: var(--ink);
+    background: linear-gradient(transparent 62%, rgba(217,164,65,.45) 62%);
+    padding: 0 1px;
+  }
+  .specimen-body .ui-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+  .ui-row .pill {
+    font-size: 13px; font-weight: 500; padding: 7px 12px;
+    border: 1px solid var(--rule); border-radius: 999px; color: var(--ink-soft);
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .ui-row .pill i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+
+  /* lockups */
+  .lockup { grid-column: span 6; min-height: 300px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; }
+  .lockup.on-ink { background: var(--ink); color: var(--parchment); }
+  .lockup.on-ink .card-label { color: rgba(244,239,230,.5); }
+  .lockup .big { font-size: clamp(64px, 7vw, 96px); margin: 10px 0 0; }
+  .lockup .tag { font-size: 14px; color: var(--ink-mute); display: flex; justify-content: space-between; align-items: center; }
+  .lockup.on-ink .tag { color: rgba(244,239,230,.55); }
+  .lockup .mini-motif { display: block; }
+  .lockup .mini-motif path { fill: none; stroke-width: 2.5; stroke-linecap: round; }
+
+  /* footer */
+  .footer {
+    padding: 40px var(--gutter) 56px;
+    border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13.5px; color: var(--ink-mute); gap: 24px; flex-wrap: wrap;
+  }
+  .footer .wordmark { font-size: 22px; color: var(--ink); }
+  .footer .bar { display: inline-flex; gap: 6px; }
+  .footer .bar i { display: block; width: 28px; height: 3px; border-radius: 3px; }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width: 1100px) {
+    .palette, .rule-card { grid-column: span 12; }
+    .swatches { grid-template-columns: repeat(4, 1fr); }
+    .type-grid { grid-template-columns: 1fr; gap: 36px; }
+  }
+  @media (max-width: 860px) {
+    :root { --nav-h: 72px; }
+    .nav { grid-template-columns: 1fr auto; }
+    .nav-links { display: none; }
+    .nav .wordmark { font-size: 26px; }
+    .hero {
+      grid-template-columns: 1fr;
+      min-height: 0;
+      padding-top: 56px; padding-bottom: 48px;
+      gap: 48px;
+    }
+    .hero::after { display: none; }
+    .headline { font-size: clamp(40px, 11vw, 56px); }
+    .hero-meta { margin-top: 36px; gap: 18px; }
+    .motif .score { max-height: none; }
+    .motif .label { font-size: 14px; }
+    .motif .voice, .motif .one { stroke-width: 6; }
+    .transport { grid-template-columns: auto 1fr; gap: 14px; }
+    .transport .pills { grid-column: 1 / -1; justify-content: flex-end; }
+    .motif-caption { margin-top: 18px; }
+    .section { padding: 64px var(--gutter); }
+    .section-head { grid-template-columns: 1fr; gap: 20px; margin-bottom: 40px; }
+    .card { padding: 26px; border-radius: 16px; }
+    .card-grid { gap: 16px; }
+    .swatches { grid-template-columns: repeat(2, 1fr); }
+    .swatch .chip { height: 84px; }
+    .lockup { grid-column: span 12; min-height: 240px; }
+    .lockup .big { font-size: clamp(56px, 16vw, 80px); }
+  }
+  @media (max-width: 420px) {
+    body { font-size: 16px; }
+    .ctas { gap: 18px; }
+    .btn-primary { padding: 15px 22px; font-size: 15px; }
+    .transport .play { width: 42px; height: 42px; }
+    .transport .play::after { left: 17px; top: 13px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <a class="wordmark" href="#" aria-label="Motet home">
+    <svg class="glyph" width="26" height="22" viewBox="0 0 26 22" aria-hidden="true">
+      <path d="M1 3 C8 3 10 11 25 11" fill="none" stroke="#D64B2A" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M1 8 C8 8 12 11 25 11" fill="none" stroke="#D9A441" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M1 14 C8 14 12 11 25 11" fill="none" stroke="#2A7F86" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M1 19 C8 19 10 11 25 11" fill="none" stroke="#6B3E86" stroke-width="2.4" stroke-linecap="round"/>
+    </svg>
+    motet
+  </a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href="#how">How it works</a>
+    <a href="#sources">Sources</a>
+    <a href="#pricing">Pricing</a>
+  </nav>
+  <a class="signin" href="#signin">Sign in</a>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">
+        <span class="voices" aria-hidden="true">
+          <i style="background:#D64B2A"></i><i style="background:#D9A441"></i><i style="background:#2A7F86"></i><i style="background:#6B3E86"></i>
+        </span>
+        A motet: many voices, one piece.
+      </p>
+      <h1 class="headline display">Many voices.<br>One thing <em>worth hearing.</em></h1>
+      <p class="subhead">Motet turns the content you already trust — newsletters, bookmarks, threads — into an interactive podcast you listen to on the go. When a story catches you, just ask, and it goes deeper.</p>
+      <div class="ctas">
+        <a class="btn-primary" href="#start"><span class="play" aria-hidden="true"></span>Start listening</a>
+        <a class="btn-text" href="#sample">Hear a sample →</a>
+      </div>
+      <div class="hero-meta">
+        <span>Content you trust</span>
+        <span>Interactive: just ask</span>
+        <span>Made for on the go</span>
+      </div>
+    </div>
+
+    <figure class="motif" aria-label="Four coloured audio waveforms, each on its own stave, converging into a single ink waveform above a podcast transport bar.">
+      <div class="score">
+      <svg viewBox="0 0 1000 620" preserveAspectRatio="xMidYMid meet" role="img">
+        <!-- staves: four systems of five thin rules on the left, fading out toward the convergence -->
+        <defs>
+          <linearGradient id="staffFade" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0" stop-color="#1B1A2E" stop-opacity="1"/>
+            <stop offset="0.55" stop-color="#1B1A2E" stop-opacity="1"/>
+            <stop offset="0.85" stop-color="#1B1A2E" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <g stroke="url(#staffFade)" stroke-width="1" opacity=".22">
+          <!-- system 1 -->
+          <line x1="0" y1="70" x2="1000" y2="70"/><line x1="0" y1="82" x2="1000" y2="82"/><line x1="0" y1="94" x2="1000" y2="94"/><line x1="0" y1="106" x2="1000" y2="106"/><line x1="0" y1="118" x2="1000" y2="118"/>
+          <!-- system 2 -->
+          <line x1="0" y1="212" x2="1000" y2="212"/><line x1="0" y1="224" x2="1000" y2="224"/><line x1="0" y1="236" x2="1000" y2="236"/><line x1="0" y1="248" x2="1000" y2="248"/><line x1="0" y1="260" x2="1000" y2="260"/>
+          <!-- system 3 -->
+          <line x1="0" y1="354" x2="1000" y2="354"/><line x1="0" y1="366" x2="1000" y2="366"/><line x1="0" y1="378" x2="1000" y2="378"/><line x1="0" y1="390" x2="1000" y2="390"/><line x1="0" y1="402" x2="1000" y2="402"/>
+          <!-- system 4 -->
+          <line x1="0" y1="496" x2="1000" y2="496"/><line x1="0" y1="508" x2="1000" y2="508"/><line x1="0" y1="520" x2="1000" y2="520"/><line x1="0" y1="532" x2="1000" y2="532"/><line x1="0" y1="544" x2="1000" y2="544"/>
+        </g>
+        <!-- bar line at the left edge, tying the four systems into one score -->
+        <line x1="0.75" y1="70" x2="0.75" y2="544" stroke="#1B1A2E" stroke-width="1.5" opacity=".28"/>
+        <!-- the centre line the one voice sits on, faint, so the ink waveform reads as continuing off the edge -->
+        <line x1="880" y1="310" x2="1000" y2="310" stroke="#1B1A2E" stroke-width="1" opacity=".18"/>
+
+        <!-- voice labels -->
+        <text class="label" x="14" y="52">Newsletters</text>
+        <text class="label" x="14" y="194">Bookmarks</text>
+        <text class="label" x="14" y="336">Longreads</text>
+        <text class="label" x="14" y="478">Threads</text>
+
+        <!-- the four voices, drawn as amplitude envelopes -->
+        <path class="voice v1" d="M0 81.5V106.5 M10 80.8V107.6 M20 86.6V103.2 M30 88.7V103.7 M40 82.3V114.0 M50 92.8V108.6 M60 88.5V118.9 M70 86.1V127.9 M80 79.8V140.9 M90 97.3V129.5 M100 105.4V126.8 M110 106.0V130.1 M120 102.8V135.4 M130 105.9V132.4 M140 100.6V135.5 M150 80.6V151.2 M160 85.4V140.8 M170 84.0V136.0 M180 94.5V118.8 M190 76.1V130.0 M200 83.8V114.8 M210 77.7V113.3 M220 70.7V112.5 M230 68.5V107.2 M240 49.9V118.4 M250 57.7V103.5 M260 60.1V94.5 M270 53.9V94.6 M280 39.1V103.9 M290 47.2V91.1 M300 54.7V79.7 M310 41.5V89.9 M320 45.5V83.8 M330 44.2V84.0 M340 50.6V77.4 M350 31.1V97.8 M360 35.4V95.3 M370 41.7V92.3 M380 48.2V91.0 M390 57.0V89.2 M400 61.2V93.6 M410 65.5V99.5 M420 69.3V107.0 M430 73.9V114.9 M440 66.7V135.4 M450 77.4V138.7 M460 104.8V125.8 M470 112.2V133.1 M480 112.9V147.4 M490 121.6V153.5 M500 133.5V156.4 M510 128.2V176.1 M520 133.0V185.3 M530 144.5V187.4 M540 153.7V191.2 M550 159.7V197.7 M560 164.3V205.0 M570 176.7V203.9 M580 178.5V213.0 M590 189.7V212.1 M600 188.9V222.8 M610 189.2V231.9 M620 207.5V222.9 M630 207.8V231.6 M640 205.6V242.6 M650 207.5V249.5 M660 224.1V241.7 M670 227.4V247.2 M680 231.1V252.4 M690 238.5V253.8 M700 240.2V261.2 M710 243.9V266.6 M720 242.5V277.2 M730 251.4V277.5 M740 256.2V281.9 M750 268.4V278.9 M760 270.3V285.9 M770 275.5V289.5 M780 280.2V293.2 M790 283.1V298.3 M800 284.3V304.5 M810 283.0V312.7 M820 293.2V308.6 M830 298.9V308.3 M840 299.8V311.9 M850 298.3V317.0 M860 304.3V313.6 M870 304.0V315.5 M880 299.6V320.4"/>
+        <path class="voice v2" d="M0 216.2V255.8 M10 221.5V251.1 M20 223.3V250.8 M30 230.2V245.6 M40 220.9V256.4 M50 228.5V249.6 M60 225.8V251.9 M70 222.0V253.9 M80 220.5V252.0 M90 205.6V262.1 M100 212.7V248.7 M110 209.1V245.1 M120 202.2V244.2 M130 187.2V251.4 M140 194.8V236.7 M150 200.6V225.1 M160 186.7V234.5 M170 190.7V226.9 M180 189.0V225.7 M190 194.8V218.1 M200 170.9V241.2 M210 176.3V235.9 M220 182.2V231.1 M230 187.9V227.5 M240 191.9V226.4 M250 195.2V227.0 M260 197.8V229.1 M270 195.1V237.3 M280 196.7V241.8 M290 186.3V258.7 M300 195.6V256.5 M310 216.4V243.1 M320 220.8V246.4 M330 217.4V257.5 M340 223.1V259.4 M350 233.1V256.9 M360 219.9V277.3 M370 221.8V282.2 M380 231.1V279.5 M390 238.3V278.5 M400 235.4V286.9 M410 237.5V289.7 M420 248.1V283.2 M430 245.1V289.6 M440 254.1V283.2 M450 246.9V292.1 M460 242.7V297.3 M470 257.2V283.0 M480 251.5V288.3 M490 242.2V296.7 M500 239.3V298.1 M510 256.1V279.6 M520 252.8V281.0 M530 250.9V281.0 M540 254.3V275.6 M550 249.7V278.4 M560 244.1V282.6 M570 235.4V290.2 M580 242.6V282.3 M590 243.5V281.4 M600 253.0V272.4 M610 250.5V276.2 M620 253.7V274.8 M630 254.2V276.8 M640 254.2V279.8 M650 252.3V285.4 M660 248.1V293.8 M670 262.8V283.9 M680 267.4V284.2 M690 268.4V288.6 M700 267.0V295.5 M710 277.3V290.9 M720 278.3V295.5 M730 275.3V304.0 M740 281.6V303.1 M750 283.8V306.1 M760 291.2V303.5 M770 285.6V313.4 M780 292.0V311.1 M790 293.7V312.9 M800 297.6V312.1 M810 301.4V311.0 M820 297.2V317.5 M830 301.9V314.6 M840 302.2V315.6 M850 301.0V317.8 M860 296.3V323.2 M870 301.2V318.7 M880 305.9V314.1"/>
+        <path class="voice v3" d="M0 370.2V385.8 M10 368.3V387.1 M20 363.4V390.0 M30 365.4V384.7 M40 360.6V385.1 M50 356.0V384.5 M60 341.7V393.2 M70 345.3V384.2 M80 342.1V382.5 M90 349.4V371.4 M100 345.2V373.4 M110 341.0V377.1 M120 347.1V372.5 M130 340.7V382.3 M140 338.0V390.2 M150 328.6V406.3 M160 350.0V392.2 M170 360.7V389.1 M180 364.8V392.6 M190 359.8V405.3 M200 373.6V399.0 M210 374.3V405.6 M220 360.8V425.9 M230 370.2V422.8 M240 374.1V424.7 M250 389.6V414.2 M260 373.5V434.5 M270 384.5V427.0 M280 386.4V427.6 M290 387.0V428.5 M300 393.0V423.0 M310 378.2V437.4 M320 385.0V429.2 M330 388.0V423.7 M340 382.5V426.0 M350 366.8V437.5 M360 373.6V425.8 M370 385.1V408.5 M380 373.9V412.9 M390 375.6V403.6 M400 369.8V401.1 M410 367.6V394.6 M420 344.9V408.4 M430 341.4V402.9 M440 342.0V393.3 M450 342.4V384.1 M460 340.7V377.5 M470 343.2V367.1 M480 339.3V363.8 M490 330.1V366.4 M500 328.1V362.6 M510 313.7V371.9 M520 312.2V369.1 M530 329.4V348.4 M540 325.8V349.3 M550 317.6V355.4 M560 317.4V354.2 M570 326.4V344.3 M580 317.0V353.2 M590 314.9V355.2 M600 318.6V351.6 M610 319.5V350.9 M620 319.0V351.6 M630 315.4V355.3 M640 321.5V349.3 M650 320.0V350.6 M660 327.0V343.0 M670 324.2V344.9 M680 318.6V349.3 M690 326.4V339.8 M700 322.2V342.0 M710 315.7V346.1 M720 311.0V348.0 M730 319.9V336.2 M740 319.8V333.0 M750 318.4V331.0 M760 316.7V329.1 M770 313.9V328.5 M780 311.0V327.9 M790 303.9V331.7 M800 305.4V327.1 M810 304.0V325.6 M820 309.1V318.0 M830 303.9V321.0 M840 307.3V315.8 M850 304.3V317.4 M860 303.8V317.0 M870 302.3V317.9 M880 297.1V322.9"/>
+        <path class="voice v4" d="M0 499.6V540.4 M10 504.2V535.4 M20 511.3V527.5 M30 511.1V527.0 M40 505.4V532.8 M50 508.1V531.2 M60 512.8V529.0 M70 500.4V545.3 M80 502.6V548.5 M90 508.5V549.1 M100 516.3V548.8 M110 510.6V562.3 M120 515.8V564.8 M130 525.3V562.2 M140 523.9V569.2 M150 534.0V562.7 M160 524.5V574.2 M170 522.7V577.2 M180 534.3V565.6 M190 529.0V570.0 M200 516.5V580.6 M210 515.1V579.3 M220 532.7V557.9 M230 526.0V560.1 M240 524.1V556.7 M250 524.6V550.2 M260 517.1V551.2 M270 503.7V557.6 M280 492.0V561.9 M290 496.9V549.5 M300 494.1V544.6 M310 499.7V531.4 M320 493.7V529.8 M330 493.3V523.0 M340 486.1V523.3 M350 481.9V521.2 M360 470.5V526.8 M370 458.8V533.1 M380 477.4V509.1 M390 475.6V505.5 M400 468.0V508.0 M410 459.0V512.2 M420 471.2V495.6 M430 463.0V499.6 M440 451.4V507.3 M450 456.4V498.8 M460 453.2V498.7 M470 458.7V490.0 M480 442.7V502.8 M490 450.6V491.8 M500 447.8V491.3 M510 453.0V482.4 M520 454.7V476.8 M530 440.9V486.1 M540 448.7V473.3 M550 443.0V473.3 M560 435.4V474.5 M570 421.8V481.0 M580 430.3V464.5 M590 434.3V451.7 M600 427.1V449.3 M610 422.6V443.4 M620 417.5V437.4 M630 412.6V430.6 M640 393.8V437.2 M650 391.0V427.2 M660 385.6V419.4 M670 385.8V405.8 M680 375.2V402.8 M690 374.1V390.4 M700 367.3V383.9 M710 358.4V379.6 M720 353.4V371.8 M730 339.9V373.1 M740 337.7V363.4 M750 338.9V351.2 M760 332.3V347.3 M770 322.1V347.9 M780 320.9V340.3 M790 321.7V331.6 M800 313.6V332.6 M810 311.8V328.2 M820 309.2V325.5 M830 308.4V321.8 M840 302.5V323.9 M850 301.1V322.5 M860 301.8V319.8 M870 301.8V318.7 M880 305.1V314.9"/>
+
+        <!-- the single voice they become -->
+        <path class="one" d="M890 277.8V342.2 M900 278.8V341.2 M910 294.2V325.8 M920 285.3V334.7 M930 282.6V337.4 M940 291.2V328.8 M950 292.2V327.8 M960 275.5V344.5 M970 270.4V349.6 M980 284.4V335.6 M990 284.6V335.4 M1000 292.5V327.5"/>
+        <text class="label ink" x="1000" y="248" text-anchor="end">One podcast</text>
+      </svg>
+      </div>
+
+      <div class="transport" aria-label="Player">
+        <span class="play" aria-hidden="true"></span>
+        <div class="scrub">
+          <span class="t">04:12</span>
+          <div class="track"><div class="played"></div><div class="knob"></div></div>
+          <span class="t">31:40</span>
+        </div>
+        <span class="pills">
+          <span class="pill">1.2×</span>
+          <span class="pill mic">
+            <svg width="12" height="14" viewBox="0 0 12 14" aria-hidden="true">
+              <rect x="3.5" y="0.75" width="5" height="8" rx="2.5" fill="#1B1A2E"/>
+              <path d="M1.5 6.5a4.5 4.5 0 0 0 9 0M6 11v2.25M3.75 13.25h4.5" fill="none" stroke="#1B1A2E" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+            hold to ask
+          </span>
+        </span>
+      </div>
+      <p class="now-playing">Now playing · Saturday’s episode · 9 sources · 31 min</p>
+      <figcaption class="motif-caption">Four sources you trust, sung as one podcast.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ---------- Identity card ---------- -->
+  <section class="section" id="identity">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">Identity card · Direction 01</p>
+        <h2 class="section-title display">Polyphony</h2>
+      </div>
+      <div>
+        <p class="section-idea">Motet turns content you trust into an interactive podcast you can listen to on the go.</p>
+        <p class="section-lede">A motet is a choral form in which several texts are sung at once and resolve into one coherent piece. Motet the product does the same with the newsletters, bookmarks and threads you chose to follow: many voices you already trust, sung together into one podcast you take with you — and can talk to. When a story catches you, you say so out loud; Motet goes deeper on it, then picks the episode back up. The brand is <strong>cultured, editorial and warm</strong> — parchment and ink with four voice colours that only ever appear together — a score, not a dashboard, and never a newspaper.</p>
+      </div>
+    </div>
+
+    <div class="card-grid">
+      <!-- Palette -->
+      <div class="card palette">
+        <div class="card-label"><span>Palette</span><small>Ground, ink, four voices</small></div>
+        <div class="swatches">
+          <div class="swatch"><div class="chip" style="background:#F4EFE6"></div><div class="name">Parchment</div><div class="hex">#F4EFE6</div></div>
+          <div class="swatch"><div class="chip" style="background:#EAE3D6"></div><div class="name">Vellum</div><div class="hex">#EAE3D6</div></div>
+          <div class="swatch"><div class="chip" style="background:#1B1A2E"></div><div class="name">Ink</div><div class="hex">#1B1A2E</div></div>
+          <div class="swatch voice"><div class="chip" style="background:#D64B2A"></div><div class="name">Vermilion</div><div class="hex">#D64B2A</div></div>
+          <div class="swatch voice"><div class="chip" style="background:#D9A441"></div><div class="name">Ochre</div><div class="hex">#D9A441</div></div>
+          <div class="swatch voice"><div class="chip" style="background:#2A7F86"></div><div class="name">Teal</div><div class="hex">#2A7F86</div></div>
+          <div class="swatch voice"><div class="chip" style="background:#6B3E86"></div><div class="name">Plum</div><div class="hex">#6B3E86</div></div>
+        </div>
+        <p class="palette-note">Parchment and ink carry ninety-five percent of every surface. The four voices are a chord, not a set of options: they appear together in the motif, in the hairline under the primary action, and in small accents that mark a source — never as section colours, never one at a time on a large area.</p>
+      </div>
+
+      <!-- Rules -->
+      <div class="card rule-card">
+        <div class="card-label"><span>How it behaves</span><small>Four rules</small></div>
+        <ul class="rule-list">
+          <li><span class="n">i</span><span><b>Voices only sing together.</b> A single voice hue on its own reads as a category label; four at once read as Motet.</span></li>
+          <li><span class="n">ii</span><span><b>Ink speaks, colour points.</b> Headlines, body and the resolved line are ink. Colour marks which of your sources is singing.</span></li>
+          <li><span class="n">iii</span><span><b>Curves, not corners.</b> Ribbons, round caps, soft serifs. Nothing in the system is a hard-edged bar.</span></li>
+          <li><span class="n">iv</span><span><b>Whitespace is the acoustic.</b> Generous margins are the cathedral; cramp the layout and the polyphony turns to noise.</span></li>
+        </ul>
+      </div>
+
+      <!-- Type -->
+      <div class="card type-card">
+        <div class="card-label"><span>Typography</span><small>Fraunces · Instrument Sans</small></div>
+        <div class="type-grid">
+          <div>
+            <p class="specimen-display display">Heard, <em>not read.</em></p>
+            <div class="specimen-meta"><span>Fraunces</span><span>SOFT 100</span><span>opsz 144</span><span>Regular &amp; Italic</span></div>
+            <div class="numerals">
+              <small>Numerals · oldstyle, for figures that live inside prose</small>
+              <span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span>
+              <span>&amp;</span><span>§</span><span>¶</span>
+            </div>
+          </div>
+          <div class="specimen-body">
+            <h3>Tuesday, twenty-two minutes.</h3>
+            <p>Three newsletters and eleven bookmarks you trust covered the same funding round. Motet tells it once, on your walk, in a few sentences. <span class="said">— you: tell me more about that.</span> It goes deeper on the round, then picks the episode back up where it left off.</p>
+            <p>Instrument Sans carries the interface and every paragraph that is meant to be scanned. It is plain on purpose: the display face is the singer, the body face is the programme note.</p>
+            <div class="ui-row">
+              <span class="pill"><i style="background:#D64B2A"></i>Stratechery</span>
+              <span class="pill"><i style="background:#2A7F86"></i>Bookmark · @patio11</span>
+              <span class="pill">Just ask · go deeper</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Lockups -->
+      <div class="card lockup">
+        <div class="card-label"><span>Wordmark · on parchment</span><small>Primary</small></div>
+        <p class="wordmark big">
+          <svg class="glyph mini-motif" width="0.72em" height="0.6em" viewBox="0 0 26 22" aria-hidden="true">
+            <path d="M1 3 C8 3 10 11 25 11" stroke="#D64B2A"/>
+            <path d="M1 8 C8 8 12 11 25 11" stroke="#D9A441"/>
+            <path d="M1 14 C8 14 12 11 25 11" stroke="#2A7F86"/>
+            <path d="M1 19 C8 19 10 11 25 11" stroke="#6B3E86"/>
+          </svg>
+          motet
+        </p>
+        <div class="tag"><span>Fraunces Italic 500 · SOFT 100</span><span>getmotet.com</span></div>
+      </div>
+
+      <div class="card lockup on-ink">
+        <div class="card-label"><span>Wordmark · on ink</span><small>Reversed</small></div>
+        <p class="wordmark big">
+          <svg class="glyph mini-motif" width="0.72em" height="0.6em" viewBox="0 0 26 22" aria-hidden="true">
+            <path d="M1 3 C8 3 10 11 25 11" stroke="#D64B2A"/>
+            <path d="M1 8 C8 8 12 11 25 11" stroke="#D9A441"/>
+            <path d="M1 14 C8 14 12 11 25 11" stroke="#2A7F86"/>
+            <path d="M1 19 C8 19 10 11 25 11" stroke="#6B3E86"/>
+          </svg>
+          motet
+        </p>
+        <div class="tag"><span>Voices unchanged on ink — they are the one constant</span><span>getmotet.com</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <span class="wordmark">motet</span>
+  <span class="bar" aria-hidden="true">
+    <i style="background:#D64B2A"></i><i style="background:#D9A441"></i><i style="background:#2A7F86"></i><i style="background:#6B3E86"></i>
+  </span>
+  <span>Brand exploration · Direction 01 of 3 · Polyphony</span>
+</footer>
+
+</body>
+</html>

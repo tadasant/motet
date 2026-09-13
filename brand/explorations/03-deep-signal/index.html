@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motet — Deep Signal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0B0D12;
+    --surface:#14171F;
+    --hair:#232733;
+    --text:#E8EAF0;
+    --muted:#8A90A0;
+    --lime:#C7F542;
+    --sans:"Geist","Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:"Geist Mono","JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --max:1312px;
+    --gutter:64px;
+    --step:22px;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{background:var(--ground);color:var(--text);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
+  body{font-family:var(--sans);font-size:15px;line-height:1.5;letter-spacing:-0.005em;background:var(--ground);min-height:100vh;overflow-x:hidden}
+  a{color:inherit;text-decoration:none}
+  ul,ol{list-style:none}
+  b,strong{font-weight:500}
+  .wrap{max-width:var(--max);margin:0 auto;padding:0 var(--gutter)}
+  .mono{font-family:var(--mono);font-weight:400;letter-spacing:0}
+  .lime{color:var(--lime)}
+
+  /* ---------- wordmark ---------- */
+  .wm{font-family:var(--sans);font-weight:500;letter-spacing:-0.035em;line-height:1;display:inline-flex;align-items:baseline}
+  .wm .dot{color:var(--lime)}
+  .wm .cur{display:inline-block;width:.34em;height:.78em;background:var(--lime);margin-left:.08em;transform:translateY(.02em)}
+
+  /* ---------- nav ---------- */
+  .nav{height:64px;border-bottom:1px solid var(--hair);position:relative;z-index:2}
+  .nav .wrap{height:100%;display:flex;align-items:center;justify-content:space-between}
+  .nav .wm{font-size:22px}
+  .nav ul{display:flex;gap:32px;font-size:14px;font-weight:500;color:var(--muted)}
+  .nav ul a:hover{color:var(--text)}
+  .nav .right{display:flex;align-items:center;gap:28px}
+  .signin{font-size:13px;font-weight:500;color:var(--text);padding:7px 12px;border:1px solid var(--hair);border-radius:6px}
+  .signin:hover{border-color:var(--muted)}
+
+  /* ---------- hero ---------- */
+  .hero{position:relative;min-height:min(calc(100vh - 64px),836px);display:flex;align-items:center;padding:48px 0 44px}
+  .hero::before{content:"";position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(60% 55% at 72% 50%,rgba(199,245,66,.045),transparent 70%)}
+  .hero .wrap{width:100%;display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:56px;align-items:center;position:relative}
+  .eyebrow{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.02em;display:flex;align-items:center;gap:10px}
+  .eyebrow::before{content:"";width:6px;height:6px;background:var(--lime);border-radius:1px;flex:none}
+  h1{font-size:clamp(40px,4.3vw,62px);font-weight:500;line-height:1.02;letter-spacing:-0.035em;margin:22px 0 22px;max-width:11ch}
+  .sub{font-size:17px;line-height:1.55;color:var(--muted);max-width:470px;letter-spacing:-0.005em}
+  .sub em{font-style:normal;color:var(--text)}
+  .ctas{display:flex;align-items:center;gap:22px;margin-top:34px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:500;padding:12px 18px;border-radius:6px;background:var(--lime);color:var(--ground);letter-spacing:-0.01em;transition:transform .12s ease}
+  .btn:hover{transform:translateY(-1px)}
+  .link{font-size:14px;font-weight:500;color:var(--muted);border-bottom:1px solid transparent;padding-bottom:1px}
+  .link:hover{color:var(--text);border-color:var(--hair)}
+  .proof{margin-top:40px;display:flex;gap:28px;font-family:var(--mono);font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .proof span b{color:var(--lime);font-weight:500}
+
+  /* ---------- the instrument ---------- */
+  .panel{background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:0;position:relative;overflow:hidden}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--hair);font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .panel-head .title{color:var(--text)}
+  .live{display:flex;align-items:center;gap:8px;color:var(--text)}
+  .live i{width:7px;height:7px;border-radius:50%;background:var(--lime);box-shadow:0 0 0 0 rgba(199,245,66,.5);animation:pulse 1.8s ease-out infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(199,245,66,.45)}100%{box-shadow:0 0 0 8px rgba(199,245,66,0)}}
+
+  /* streams merge into one signal; the signal dips where you asked */
+  .signal{display:grid;grid-template-columns:168px minmax(0,1fr);align-items:start;padding:20px 20px 12px;gap:0}
+  .streams{position:relative;height:72px;border-right:1px solid var(--hair);margin-right:-1px}
+  .streams svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+  .streams path{fill:none;stroke:var(--muted);stroke-opacity:.45;stroke-width:1;vector-effect:non-scaling-stroke}
+  .streams text{font-family:var(--mono);font-size:10px;fill:var(--muted);letter-spacing:.02em}
+  .streams .merge{fill:var(--lime)}
+
+  .wave{position:relative;height:100px;padding:0 0 0 18px}
+  .bars{position:relative;height:72px;display:flex;align-items:center;gap:3px}
+  .bars i{flex:1 1 0;min-width:2px;max-width:5px;height:14%;background:var(--muted);border-radius:1px;opacity:.85}
+  .bars i:nth-child(2n){height:30%}
+  .bars i:nth-child(3n){height:48%}
+  .bars i:nth-child(4n+1){height:22%}
+  .bars i:nth-child(5n){height:64%}
+  .bars i:nth-child(7n){height:40%}
+  .bars i:nth-child(9n+2){height:78%}
+  .bars i:nth-child(11n){height:92%}
+  .bars i:nth-child(13n+5){height:56%}
+  .bars i:nth-child(17n+3){height:36%}
+  /* the dive — 00:36 to 02:05, the region spent deeper */
+  .bars i:nth-child(n+16):nth-child(-n+52){background:var(--lime);opacity:1}
+  /* unplayed, past the playhead */
+  .bars i:nth-child(n+56){opacity:.28}
+  .playhead{position:absolute;top:0;bottom:0;left:65.5%;width:1px;background:var(--text)}
+  .playhead::before{content:"";position:absolute;top:0;left:-3px;width:7px;height:7px;background:var(--text);border-radius:1px}
+  .playhead::after{content:"02:11";position:absolute;top:-2px;left:10px;font-family:var(--mono);font-size:10px;color:var(--text);letter-spacing:.02em}
+  .dive{position:absolute;top:calc(100% + 4px);left:17.9%;width:44%;height:5px;border:1px solid var(--lime);border-top:0}
+  .dive::after{content:"deeper · 1:29";position:absolute;top:7px;left:50%;transform:translateX(-50%);font-family:var(--mono);font-size:10px;color:var(--lime);letter-spacing:.02em;white-space:nowrap}
+
+  /* the drilldown transcript — a staircase down, and back */
+  .transcript{padding:4px 20px 2px;border-top:1px solid var(--hair)}
+  .row{display:grid;grid-template-columns:40px 104px minmax(0,1fr);gap:0 14px;border-bottom:1px solid var(--hair)}
+  .row:last-child{border-bottom:0}
+  .row>*{padding:10px 0}
+  .tc{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.02em;line-height:20px}
+  .lvl{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.02em;line-height:20px;white-space:nowrap}
+  .lvl b{color:var(--text);font-weight:500}
+  .row.deep .lvl b{color:var(--lime)}
+  .you-chip{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--lime);border:1px solid rgba(199,245,66,.45);border-radius:4px;padding:0 6px 0 5px;height:20px;letter-spacing:.02em;background:var(--ground)}
+  .you-chip svg{width:9px;height:11px;display:block}
+  .say{font-size:14.5px;line-height:1.4;letter-spacing:-0.01em;color:var(--text);position:relative;min-width:0}
+  .row.past .say{color:var(--muted)}
+  .row.now .say{color:var(--text)}
+  .row.you .say{color:var(--lime)}
+  .row.d2 .say{padding-left:var(--step);background:linear-gradient(var(--lime),var(--lime)) 0 0/1px 100% no-repeat}
+  .row.d3 .say{padding-left:calc(var(--step) * 2);background:linear-gradient(var(--lime),var(--lime)) 0 0/1px 100% no-repeat,linear-gradient(var(--lime),var(--lime)) var(--step) 0/1px 100% no-repeat}
+  .panel-foot{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-top:1px solid var(--hair);font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--ground)}
+  .panel-foot .sum{color:var(--text)}
+  .panel-foot .sum b{color:var(--lime);font-weight:500}
+  .kbd{border:1px solid var(--hair);border-radius:3px;padding:1px 5px;color:var(--text);font-size:10.5px}
+
+  /* ---------- pillars ---------- */
+  .pillars{border-top:1px solid var(--hair);border-bottom:1px solid var(--hair)}
+  .pillars .wrap{display:grid;grid-template-columns:repeat(3,1fr)}
+  .pillar{padding:36px 32px 36px 0;border-right:1px solid var(--hair)}
+  .pillar+.pillar{padding-left:32px}
+  .pillar:last-child{border-right:0;padding-right:0}
+  .pillar .k{font-family:var(--mono);font-size:11.5px;color:var(--muted);letter-spacing:.02em;margin-bottom:14px}
+  .pillar .k b{color:var(--lime);font-weight:500;margin-right:8px}
+  .pillar h3{font-size:18px;font-weight:500;letter-spacing:-0.02em;margin-bottom:8px}
+  .pillar p{font-size:14px;color:var(--muted);line-height:1.5;max-width:34ch}
+
+  /* ---------- identity card ---------- */
+  .identity{padding:88px 0 96px}
+  .sect-head{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:40px;gap:32px}
+  h2{font-size:38px;font-weight:500;letter-spacing:-0.03em;line-height:1.05;margin-top:14px}
+  .sect-head .meta{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right;line-height:1.7}
+  .card{border:1px solid var(--hair);border-radius:10px;background:var(--surface);overflow:hidden}
+  .card-grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr)}
+  .cell{padding:32px;border-bottom:1px solid var(--hair)}
+  .cell.l{border-right:1px solid var(--hair)}
+  .lab{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;margin-bottom:18px;display:flex;align-items:center;gap:10px}
+  .lab::after{content:"";flex:1;height:1px;background:var(--hair)}
+  .idea{font-size:16.5px;line-height:1.6;letter-spacing:-0.01em;max-width:52ch}
+  .idea em{font-style:normal;color:var(--lime)}
+  .idea+.idea{margin-top:14px;color:var(--muted)}
+  .pos{font-family:var(--mono);font-size:12.5px;line-height:1.6;letter-spacing:0;color:var(--lime);max-width:52ch;margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--hair)}
+
+  .swatches{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+  .sw{border:1px solid var(--hair);border-radius:6px;overflow:hidden}
+  .sw i{display:block;height:64px}
+  .sw span{display:block;font-family:var(--mono);font-size:10.5px;color:var(--muted);padding:7px 8px;line-height:1.45;background:var(--ground)}
+  .sw span b{display:block;color:var(--text);font-weight:500}
+
+  .spec .big{font-size:96px;font-weight:500;letter-spacing:-0.045em;line-height:.95;display:flex;align-items:baseline;gap:24px}
+  .spec .big small{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.02em;font-weight:400}
+  .spec .disp{font-size:34px;font-weight:500;letter-spacing:-0.03em;line-height:1.1;margin:26px 0 18px;max-width:20ch}
+  .spec .body{font-size:15px;line-height:1.55;color:var(--muted);max-width:56ch}
+  .spec .body em{font-style:normal;color:var(--text)}
+  .spec .monorow{margin-top:22px;padding-top:18px;border-top:1px solid var(--hair);font-family:var(--mono);font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 22px}
+  .spec .monorow b{color:var(--lime);font-weight:500}
+  .spec .monorow span{color:var(--text)}
+  .scale{margin-top:20px;display:flex;flex-wrap:wrap;gap:10px 18px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .scale i{font-style:normal;color:var(--text);font-family:var(--sans);font-weight:500;letter-spacing:-0.02em;margin-right:6px}
+
+  .lockups{display:grid;grid-template-columns:1fr 1fr}
+  .lock{padding:56px 32px;display:flex;flex-direction:column;justify-content:space-between;min-height:240px;gap:28px}
+  .lock.dark{background:var(--ground);border-right:1px solid var(--hair)}
+  .lock.light{background:var(--text);color:var(--ground)}
+  .lock .wm{font-size:64px}
+  .lock .note{font-family:var(--mono);font-size:11px;letter-spacing:.02em;display:flex;justify-content:space-between;gap:16px}
+  .lock.dark .note{color:var(--muted)}
+  .lock.light .note{color:#5C6273}
+  .lock.light .wm .dot{color:var(--ground)}
+  .lock .row-marks{display:flex;align-items:baseline;gap:40px}
+  .lock .wm.sm{font-size:22px}
+
+  /* ---------- footer ---------- */
+  footer{border-top:1px solid var(--hair);padding:28px 0 40px}
+  footer .wrap{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:12px;color:var(--muted);gap:24px;flex-wrap:wrap}
+  footer .wm{font-size:18px}
+  footer ul{display:flex;gap:24px}
+  footer a:hover{color:var(--text)}
+
+  /* ---------- responsive ---------- */
+  @media (max-width:1100px){
+    :root{--gutter:40px}
+    .hero .wrap{grid-template-columns:1fr;gap:40px}
+    .hero{min-height:0;padding:56px 0 48px}
+    h1{max-width:14ch}
+    .card-grid{grid-template-columns:1fr}
+    .cell.l{border-right:0}
+  }
+  @media (max-width:760px){
+    :root{--gutter:20px;--step:14px}
+    .nav ul{display:none}
+    .hero{padding:40px 0 40px}
+    h1{font-size:38px}
+    .sub{font-size:16px}
+    .proof{gap:12px 20px}
+    .signal{grid-template-columns:1fr;padding:18px 16px 8px}
+    .streams{display:none}
+    .wave{padding-left:0}
+    .bars{gap:2px}
+    .bars i{min-width:1px}
+    .transcript,.panel-head,.panel-foot{padding-left:16px;padding-right:16px}
+    .panel-foot{flex-wrap:wrap;gap:8px 16px}
+    .row{grid-template-columns:40px 1fr;gap:0 12px}
+    .row>*{padding:9px 0}
+    .say{grid-column:1/-1;padding-top:0 !important}
+    .pillars .wrap{grid-template-columns:1fr}
+    .pillar{border-right:0;border-bottom:1px solid var(--hair);padding:28px 0}
+    .pillar+.pillar{padding-left:0}
+    .pillar:last-child{border-bottom:0}
+    .identity{padding:56px 0 64px}
+    .sect-head{flex-direction:column;align-items:flex-start;gap:16px}
+    .sect-head .meta{text-align:left}
+    h2{font-size:30px}
+    .cell{padding:24px 20px}
+    .swatches{grid-template-columns:repeat(3,1fr)}
+    .spec .big{font-size:72px}
+    .spec .disp{font-size:26px}
+    .lockups{grid-template-columns:1fr}
+    .lock.dark{border-right:0;border-bottom:1px solid var(--hair)}
+    .lock .wm{font-size:48px}
+    .lock{padding:40px 20px;min-height:0}
+  }
+  @media (prefers-reduced-motion:reduce){.live i{animation:none}}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a href="#" class="wm" aria-label="motet">motet<span class="dot">.</span></a>
+    <nav class="right">
+      <ul>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#sources">Sources</a></li>
+        <li><a href="#">Changelog</a></li>
+      </ul>
+      <a href="#" class="signin">Sign in</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <div class="copy">
+      <p class="eyebrow">content you trust · interactive · on the go</p>
+      <h1>Skim by ear. Dive by asking.</h1>
+      <p class="sub">Motet turns the content you trust into an interactive podcast you listen to on the go. <em>When a story catches you, say so — it goes deeper, then picks back up.</em></p>
+      <div class="ctas">
+        <a href="#" class="btn">Start listening</a>
+        <a href="#how" class="link">Hear a sample →</a>
+      </div>
+      <div class="proof">
+        <span><b>12</b> sources you trust</span>
+        <span><b>1</b> podcast</span>
+        <span><b>23 min</b> on the go today</span>
+      </div>
+    </div>
+
+    <div class="panel" role="img" aria-label="An audio waveform with a transcript that steps down two levels on a spoken question, then returns to the episode.">
+      <div class="panel-head">
+        <span class="title">episode · sat 12 sep · 07:14</span>
+        <span class="live"><i></i>live · 02:11</span>
+      </div>
+
+      <div class="signal">
+        <div class="streams" aria-hidden="true">
+          <svg viewBox="0 0 168 72" preserveAspectRatio="none">
+            <path d="M0 12 C 90 12, 110 36, 168 36"/>
+            <path d="M0 36 C 90 36, 110 36, 168 36"/>
+            <path d="M0 60 C 90 60, 110 36, 168 36"/>
+            <circle class="merge" cx="168" cy="36" r="2.5"/>
+          </svg>
+          <svg viewBox="0 0 168 72">
+            <text x="0" y="7">12 newsletters</text>
+            <text x="0" y="31">38 bookmarks</text>
+            <text x="0" y="55">3 threads</text>
+          </svg>
+        </div>
+        <div class="wave" aria-hidden="true">
+          <div class="bars">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i>
+            <div class="playhead"></div>
+            <div class="dive"></div>
+          </div>
+        </div>
+      </div>
+
+      <ol class="transcript">
+        <li class="row past d1">
+          <span class="tc">00:12</span>
+          <span class="lvl"><b>L1</b> · episode</span>
+          <p class="say">Cloudflare will bill AI crawlers per request, off by default for publishers.</p>
+        </li>
+        <li class="row past d1">
+          <span class="tc">00:34</span>
+          <span class="lvl"><b>L1</b> · episode</span>
+          <p class="say">Next: the open-weights bet, from Import AI.</p>
+        </li>
+        <li class="row you d2">
+          <span class="tc">00:36</span>
+          <span class="lvl"><span class="you-chip"><svg viewBox="0 0 9 11" aria-hidden="true"><rect x="2.5" y="0.5" width="4" height="6" rx="2" fill="currentColor"/><path d="M1 5.5a3.5 3.5 0 0 0 7 0M4.5 9v1.5M3 10.5h3" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round"/></svg>you</span></span>
+          <p class="say">wait — go deeper on the crawler thing.</p>
+        </li>
+        <li class="row past deep d2">
+          <span class="tc">00:38</span>
+          <span class="lvl"><b>L2</b> · deeper</span>
+          <p class="say">The switch flips the default: publishers now opt in to being crawled, and the per-request price is set by the publisher…</p>
+        </li>
+        <li class="row you d3">
+          <span class="tc">01:20</span>
+          <span class="lvl"><span class="you-chip"><svg viewBox="0 0 9 11" aria-hidden="true"><rect x="2.5" y="0.5" width="4" height="6" rx="2" fill="currentColor"/><path d="M1 5.5a3.5 3.5 0 0 0 7 0M4.5 9v1.5M3 10.5h3" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round"/></svg>you</span></span>
+          <p class="say">who wins from that?</p>
+        </li>
+        <li class="row past deep d3">
+          <span class="tc">01:22</span>
+          <span class="lvl"><b>L3</b> · deeper</span>
+          <p class="say">Two groups: large publishers with leverage, and the crawlers that already pay…</p>
+        </li>
+        <li class="row now d1">
+          <span class="tc">02:05</span>
+          <span class="lvl"><b>L1</b> · resumed</span>
+          <p class="say">Back to the episode — the open-weights bet…</p>
+        </li>
+      </ol>
+
+      <div class="panel-foot">
+        <span class="sum">3 stories · <b>1 dive</b> · 1:29 deeper · resumed 02:05</span>
+        <span>hold <span class="kbd">space</span> to ask</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="pillars" id="how">
+  <div class="wrap">
+    <div class="pillar" id="sources">
+      <p class="k"><b>01</b>content you trust</p>
+      <h3>Content you trust</h3>
+      <p>The newsletters, bookmarks and threads you chose to follow — and nothing you didn’t.</p>
+    </div>
+    <div class="pillar">
+      <p class="k"><b>02</b>interactive</p>
+      <h3>Interactive</h3>
+      <p>Say something mid-story and it goes deeper, answers you, then picks the episode back up.</p>
+    </div>
+    <div class="pillar">
+      <p class="k"><b>03</b>on the go</p>
+      <h3>On the go</h3>
+      <p>One podcast on your phone, in any podcast app — on the walk, in the car, offline.</p>
+    </div>
+  </div>
+</section>
+
+<section class="identity">
+  <div class="wrap">
+    <div class="sect-head">
+      <div>
+        <p class="eyebrow">identity card · direction 03</p>
+        <h2>Deep Signal — the interactive podcast with depth on demand.</h2>
+      </div>
+      <p class="meta">one accent · two faces · hairlines, never borders<br>dark ground · quiet confidence · instrument, not assistant</p>
+    </div>
+
+    <div class="card">
+      <div class="card-grid">
+        <div class="cell l">
+          <p class="lab">brand idea</p>
+          <p class="pos">Motet turns content you trust into an interactive podcast you can listen to on the go.</p>
+          <p class="idea">The content you trust — the newsletters, bookmarks and threads you personally chose to follow — becomes one interactive podcast, listened to on the move. So the brand makes <em>depth</em> visible, and then makes it beautiful. Several trusted streams resolve into one clean signal that runs at the surface; when something catches you, you ask, and the signal steps down a level, then another, then returns to the episode. The aesthetic is a well-made instrument: dark, precise, unhurried, with a single electric line that marks where you went deeper.</p>
+          <p class="idea">Lime is spent on exactly three things — your voice and the dive it opens, the live indicator, and the one action we want you to take. Everything else is grey, so that the accent means something when it appears.</p>
+        </div>
+        <div class="cell spec">
+          <p class="lab">type specimen · geist / geist mono</p>
+          <p class="big">Aa<small>geist · 500 · −4.5% tracking</small></p>
+          <p class="disp">Many sources, one thing worth hearing.</p>
+          <p class="body">A motet layers several different texts, sung at the same time, into one coherent piece. That is the product: the content you trust — newsletters, bookmarks, threads — read together and spoken as one interactive podcast for wherever you are. <em>One that goes deeper the moment you ask.</em></p>
+          <p class="monorow"><span>00:36</span> <b>you</b> go deeper <span>·</span> <b>L2</b> · deeper · 1:29 <span>·</span> <b>#C7F542</b> <span>·</span> episode resumed 02:05</p>
+          <p class="scale"><span><i>62</i>h1</span><span><i>38</i>h2</span><span><i>18</i>h3</span><span><i>17</i>lede</span><span><i>15</i>body</span><span><i>12</i>mono</span><span><i>11</i>depth</span></p>
+        </div>
+      </div>
+
+      <div class="cell" style="border-bottom:1px solid var(--hair)">
+        <p class="lab">palette · one hue</p>
+        <div class="swatches">
+          <div class="sw"><i style="background:#0B0D12"></i><span><b>#0B0D12</b>ground</span></div>
+          <div class="sw"><i style="background:#14171F"></i><span><b>#14171F</b>surface</span></div>
+          <div class="sw"><i style="background:#232733"></i><span><b>#232733</b>hairline</span></div>
+          <div class="sw"><i style="background:#8A90A0"></i><span><b>#8A90A0</b>muted</span></div>
+          <div class="sw"><i style="background:#E8EAF0"></i><span><b>#E8EAF0</b>text</span></div>
+          <div class="sw"><i style="background:#C7F542"></i><span><b>#C7F542</b>lime · the accent</span></div>
+        </div>
+      </div>
+
+      <div class="lockups">
+        <div class="lock dark">
+          <div class="row-marks">
+            <span class="wm">motet<span class="dot">.</span></span>
+            <span class="wm sm">motet<span class="cur"></span></span>
+          </div>
+          <p class="note"><span>on ground · period in lime, or a cursor block</span><span>#E8EAF0 / #C7F542</span></p>
+        </div>
+        <div class="lock light">
+          <div class="row-marks">
+            <span class="wm">motet<span class="cur"></span></span>
+            <span class="wm sm">motet<span class="dot">.</span></span>
+          </div>
+          <p class="note"><span>inverted · the block carries the accent where a dot would vanish</span><span>#0B0D12 / #C7F542</span></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span class="wm">motet<span class="dot">.</span></span>
+    <ul>
+      <li><a href="#">getmotet.com</a></li>
+      <li><a href="#sources">sources</a></li>
+      <li><a href="#">changelog</a></li>
+    </ul>
+    <span>© 2026 · direction 03 · deep signal</span>
+  </div>
+</footer>
+
+</body>
+</html>
