@@ -24,11 +24,14 @@ public enum NativeSignIn {
         case notAHandoff
         /// A handoff link with no code in it.
         case missingCode
+        /// The redeem answered without a session token.
+        case noSession
 
         public var description: String {
             switch self {
             case .notAHandoff: return "The sign-in came back somewhere unexpected. Try again."
             case .missingCode: return "The sign-in came back without a code. Try again."
+            case .noSession: return "The sign-in finished without a session. Try again."
             }
         }
     }

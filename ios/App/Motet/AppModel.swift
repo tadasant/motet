@@ -183,6 +183,13 @@ final class AppModel: ObservableObject {
     // MARK: - Settings
 
     func saveCredentials(baseURL: String, apiToken: String) async {
+        let previous = environment.credentials.configuration()
+        let token = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if signedInEmail != nil, let old = previous.apiToken, !old.isEmpty, old != token {
+            // Replacing a signed-in session: revoke it on the server rather than leave it
+            // valid for the rest of its thirty days on a phone that no longer uses it.
+            try? await MotetHTTPClient(configuration: previous).signOut()
+        }
         environment.credentials.save(baseURL: baseURL, apiToken: apiToken)
         signedInEmail = environment.credentials.signedInEmail
         await applyCredentialChange()
@@ -199,19 +206,19 @@ final class AppModel: ObservableObject {
 
     // MARK: - Signing in (AGENTS.md, "The phone signs in through the web sign-in")
 
-    /// Ask the API to start a Google sign-in for this app. The caller opens `url` in the
-    /// system sign-in sheet and hands whatever comes back to `finishSignIn`.
-    func beginSignIn() async -> (url: URL, callbackScheme: String, pkce: PKCEPair)? {
+    /// Ask the server on screen — saved or only typed — to start a Google sign-in for this
+    /// app. The caller opens `url` in the system sign-in sheet and hands whatever comes back
+    /// to `finishSignIn`, with the same server.
+    func beginSignIn(baseURL: String) async -> (url: URL, callbackScheme: String, pkce: PKCEPair)? {
         signInMessage = nil
-        let configuration = environment.credentials.configuration()
-        guard configuration.baseURL != nil else {
+        guard let base = Self.server(baseURL) else {
             signInMessage = "Set the server first."
             return nil
         }
         isSigningIn = true
         let pkce = PKCEPair.generate()
         do {
-            let started = try await MotetHTTPClient(configuration: configuration)
+            let started = try await MotetHTTPClient(configuration: MotetConfiguration(baseURL: base))
                 .startNativeSignIn(codeChallenge: pkce.challenge)
             guard let url = URL(string: started.authorizationUrl) else {
                 throw NativeSignIn.Failure.notAHandoff
@@ -224,14 +231,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Redeem the handoff link the sheet returned, and keep the session it buys.
-    func finishSignIn(callback: URL, pkce: PKCEPair) async {
+    /// Redeem the handoff link the sheet returned, and keep the server and the session it buys.
+    func finishSignIn(callback: URL, pkce: PKCEPair, baseURL: String) async {
         defer { isSigningIn = false }
         do {
+            guard let base = Self.server(baseURL) else { throw NativeSignIn.Failure.notAHandoff }
             let code = try NativeSignIn.handoffCode(from: callback)
-            let session = try await MotetHTTPClient(configuration: environment.credentials.configuration())
+            let session = try await MotetHTTPClient(configuration: MotetConfiguration(baseURL: base))
                 .redeemNativeSignIn(code: code, codeVerifier: pkce.verifier)
-            guard let token = session.token else { throw NativeSignIn.Failure.missingCode }
+            guard let token = session.token else { throw NativeSignIn.Failure.noSession }
+            // The server the session belongs to is saved with it, so a typed-but-unsaved URL
+            // cannot leave the app holding one server's session against another.
+            environment.credentials.save(baseURL: baseURL, apiToken: token)
             environment.credentials.saveSession(token: token, email: session.email)
             signedInEmail = session.email
             await applyCredentialChange()
@@ -252,6 +263,12 @@ final class AppModel: ObservableObject {
         environment.credentials.clearSession()
         signedInEmail = nil
         await applyCredentialChange()
+    }
+
+    private static func server(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), url.host != nil else { return nil }
+        return url
     }
 
     private static func describe(_ error: Error) -> String {

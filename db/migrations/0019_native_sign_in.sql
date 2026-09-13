@@ -19,9 +19,10 @@
 --      only then is a session minted.
 --
 -- The session token itself therefore never travels in a URL. What does is a code that is
--- single-use, expires in two minutes, and is worthless without the verifier that never
--- left the app — so a code read by another app that registered the same URL scheme buys
--- that app nothing.
+-- consumed by the redeem that succeeds, expires in two minutes, and is worthless without the
+-- verifier that never left the app — so a code read by another app that registered the same
+-- URL scheme buys that app nothing. (What PKCE does not stop is another app starting its own
+-- sign-in; AGENTS.md says what does.)
 
 -- The app's PKCE challenge, on the pending authorization it belongs to. NULL for every
 -- browser sign-in and every mailbox connection, which is what keeps those flows unchanged.

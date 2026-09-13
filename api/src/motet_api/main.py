@@ -846,6 +846,11 @@ def redeem_native_login(
 
     The allowlist is asked again here, because this is the moment a session is minted and
     ``create_session``'s contract is that every writer asks.
+
+    **The code is consumed by the redeem that succeeds, not by the first one that arrives.**
+    A refused redeem raises, the request's transaction rolls back, and the ``DELETE`` in
+    ``take_handoff`` goes with it. That is the right direction: a guess without the verifier
+    cannot burn the real app's sign-in, and a 256-bit verifier is not something to guess.
     """
     if not config.allowed_emails:
         raise HTTPException(

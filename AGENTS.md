@@ -2498,19 +2498,30 @@ The flow reuses everything the browser sign-in already has:
    as for a browser.
 3. Because the pending row carries a challenge, `/v1/auth/google/callback` mints **no
    session**. It stores a handoff in `auth_handoffs` and answers with
-   `handoff_url = motet://signed-in?code=…`. The SPA navigates to that link without storing
-   anything, and the sheet closes on it.
+   `handoff_url = motet://signed-in?code=…`. The SPA stores nothing, **asks the person to
+   confirm** that they just tapped Sign in in the Motet app, and only then navigates to the
+   link, on which the sheet closes.
 4. The app calls `native/redeem` with the code and its verifier, and gets an ordinary
    session in `auth_sessions`. That session is revoked by `/v1/auth/logout`, expires in
    thirty days and is re-checked against the allowlist on every request.
 
 What makes this safe, and each point is pinned in `api/tests/test_native_sign_in.py`:
 
-- **The session token never travels in a URL.** The link carries a code: single-use (a
-  `DELETE … RETURNING`), stored only as a hash, and valid for two minutes.
+- **The session token never travels in a URL.** The link carries a code, stored only as a
+  hash and valid for two minutes, and consumed by the redeem that succeeds. A refused redeem
+  rolls back with its request and leaves the code for the app that holds the verifier, so a
+  wrong guess cannot burn the real app's sign-in.
 - **The code is worthless without the verifier.** Another app can register the `motet`
-  scheme. What it cannot have is the verifier, which never left the app that made the
-  challenge.
+  scheme and read a code meant for Motet. What it cannot have is Motet's verifier.
+- **What PKCE does not stop, and the confirmation is for.** Any app on the phone can call
+  `native/start` itself, hold *its own* verifier, and wait for the link, so a sign-in it
+  started ends in a session it holds. Nothing in the protocol tells that apart from Motet.
+  The web callback therefore asks before following a handoff, which is the moment a person
+  can notice they did not just tap Sign in in Motet. The stronger fix is returning through a
+  verified `https` universal link that only this app can receive. That needs an associated
+  domains entitlement and a file on the web app, so it is a question for the owner under
+  invariant 12 and is not built. The SPA also refuses any `handoff_url` that is not
+  `motet://signed-in?…`, so no value there can run as script in its origin.
 - **The browser that finished the sign-in holds nothing.** The sheet shares Safari's
   storage, so a session left there would outlive the flow in a browser nobody is looking at.
 - **The link is the API's.** Its scheme, host and single `code` parameter are literals in

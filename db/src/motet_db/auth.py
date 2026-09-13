@@ -298,7 +298,11 @@ def create_handoff(
 
 
 def take_handoff(conn: psycopg.Connection[Any], code: str) -> AuthHandoff | None:
-    """Consume a handoff, exactly once — the same ``DELETE ... RETURNING`` as a state."""
+    """Consume a handoff, exactly once — the same ``DELETE ... RETURNING`` as a state.
+
+    Exactly once *per committed transaction*: a caller that raises after this rolls the delete
+    back, which is what lets a refused redeem leave the code for the app holding the verifier.
+    """
     if not code:
         return None
     row = _maybe_one(

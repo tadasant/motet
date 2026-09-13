@@ -168,6 +168,16 @@ class TestTheHandoffCode:
         assert redeem(api, code, verifier).status_code == 200
         assert redeem(api, code, verifier).status_code == 400
 
+    def test_a_refused_redeem_leaves_the_code_for_the_app_with_the_verifier(
+        self, api: TestClient
+    ) -> None:
+        """The refusal rolls back with its request, so a guess cannot burn the real sign-in."""
+        verifier, challenge = pkce()
+        code = handoff_code(finish_in_the_web_app(api, start(api, challenge)))
+        somebody_elses, _ = pkce()
+        assert redeem(api, code, somebody_elses).status_code == 400
+        assert redeem(api, code, verifier).status_code == 200
+
     def test_a_code_without_its_verifier_gets_nothing(
         self, api: TestClient, db: psycopg.Connection[Any]
     ) -> None:

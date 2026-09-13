@@ -75,14 +75,17 @@ struct SettingsView: View {
 
     /// The system sheet opens the web sign-in and closes on the API's `motet://` link.
     private func signIn() async {
-        guard let started = await model.beginSignIn() else { return }
+        let server = baseURL
+        guard let started = await model.beginSignIn(baseURL: server) else { return }
         do {
             let callback = try await webAuthenticationSession.authenticate(
                 using: started.url, callbackURLScheme: started.callbackScheme
             )
-            await model.finishSignIn(callback: callback, pkce: started.pkce)
+            await model.finishSignIn(callback: callback, pkce: started.pkce, baseURL: server)
             apiToken = model.currentCredentials().apiToken
         } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
+            model.abandonSignIn(nil)
+        } catch is CancellationError {
             model.abandonSignIn(nil)
         } catch {
             model.abandonSignIn(error)

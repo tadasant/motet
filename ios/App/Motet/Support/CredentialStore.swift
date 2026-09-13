@@ -63,6 +63,10 @@ final class CredentialStore {
 
     func save(baseURL: String, apiToken: String) {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if URL(string: trimmed) != (storedBaseURL() ?? Self.buildDefaultBaseURL) {
+            // A session belongs to one server; pointed at another, "signed in as" would be false.
+            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+        }
         // Settings shows the build's default, so saving it unchanged must not pin it: a later
         // build pointed somewhere else would otherwise be ignored on this phone forever.
         if trimmed == Self.buildDefaultBaseURL?.absoluteString {
