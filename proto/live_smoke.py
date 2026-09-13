@@ -6,13 +6,20 @@ by hand against a voice service on :8100 started in realtime mode (proto/live-sc
 
     UV_ENV_FILE=.env uv run python proto/live_smoke.py
     UV_ENV_FILE=.env uv run python proto/live_smoke.py "What was that number they just said?" 33000
+    UV_ENV_FILE=.env uv run python proto/live_smoke.py "Who led it?" 15000 --client-barge-in
 
 It synthesizes the question to 16 kHz PCM (cached beside this file as `.live_smoke_*.wav`),
-opens a session with a timed transcript, sends `barge_in` at the given offset, streams the
-question as 200 ms mic packets followed by silence so the provider's server VAD ends the
-turn, and prints what came back: `interrupted_at` with its position context, both
-transcripts, the `audio_chunk` format, and the latency from the last mic frame to the
-first reply chunk. Prints no secret.
+opens a session with a timed transcript, starts narration at the given offset, streams a
+second of quiet room and then the question as 200 ms mic packets followed by silence so
+the provider's server VAD ends the turn, and prints what came back — **the interruption
+comes from the service's own detector**, exactly as it does for a browser's open mic.
+`--client-barge-in` sends an explicit `barge_in` frame first instead, which is the
+push-to-talk shape; `--gated-mic` makes the quiet lead a browser mic with noise
+suppression on (-65 dBFS, under the detector's absolute floor), which is the shape that
+never fired before the noise floor learned to seed from quiet frames. Either way it
+prints: `interrupted_at` with its position context, both transcripts, the `audio_chunk`
+format, and the latency from the last mic frame to the first reply chunk. Prints no
+secret.
 """
 
 from __future__ import annotations
@@ -20,6 +27,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
+import struct
 import sys
 import time
 import wave
@@ -117,7 +126,15 @@ def synthesize(text: str) -> bytes:
     return response.content
 
 
-async def main(question: str, offset_ms: int) -> None:
+def ambient(size: int, *, level_dbfs: float = -50.0) -> bytes:
+    """``size`` bytes of a quiet room: white noise at ``level_dbfs``, deterministic."""
+    rng = random.Random(size)
+    amplitude = int(32767 * 10 ** (level_dbfs / 20))
+    samples = (rng.randint(-amplitude, amplitude) for _ in range(size // 2))
+    return struct.pack(f"<{size // 2}h", *samples)
+
+
+async def main(question: str, offset_ms: int, *, client_barge_in: bool, gated_mic: bool) -> None:
     pcm = synthesize(question)
     print(f"question: {question!r} → {len(pcm) / 32:.0f} ms of speech")
     config = {
@@ -151,10 +168,20 @@ async def main(question: str, offset_ms: int) -> None:
         print("ready:", (ready.get("detail") or "")[:100])
         await ws.send(json.dumps({"type": "narration_delivered", "duration_ms": 70_000}))
         await ws.send(json.dumps({"type": "playback_position", "spoken_through_ms": offset_ms}))
-        await ws.send(json.dumps({"type": "barge_in"}))
+        if client_barge_in:
+            await ws.send(json.dumps({"type": "barge_in"}))
 
         chunk = 6_400  # 200 ms at 16 kHz
-        packets = [pcm[i : i + chunk] for i in range(0, len(pcm), chunk)] + [bytes(chunk)] * 6
+        # A second of quiet room first, so the detector's noise floor has settled and the
+        # narration clock is visibly running when the speech arrives — the browser's mic
+        # is open long before the listener says anything. Faint noise rather than digital
+        # zero: a real microphone is never exactly silent, and the energy VAD refuses to
+        # seed its floor from a frame that is.
+        lead_level = -65.0 if gated_mic else -50.0
+        lead = [] if client_barge_in else [ambient(chunk, level_dbfs=lead_level)] * 5
+        packets = (
+            lead + [pcm[i : i + chunk] for i in range(0, len(pcm), chunk)] + [bytes(chunk)] * 6
+        )
         last_mic_at = 0.0
 
         async def feed() -> None:
@@ -187,7 +214,12 @@ async def main(question: str, offset_ms: int) -> None:
                 chunks += 1
                 audio_ms += event["duration_ms"]
             elif kind == "interrupted_at":
-                print("interrupted_at:", event["offset_ms"], event.get("context"))
+                print(
+                    "interrupted_at:",
+                    event["offset_ms"],
+                    f"trigger={event['decision'].get('trigger')}",
+                    event.get("context"),
+                )
             elif kind == "transcript":
                 print(f"transcript[{event['speaker']}]: {event['text']}")
             elif kind == "session_state":
@@ -203,6 +235,14 @@ async def main(question: str, offset_ms: int) -> None:
 
 
 if __name__ == "__main__":
-    text = sys.argv[1] if len(sys.argv) > 1 else "What did the company raise?"
-    offset = int(sys.argv[2]) if len(sys.argv) > 2 else 15_000
-    asyncio.run(main(text, offset))
+    args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
+    text = args[0] if args else "What did the company raise?"
+    offset = int(args[1]) if len(args) > 1 else 15_000
+    asyncio.run(
+        main(
+            text,
+            offset,
+            client_barge_in="--client-barge-in" in sys.argv,
+            gated_mic="--gated-mic" in sys.argv,
+        )
+    )

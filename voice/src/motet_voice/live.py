@@ -8,6 +8,13 @@ between the two: it decides *when* listener audio is forwarded, turns the conver
 events into the session's wire events, runs the tools the model asks for, and keeps the
 numbers a walk is judged by — barge-ins, latency, what it cost.
 
+**The interruption is the session's, not the provider's.** Every packet goes through the
+session's own detector before anything here sees it (:meth:`VoiceSession.receive_audio`),
+because a provider that only hears audio once the floor has been taken cannot be the one
+to decide when to take it — and because the clock that freezes at the interruption is ours
+(invariant 4). The provider's server VAD governs what it is good at: the end of the
+listener's utterance, and cutting a reply off when the listener talks over it.
+
 **Audio is forwarded only while the listener has the floor.** Every frame is remembered in
 a short ring buffer, but nothing goes to the provider until a barge-in — the client's, or
 the local detector's — and forwarding stops again when the reply is done. Two reasons, and
@@ -147,8 +154,12 @@ class LiveBridge:
     # -- listener audio -------------------------------------------------------------------
 
     def remember(self, pcm: bytes) -> None:
-        """Keep the tail of the listener's audio, whether or not it is being forwarded."""
-        if not pcm:
+        """Keep the tail of the listener's audio while it is *not* being forwarded.
+
+        Audio that is being forwarded is already with the provider; keeping it here too
+        would flush the last 600 ms of it a second time at the next barge-in.
+        """
+        if not pcm or self.active:
             return
         self._preroll.append(pcm)
         self._preroll_bytes += len(pcm)
@@ -162,10 +173,17 @@ class LiveBridge:
         await self.conversation.append_audio(pcm)
 
     async def engage(self, position_notes: str) -> list[SessionEvent]:
-        """The listener has the floor: context in, pre-roll in, then live audio."""
+        """The listener has the floor: context in, pre-roll in, then live audio.
+
+        Called *after* the session has frozen its clock and emitted ``interrupted_at`` —
+        the interruption is the session's decision, on every arm, and this is what happens
+        behind it. On a channel that is already forwarding, only the position goes in: the
+        listener interrupted again (narration resumed while the floor was still theirs) and
+        the provider should know where, but nothing is flushed twice.
+        """
+        await self.conversation.add_context(position_notes)
         if self.active:
             return []
-        await self.conversation.add_context(position_notes)
         preroll = b"".join(self._preroll)
         self._preroll.clear()
         self._preroll_bytes = 0

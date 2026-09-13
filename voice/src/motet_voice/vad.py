@@ -28,12 +28,15 @@ if it is wrong the harness will say so.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from .audio import PcmFrame, dbfs, zero_crossing_rate
+from .audio import SILENCE_DBFS, PcmFrame, dbfs, zero_crossing_rate
+
+logger = logging.getLogger("motet.voice.vad")
 
 
 class VadUnavailable(RuntimeError):
@@ -159,19 +162,41 @@ class EnergyVad:
         level = dbfs(frame.samples)
         zcr = zero_crossing_rate(frame.samples)
 
-        # A frame below the absolute floor carries no information about the environment: it
-        # is a dropout, a muted mic, or the exact zeros a phone's voice-memo export puts at
-        # the head of a file. It neither seeds nor moves the floor, and the warm-up counter
-        # does not start until the first frame that is actually a recording of something.
+        # Three kinds of frame, and the floor treats them differently:
         #
-        # This is not tidiness. `dbfs()` reports digital silence as -100 dBFS; a floor that
-        # walks toward it — or seeds from it — reads ordinary ambient afterwards as a 25 dB
-        # event and fires on the first second of every export. The walk's headline number
-        # would then be about a codec rather than about the weather.
+        # * **Silent** — exact digital zeros, which `dbfs()` reports as -100. A dropout, a
+        #   muted track, or the zeros a phone's voice-memo export puts at the head of a
+        #   file. It carries no information about the environment: it neither seeds nor
+        #   moves the floor, and the warm-up does not start on it. A floor that walked
+        #   toward -100 — or seeded from it — read ordinary ambient afterwards as a 25 dB
+        #   event and fired on the first second of every export.
+        # * **Quiet** — below the absolute floor but not zero: a microphone that is there
+        #   and hears nothing. A browser mic with echo cancellation and noise suppression
+        #   on, under headphones, delivers exactly this between utterances — -60 to -70
+        #   dBFS of residual, never zeros. It is a real reading of a quiet place, so it
+        #   seeds the floor at the absolute floor and walks it *down* toward it, and that
+        #   is what a gated mic needs: before this, such a mic's first frame above the
+        #   floor was the listener's own voice, the floor seeded *at speech level*, every
+        #   utterance read as ~0 dB SNR, and nothing could ever bring the floor back down
+        #   because the frames between utterances did not move it. A session on that mic
+        #   never fired, and looked identical to one where nobody spoke.
+        # * **Measurable** — at or above the absolute floor. Seeds the floor from itself
+        #   (recordings differ by 30 dB of gain between a phone in a pocket and a
+        #   headset, and a constant seed measures the first seconds against the wrong
+        #   scale) and tracks the quantile.
+        #
+        # Quiet frames do not count toward the warm-up, so the first measurable frame
+        # still gets the fast convergence. The cost, named rather than discovered: a
+        # recording whose quiet head gives way to a *loud* sustained ambient (a busy road
+        # at -30 dBFS, say) can fire once in its first half-second, while the floor climbs
+        # from the absolute floor to the road. That is a 25 dB step change in the
+        # environment and it is over in a few frames of warm-up; an open mic that cannot
+        # hear its listener is not.
+        silent = level <= SILENCE_DBFS
         measurable = level >= self.absolute_floor_dbfs
 
         if self._floor_dbfs is None:
-            if not measurable:
+            if silent:
                 return VadReading(
                     speech_probability=0.0,
                     rms_dbfs=level,
@@ -179,10 +204,13 @@ class EnergyVad:
                     snr_db=0.0,
                     zero_crossing_rate=zcr,
                 )
-            # Seed from the first measurable frame rather than from a constant: recordings
-            # differ by 30 dB of gain between a phone in a pocket and a headset, and a
-            # constant seed measures the first seconds against the wrong scale.
-            self._floor_dbfs = level
+            self._floor_dbfs = level if measurable else self.absolute_floor_dbfs
+            logger.info(
+                "noise floor seeded at %.1f dBFS from a %s frame (%.1f dBFS)",
+                self._floor_dbfs,
+                "measurable" if measurable else "quiet",
+                level,
+            )
 
         snr = level - self._floor_dbfs
         probability = _logistic((snr - self.snr_midpoint_db) / max(self.snr_scale_db, 1e-6))
@@ -198,8 +226,13 @@ class EnergyVad:
                 self._floor_dbfs += self.up_step_db * scale
             else:
                 self._floor_dbfs -= self.down_step_db * scale
-        # Belt and braces on top of the measurable check above: a long quiet stretch that is
-        # not quite silent could still walk the floor below anything real, and the recovery
+        elif not silent:
+            # A quiet frame is a quieter frame: it pulls the floor down at the ordinary
+            # rate, and the clamp below stops it at the absolute floor. This is the
+            # recovery from a floor seeded too high, and it runs at 7.5 dB a second.
+            self._floor_dbfs -= self.down_step_db
+        # Belt and braces on top of the checks above: a long quiet stretch that is not
+        # quite silent could still walk the floor below anything real, and the recovery
         # from there is 0.05 dB a frame.
         self._floor_dbfs = max(self._floor_dbfs, self.absolute_floor_dbfs)
 

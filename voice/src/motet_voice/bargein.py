@@ -188,6 +188,11 @@ class VadTurnDetector:
     #: is the interval between when the listener started and when we acted.
     onset_back_off_ms: int = 0
 
+    #: What the VAD saw in the most recent frame, decision or not. A decision carries its
+    #: own evidence; this is the evidence for the frames that did *not* decide, which is
+    #: what a session logs when a listener says "I spoke and nothing happened".
+    last_reading: VadReading | None = field(default=None, init=False)
+
     _run: int = field(default=0, init=False)
     _run_started_ms: int = field(default=0, init=False)
     _last_fired_ms: int | None = field(default=None, init=False)
@@ -202,6 +207,7 @@ class VadTurnDetector:
 
     def reset(self) -> None:
         self.vad.reset()
+        self.last_reading = None
         self._run = 0
         self._run_started_ms = 0
         self._last_fired_ms = None
@@ -210,6 +216,7 @@ class VadTurnDetector:
         self, frame: PcmFrame, *, narration_playing: bool, spoken_through_ms: int
     ) -> BargeInDecision | None:
         reading = self.vad.observe(frame)
+        self.last_reading = reading
         qualifies = (
             reading.speech_probability >= self.policy.speech_probability_threshold
             and reading.snr_db >= self.policy.min_snr_db

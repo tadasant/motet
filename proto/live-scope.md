@@ -20,6 +20,7 @@ prototype launches it through a ~15-line wrapper that adds CORS around `create_a
 ```bash
 # from the repo root; the wrapper lives in the session scratchpad, not in the repo
 UV_ENV_FILE=.env OTEL_SERVICE_NAME=motet-voice-local \
+  unset OPENAI_API_KEY OPENROUTER_API_KEY CARTESIA_API_KEY CARTESIA_VERSION   # ~/.zshrc exports stale ones (motet#85)
   uv run uvicorn --app-dir <scratchpad> voice_local:app --port 8100
 ```
 
@@ -37,12 +38,18 @@ picks an arm — a client never names a vendor (invariant 1). It needs `OPENAI_A
 `/internal/health` (`arm_dormant_reason`).
 
 ```bash
-# (a) restart the voice service on :8100 in realtime mode — from the repo root
+# (a) restart the voice service on :8100 in realtime mode — from the repo root.
+# `unset` first: ~/.zshrc exports stale vendor keys that would shadow .env (motet#85).
+unset OPENAI_API_KEY OPENROUTER_API_KEY CARTESIA_API_KEY CARTESIA_VERSION
 kill $(lsof -tnP -iTCP:8100 -sTCP:LISTEN) 2>/dev/null
 UV_ENV_FILE=.env OTEL_SERVICE_NAME=motet-voice-local MOTET_VOICE_ARM=openai_realtime \
   uv run uvicorn --app-dir <scratchpad-with-voice_local.py> voice_local:app --host 127.0.0.1 --port 8100
 curl -s localhost:8100/internal/health | jq '{arm, arm_conversational, inference_mode}'
 # expect: "openai_realtime", true, "real"
+# then prove the process holds .env's key, by hash only — never print the value:
+PID=$(lsof -tnP -iTCP:8100 -sTCP:LISTEN)
+ps eww -o command= -p $PID | tr ' ' '\n' | grep ^OPENAI_API_KEY= | cut -d= -f2- | shasum
+grep -E '^OPENAI_API_KEY=' .env | cut -d= -f2- | shasum   # the two hashes must match
 ```
 
 Then on the socket the `ready` frame's `detail` starts with **`live conversation open`**
@@ -55,13 +62,21 @@ way; barge-in is local and a typed question is answered by the composed arm (`te
 not depend on the live socket" in `proto/issues/04-play-live.md`.
 
 ```bash
-# (b) re-run the live verification once the vendor accepts the key — no browser needed
+# (b) the live verification — no browser needed. The interruption comes from the
+# service's own detector (a second of quiet room, then the question, as mic packets);
+# `--client-barge-in` sends the explicit frame instead, `--gated-mic` uses a -65 dBFS lead
+# (a browser mic with noise suppression on — the shape that used to never fire).
 UV_ENV_FILE=.env uv run python proto/live_smoke.py
 UV_ENV_FILE=.env uv run python proto/live_smoke.py "What was that number they just said?" 33000
-# expect: interrupted_at with context {segment_title, claim_text}; transcript[user] with the
-# recognisable question; state: speaking; first audio_chunk: format=pcm16 rate=24000 with
-# the latency after the last mic frame; transcript[assistant]; state: ready · reply complete.
-# The service log (voice.log) carries `live reply latency: … speech_stopped_to_first_audio_ms=…`
+UV_ENV_FILE=.env uv run python proto/live_smoke.py "What was that number they just said?" 33000 --gated-mic
+# expect: interrupted_at with trigger=openai_server_vad_emulated and context {segment_title,
+# claim_text}; transcript[user] with the recognisable question; state: speaking; first
+# audio_chunk: format=pcm16 rate=24000 with the latency after the last mic frame;
+# transcript[assistant]; state: ready · reply complete. Seen 2026-09-12: "The number was
+# 425 million dollars." with speech_stopped_to_first_audio_ms=420 (286 on the gated-mic run).
+# The service log (voice.log) carries `noise floor seeded at … from a quiet|measurable frame`,
+# `listener audio: … route=… rms_dbfs=… floor_dbfs=… snr_db=…` every ten seconds of mic audio,
+# `barge-in: … trigger=… offset_ms=…`, `live reply latency: … speech_stopped_to_first_audio_ms=…`
 # and `live turn usage: … input=… (audio=… cached=…) output=… (audio=…)`.
 ```
 
@@ -71,8 +86,12 @@ Live**, and speak — or, headless, stub `getUserMedia` with a `MediaStreamDesti
 play a Cartesia-synthesized WAV of the question into it. What to look for: the status line
 goes *listening…*, the "interrupted during: …" line names the claim, "You (heard): …" is
 the vendor's transcript, "Motet: …" the reply, and the reply audio starts playing before
-the transcript lands. Both were seen on 2026-09-12 up to the vendor socket (the vendor
-refused for quota, so the transcripts and audio are still unobserved live).
+the transcript lands. The socket-level version of all of that was seen on 2026-09-12; the
+browser version with a real microphone has not fired yet — the mic meter now shows the
+RMS in dBFS, and a mic that sits under -55 dBFS between utterances is the case the
+detector's floor was fixed for (draft 04, "Interruption is local on every arm"). If
+`barge_ins` is still 0, the service log's `listener audio:` lines say what the detector
+saw.
 
 Fake mode: `MOTET_INFERENCE_MODE=fake` in the launcher's environment — free, no vendor,
 silent reply audio, composed arm only (the realtime arm has no fake conversation and is

@@ -18,10 +18,17 @@ arms comparable on the dials that are actually documented, and it does **not** t
 the vendor's own model behaves on wind. A report generated with no key says so on its face;
 see :mod:`motet_voice.harness.report`.
 
-**2. Live, the arm reports the vendor's decisions and does not second-guess them.**
-When the key exists, :class:`ServerVadRelay` turns ``input_audio_buffer.speech_started``
-events into barge-in decisions with ``trigger="openai_server_vad"``. It deliberately does
-*not* also run a local VAD and merge: measuring a vendor means measuring the vendor.
+**2. Live, the vendor governs the reply turn; the interruption of narration is ours.**
+The session's own detector — this arm's emulation, key or no key — decides when the
+listener has interrupted the *briefing*, freezes the clock and emits ``interrupted_at``
+before a byte reaches the vendor (invariant 4; ``VoiceSession.receive_audio`` says why a
+vendor that only hears audio once the floor is taken cannot make that call).
+From there the vendor's server VAD is in charge of what it is good at: hearing the end of
+the utterance, starting the response, and cutting the response off when the listener talks
+over it. :class:`ServerVadRelay` records those ``input_audio_buffer.speech_started`` events
+as decisions with ``trigger="openai_server_vad"`` — the vendor's verdicts, not second-guessed
+and not merged with a local VAD: measuring a vendor means measuring the vendor, on the half
+of the turn that is its to measure.
 
 **3. A live session is a socket of its own, not a turn.** :meth:`OpenAiRealtimeArm.respond`
 is the turn-shaped path — text in, one collected answer out — and it was all the arm had,
@@ -561,9 +568,10 @@ class OpenAiLiveConversation:
     The shape of a turn on this channel, and who decides each step:
 
     1. The session forwards listener PCM (:meth:`append_audio`) once the listener has taken
-       the floor. **The vendor's server VAD decides when the utterance ended** and starts a
-       response on its own — that is the property the realtime arm is being measured for,
-       and this class does not second-guess it with a local commit.
+       the floor — a decision the session's own detector has already made and emitted.
+       **The vendor's server VAD decides when the utterance ended** and starts a response
+       on its own — that is the property the realtime arm is being measured for, and this
+       class does not second-guess it with a local commit.
     2. The reply streams back as ``response.output_audio.delta`` chunks, each relayed as
        :class:`AssistantAudio` the moment it arrives, so a client can start playing before
        the sentence is finished.

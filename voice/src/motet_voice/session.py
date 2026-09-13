@@ -49,6 +49,11 @@ from .tools import ToolRegistry
 
 logger = logging.getLogger("motet.voice.session")
 
+#: How much listener audio goes by between two "where is the audio going" lines. Ten
+#: seconds is six lines a minute per open session — cheap enough to leave on, and dense
+#: enough that a walk's log says whether the mic was ever heard.
+AUDIO_LOG_EVERY_MS = 10_000
+
 
 def policy_from(turn_policy: TurnPolicy, *, name: str = "session") -> BargeInPolicy:
     """Translate the wire turn policy into the internal barge-in policy.
@@ -125,6 +130,10 @@ class VoiceSession:
     #: Counted rather than derived from :attr:`history`: a turn that produces no assistant
     #: text appends one entry instead of two, and arithmetic over that would drift.
     _turns_seen: int = field(default=0, init=False)
+    #: Listener audio received, in bytes, and the byte count at which the last "where is
+    #: the audio going" line was logged — see :meth:`_log_listener_audio`.
+    _audio_bytes: int = field(default=0, init=False)
+    _audio_logged_at: int = field(default=-1, init=False)
 
     @classmethod
     def create(
@@ -196,16 +205,41 @@ class VoiceSession:
         self.live = bridge
 
     async def receive_audio(self, pcm: bytes) -> list[SessionEvent]:
-        """Listener audio from the socket: to the provider while they have the floor,
-        through the local detector otherwise."""
+        """Listener audio from the socket.
+
+        **The interruption is decided here, by this session's detector, on every arm** —
+        invariant 4 says the clock and the moment it freezes are ours, and a vendor that
+        only hears audio once the floor has been taken cannot be the one to decide when to
+        take it. So every packet goes through :meth:`observe_audio` first, whether or not
+        a live channel is open and whether or not it is already forwarding: a decision
+        freezes the clock and emits ``interrupted_at`` *before* anything reaches a vendor.
+        The live channel is then engaged behind it — position in, pre-roll in, live audio
+        after — and the vendor's own server VAD governs the end of the *utterance* and the
+        reply, which is the half that is its to govern.
+
+        The detector observes while a reply is under way too, deliberately. Narration is
+        paused then, so with the deployed policy (``require_narration_playing``) it decides
+        nothing and the vendor's ``speech_started`` cuts the reply off as before. What it
+        buys is the case where narration has resumed while the channel is still engaged —
+        the listener changed their mind and pressed resume without asking anything — where
+        forwarding-only would have sent every later utterance to a vendor that has no
+        response to interrupt, and left the walk uninterruptible with no line anywhere.
+        """
         live = self._live_channel()
         if live is not None:
             live.remember(pcm)
-            if live.active:
-                return await self._on_live(live.forward(pcm), what="forwarding audio")
+        was_forwarding = live is not None and live.active
         events = self.observe_audio(pcm)
-        if events and (live := self._live_channel()) is not None:
+        self._log_listener_audio(pcm, interrupted=bool(events), forwarding=was_forwarding)
+        if live is None:
+            return events
+        if events:
+            # The floor is the listener's: context in, pre-roll (which includes this
+            # packet) in, live audio from the next packet. An already-engaged channel gets
+            # the new position and nothing is flushed twice.
             events.extend(await self._on_live(live.engage(self._position_notes()), what="engaging"))
+        if was_forwarding:
+            events.extend(await self._on_live(live.forward(pcm), what="forwarding audio"))
         return events
 
     async def client_barge_in(self, *, trigger: str = "client") -> list[SessionEvent]:
@@ -214,6 +248,38 @@ class VoiceSession:
         if (live := self._live_channel()) is not None:
             events.extend(await self._on_live(live.engage(self._position_notes()), what="engaging"))
         return events
+
+    def _log_listener_audio(self, pcm: bytes, *, interrupted: bool, forwarding: bool) -> None:
+        """Say where the listener's audio is going, and what the detector made of it.
+
+        A session where the listener spoke and nothing interrupted used to look exactly
+        like one where nobody spoke: ``barge_ins: 0`` on close and not a line in between.
+        So the first packet is logged, and then one line per :data:`AUDIO_LOG_EVERY_MS` of
+        audio carrying the detector's latest reading — level, floor, SNR, probability —
+        which is enough to tell a mic that is not being heard from a floor that has seeded
+        at the listener's own voice, without a microphone in the room.
+        """
+        self._audio_bytes += len(pcm)
+        interval = AUDIO_LOG_EVERY_MS * 32
+        bucket = self._audio_bytes // interval
+        if not interrupted and bucket == self._audio_logged_at:
+            return
+        self._audio_logged_at = bucket
+        reading = getattr(self.detector, "last_reading", None)
+        logger.info(
+            "listener audio: session=%s heard_ms=%d route=%s playing=%s spoken_through_ms=%d "
+            "interrupted=%s rms_dbfs=%s floor_dbfs=%s snr_db=%s speech_probability=%s",
+            self.session_id,
+            self._audio_bytes // 32,
+            "vendor+detector" if forwarding else "detector",
+            self.clock.playing,
+            self.clock.spoken_through_ms,
+            interrupted,
+            None if reading is None else round(reading.rms_dbfs, 1),
+            None if reading is None else round(reading.noise_floor_dbfs, 1),
+            None if reading is None else round(reading.snr_db, 1),
+            None if reading is None else round(reading.speech_probability, 2),
+        )
 
     def _live_channel(self) -> LiveBridge | None:
         """The live channel, if there is one and it is still up."""
@@ -322,6 +388,9 @@ class VoiceSession:
     def barge_in(self, *, trigger: str = "client") -> InterruptedAtEvent:
         """An explicit interruption from the client — push-to-talk, or a button."""
         offset = self.clock.interrupt()
+        logger.info(
+            "barge-in: session=%s trigger=%s offset_ms=%d", self.session_id, trigger, offset
+        )
         return InterruptedAtEvent(
             at_ms=offset,
             offset_ms=offset,
@@ -335,6 +404,18 @@ class VoiceSession:
         # is the one the clock froze at, so the event carries that and the decision record
         # carries its own. They agree in practice and the event's is the one that binds.
         self.decisions.append(decision)
+        logger.info(
+            "barge-in: session=%s trigger=%s offset_ms=%d at_ms=%d snr_db=%.1f "
+            "speech_probability=%.2f rms_dbfs=%.1f floor_dbfs=%.1f",
+            self.session_id,
+            decision.trigger,
+            offset,
+            decision.at_ms,
+            decision.snr_db,
+            decision.speech_probability,
+            decision.rms_dbfs,
+            decision.noise_floor_dbfs,
+        )
         return InterruptedAtEvent(
             at_ms=offset,
             offset_ms=offset,

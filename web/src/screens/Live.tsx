@@ -255,7 +255,19 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
     decision: Record<string, unknown>
     context?: { clock?: string; segment_title?: string; claim_text?: string } | undefined
   } | null>(null)
+  // Peak of the last mic buffer (0..1) and its RMS in dBFS. The dBFS figure is the one that
+  // matters: the service's detector seeds its noise floor from what the mic delivers
+  // *between* utterances, and a browser mic with noise suppression on can sit under the
+  // detector's absolute floor (-55 dBFS) while nobody is speaking. Showing the number is
+  // how "the meter moves when I talk but nothing interrupts" becomes diagnosable.
   const [micLevel, setMicLevel] = useState(0)
+  const [micDbfs, setMicDbfs] = useState(-100)
+  // Whether replies arrive as streamed speech (the live channel opened) or as a whole
+  // container from the fallback arm. **Nothing about the microphone depends on it**: the
+  // mic is captured and streamed for as long as the session is open, on every arm, because
+  // the interruption is decided by the service's own detector and not by the vendor
+  // (voice/session.py, `receive_audio`). `live` only changes how a reply is played and
+  // whether the user transcript line is the service's or our own echo.
   const [live, setLive] = useState(false)
   // Why the live channel is not there, when the arm offered one: the server's `reason` code
   // plus its prose. Rendered as one line so the owner can tell "no credits" from "no key".
@@ -460,7 +472,9 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
         }
         if (event.code === 'live_unavailable') {
           // The live channel died mid-session. Typed questions go to the text arm from here;
-          // a user line is now our own echo, so stop rendering it twice.
+          // a user line is now our own echo, so stop rendering it twice. The mic and the
+          // narration clock are untouched: barge-in is the service's local detector and
+          // keeps working without any vendor.
           setLiveMode(false)
           setLiveUnavailable({ reason: event.code, detail: event.message })
         }
@@ -505,6 +519,9 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
     }
   }, [phase, player])
 
+  // Runs from `start` until the socket closes — never gated on `live`, never stopped by a
+  // `live_unavailable` error. Barge-in is the service's local detector reading these
+  // frames, so stopping them for any reason short of ending the session ends barge-in.
   const startMic = async (audio: AudioContext) => {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
@@ -523,8 +540,15 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
       frames += 1
       if (frames % 4 === 0) {
         let peak = 0
-          for (let i = 0; i < input.length; i += 1) peak = Math.max(peak, Math.abs(input[i] ?? 0))
+        let energy = 0
+        for (let i = 0; i < input.length; i += 1) {
+          const sample = input[i] ?? 0
+          peak = Math.max(peak, Math.abs(sample))
+          energy += sample * sample
+        }
         setMicLevel(peak)
+        const rms = Math.sqrt(energy / Math.max(1, input.length))
+        setMicDbfs(rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100)
       }
     }
     source.connect(node)
@@ -634,8 +658,8 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
           {arm && ` · ${arm}`}
         </span>
         {running && (
-          <span className="hint" aria-label="mic level">
-            mic {'▮'.repeat(Math.min(8, Math.round(micLevel * 16)))}
+          <span className="hint" aria-label="mic level" title="RMS of the last mic buffer; the service's detector ignores frames under -55 dBFS as silence and seeds its noise floor from the rest">
+            mic {'▮'.repeat(Math.min(8, Math.round(micLevel * 16)))} {micDbfs.toFixed(0)} dBFS
           </span>
         )}
       </div>
