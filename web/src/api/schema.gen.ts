@@ -58,6 +58,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Admin Overview
+         * @description The whole deployment at a glance, across every user.
+         *
+         *     Deployment state rather than user state, like ``/v1/processing``: the caller's own
+         *     ``user_id`` is ignored, and the route takes it only to sit behind the same lock as
+         *     everything else under ``/v1``. The optional ``user_id`` query filters the job list;
+         *     the per-user and per-queue aggregates are always for everyone.
+         */
+        get: operations["admin_overview_v1_admin_overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/google/callback": {
         parameters: {
             query?: never;
@@ -816,6 +841,152 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AdminEpisodeCounts */
+        AdminEpisodeCounts: {
+            /** Failed */
+            failed: number;
+            /** Pending */
+            pending: number;
+            /** Ready */
+            ready: number;
+            /** Rendering */
+            rendering: number;
+            /** Scripting */
+            scripting: number;
+        };
+        /** AdminJobCounts */
+        AdminJobCounts: {
+            /** Done */
+            done: number;
+            /** Failed */
+            failed: number;
+            /** Ready */
+            ready: number;
+            /** Running */
+            running: number;
+        };
+        /**
+         * AdminJobResponse
+         * @description One job row, with its payload resolved to a user and a domain subject.
+         */
+        AdminJobResponse: {
+            /** Attempts */
+            attempts: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            /** Last Error */
+            last_error: string | null;
+            /** Locked At */
+            locked_at: string | null;
+            /** Queue */
+            queue: string;
+            /**
+             * Run At
+             * Format: date-time
+             */
+            run_at: string;
+            /** State */
+            state: string;
+            /**
+             * Subject
+             * @description The domain id the job is about: a source item, an episode, or a source.
+             */
+            subject: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * User Id
+             * @description The user the job's subject belongs to, resolved from the payload; null if unresolvable.
+             */
+            user_id: string | null;
+        };
+        /** AdminNewsItemCounts */
+        AdminNewsItemCounts: {
+            /** Read */
+            read: number;
+            /** Unread */
+            unread: number;
+        };
+        /**
+         * AdminOverviewResponse
+         * @description The whole deployment at a glance, across every user.
+         *
+         *     Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
+         *     for. Every user and every pipeline queue is present, at zero when empty.
+         */
+        AdminOverviewResponse: {
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /**
+             * Jobs
+             * @description The newest 200 jobs, any state.
+             */
+            jobs: components["schemas"]["AdminJobResponse"][];
+            /** Queues */
+            queues: components["schemas"]["AdminQueueResponse"][];
+            /** Users */
+            users: components["schemas"]["AdminUserResponse"][];
+        };
+        /**
+         * AdminQueueResponse
+         * @description One queue's counts per job state, plus the two liveness facts an operator wants.
+         */
+        AdminQueueResponse: {
+            /** Done */
+            done: number;
+            /** Failed */
+            failed: number;
+            /**
+             * Last Heartbeat At
+             * @description When a worker last drained this queue; null if none ever has.
+             */
+            last_heartbeat_at: string | null;
+            /**
+             * Oldest Ready Age S
+             * @description Seconds since the oldest `ready` job on this queue was created; null if none.
+             */
+            oldest_ready_age_s: number | null;
+            /** Queue */
+            queue: string;
+            /** Ready */
+            ready: number;
+            /** Running */
+            running: number;
+        };
+        /** AdminSourceItemCounts */
+        AdminSourceItemCounts: {
+            /** Failed */
+            failed: number;
+            /** Integrated */
+            integrated: number;
+            /** Pending */
+            pending: number;
+        };
+        /**
+         * AdminUserResponse
+         * @description One user's counts per state, across every table that carries a `user_id`.
+         */
+        AdminUserResponse: {
+            /** Email */
+            email: string | null;
+            episodes: components["schemas"]["AdminEpisodeCounts"];
+            jobs: components["schemas"]["AdminJobCounts"];
+            news_items: components["schemas"]["AdminNewsItemCounts"];
+            source_items: components["schemas"]["AdminSourceItemCounts"];
+            /** User Id */
+            user_id: string;
+        };
         /**
          * ClaimModel
          * @description A reported assertion beside the span it came from (invariant 3).
@@ -1610,6 +1781,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    admin_overview_v1_admin_overview_get: {
+        parameters: {
+            query?: {
+                user_id?: string | null;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOverviewResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
