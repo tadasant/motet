@@ -150,11 +150,19 @@ case "$entitlements" in
   "$APPLINKS_ENTITLEMENTS")
     # Asked of the file rather than of the setting: the whole point of the exception is
     # which entitlements the file requests, and it is edited far more often than this line.
+    #
+    # Asked of the PARSED plist, never of its bytes. The file's own comment explains why it
+    # is not the CarPlay one, so it contains the word — and a grep over the raw text would
+    # fail every signed build on the strength of a comment. PlistBuddy prints the structure
+    # and drops comments, so what is inspected is what is requested.
     file="App/$APPLINKS_ENTITLEMENTS"
     [ -f "$file" ] || fail "$file is missing"
-    ! grep -qi 'carplay' "$file" ||
+    requested="$(/usr/libexec/PlistBuddy -c 'Print' "$file" 2>/dev/null)" ||
+      fail "$file is not a readable plist"
+    ! printf '%s\n' "$requested" | grep -qi 'carplay' ||
       fail "$file asks for CarPlay, which is not granted — an ungranted entitlement fails signing"
-    grep -q "applinks:" "$file" || fail "$file does not ask for an associated domain"
+    printf '%s\n' "$requested" | grep -q 'applinks:' ||
+      fail "$file does not ask for an associated domain"
     printf '    ok  %-44s %s\n' "CODE_SIGN_ENTITLEMENTS" "applinks only ($app_link_domain)"
     ;;
   *)
