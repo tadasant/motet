@@ -12,6 +12,9 @@ import { SourceItemDetail } from './SourceItemDetail'
 
 const POLL_MS = 5_000
 
+/** The API's bound on the held list (`repo.HELD_MAX_ITEMS`); a full page may not be all. */
+const HELD_PAGE = 500
+
 function when(iso: string): string {
   const d = new Date(iso)
   const sameDay = d.toDateString() === new Date().toDateString()
@@ -114,13 +117,18 @@ export function Held({
     })
   }
 
-  if (items !== null && items.length === 0 && !error && !notice) return null
+  // Hidden when nothing is held — including right after an action empties the list; the
+  // Processing panel below is where ingested items show up next.
+  if (items !== null && items.length === 0 && !error) return null
 
   return (
     <div className="held">
       <div className="row">
         <h3>
-          Pulled in, waiting for you <span className="tab-count">{all.length}</span>
+          Pulled in, waiting for you{' '}
+          <span className="tab-count">
+            {all.length >= HELD_PAGE ? `${HELD_PAGE}+` : all.length}
+          </span>
         </h3>
         <button type="button" onClick={ingestNow} disabled={busy || !someSelected}>
           {busy ? 'Working…' : someSelected ? `Ingest ${selected.size} now` : 'Ingest now'}
@@ -130,7 +138,7 @@ export function Held({
         </button>
         {someSelected && (
           <span className="hint">
-            ~{Math.round(selectedChars / 1000)}k chars → dedup at low effort, each
+            ~{(selectedChars / 1000).toFixed(1)}k chars → dedup at low effort, each
           </span>
         )}
         {notice && (

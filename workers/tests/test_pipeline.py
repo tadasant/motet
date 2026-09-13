@@ -2936,3 +2936,46 @@ class TestTheDecisionIsRecorded:
         drain(Queue.INTEGRATE, _migrated)
 
         assert repo.list_news_items(db, USER) == []
+
+
+class TestTheDecisionIsRecordedOnEveryBranch:
+    """The two branches of the real adapter not covered above, through the handler."""
+
+    def test_a_second_look_that_says_no_is_recorded_as_its_basis_with_a_new_story(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        model = _ScriptedModel(
+            [
+                _first_pass("unrelated", "Canada announces tariffs", closest=None),
+                _first_pass("related", "Ottawa hits back"),
+            ],
+            {"same_event": False, "reason": "Two announcements."},
+        )
+        _integrate_with(db, model, [MORNING, INQUIRY])
+
+        rows = db.execute(
+            "SELECT position, relation, basis FROM news_item_sources ORDER BY decided_at, position"
+        ).fetchall()
+        assert [(row["position"], row["relation"], row["basis"]) for row in rows] == [
+            (0, "unrelated", "first_pass"),
+            (0, "related", "second_look"),
+        ]
+
+    def test_related_with_no_candidate_is_the_first_pass_and_nothing_is_asked_again(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        model = _ScriptedModel(
+            [_first_pass("related", "Regulator opens inquiry", closest=None)],
+            {"same_event": True, "reason": "unused"},
+        )
+        _integrate_with(db, model, [INQUIRY])
+
+        (row,) = db.execute(
+            "SELECT relation, candidate_id, basis FROM news_item_sources"
+        ).fetchall()
+        assert (row["relation"], row["candidate_id"], row["basis"]) == (
+            "related",
+            None,
+            "first_pass",
+        )
+        assert model.calls == ["first_pass"]

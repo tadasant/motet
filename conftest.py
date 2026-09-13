@@ -68,6 +68,11 @@ TABLES = (
 #: source's credentials and source items, which is what makes the ordering above harmless.
 _DELETE_NON_SEED_SOURCES = "DELETE FROM sources WHERE id <> 'src_paste'"
 
+#: Users a test added, without disturbing the seeded owner — for the same reason as the
+#: sources above. Left behind, a second user leaks into every later test that lists users,
+#: so a test passes or fails on which file ran first.
+_DELETE_NON_SEED_USERS = "DELETE FROM users WHERE id <> 'motet-owner'"
+
 #: The statement :data:`TABLES` exists for. Named so that ``db/tests/test_isolation.py``
 #: can run *this* statement rather than a copy of it that could drift out of step.
 TRUNCATE_SQL = f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"
@@ -348,6 +353,7 @@ def db(_migrated: str) -> Iterator[psycopg.Connection[Any]]:
     with repo.connect(_migrated) as conn:
         conn.execute(TRUNCATE_SQL)
         conn.execute(_DELETE_NON_SEED_SOURCES)
+        conn.execute(_DELETE_NON_SEED_USERS)
         conn.commit()
         yield conn
 

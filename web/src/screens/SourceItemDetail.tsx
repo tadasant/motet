@@ -35,7 +35,9 @@ const STEP_COPY: Record<string, string> = {
 
 const BASIS_COPY: Record<string, string> = {
   first_pass: 'the first pass decided',
-  second_look: 'the first pass was unsure; a focused second look decided',
+  // A second look that failed counts as "no" and is recorded the same way, so this does
+  // not claim the second look answered — only that it was asked.
+  second_look: 'the first pass was unsure, so it was looked at again',
   title_backstop: 'dedup said new, but an unread story already had this title, so it merged',
 }
 

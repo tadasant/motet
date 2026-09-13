@@ -1025,7 +1025,9 @@ line beside the counter is the only moment the detail exists.
 
 `GET /v1/ingestion` (`repo.list_ingestion`) is what stops content from silently
 disappearing. It reports source items that are not in the backlog yet — pending, failed,
-and for ten minutes after they succeed — each joined to its `integrate` job.
+and for ten minutes after they succeed — each joined to its `integrate` job. A *held* item
+(pending with no job, motet#91) is not on its way anywhere and is reported by
+`/v1/source-items/held` instead; see "Connecting a source does the free work at once".
 
 **The reason a failure is happening lives on the job row, and that is why this is a join.**
 `source_items.last_error` is only written when the retries run out (`_record_failure` in
@@ -1097,7 +1099,10 @@ must not go blank because the secondary one 404s.
 ### Connecting a source does the free work at once; inference waits for "Ingest now"
 
 `repo._HELD_WHERE`, `/v1/source-items/{held,integrate,dismiss}`, `GET
-/v1/source-items/{id}`, migration 0012 (motet#91). Connecting a mailbox used to be a
+/v1/source-items/{id}`, migration 0012. **Specified by Tadas in motet#91**, which states the
+design, the evidence and the checklists; its issue gate read it as proceeding with every
+open question left at the prototype's answer, and this section is the record of that
+choice. Connecting a mailbox used to be a
 standing authorization to spend: every message a poll found was extracted *and* queued for
 dedup, and the first real connect queued forty dedup calls before the Sources screen had
 finished re-rendering. `handle_extract` now stops after writing the source item, and a
@@ -1152,10 +1157,14 @@ metric carries it per stage, and motet#92's `llm_usage` design is where a per-it
 would live — if it survives its design session, this becomes a join, not a column.
 `cost_recorded: false` says so on every step rather than leaving a blank.
 
-**The invariant-12 reading, recorded as invariant 12 asks.** Removing one enqueue, four
-routes on the existing API, two columns and a state on existing tables used the way those
-tables are already used, and a lock in the advisory-lock family the queue already uses: no
-new deployable, datastore, vendor, seam, stage, model call or resource. `IntegrationResult`
+**The invariant-12 reading, recorded as invariant 12 asks.** Taking the automatic
+extract→integrate step out and putting a person in its place changes the pipeline's shape,
+and "when in doubt, it counts" — so the sign-off this rests on is the owner's issue, not the
+size of the diff, exactly as motet#78's and motet#83's sections read theirs. What it adds is
+one enqueue removed, four routes on the existing API, nine nullable-or-defaulted columns and
+a state on existing tables used the way those tables are already used, and a lock in the
+advisory-lock family the queue already uses: no new deployable, datastore, vendor, seam,
+stage, model call or resource. `IntegrationResult`
 gains an optional field rather than a second implementation. The two things the issue
 *names* that are above the line — raw-bytes retention in object storage and agentic
 enrichment — are deferred to their own sessions.
@@ -1212,7 +1221,7 @@ and several vendor calls more expensive.
 ### Enqueuing is an event, so the API starts the worker rather than waiting for a clock
 
 `motet_api.drain`. Every enqueue in this API traces to a person doing something — pasting
-text, asking for an episode, connecting a mailbox — so the API knows the exact moment
+text, asking for an episode, connecting a mailbox, pressing "Ingest now" — so the API knows the exact moment
 there is something to drain, and it used to do nothing with that. The `motet-worker` job
 was started by a standing Cloud Scheduler sweep that fired whether or not any work
 existed: roughly 21,900 executions a month per environment, essentially all of which found

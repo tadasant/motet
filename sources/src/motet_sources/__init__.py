@@ -1,6 +1,7 @@
 """Ingestion sources: the Gmail seam, behind an interface with a fake.
 
-`Poll -> Extract -> Source Item`, feeding the existing dedup/integrate stage. The same
+`Poll -> Extract -> Source Item`, held there until a person asks for the dedup/integrate
+stage (motet#91). The same
 shape as ``motet_inference``: Protocols in :mod:`~motet_sources.interfaces`, a
 deterministic fake in :mod:`~motet_sources.fakes`, a real adapter in
 :mod:`~motet_sources.gmail`, and a registry that picks between them from the one mode

@@ -637,3 +637,43 @@ def test_two_concurrent_ingest_nows_write_one_integrate_job(
         second.close()
 
     assert len(_jobs(db, Queue.INTEGRATE)) == 1
+
+
+def test_a_dismiss_and_an_ingest_now_racing_for_one_item_cannot_both_win(
+    db: psycopg.Connection[Any], database_url: str
+) -> None:
+    """They take the same lock, and the second re-reads the held predicate after it.
+
+    Otherwise an item could be dismissed *and* queued — a job that runs on an item the
+    person said not to spend on.
+    """
+    import threading
+
+    source_id = connected_source(db)
+    handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
+    db.commit()
+    (item_id,) = [item.id for item in repo.list_held_source_items(db, USER)]
+
+    dismisser = repo.connect(database_url)
+    ingester = repo.connect(database_url)
+    try:
+        assert repo.dismiss_held_source_items(dismisser, USER, [item_id]) == [item_id]
+        answer: list[list[str]] = []
+        waiter = threading.Thread(
+            target=lambda: answer.append(
+                enqueue_integration(ingester, user_id=USER, source_item_ids=[item_id])
+            )
+        )
+        waiter.start()
+        waiter.join(timeout=1.0)
+        assert waiter.is_alive(), "the ingest must wait on the dismiss's lock"
+
+        dismisser.commit()
+        waiter.join(timeout=10.0)
+        ingester.commit()
+        assert answer == [[]], "and then find the item no longer held"
+    finally:
+        dismisser.close()
+        ingester.close()
+
+    assert _jobs(db, Queue.INTEGRATE) == []

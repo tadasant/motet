@@ -1158,7 +1158,11 @@ _HELD_WHERE = """
 HELD_SQL = f"""
 SELECT si.id, si.title, si.source_id, src.kind AS source_kind, src.name AS source_name,
        si.received_at, length(si.text) AS chars,
-       left(regexp_replace(si.text, '\\s+', ' ', 'g'), %(preview)s) AS preview
+       -- The regex runs on a bounded prefix, not the whole newsletter: this list is
+       -- polled every few seconds, and a body is up to 60k characters. Four times the
+       -- preview is room for the whitespace the collapse removes.
+       left(regexp_replace(left(si.text, %(preview)s * 4), '\\s+', ' ', 'g'), %(preview)s)
+           AS preview
 FROM source_items si
 JOIN sources src ON src.id = si.source_id
 WHERE {_HELD_WHERE}
