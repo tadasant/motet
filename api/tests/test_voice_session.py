@@ -212,7 +212,13 @@ def test_the_api_assembles_the_context_and_the_voice_service_accepts_it(
     assert all(claim["end_ms"] > claim["start_ms"] for claim in claims), (
         "claims are timed from the server's apportioned timings, not re-derived"
     )
-    assert [t["name"] for t in frame["config"]["tools"]] == ["mark_read"]
+    assert [t["name"] for t in frame["config"]["tools"]] == ["mark_read", "save_highlight"]
+    assert frame["config"]["mcp_servers"] == [{"name": "motet", "slug": "motet"}], (
+        "the session is bound to Motet's own MCP server, by slug and never by URL"
+    )
+    assert all(
+        claim["source_item_id"] and claim["span_end"] > claim["span_start"] for claim in claims
+    ), "a claim carries the span it was copied from, so save_highlight can send one"
 
 
 def test_the_minted_frame_opens_the_voice_socket(

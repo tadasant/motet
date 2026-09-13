@@ -34,10 +34,13 @@ from pydantic import BaseModel, Field
 #: name; anything else in ``tools`` is rejected at StartSession rather than at call time,
 #: because a persona that has been told it can do something it cannot will spend the whole
 #: session apologizing.
+#:
+#: Each one is a tool on the MCP server a session binds (motet#120), which is why
+#: ``get_item_detail`` and ``start_research`` are no longer here: neither named anything a
+#: server offers, and both had been failing silently since they were written. See
+#: :mod:`motet_voice.tools.platform`.
 PLATFORM_TOOLS: tuple[str, ...] = (
     "save_highlight",
-    "get_item_detail",
-    "start_research",
     "mark_read",
 )
 
@@ -91,10 +94,15 @@ class ToolBinding(BaseModel):
 class McpServerBinding(BaseModel):
     """An MCP server the session may reach.
 
-    Phase 2 ships the field and no servers: the platform tools below cover what a briefing
-    conversation needs, and an MCP server reachable from the always-warm, internet-facing,
-    vendor-connected component is a blast-radius decision rather than a feature. The field
-    exists because the contract in the target design has it and because Zimmer will use it.
+    **Motet's own is the one this deployment resolves** (motet#120): a binding whose slug is
+    ``motet`` points the platform tools at the API's ``/mcp``, with the tool groups and the
+    credential coming from this service's configuration. Any other slug is refused at
+    StartSession — which is the whole of the blast-radius decision this field used to be
+    deferred over. A session that binds nothing gets platform tools that are described to
+    the persona as dormant, so it never promises something it cannot do.
+
+    The field is also what Zimmer will use, with servers nobody here wrote; that is why the
+    client speaks the real protocol rather than a subset Motet happens to accept.
     """
 
     name: str = Field(min_length=1, max_length=64)
@@ -115,6 +123,15 @@ class TimedClaim(BaseModel):
     start_ms: Annotated[int, Field(ge=0)]
     end_ms: Annotated[int, Field(ge=0)]
     spoken_text: str = Field(max_length=4_000)
+    #: The source item this claim was copied from, and the character range its quote sits
+    #: at (invariant 3). Passed in because ``save_highlight`` has to send a span and this
+    #: service cannot look one up — ``POST /v1/highlights`` reads the quote out of the
+    #: source text at the span, so a highlight is verbatim whoever asked for it. Optional
+    #: because a caller that is not Motet has no such spans, and a claim without one is
+    #: simply not a candidate for a highlight.
+    source_item_id: str | None = None
+    span_start: Annotated[int, Field(ge=0)] = 0
+    span_end: Annotated[int, Field(ge=0)] = 0
 
 
 class TimedSegment(BaseModel):

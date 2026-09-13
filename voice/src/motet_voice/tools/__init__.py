@@ -1,7 +1,8 @@
 """Platform tools: the only way the voice service touches anything outside itself."""
 
 from .fakes import FailingToolTransport, RecordingToolTransport
-from .platform import ApiTool, HttpToolTransport, build_platform_tools
+from .mcp import McpToolTransport, build_motet_transport, motet_mcp_url
+from .platform import McpTool, build_platform_tools, locate_claim
 from .spec import (
     AVAILABLE,
     Tool,
@@ -15,9 +16,9 @@ from .spec import (
 
 __all__ = [
     "AVAILABLE",
-    "ApiTool",
     "FailingToolTransport",
-    "HttpToolTransport",
+    "McpTool",
+    "McpToolTransport",
     "RecordingToolTransport",
     "Tool",
     "ToolAvailability",
@@ -26,5 +27,8 @@ __all__ = [
     "ToolResult",
     "ToolState",
     "ToolTransport",
+    "build_motet_transport",
     "build_platform_tools",
+    "locate_claim",
+    "motet_mcp_url",
 ]

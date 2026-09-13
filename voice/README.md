@@ -91,9 +91,8 @@ the object-storage seam afterwards.
 | Composed arm — LLM leg | Live, through the existing OpenRouter seam (Claude Sonnet 5) |
 | Composed arm — TTS leg | Live, through the existing Cartesia adapter |
 | Composed arm — STT leg | **Dormant:** no speech-to-text vendor provisioned. Does not affect barge-in |
-| `save_highlight`, `get_item_detail` | Coded to the contract; live when their API routes ship |
-| `mark_read` | **Live** — the route exists today |
-| `start_research` | **Dormant:** `EXA_API_KEY` is not provisioned |
+| `mark_read`, `save_highlight` | **Live**, through Motet's MCP server — where a session binds the `motet` slug and `MOTET_VOICE_API_BASE_URL` is set. Dormant otherwise, with the reason |
+| `get_item_detail`, `start_research` | **Gone** (motet#120). Neither named a tool any server has: one needed a single-news-item route that does not exist, the other needed Exa *and* a route nobody has designed |
 
 **A key wakes the conversation, not the measurement**, and the distinction is deliberate.
 `OPENAI_API_KEY` plus `MOTET_VOICE_ARM=openai_realtime` gives the arm a live vendor session
@@ -157,7 +156,7 @@ buffer that ends at another, and only one of those is what the listener heard.
 | `vad.py` | The VAD seam: energy, WebRTC (optional), scripted fake |
 | `bargein.py` | The policy, the decision record, the turn-detector seam |
 | `realtime/` | Both provider arms behind one interface |
-| `tools/` | The four platform tools, over HTTP to Motet's API |
+| `tools/` | The platform tools, as MCP `tools/call`s on a bound server |
 | `harness/` | Capture, replay, score, report — and a synthetic walk for CI |
 | `cli.py` | `motet-voice demo \| ingest \| replay \| report \| upload` |
 
@@ -175,11 +174,13 @@ Every variable is optional; the service starts with none of them set.
 | `MOTET_INFERENCE_MODE` | `fake` (default) or `real`. Parsed by `motet_inference.mode`, never here |
 | `MOTET_VOICE_SESSION_SECRET` | HMAC key for session tokens. Unset mints an ephemeral one and warns |
 | `MOTET_VOICE_SESSION_TTL_SECONDS` | Token lifetime, default 3600 |
-| `MOTET_VOICE_API_BASE_URL` | Where the platform tools call Motet's API |
-| `MOTET_VOICE_API_TOKEN` | Bearer token for that API |
+| `MOTET_VOICE_API_BASE_URL` | Where Motet's API is. The `motet` MCP slug resolves to `<this>/mcp`; unset means the slug resolves to nothing and every platform tool is dormant |
+| `MOTET_VOICE_API_TOKEN` | Bearer for that API, and — unless the next variable is set — what the MCP connection presents |
+| `MOTET_VOICE_MCP_TOKEN` | A credential for `/mcp` alone. Unset falls back to `MOTET_VOICE_API_TOKEN`, which is the whole-API owner token (motet#120, option **a**); setting this is the whole of option **b** |
+| `MOTET_VOICE_MCP_TOOL_GROUPS` | The `?tool_groups=` selection, default `backlog,highlights` — the two groups holding the two tools a conversation calls. A deployment can narrow it, and an unknown group is a 400 from the server rather than a quietly smaller surface |
 | `MOTET_VOICE_START_SESSION_TOKEN` | Bearer required to mint a session. **Unset means open**, and an open `StartSession` is a confused deputy: a session's tools carry the credential above. `/internal/health` reports which it is |
 | `MOTET_LLM_MODEL_VOICE` | Conversation model for the composed arm; falls back to `MOTET_LLM_MODEL`, then the seam's default. The per-stage seam in `motet_inference.llm`, not a variable of this service's own — so the slug is checked against the catalogue at startup |
 | `MOTET_LLM_EFFORT_VOICE` | Thinking depth for a spoken turn. Defaults to `off` |
 | `MOTET_VOICE_OPENAI_REALTIME_MODEL` | Realtime model slug |
 | `OPENAI_API_KEY` | Not provisioned. Wakes the realtime arm |
-| `EXA_API_KEY` | Not provisioned. Wakes `start_research` |
+

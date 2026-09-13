@@ -228,10 +228,13 @@ def _system_prompt(request: TurnRequest) -> str:
 
     **This prompt is the only containment on what gets said, and it is not a guarantee.**
     Nothing checks a reply against its material any more (motet#75). The material is
-    context the caller assembled from an episode's own claims and their source spans; the
-    prompt below tells the model to answer from it and to reach for ``get_item_detail`` —
-    which returns spans — instead of recalling. That narrows the failure to paraphrase and
-    inference over text that came out of a source, and it does not eliminate it: a spoken
+    context the caller assembled from an episode's own claims and their source spans, and
+    the prompt below tells the model to answer from that and not from what it recalls. It
+    used to also name ``get_item_detail`` as somewhere to reach for spans; that tool never
+    worked and is gone (motet#120), so the whole of the sourced material a turn has is now
+    what arrived in the session config — which, for this argument, is the stronger position
+    rather than a weaker one. The failure it narrows to is still paraphrase and inference
+    over text that came out of a source, and it still does not eliminate it: a spoken
     answer here can assert something no span supports, and nothing will say so.
 
     **Do not widen the path without reopening that.** Anything that gives this path a

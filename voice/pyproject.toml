@@ -14,6 +14,14 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.28",
+    # The MCP client, for the one path out of this process: a session's platform tools are
+    # `tools/call`s on Motet's own server at `/mcp` (motet#120). The SDK rather than a
+    # hand-rolled JSON-RPC client, because `McpServerBinding` exists so that Zimmer can
+    # point this at servers nobody here wrote — the protocol has to be the real one, not
+    # the subset Motet's server happens to accept. It reaches an HTTP endpoint and never a
+    # database, so it does not weaken invariant 2; the same pin as `motet-api`, which
+    # serves the other half.
+    "mcp>=2.2,<3",
     "motet-inference",
     # Telemetry wiring, shared with the API and the worker. `motet-obs` depends on no
     # `motet-*` package and reaches an OTLP endpoint rather than Postgres, so taking it

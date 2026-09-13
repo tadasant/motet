@@ -1091,6 +1091,7 @@ source = { editable = "voice" }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "mcp" },
     { name = "motet-inference" },
     { name = "motet-obs" },
     { name = "motet-storage" },
@@ -1103,6 +1104,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "mcp", specifier = ">=2.2,<3" },
     { name = "motet-inference", editable = "inference" },
     { name = "motet-obs", editable = "obs" },
     { name = "motet-storage", editable = "storage" },

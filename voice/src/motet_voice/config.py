@@ -32,7 +32,15 @@ API_TOKEN_ENV: Final = "MOTET_VOICE_API_TOKEN"
 START_SESSION_TOKEN_ENV: Final = "MOTET_VOICE_START_SESSION_TOKEN"
 OPENAI_KEY_ENV: Final = "OPENAI_API_KEY"
 OPENAI_REALTIME_MODEL_ENV: Final = "MOTET_VOICE_OPENAI_REALTIME_MODEL"
-EXA_KEY_ENV: Final = "EXA_API_KEY"
+#: Which of Motet's MCP tool groups this service's connection may list and call. A
+#: deployment can narrow it; it can also widen it, which is why the default is the tight
+#: selection rather than the server's own (every group but ``admin``).
+MCP_TOOL_GROUPS_ENV: Final = "MOTET_VOICE_MCP_TOOL_GROUPS"
+#: The credential presented to ``/mcp``. **Unset falls back to** ``MOTET_VOICE_API_TOKEN``,
+#: which is the owner token — option (a) of motet#120, and the reason this change needs
+#: nothing provisioned. Setting this one is the whole of option (b): a scoped credential
+#: swaps in as a variable rather than as a rewrite.
+MCP_TOKEN_ENV: Final = "MOTET_VOICE_MCP_TOKEN"
 #: Comma-separated browser origins allowed to open a session socket — the SPA's origin in
 #: a deployed environment. Unset allows any, which is right on a laptop.
 ALLOWED_ORIGINS_ENV: Final = "MOTET_VOICE_ALLOWED_ORIGINS"
@@ -54,6 +62,20 @@ DEFAULT_ARM: Final = COMPOSED_ARM
 
 DEFAULT_OPENAI_REALTIME_MODEL: Final = "gpt-realtime"
 
+#: The slug a caller binds to reach Motet's own MCP server. A *slug*, never a URL — see
+#: :class:`~motet_voice.contract.McpServerBinding`: where it points is this service's
+#: configuration, so no client can name a host.
+MOTET_MCP_SLUG: Final = "motet"
+
+#: The tool groups the conversation genuinely needs, and no more (motet#120).
+#:
+#: ``backlog`` carries ``set_news_item_read``, which is ``mark_read``; ``highlights``
+#: carries ``save_highlight``. Both are *write* groups because both platform tools write —
+#: there is no read-only variant that contains a write. No read-only group is asked for:
+#: everything a session reads arrives in its :class:`~motet_voice.contract.SessionContext`
+#: (invariant 2), so a read group would be a surface nothing calls.
+DEFAULT_MCP_TOOL_GROUPS: Final = "backlog,highlights"
+
 
 class VoiceConfigError(ValueError):
     """The voice service was asked for something it cannot do."""
@@ -69,6 +91,10 @@ class VoiceSettings:
     session_secret_provided: bool
     session_ttl_seconds: int
     api_base_url: str | None
+    #: Read only as the fallback for :attr:`mcp_token` — since motet#120 the one thing this
+    #: service presents a bearer to is Motet's MCP server, and nothing else in this package
+    #: makes an HTTP request to the API. Kept under its own name because that is the
+    #: variable a deployment already sets, and because option (b) is the *other* name.
     api_token: str | None
     #: Bearer required to mint a session. Unset means anyone who can reach this service can
     #: open one — and a session's tools carry *our* ``/v1`` credential, so an open
@@ -76,7 +102,17 @@ class VoiceSettings:
     start_session_token: str | None
     openai_api_key_present: bool
     openai_realtime_model: str
-    exa_api_key_present: bool
+    #: The ``?tool_groups=`` value this service's ``/mcp`` connection asks for, verbatim.
+    #: Validated by the *server*, which refuses an unknown group with a 400 rather than
+    #: quietly serving a smaller surface — so a typo here is a loud connection failure.
+    mcp_tool_groups: str
+    #: What to present to ``/mcp``. ``None`` when neither variable is set, which is the
+    #: laptop case: an open API needs no bearer.
+    mcp_token: str | None
+    #: Whether :data:`MCP_TOKEN_ENV` supplied it, rather than the whole-API owner token.
+    #: Reported on ``/internal/health`` so that "which credential is this?" is a question
+    #: the deployment can answer without reading a secret.
+    mcp_token_dedicated: bool
     #: Lowercased ``scheme://host[:port]`` origins, compared exactly against a socket's
     #: ``Origin`` header. Empty means unrestricted.
     allowed_origins: frozenset[str] = frozenset()
@@ -115,7 +151,10 @@ class VoiceSettings:
                 OPENAI_REALTIME_MODEL_ENV, DEFAULT_OPENAI_REALTIME_MODEL
             ).strip()
             or DEFAULT_OPENAI_REALTIME_MODEL,
-            exa_api_key_present=bool(_clean(environ.get(EXA_KEY_ENV))),
+            mcp_tool_groups=environ.get(MCP_TOOL_GROUPS_ENV, DEFAULT_MCP_TOOL_GROUPS).strip()
+            or DEFAULT_MCP_TOOL_GROUPS,
+            mcp_token=_clean(environ.get(MCP_TOKEN_ENV)) or _clean(environ.get(API_TOKEN_ENV)),
+            mcp_token_dedicated=_clean(environ.get(MCP_TOKEN_ENV)) is not None,
             allowed_origins=frozenset(
                 origin.strip().rstrip("/").lower()
                 for origin in environ.get(ALLOWED_ORIGINS_ENV, "").split(",")
@@ -136,8 +175,17 @@ class VoiceSettings:
             f"start_session_auth={'set' if self.start_session_token else 'OPEN'} "
             f"openai_key={'present' if self.openai_api_key_present else 'absent'} "
             f"origins={'restricted' if self.allowed_origins else 'ANY'} "
-            f"exa_key={'present' if self.exa_api_key_present else 'absent'}"
+            f"mcp={self.describe_mcp()}"
         )
+
+    def describe_mcp(self) -> str:
+        """How this service reaches Motet's MCP server. Names, never values."""
+        if not self.api_base_url:
+            return "unset"
+        credential = (
+            "scoped" if self.mcp_token_dedicated else ("api_token" if self.mcp_token else "NONE")
+        )
+        return f"{self.mcp_tool_groups}/{credential}"
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> VoiceSettings:
@@ -159,6 +207,30 @@ def load_settings(env: Mapping[str, str] | None = None) -> VoiceSettings:
             "parameters — which is an emulation, not a measurement of the vendor.",
             OPENAI_KEY_ENV,
             OPENAI_REALTIME_ARM,
+        )
+    if settings.api_base_url is None:
+        logger.warning(
+            "%s is unset, so this service resolves no MCP server and every platform tool is "
+            "dormant: a session can converse, and it cannot mark a story read or save a "
+            "highlight.",
+            API_BASE_URL_ENV,
+        )
+    elif settings.mcp_token is None:
+        logger.warning(
+            "%s reaches %s with no credential (neither %s nor %s is set). That works only "
+            "against an API whose own token is unset.",
+            MOTET_MCP_SLUG,
+            API_BASE_URL_ENV,
+            MCP_TOKEN_ENV,
+            API_TOKEN_ENV,
+        )
+    elif not settings.mcp_token_dedicated:
+        logger.info(
+            "%s presents %s to Motet's MCP server — the whole-API owner token (motet#120, "
+            "option a). Set %s to swap in a scoped credential.",
+            MOTET_MCP_SLUG,
+            API_TOKEN_ENV,
+            MCP_TOKEN_ENV,
         )
     if settings.start_session_token is None:
         logger.warning(
