@@ -22,16 +22,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 
 import psycopg
-from fastapi import (
-    Depends,
-    FastAPI,
-    HTTPException,
-    Path,
-    Query,
-    Request,
-    Response,
-    status,
-)
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from motet_db import (

@@ -101,7 +101,9 @@ function AdminApp() {
               ? 'Sign in first — the admin view needs a signed-in account.'
               : who.how === 'session'
                 ? `${who.email ?? 'This account'} is not an admin on this deployment.`
-                : 'The admin view needs a signed-in Google account; the shared API token is not one.'}
+                : who.how === 'token'
+                  ? 'The admin view needs a signed-in Google account; the shared API token is not one.'
+                  : 'The admin view needs a signed-in Google account, and this deployment has no sign-in lock at all.'}
           </p>
           <a href="/">← app</a>
         </section>
