@@ -17,6 +17,11 @@
 # Deliberately does NOT set UV_ENV_FILE. `uv run` reads no .env without it, real mode
 # spends real money (CONTRIBUTING.md), and that export stays the deliberate act it is
 # documented as — `export UV_ENV_FILE=.env` before this, and every child picks it up.
+#
+# `--no-env-file` keeps that file out of the SUPERVISOR's own environment, and only there:
+# it sets no variable, so every child's `uv run` still reads it. Without it the supervisor
+# cannot tell a shell export from a line uv loaded, so the warning about exported names
+# that beat `.env` (motet#85) and the DATABASE_URL source label would both be wrong.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec uv run python -m tools.dev "$@"
+exec uv run --no-env-file python -m tools.dev "$@"

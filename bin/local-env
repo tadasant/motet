@@ -9,6 +9,11 @@
 #
 # NOT in bin/ci, and never will be: CI is offline and fake (invariant 7), and this is the
 # one script in the repo whose entire job is to reach a cloud API for real credentials.
+#
+# `--no-env-file` because the script compares the file it writes against this shell's
+# exports (motet#85). With UV_ENV_FILE=.env exported, uv would otherwise load the OLD file
+# into this process, and a `--force` after a rotation would report every rotated key as
+# exported.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec uv run python -m tools.local_env "$@"
+exec uv run --no-env-file python -m tools.local_env "$@"

@@ -27,6 +27,7 @@ import pytest
 from google.api_core import exceptions as api_exceptions
 from google.auth import exceptions as auth_exceptions
 
+import tools.dev
 import tools.local_env
 from tools.local_env import (
     LABEL_FILTER,
@@ -492,6 +493,25 @@ class TestTheWholeScript:
         assert f"OPENROUTER_API_KEY={SECRETS['OPENROUTER_API_KEY']}" in out.read_text(
             encoding="utf-8"
         )
+
+    def test_a_quoted_secret_exported_unchanged_is_not_a_collision(
+        self,
+        key: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """What `_render_value` escapes, `bin/dev`'s parser reads back to the same string."""
+        awkward = 'a "json" ${not} \\ secret\nline two'
+        monkeypatch.setenv("AWKWARD_SECRET", awkward)
+        out = tmp_path / ".env"
+
+        assert run(["--output", str(out)], FakeSecrets({**SECRETS, "AWKWARD_SECRET": awkward})) == 0
+
+        assert tools.dev.read_env_file(out)["AWKWARD_SECRET"] == awkward
+        printed = capsys.readouterr().out
+        warning = [line for line in printed.splitlines() if "precedence" in line]
+        assert not any("AWKWARD_SECRET" in line for line in warning)
 
     def test_no_warning_when_nothing_collides(
         self,
