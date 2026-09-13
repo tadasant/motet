@@ -213,19 +213,29 @@ components:
       type: object
     AdminSourceItemCounts:
       properties:
+        dismissed:
+          title: Dismissed
+          type: integer
         failed:
           title: Failed
+          type: integer
+        held:
+          description: 'Pending with no integrate job: waiting for ''ingest now''.'
+          title: Held
           type: integer
         integrated:
           title: Integrated
           type: integer
         pending:
+          description: 'Pending with an integrate job: on its way in.'
           title: Pending
           type: integer
       required:
+      - held
       - pending
       - integrated
       - failed
+      - dismissed
       title: AdminSourceItemCounts
       type: object
     AdminUserResponse:

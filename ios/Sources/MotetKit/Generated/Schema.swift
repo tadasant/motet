@@ -177,12 +177,16 @@ public struct AdminQueueResponse: Codable, Hashable, Sendable {
 }
 
 public struct AdminSourceItemCounts: Codable, Hashable, Sendable {
+    public var dismissed: Int
     public var failed: Int
+    public var held: Int
     public var integrated: Int
     public var pending: Int
 
-    public init(failed: Int, integrated: Int, pending: Int) {
+    public init(dismissed: Int, failed: Int, held: Int, integrated: Int, pending: Int) {
+        self.dismissed = dismissed
         self.failed = failed
+        self.held = held
         self.integrated = integrated
         self.pending = pending
     }

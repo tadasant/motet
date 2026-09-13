@@ -1080,11 +1080,21 @@ export interface components {
         };
         /** AdminSourceItemCounts */
         AdminSourceItemCounts: {
+            /** Dismissed */
+            dismissed: number;
             /** Failed */
             failed: number;
+            /**
+             * Held
+             * @description Pending with no integrate job: waiting for 'ingest now'.
+             */
+            held: number;
             /** Integrated */
             integrated: number;
-            /** Pending */
+            /**
+             * Pending
+             * @description Pending with an integrate job: on its way in.
+             */
             pending: number;
         };
         /**

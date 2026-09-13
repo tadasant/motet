@@ -866,9 +866,11 @@ class RevokedResponse(BaseModel):
 
 
 class AdminSourceItemCounts(BaseModel):
-    pending: int
+    held: int = Field(description="Pending with no integrate job: waiting for 'ingest now'.")
+    pending: int = Field(description="Pending with an integrate job: on its way in.")
     integrated: int
     failed: int
+    dismissed: int
 
 
 class AdminNewsItemCounts(BaseModel):

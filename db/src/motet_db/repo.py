@@ -963,7 +963,9 @@ _ADMIN_JOBS_SQL = """
 """
 
 JOB_STATES: Final = ("ready", "running", "done", "failed")
-SOURCE_ITEM_STATES: Final = ("pending", "integrated", "failed")
+#: ``held`` is split out of ``pending`` on the same predicate as ``_HELD_WHERE`` — a pending
+#: item with no integrate job is waiting for a person, not in flight (motet#91).
+SOURCE_ITEM_STATES: Final = ("held", "pending", "integrated", "failed", "dismissed")
 EPISODE_STATES: Final = ("pending", "scripting", "rendering", "ready", "failed")
 
 
@@ -984,7 +986,17 @@ def admin_overview_users(conn: psycopg.Connection[Any]) -> list[AdminUserOvervie
             out.setdefault(row["user_id"], {})[row["state"]] = row["n"]
         return out
 
-    source_items = counts("SELECT user_id, state, count(*) AS n FROM source_items GROUP BY 1, 2")
+    source_items = counts(
+        """
+        SELECT user_id,
+               CASE WHEN si.state = 'pending' AND NOT EXISTS (
+                        SELECT 1 FROM jobs j
+                        WHERE j.queue = 'integrate' AND j.payload ->> 'source_item_id' = si.id
+                    ) THEN 'held' ELSE si.state END AS state,
+               count(*) AS n
+        FROM source_items si GROUP BY 1, 2
+        """
+    )
     news_items = counts(
         """
         SELECT user_id, CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END AS state,
