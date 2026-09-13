@@ -40,7 +40,8 @@ import {
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
-import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
+import { IN_PROGRESS } from './screens/EpisodeScreen'
+import { Episodes } from './screens/Episodes'
 import { OAuthCallback } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
@@ -352,7 +353,7 @@ export default function App() {
       )}
       {section.id === 'episodes' &&
         (episode ? (
-          <EpisodeScreen
+          <Episodes
             episode={episode}
             episodes={episodes}
             processing={processing}
@@ -361,8 +362,7 @@ export default function App() {
             onBacklogChanged={refresh}
           />
         ) : (
-          <section aria-labelledby="episode-heading">
-            <h2 id="episode-heading">Episode</h2>
+          <section aria-label="Episodes">
             <p className="hint">
               {!episodesLoaded
                 ? 'Looking for your episodes…'

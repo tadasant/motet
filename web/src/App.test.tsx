@@ -13,6 +13,7 @@ import type {
 } from './api/client'
 // Imported directly for the connect tests: handing the browser to Google is the one line
 // of that flow jsdom cannot execute, and the screen takes it as a prop for that reason.
+import { forgetLastShownEpisode } from './screens/Episodes'
 import { SignIn } from './screens/SignIn'
 import { Sources } from './screens/Sources'
 
@@ -67,6 +68,27 @@ const EPISODE: Episode = {
       ],
     },
   ],
+}
+
+/**
+ * What `POST /v1/episodes` answers: a *different* episode from the one already on the
+ * shelf. The Episodes section lands on its list and opens the detail only when the
+ * selected episode *changes* — which is what making one does. A mock that returned
+ * `EPISODE` for the create as well would hand the section the id it was already showing,
+ * and the list would be the right answer.
+ */
+const CREATED: Episode = {
+  ...EPISODE,
+  id: 'ep_2',
+  title: 'Fresh briefing',
+  // As the API actually answers a create: queued, nothing rendered yet.
+  state: 'pending',
+  duration_ms: 0,
+  audio_bytes: null,
+  audio_media_type: null,
+  created_at: '2026-08-24T01:00:00Z',
+  published_at: null,
+  segments: [],
 }
 
 const SESSION: SessionInfo = {
@@ -175,6 +197,9 @@ beforeEach(() => {
   // is the point of Google Sign-In. Every test below is about what a *signed-in* browser
   // does, so they start with a credential in the slot; the door has its own describe.
   window.localStorage.setItem('motet.apiToken', 'test-token')
+  // The Episodes section remembers which episode it last showed across the tab being left
+  // and come back to — in a module variable, so it would remember across tests too.
+  forgetLastShownEpisode()
 })
 
 afterEach(() => {
@@ -348,14 +373,20 @@ describe('App', () => {
   })
 
   it('creates an episode from the backlog and opens it', async () => {
-    const calls = mockApi()
+    // `/v1/episodes` is the prefix route: the POST that creates, and the GET of one episode
+    // by id that the detail polls. The list is `GET /v1/episodes`, matched exactly.
+    const calls = mockApi({ '/v1/episodes': CREATED })
     render(<App />)
     fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
 
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
 
+    // The *detail* of the new one, not the shelf: making an episode is the one way into
+    // this section that should skip the list.
     expect(await screen.findByRole('heading', { name: 'Episode' })).toBeDefined()
+    expect(screen.getByText('Fresh briefing', { selector: 'strong' })).toBeDefined()
+    expect(screen.getByRole('button', { name: '← All episodes' })).toBeDefined()
     const created = calls.find((call) => call.method === 'POST' && call.url.endsWith('/v1/episodes'))
     expect(created?.body).toMatchObject({ max_duration_ms: 20 * 60_000 })
   })
@@ -430,9 +461,9 @@ describe('App', () => {
   it('shows every claim beside the source span it cites', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
-    await screen.findByText('Acme raises $20M Series A')
-    fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+    await screen.findByRole('heading', { name: 'Episodes' })
+    fireEvent.click(screen.getByRole('button', { name: 'Play Morning briefing' }))
     await screen.findByRole('heading', { name: 'Episode' })
 
     // Invariant 3, as a user can see it: the spoken sentence and the verbatim source text
@@ -447,9 +478,11 @@ describe('App', () => {
   it('offers the private feed URL rather than an in-page player', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
-    await screen.findByText('Acme raises $20M Series A')
-    fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+    // The section lands on the shelf; the feed URL lives on the episode's detail, so open
+    // the row.
+    await screen.findByRole('heading', { name: 'Episodes' })
+    fireEvent.click(screen.getByRole('button', { name: 'Play Morning briefing' }))
 
     expect(await screen.findByText('https://example.test/feed.xml?token=secret')).toBeDefined()
     // Phase 1 deliberately ships RSS instead of a player: a browser has no background
@@ -473,7 +506,7 @@ describe('the app shell', () => {
     mockApi()
     window.history.replaceState({}, '', '/episodes')
     render(<App />)
-    expect(await screen.findByRole('heading', { name: 'Episodes', level: 1 })).toBeDefined()
+    expect(await screen.findByRole('heading', { name: 'Episodes' })).toBeDefined()
     expect(await screen.findByText(/Morning briefing/)).toBeDefined()
   })
 

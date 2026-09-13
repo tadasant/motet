@@ -190,3 +190,33 @@ main.wide { max-width: 90rem; }
 /* PROTOTYPE: in-page player */
 .player { margin: .75rem 0 1rem; }
 .player audio { width: 100%; max-width: 46rem; display: block; }
+
+
+
+
+/* PROTOTYPE — the Episodes shelf (Episodes.tsx): list first, detail on click. */
+.back-row { margin: 0 0 .75rem; }
+.back-row .linkish { text-decoration: none; color: var(--muted); font-size: .9rem; }
+.back-row .linkish:hover { color: var(--fg); text-decoration: underline; }
+.episode-group { margin-top: 1.25rem; }
+.episode-group h3 { margin: 0 0 .25rem; font-size: 1rem; }
+.episode-group summary { cursor: pointer; list-style: revert; }
+.episode-group summary h3 { display: inline; }
+.episode-list { list-style: none; padding: 0; margin: 0; }
+.episode-row { display: flex; gap: 1rem; align-items: flex-start; border-top: 1px solid var(--line); padding: .75rem .5rem; cursor: pointer; }
+.episode-row:hover { background: var(--surface); }
+.episode-row.listened .episode-title { color: var(--muted); font-weight: 400; }
+.episode-row.failed .episode-title { color: var(--bad); }
+.episode-main { flex: 1; min-width: 0; }
+.episode-head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.episode-title { font-weight: 600; text-decoration: none; text-align: left; font-size: 1rem; }
+.episode-title:hover { text-decoration: underline; }
+.episode-meta { margin: .15rem 0 0; }
+.episode-error { margin: .25rem 0 0; color: var(--bad); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; overflow-wrap: anywhere; }
+.episode-progress { display: flex; align-items: center; gap: .75rem; margin-top: .4rem; }
+.progress { flex: 1; max-width: 18rem; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); }
+.progress-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.episode-actions { display: flex; flex-direction: column; align-items: flex-end; gap: .35rem; flex: none; }
+.episode-actions .play { border: 1px solid var(--accent); color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: .3rem .9rem; font-weight: 600; white-space: nowrap; }
+.episode-actions .play:hover { background: var(--accent); color: #fff; }
