@@ -2144,11 +2144,19 @@ Dropping it was the smaller honest change; adding the route remains open to anyo
 a session genuinely short of something.
 
 **The binding is the gate, and an unbound session's tools are dormant rather than absent.**
-`StartSession` resolves `mcp_servers` against the slugs this deployment has — `motet`, and
-only where `MOTET_VOICE_API_BASE_URL` is set — and refuses any other with a 422 naming both.
-A client still supplies no URL and no credential (invariant 1's shape, one layer in). A
-session that binds nothing still *sees* the tools, described as dormant with the reason, so a
-persona told it cannot save a highlight says so instead of promising and failing.
+A client still supplies no URL and no credential (invariant 1's shape, one layer in): it
+names a slug, and `StartSession` decides. A session that binds nothing still *sees* the
+tools, described as dormant with the reason, so a persona told it cannot save a highlight
+says so instead of promising and failing.
+
+**Which slug the *service* knows and which one a *deployment* resolves are two questions,
+and the difference is a 422 against a dormant tool.** A slug outside `KNOWN_MCP_SLUGS` is
+refused at StartSession, naming both sides — it can never mean anything here. `motet` where
+`MOTET_VOICE_API_BASE_URL` is unset is the other case and is **accepted**, with a warning and
+dormant tools: the API sends that binding on every Play Live session, so refusing it would
+take the whole conversation down to protect two tools, which is exactly the trade
+`load_settings` already declines to make for a missing vendor key. `/internal/health`'s
+`mcp_slugs` is the second list — what resolves — for `vault_ready`'s reason.
 
 **A highlight's span is resolved from the session's own transcript, never from the model.**
 `POST /v1/highlights` reads the quote out of the source text at the span it is given — which
@@ -2160,6 +2168,19 @@ containment, on case- and punctuation-folded text) and sends **that claim's** sp
 that paraphrases loosely therefore fails to save rather than saving its own words, and it
 cannot invent an offset because it is never asked for one. The fields are optional: a caller
 that is not Motet has no spans, and a claim without one is simply not a candidate.
+
+**Three rules inside that matching are each a wrong highlight avoided, not a refinement.**
+Punctuation folds to a *space* and the collapse happens after, because deleting it joins the
+words either side — `forty-million` became `fortymillion`, an em dash left a double space —
+and this pipeline's prose is full of both, so the first version failed to save exactly the
+lines a listener asks for. Within a pass the **tightest fit** wins rather than whichever
+claim came first: a three-word claim is contained in almost any paraphrase and would take
+every quote. And containment needs `MIN_CONTAINMENT_WORDS`, because *under*-quoting is the
+other half of the same failure — a model that says `quote="that"` would otherwise land
+inside some claim and write a highlight nobody asked for, which then reads as verbatim
+source text. An exact match is always allowed however short: that is the model repeating
+what was said rather than guessing. Length rather than a similarity score, deliberately —
+a threshold is a judgement about two texts, in the one place meant to have no opinion.
 
 **The credential is the owner token, and swapping it is a variable.** *The (a)/(b) choice in
 motet#120 is the owner's and this is what runs until he makes it.* `MOTET_VOICE_MCP_TOKEN`
@@ -2186,10 +2207,31 @@ rather than of the tools: every model call in the system is reached through `ing
 exists because Zimmer will point it at servers nobody here wrote, so the half of the protocol
 this service speaks has to be the real one rather than the subset Motet's server happens to
 accept. `motet-voice` therefore takes `mcp>=2.2,<3` — the same pin as `motet-api`, serving
-the other half — which reaches an HTTP endpoint and never a database, so invariant 2 is
-untouched and `test_no_database_access.py` still holds. The connection is opened once per
-process and reopened after a failure: a handshake per question is a listener standing on a
-pavement, and Motet's server is stateless, so a held client is a socket rather than state.
+the other half — and declares `httpx2` beside it rather than inheriting it, which is
+`google-auth[requests]`' rule one package along: a dependency you import by name is one you
+depend on. Both reach an HTTP endpoint and never a database, so invariant 2 is untouched and
+`test_no_database_access.py` still holds.
+
+**A connection lasts one call, and that is correctness rather than cost.** Holding one open
+across calls buys one POST against a stateless server and costs three things the first draft
+of this discovered the hard way. The SDK's transport is an `anyio` task group, and **anyio
+refuses to let a task close a cancel scope another task entered** — the transport is
+process-wide, so the websocket task that opened the connection is almost never the one that
+closes it, and every close raised `Attempted to exit cancel scope in a different task` and
+was swallowed, which is a leak that reads exactly like a clean close. The lifespan's own
+teardown on SIGTERM had the same fault. And one session's failed call tore down a connection
+other sessions had calls in flight on. A connection owned by the task that uses it has none
+of those, needs neither a lock nor a generation counter, and is one `async with`; the shared
+httpx client keeps the socket and the TLS session, so what a call actually pays is an
+`initialize` round trip. `voice/tests/test_mcp_binding.py` drives three calls from three
+tasks at once and closes from a fourth.
+
+**What the listener is told when it fails is fixed prose, and the detail goes to the log.**
+A tool's error text is read out loud, handed to the model, and sent to the browser: an SDK
+exception there is usually meaningless (`unhandled errors in a TaskGroup (1 sub-exception)`)
+and an HTTP error's string carries the deployment's API hostname and this connection's
+tool-group selection with it. The log line unwraps the `ExceptionGroup`, which is the half
+that is actually diagnostic.
 
 **`motet.voice.tool_calls{tool,outcome}`** is what makes any of this falsifiable. A binding
 that resolves to nothing, a credential the API refuses, and a deployment nobody has spoken to
@@ -2197,7 +2239,10 @@ are otherwise the same silence — the never-infer-"no errors"-from-"no data" tr
 path that leaves this process. `dormant` and `not_granted` are counted alongside `ok` and
 `failed`, because a persona saying "I can't do that" is a product that does not work rather
 than an error anywhere. `/internal/health` reports `mcp_slugs`, `mcp_tool_groups` and
-`mcp_credential` (`api_token` or `scoped`, never a value) for `vault_ready`'s reason.
+`mcp_credential` — `api_token`, `scoped`, or `none`, never a value — for `vault_ready`'s
+reason. `none` is the one worth looking for: it works only against an API whose own token is
+unset, so in a deployed environment it is a misconfiguration that answers every call with a
+401 the listener hears as "I can't do that".
 
 **The invariant-12 reading, recorded as invariant 12 asks.** motet#120 is the design session
 for the binding itself — the owner's issue states the two steps and names `?tool_groups=` —

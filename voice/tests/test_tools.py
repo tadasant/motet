@@ -161,6 +161,83 @@ def test_a_news_item_id_narrows_which_claims_are_candidates(settings: VoiceSetti
     assert found is not None and found[1].span_start == 12
 
 
+def test_a_short_claim_does_not_swallow_a_long_quote(settings: VoiceSettings) -> None:
+    """ "It was announced." is contained in almost any paraphrase. Whichever claim came
+    first would win, and the highlight would hold the wrong span while reading verbatim."""
+    context = SessionContext.model_validate(
+        {
+            "transcript": [
+                {
+                    "title": "A funding round",
+                    "start_ms": 0,
+                    "end_ms": 20_000,
+                    "news_item_id": "n1",
+                    "claims": [
+                        {
+                            "start_ms": 0,
+                            "end_ms": 5_000,
+                            "spoken_text": "It was announced.",
+                            "source_item_id": "si1",
+                            "span_start": 0,
+                            "span_end": 10,
+                        },
+                        {
+                            "start_ms": 5_000,
+                            "end_ms": 20_000,
+                            "spoken_text": "Acme raised forty million dollars.",
+                            "source_item_id": "si1",
+                            "span_start": 10,
+                            "span_end": 80,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    found = locate_claim(context, "It was announced. Acme raised forty million dollars. Big news.")
+    assert found is not None
+    assert found[1].span_start == 10, "the longest claim inside the quote wins, not the first"
+
+
+def test_the_tightest_containing_claim_wins_when_the_quote_is_a_fragment(
+    settings: VoiceSettings,
+) -> None:
+    """Two claims can both contain the fragment; the shorter one is the more specific."""
+    context = SessionContext.model_validate(
+        {
+            "transcript": [
+                {
+                    "title": "A funding round",
+                    "start_ms": 0,
+                    "end_ms": 20_000,
+                    "news_item_id": "n1",
+                    "claims": [
+                        {
+                            "start_ms": 0,
+                            "end_ms": 10_000,
+                            "spoken_text": ("Acme raised forty million dollars, the company said."),
+                            "source_item_id": "si1",
+                            "span_start": 0,
+                            "span_end": 60,
+                        },
+                        {
+                            "start_ms": 10_000,
+                            "end_ms": 20_000,
+                            "spoken_text": "Acme raised forty million dollars.",
+                            "source_item_id": "si1",
+                            "span_start": 60,
+                            "span_end": 90,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    found = locate_claim(context, "raised forty million")
+    assert found is not None
+    assert found[1].span_start == 60, "the shortest claim containing the fragment wins"
+
+
 def test_a_session_with_no_transcript_cannot_save_a_highlight(settings: VoiceSettings) -> None:
     result = asyncio.run(
         _registry(settings, RecordingToolTransport()).invoke("save_highlight", {"quote": "x"})
@@ -203,6 +280,106 @@ def test_an_unbound_session_gets_dormant_tools_rather_than_a_crash(
         availability = tool.availability()
         assert availability.state is ToolState.DORMANT
         assert "not bound" in availability.reason and "motet" in availability.reason
+
+
+def test_every_outcome_reaches_the_counter(settings: VoiceSettings, metrics: Any) -> None:
+    """`motet.voice.tool_calls` is what makes the binding falsifiable (invariant 11): a
+    binding that resolves to nothing, a credential the API refuses, and a deployment nobody
+    has spoken to are otherwise the same silence. Read back through a real in-memory reader
+    rather than by asserting a function was called."""
+    transport = RecordingToolTransport(
+        responses={"set_news_item_read": ToolResponse(200, {"id": "n1", "read": True})}
+    )
+    granted = _registry(settings, transport, context=CONTEXT)
+
+    def counted() -> dict[tuple[str, str], int]:
+        return {
+            (str(point.attributes["tool"]), str(point.attributes["outcome"])): int(point.value)
+            for point in metrics.points("motet.voice.tool_calls")
+        }
+
+    # The reader is session-scoped and a counter is cumulative, so what this test owns is
+    # the delta rather than the total.
+    before = counted()
+
+    async def go() -> None:
+        await granted.invoke("mark_read", {"news_item_id": "n1"})  # ok
+        await granted.invoke("save_highlight", {"quote": "nothing like this was said"})  # failed
+        await granted.invoke("no_such_tool", {})  # not_granted
+        unbound = ToolRegistry(build_platform_tools(settings, transport=None))
+        await unbound.invoke("mark_read", {"news_item_id": "n1"})  # dormant
+
+    asyncio.run(go())
+    after = counted()
+
+    for key in (
+        ("mark_read", "ok"),
+        ("save_highlight", "failed"),
+        ("no_such_tool", "not_granted"),
+        ("mark_read", "dormant"),
+    ):
+        assert after.get(key, 0) - before.get(key, 0) == 1, key
+
+
+def test_a_story_that_is_not_in_this_episode_says_so(settings: VoiceSettings) -> None:
+    """Distinct from "I couldn't find that line": no requoting fixes a wrong story id."""
+    result = asyncio.run(
+        _registry(settings, RecordingToolTransport(), context=CONTEXT).invoke(
+            "save_highlight", {"quote": "Acme raised forty million dollars.", "news_item_id": "n9"}
+        )
+    )
+    assert not result.ok
+    assert result.error is not None and "not in this episode" in result.error
+
+
+def test_an_under_quoted_fragment_does_not_save_an_arbitrary_span(
+    settings: VoiceSettings,
+) -> None:
+    """A model that says `quote="that"` must not land inside some claim and write a
+    highlight — which would then read as verbatim source text nobody asked for. The
+    paraphrase direction is only half of what this path has to refuse."""
+    transport = RecordingToolTransport()
+    for vague in ("that", "Acme", "dollars"):
+        result = asyncio.run(
+            _registry(settings, transport, context=CONTEXT).invoke(
+                "save_highlight", {"quote": vague}
+            )
+        )
+        assert not result.ok, f"{vague!r} matched a claim by containment"
+    assert transport.calls == []
+    # An exact match is still a match, however short: that is the model repeating what was
+    # said rather than guessing.
+    assert locate_claim(CONTEXT, "The round was led by Initech.") is not None
+
+
+def test_an_em_dash_or_a_hyphen_does_not_break_the_match(settings: VoiceSettings) -> None:
+    """Deleting punctuation joins the words either side, so `forty-million` became
+    `fortymillion` and matched no paraphrase of itself. This pipeline's prose is full of
+    em dashes and hyphenated compounds."""
+    context = SessionContext.model_validate(
+        {
+            "transcript": [
+                {
+                    "title": "A funding round",
+                    "start_ms": 0,
+                    "end_ms": 10_000,
+                    "news_item_id": "n1",
+                    "claims": [
+                        {
+                            "start_ms": 0,
+                            "end_ms": 10_000,
+                            "spoken_text": "Acme — the maker of things — raised forty-million.",
+                            "source_item_id": "si1",
+                            "span_start": 5,
+                            "span_end": 40,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    found = locate_claim(context, "Acme the maker of things raised forty million.")
+    assert found is not None and found[1].span_start == 5
 
 
 def test_a_missing_required_argument_is_explained(settings: VoiceSettings) -> None:

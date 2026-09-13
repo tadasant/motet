@@ -176,7 +176,7 @@ Every variable is optional; the service starts with none of them set.
 | `MOTET_VOICE_SESSION_TTL_SECONDS` | Token lifetime, default 3600 |
 | `MOTET_VOICE_API_BASE_URL` | Where Motet's API is. The `motet` MCP slug resolves to `<this>/mcp`; unset means the slug resolves to nothing and every platform tool is dormant |
 | `MOTET_VOICE_API_TOKEN` | Bearer for that API, and — unless the next variable is set — what the MCP connection presents |
-| `MOTET_VOICE_MCP_TOKEN` | A credential for `/mcp` alone. Unset falls back to `MOTET_VOICE_API_TOKEN`, which is the whole-API owner token (motet#120, option **a**); setting this is the whole of option **b** |
+| `MOTET_VOICE_MCP_TOKEN` | A credential for `/mcp` alone. Unset falls back to `MOTET_VOICE_API_TOKEN`, which is the whole-API owner token (motet#120, option **a**); setting this is the whole of option **b**. `/internal/health` reports which of the two a deployment is on — or `none`, if neither is set |
 | `MOTET_VOICE_MCP_TOOL_GROUPS` | The `?tool_groups=` selection, default `backlog,highlights` — the two groups holding the two tools a conversation calls. A deployment can narrow it, and an unknown group is a 400 from the server rather than a quietly smaller surface |
 | `MOTET_VOICE_START_SESSION_TOKEN` | Bearer required to mint a session. **Unset means open**, and an open `StartSession` is a confused deputy: a session's tools carry the credential above. `/internal/health` reports which it is |
 | `MOTET_LLM_MODEL_VOICE` | Conversation model for the composed arm; falls back to `MOTET_LLM_MODEL`, then the seam's default. The per-stage seam in `motet_inference.llm`, not a variable of this service's own — so the slug is checked against the catalogue at startup |

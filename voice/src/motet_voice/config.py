@@ -182,8 +182,11 @@ class VoiceSettings:
         """How this service reaches Motet's MCP server. Names, never values."""
         if not self.api_base_url:
             return "unset"
+        # The same three words `/internal/health` reports, deliberately: an operator who
+        # greps a boot log and an operator who reads the health route must not have to
+        # notice that one says NONE and the other says none.
         credential = (
-            "scoped" if self.mcp_token_dedicated else ("api_token" if self.mcp_token else "NONE")
+            "scoped" if self.mcp_token_dedicated else ("api_token" if self.mcp_token else "none")
         )
         return f"{self.mcp_tool_groups}/{credential}"
 

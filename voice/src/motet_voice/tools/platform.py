@@ -44,7 +44,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from ..config import MOTET_MCP_SLUG, VoiceSettings
 from ..contract import SessionContext, TimedClaim
@@ -227,6 +227,16 @@ def _highlight_shaper(
     def shape(arguments: Mapping[str, Any]) -> dict[str, Any] | str:
         quote = str(arguments.get("quote") or "").strip()
         wanted = str(arguments.get("news_item_id") or "").strip() or None
+        if wanted is not None and not any(
+            segment.news_item_id == wanted for segment in context.transcript
+        ):
+            # A distinct sentence, because the two failures want different things of the
+            # persona: one is "quote me the line", the other is "that story is not in this
+            # episode" and no requoting will fix it.
+            return (
+                f"save_highlight was given a story id ({wanted}) that is not in this "
+                f"episode, so there is nothing to save from."
+            )
         claim = locate_claim(context, quote, news_item_id=wanted)
         if claim is None:
             return (
@@ -252,6 +262,15 @@ def _highlight_shaper(
     return shape
 
 
+#: How many words a quote needs before it may match by *containment*. A model that
+#: under-quotes — ``"that"``, ``"Acme"`` — would otherwise land inside some claim and write
+#: a highlight the listener never asked for, which then renders as verbatim source text.
+#: That is the failure this whole path exists to prevent, and the paraphrase direction the
+#: docstrings talk about is only half of it. A floor on *length* rather than a similarity
+#: score: three words is "did the model quote something", not "how close is it".
+MIN_CONTAINMENT_WORDS: Final = 3
+
+
 def locate_claim(
     context: SessionContext, quote: str, *, news_item_id: str | None = None
 ) -> tuple[str, TimedClaim] | None:
@@ -261,23 +280,41 @@ def locate_claim(
     with its own punctuation and capitalization far more often than it repeats it byte for
     byte. Only claims that carry a source span are candidates: a claim without one cannot
     be saved, and offering it would mean sending the API a span nobody has.
+
+    **Within a pass the tightest fit wins, not whichever claim came first**, and that is a
+    correctness rule rather than a refinement. When the quote is a fragment *of* a claim the
+    shortest containing claim is the most specific; when a claim is a fragment *of* the
+    quote the longest one accounts for the most of what was said — and without that, a
+    three-word claim ("It was announced.") is contained in almost any paraphrase and would
+    win every time, writing the wrong span into a highlight that then reads as verbatim.
+    Length rather than a similarity score, deliberately: a threshold here would be a
+    judgement about two texts in the one place meant to have no opinion.
     """
     needle = _normalize(quote)
     if not needle:
         return None
     candidates = [
-        (item_id, claim, _normalize(claim.spoken_text))
+        (item_id, claim, spoken)
         for item_id, claim in _candidates(context, news_item_id)
+        if (spoken := _normalize(claim.spoken_text))
     ]
-    matches: tuple[Callable[[str], bool], ...] = (
-        lambda spoken: spoken == needle,
-        lambda spoken: needle in spoken,
-        lambda spoken: spoken in needle,
+    #: ``(does it match, which of the matches to prefer)``. The key is minimised.
+    passes: tuple[tuple[Callable[[str], bool], Callable[[str], int]], ...] = (
+        (lambda spoken: spoken == needle, lambda spoken: 0),
+        (lambda spoken: needle in spoken, len),
+        (lambda spoken: spoken in needle, lambda spoken: -len(spoken)),
     )
-    for match in matches:
-        for item_id, claim, spoken in candidates:
-            if spoken and match(spoken):
-                return item_id, claim
+    for index, (matches, preference) in enumerate(passes):
+        if index and len(needle.split()) < MIN_CONTAINMENT_WORDS:
+            # Exact match (pass 0) is always allowed: a one-word claim quoted exactly is the
+            # model repeating what was said. Containment on a one-word needle is a guess.
+            break
+        hits = [
+            (item_id, claim, spoken) for item_id, claim, spoken in candidates if matches(spoken)
+        ]
+        if hits:
+            item_id, claim, _ = min(hits, key=lambda hit: preference(hit[2]))
+            return item_id, claim
     return None
 
 
@@ -297,5 +334,12 @@ def _candidates(
 def _normalize(text: str) -> str:
     """Case, punctuation and runs of whitespace folded away. Nothing cleverer: a similarity
     threshold here would be a judgement about two texts in the one place meant to have no
-    opinion."""
-    return re.sub(r"[^a-z0-9 ]+", "", re.sub(r"\s+", " ", text.lower())).strip()
+    opinion.
+
+    **Punctuation becomes a space rather than nothing, and the collapse happens after.**
+    Deleting it joins the words either side — ``forty-million`` normalizes to
+    ``fortymillion`` and matches no paraphrase of it, and an em dash leaves a double space
+    that no pass survives. This pipeline's prose is full of both, so the first version of
+    this failed to save exactly the lines a listener is most likely to ask for.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()

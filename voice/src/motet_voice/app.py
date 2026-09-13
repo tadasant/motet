@@ -141,8 +141,10 @@ class HealthResponse(BaseModel):
     #: listener being told "I can't do that" rather than an error anywhere.
     mcp_slugs: list[str]
     #: The ``?tool_groups=`` selection the ``motet`` connection asks for, and which
-    #: credential it presents — ``api_token`` (the whole-API owner token) or ``scoped``.
-    #: Names, never values; ``None`` when no slug resolves.
+    #: credential it presents: ``api_token`` (the whole-API owner token), ``scoped`` (a
+    #: credential of this connection's own), or ``none`` — which is the one an operator most
+    #: needs to see, because it only works against an API whose own token is unset. Names,
+    #: never values; ``None`` when no slug resolves.
     mcp_tool_groups: str | None
     mcp_credential: str | None
     tools: list[dict[str, Any]]

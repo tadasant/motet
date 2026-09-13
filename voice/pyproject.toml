@@ -14,6 +14,12 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.28",
+    # The MCP SDK's own HTTP client, which `tools/mcp.py` imports by name to build the
+    # client the transport is handed. Declared rather than inherited through `mcp`, for the
+    # reason `motet-api` declares `google-auth[requests]` rather than inheriting it through
+    # `motet-storage`: a dependency you import is a dependency you depend on, and a
+    # transitive one can stop being transitive in a release nobody here reads.
+    "httpx2>=2.12",
     # The MCP client, for the one path out of this process: a session's platform tools are
     # `tools/call`s on Motet's own server at `/mcp` (motet#120). The SDK rather than a
     # hand-rolled JSON-RPC client, because `McpServerBinding` exists so that Zimmer can

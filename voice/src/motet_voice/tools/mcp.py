@@ -12,20 +12,29 @@ protocol rather than the subset Motet's own server happens to accept today. It i
 same client the API's own ``/mcp`` tests drive, which is what makes those tests evidence
 about this path.
 
-**The connection is held open across calls, and reopened after a failure.** A ``tools/call``
-inside a conversational turn is a listener standing on a pavement, so the handshake is paid
-once per process rather than once per question. Motet's server is stateless, so a held
-client is an HTTP connection and a negotiated protocol version — there is no server-side
-session to go stale, and a dropped connection costs one reopen on the next call.
+**A connection lasts one call, and that is a correctness decision rather than a cost one.**
+Holding one open across calls buys a handshake — one extra POST against a stateless server —
+and costs the three things that made the first draft of this module wrong. The SDK's
+transport is an ``anyio`` task group, and **anyio refuses to let a task close a cancel scope
+another task entered**: this transport is process-wide, so the session task that opened the
+connection is almost never the one that closes it, and the close raised
+``RuntimeError: Attempted to exit cancel scope in a different task`` every time — swallowed,
+because what else can a teardown do, which left a leak indistinguishable from a clean close.
+The lifespan's own ``aclose`` on SIGTERM had the same fault. And one session's failed call
+tore down a connection other sessions had calls in flight on. A connection owned by exactly
+the task that uses it has none of those, needs no lock and no generation counter, and its
+whole lifetime is one ``async with``.
+
+**The httpx client is the thing that is shared**, which is what makes a per-call connection
+cheap: the TCP connection and the TLS session live in its pool and are reused, so the
+per-call cost is a JSON-RPC ``initialize`` round trip rather than a new socket.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import AsyncExitStack
+from collections.abc import Callable, Mapping
 from typing import Any, Final
 from urllib.parse import urlencode
 
@@ -45,9 +54,18 @@ from .spec import ToolResponse
 logger = logging.getLogger("motet.voice.tools.mcp")
 
 #: Short on purpose. A tool call happens inside a conversational turn — a listener is
-#: standing on a pavement waiting for an answer. Ten seconds of silence is a failed turn
+#: standing on a pavement waiting for an answer. Eight seconds of silence is a failed turn
 #: whatever the eventual status says.
 DEFAULT_TOOL_TIMEOUT_SECONDS: Final = 8.0
+
+#: What the *HTTP client* allows a read to take, which is a different question from how long
+#: this service waits for a tool. The streamable-HTTP transport holds a server→client GET
+#: stream open for as long as the connection lasts, so an 8-second read deadline there would
+#: expire it on a schedule, burn the SDK's two reconnection attempts, and then drop
+#: server-sent messages with a debug line. Motet is stateless and opens no such stream, but
+#: the reason this module uses the SDK at all is the servers it does not own.
+#: :data:`DEFAULT_TOOL_TIMEOUT_SECONDS` is what bounds a call, per call.
+STREAM_READ_TIMEOUT_SECONDS: Final = 300.0
 
 #: The path Motet's MCP server is mounted at. It is a ``Route`` rather than a ``Mount`` on
 #: the API side, so this must not carry a trailing slash: ``/mcp/`` is a 404 there.
@@ -59,13 +77,19 @@ MCP_PATH: Final = "/mcp"
 #:
 #: Searched rather than anchored, because the SDK prefixes a tool's own message with
 #: ``"Error executing tool <name>: "`` before it reaches a client. The first such group
-#: wins; a server that is not Motet simply has none, and its errors keep their own words
-#: under :data:`_UNKNOWN_STATUS`.
-_STATUS_PREFIX: Final = re.compile(r"(?<!\d)(\d{3}):\s*")
+#: wins, and only if it is a *failure* status — see :func:`decode`.
+_STATUS_PREFIX: Final = re.compile(r"(?<!\d)([1-5]\d\d):\s*")
 
 #: What a tool error is recorded as when the server said nothing a number could be read out
 #: of. 400 rather than 500: the tool refused, and this service did reach it.
 _UNKNOWN_STATUS: Final = 400
+
+#: What the persona is told when the call did not reach Motet at all. Fixed prose rather
+#: than the exception's own text, which is read out loud to a listener, handed to a model,
+#: and sent to a browser: an SDK exception is often meaningless there ("unhandled errors in
+#: a TaskGroup"), and an HTTP error's string carries the deployment's API hostname and this
+#: connection's tool-group selection with it. The detail goes to the log.
+UNREACHABLE = "the connection to Motet failed"
 
 
 def motet_mcp_url(base_url: str, tool_groups: str = DEFAULT_MCP_TOOL_GROUPS) -> str:
@@ -78,13 +102,13 @@ def motet_mcp_url(base_url: str, tool_groups: str = DEFAULT_MCP_TOOL_GROUPS) -> 
 
 
 class McpToolTransport:
-    """One MCP connection to one server, opened on demand and reused.
+    """Calls one MCP server, a connection per call, in the caller's own task.
 
     ``connect`` returns whatever :class:`mcp.Client` accepts — a fresh transport in a
-    deployment, an in-process server object in a test — and is called again on every
-    reopen, because the SDK's streamable-HTTP transport is a generator that can be entered
-    once. Passing that in rather than a URL is what lets a test drive this class itself
-    against a real server over ASGI, instead of asserting against a stub of it.
+    deployment, an in-process server object in a test — and is called once per tool call,
+    which is also what the SDK's streamable-HTTP transport requires: it is a generator that
+    can be entered once. Passing that in rather than a URL is what lets a test drive this
+    class itself against a real server over ASGI, instead of asserting against a stub of it.
     """
 
     def __init__(
@@ -92,62 +116,42 @@ class McpToolTransport:
         connect: Callable[[], Any],
         *,
         timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
-        on_close: Callable[[], Awaitable[None]] | None = None,
+        close: Callable[[], Any] | None = None,
     ) -> None:
         self._connect = connect
         self._timeout = timeout_seconds
-        self._on_close = on_close
-        self._client: Any | None = None
-        self._stack: AsyncExitStack | None = None
-        self._lock = asyncio.Lock()
-
-    async def _connected(self) -> Any:
-        """The open client, opening one if there is none.
-
-        Serialized, so two turns racing for the first tool call of a session open one
-        connection rather than two.
-        """
-        async with self._lock:
-            if self._client is not None:
-                return self._client
-            stack = AsyncExitStack()
-            try:
-                client = await stack.enter_async_context(Client(self._connect()))
-            except BaseException:
-                await stack.aclose()
-                raise
-            self._stack, self._client = stack, client
-            return client
-
-    async def _drop(self) -> None:
-        """Let go of a connection that failed, so the next call opens a fresh one."""
-        async with self._lock:
-            stack, self._stack, self._client = self._stack, None, None
-        if stack is not None:
-            try:
-                await stack.aclose()
-            except Exception:  # noqa: BLE001 — closing a broken connection is best effort
-                logger.debug("closing a failed MCP connection raised", exc_info=True)
+        self._close = close
 
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolResponse:
         try:
-            client = await self._connected()
-            result = await client.call_tool(
-                name, dict(arguments), read_timeout_seconds=self._timeout
-            )
+            async with Client(self._connect()) as client:
+                result = await client.call_tool(
+                    name, dict(arguments), read_timeout_seconds=self._timeout
+                )
         except Exception as exc:  # noqa: BLE001 — a tool's errors are values, never raises
             # Mapped to a status rather than raised: the registry turns a failed result into
             # something the persona can say, and a transport blow-up mid-turn is the one
-            # thing a voice session cannot recover from gracefully.
-            logger.warning("MCP tool %s could not be called: %r", name, exc)
-            await self._drop()
-            return ToolResponse(status=599, payload={"detail": f"could not reach Motet: {exc}"})
+            # thing a voice session cannot recover from gracefully. Logged unwrapped,
+            # because the SDK raises an ExceptionGroup whose own text says nothing.
+            logger.warning("MCP tool %s could not be called: %s", name, explain_exception(exc))
+            return ToolResponse(status=599, payload={"detail": UNREACHABLE})
         return decode(result)
 
     async def aclose(self) -> None:
-        await self._drop()
-        if self._on_close is not None:
-            await self._on_close()
+        """Let go of the HTTP client. No connection is held, so there is nothing else."""
+        if self._close is not None:
+            await self._close()
+
+
+def explain_exception(exc: BaseException) -> str:
+    """An exception as a log line, with ``ExceptionGroup``s unwrapped.
+
+    The SDK's transport is a task group, so a transport fault arrives as
+    ``unhandled errors in a TaskGroup (1 sub-exception)`` — true, and useless.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return " | ".join(explain_exception(inner) for inner in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
 
 
 def decode(result: Any) -> ToolResponse:
@@ -158,8 +162,13 @@ def decode(result: Any) -> ToolResponse:
     if result.is_error:
         match = _STATUS_PREFIX.search(text)
         status = int(match.group(1)) if match else _UNKNOWN_STATUS
-        detail = text[match.end() :] if match else text
-        return ToolResponse(status=status, payload={"detail": detail})
+        # A status the server's prose happens to contain is only believed when it is a
+        # failure: `ToolResponse.ok` is true below 400, so a "201" in an error's text would
+        # report a failed call to the persona as a success — the one decoding mistake
+        # nothing downstream can see.
+        if match is None or status < 400:
+            return ToolResponse(status=_UNKNOWN_STATUS, payload={"detail": text})
+        return ToolResponse(status=status, payload={"detail": text[match.end() :]})
     structured = result.structured_content
     if isinstance(structured, dict):
         return ToolResponse(status=200, payload=structured)
@@ -172,9 +181,10 @@ def build_motet_transport(settings: VoiceSettings) -> McpToolTransport | None:
     """The ``motet`` slug, resolved. ``None`` when this deployment has no API to reach."""
     if not settings.api_base_url:
         return None
+
     url = motet_mcp_url(settings.api_base_url, settings.mcp_tool_groups)
     http = httpx2.AsyncClient(
-        timeout=DEFAULT_TOOL_TIMEOUT_SECONDS,
+        timeout=httpx2.Timeout(DEFAULT_TOOL_TIMEOUT_SECONDS, read=STREAM_READ_TIMEOUT_SECONDS),
         headers={"Authorization": f"Bearer {settings.mcp_token}"} if settings.mcp_token else {},
     )
     logger.info(
@@ -184,5 +194,5 @@ def build_motet_transport(settings: VoiceSettings) -> McpToolTransport | None:
         settings.mcp_tool_groups,
     )
     return McpToolTransport(
-        lambda: streamable_http_client(url, http_client=http), on_close=http.aclose
+        lambda: streamable_http_client(url, http_client=http), close=http.aclose
     )

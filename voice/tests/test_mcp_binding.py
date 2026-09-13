@@ -25,10 +25,12 @@ from motet_voice.contract import SessionContext
 from motet_voice.tools import (
     McpToolTransport,
     ToolRegistry,
+    ToolResponse,
     build_motet_transport,
     build_platform_tools,
     motet_mcp_url,
 )
+from motet_voice.tools.mcp import decode, explain_exception
 from pydantic import BaseModel, Field
 
 
@@ -216,11 +218,14 @@ def test_a_tool_the_server_does_not_have_is_a_failed_result(
     assert not result.ok and result.error is not None
 
 
-def test_a_connection_is_reused_across_calls_and_reopened_after_one_fails(
+def test_two_sessions_calling_at_once_each_own_their_connection(
     settings: VoiceSettings, calls: list[Any]
 ) -> None:
-    """A handshake per question is a listener waiting on a pavement; a dead connection that
-    never reopens is a session that quietly stops being able to do anything."""
+    """The transport is process-wide and every caller is a different websocket task — which
+    is the shape the first draft got wrong, because a connection opened in one task cannot
+    be closed from another (anyio refuses to exit a cancel scope in a task that did not
+    enter it). A connection per call, in the caller's own task, is what makes that a
+    non-question; this drives it from two tasks at once to say so."""
     opened: list[int] = []
     server = build_server(calls=calls)
 
@@ -230,20 +235,84 @@ def test_a_connection_is_reused_across_calls_and_reopened_after_one_fails(
 
     transport = McpToolTransport(connect)
 
-    async def go() -> None:
+    async def go() -> list[Any]:
         registry = _registry(settings, transport)
-        await registry.invoke("mark_read", {"news_item_id": "n1"})
-        await registry.invoke("mark_read", {"news_item_id": "n2"})
-        assert len(opened) == 1, "one handshake for two calls"
-        # A failure drops the connection; the next call has to open a fresh one, because
-        # the SDK's streamable-HTTP transport can only be entered once.
-        await transport._drop()
-        await registry.invoke("mark_read", {"news_item_id": "n3"})
-        assert len(opened) == 2
-        await transport.aclose()
+        results = await asyncio.gather(
+            registry.invoke("mark_read", {"news_item_id": "n1"}),
+            registry.invoke("mark_read", {"news_item_id": "n2"}),
+            registry.invoke("save_highlight", {"quote": "Acme raised forty million dollars."}),
+        )
+        # Closing from a *third* task is the SIGTERM case, and must not raise either.
+        await asyncio.create_task(transport.aclose())
+        return results
 
-    asyncio.run(go())
-    assert [arguments["news_item_id"] for _, arguments in calls] == ["n1", "n2", "n3"]
+    results = asyncio.run(go())
+    assert [result.ok for result in results] == [True, True, True], [r.error for r in results]
+    assert len(opened) == 3, "one connection per call, owned by the task that made it"
+    assert sorted(name for name, _ in calls) == [
+        "save_highlight",
+        "set_news_item_read",
+        "set_news_item_read",
+    ]
+
+
+def test_an_unreachable_server_says_nothing_about_where_it_was(
+    settings: VoiceSettings,
+) -> None:
+    """The failure text is read out to a listener and handed to a model, so it carries no
+    URL, no hostname and no tool-group selection — only the log does."""
+
+    def connect() -> Any:
+        raise RuntimeError("connect to https://api.internal.example/mcp?tool_groups=x failed")
+
+    transport = McpToolTransport(connect)
+    result = asyncio.run(
+        ToolRegistry(build_platform_tools(settings, transport=transport, context=CONTEXT)).invoke(
+            "mark_read", {"news_item_id": "n1"}
+        )
+    )
+    assert not result.ok
+    assert result.error is not None
+    assert "api.internal.example" not in result.error and "tool_groups" not in result.error
+    assert "599" in result.error
+
+
+def test_an_exception_group_is_unwrapped_for_the_log(settings: VoiceSettings) -> None:
+    """The SDK's transport is a task group, so a fault arrives as "unhandled errors in a
+    TaskGroup (1 sub-exception)" — true, and useless in an obs query."""
+    inner = ConnectionRefusedError("nothing is listening")
+    assert explain_exception(ExceptionGroup("unhandled errors in a TaskGroup", [inner])) == (
+        "ConnectionRefusedError: nothing is listening"
+    )
+
+
+def test_an_error_whose_prose_holds_a_success_number_is_still_an_error() -> None:
+    """`ToolResponse.ok` is true below 400, so believing a "201" in an error's text would
+    report a failed call to the persona as a success — which nothing downstream can see."""
+
+    class Part:
+        text = "Error executing tool paste_text: could not queue job 201: retry later"
+
+    class Result:
+        is_error = True
+        content = (Part(),)
+        structured_content = None
+
+    response = decode(Result())
+    assert not response.ok and response.status == 400
+    assert "201" in str(response.payload["detail"]), "the prose is kept, the number is not read"
+
+
+def test_a_result_with_no_structured_content_still_reaches_the_persona() -> None:
+    class Part:
+        text = "Deleted hl_1."
+
+    class Result:
+        is_error = False
+        content = (Part(),)
+        structured_content = None
+
+    assert decode(Result()) == ToolResponse(status=200, payload={"data": "Deleted hl_1."})
 
 
 def test_the_slug_resolves_to_the_apis_mcp_path_with_the_tight_group_selection() -> None:

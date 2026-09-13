@@ -25,6 +25,7 @@ from typing import Any
 import httpx2
 import psycopg
 import pytest
+from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from motet_api import app
 from motet_api.deps import reset_drain_trigger, reset_store
@@ -147,7 +148,7 @@ async def bound(settings: VoiceSettings) -> AsyncIterator[McpToolTransport]:
         headers={"Authorization": f"Bearer {settings.mcp_token}"},
     )
     transport = McpToolTransport(
-        lambda: streamable_http_client(url, http_client=http), on_close=http.aclose
+        lambda: streamable_http_client(url, http_client=http), close=http.aclose
     )
     try:
         yield transport
@@ -258,8 +259,8 @@ class TestTheSurfaceTheVoiceServiceAsksFor:
         self, env: None, settings: VoiceSettings
     ) -> None:
         async def work(transport: McpToolTransport) -> Any:
-            client = await transport._connected()
-            return sorted(tool.name for tool in (await client.list_tools()).tools)
+            async with Client(transport._connect()) as client:
+                return sorted(tool.name for tool in (await client.list_tools()).tools)
 
         assert run(settings, work) == [
             "delete_highlight",
@@ -305,8 +306,8 @@ class TestTheSurfaceTheVoiceServiceAsksFor:
         apologising — which is why the group selection and `PLATFORM_TOOLS` are one claim."""
 
         async def work(transport: McpToolTransport) -> Any:
-            client = await transport._connected()
-            listed = {tool.name for tool in (await client.list_tools()).tools}
+            async with Client(transport._connect()) as client:
+                listed = {tool.name for tool in (await client.list_tools()).tools}
             tools = build_platform_tools(settings, transport=transport, context=context_for(story))
             return [tool.tool for tool in tools.values() if tool.tool not in listed]
 
