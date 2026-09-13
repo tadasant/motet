@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import errno
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -72,6 +73,9 @@ DEFAULT_WEB_PORT = 5173
 #: What ``web/vite.config.ts`` reads to find the API. Keep the two in step.
 API_PORT_ENV = "MOTET_DEV_API_PORT"
 
+#: Where ``--voice`` runs the voice service. The prototype's hand-launched port.
+DEFAULT_VOICE_PORT = 8100
+
 #: A local worker polls rather than draining once and exiting: ``MOTET_DRAIN_TRIGGER`` is
 #: deliberately unset on a laptop (there is no Cloud Run job to nudge), so nothing else
 #: would start one.
@@ -89,7 +93,7 @@ DATABASE_SERVICE = "postgres"
 SHUTDOWN_GRACE_SECONDS = 10.0
 
 #: ANSI colours for the log prefixes, used only when stdout is a terminal.
-_COLOURS = {"api": "36", "worker": "35", "web": "32", "dev": "1"}
+_COLOURS = {"api": "36", "worker": "35", "web": "32", "voice": "33", "dev": "1"}
 _RESET = "\033[0m"
 
 
@@ -555,6 +559,8 @@ def build_services(
     database_url: str = DEFAULT_DATABASE_URL,
     inject_database_url: bool = True,
     without: Sequence[str] = (),
+    voice_port: int | None = None,
+    voice_start_token: str = "",
 ) -> list[Service]:
     """The three processes, and the one place the API's port is written down.
 
@@ -569,8 +575,22 @@ def build_services(
     migrate CLI answers with a usage message. In the other two cases the children resolve
     it themselves, through the same ``uv run`` that read it, and an injected copy would
     *override* uv's own answer with our re-reading of it.
+
+    ``voice_port`` adds the voice service (``--voice``, off by default) and points the API
+    at it with one start token both sides are handed — the same shape a deployment has, so
+    Play Live runs through the API locally exactly as it would deployed. The voice service
+    takes ``MOTET_VOICE_ARM`` and the inference mode from the environment like everything
+    else here; nothing about it is decided by this function.
     """
     database_env = {"DATABASE_URL": database_url} if inject_database_url else {}
+    voice_env = (
+        {
+            "MOTET_VOICE_BASE_URL": f"http://localhost:{voice_port}",
+            "MOTET_VOICE_START_SESSION_TOKEN": voice_start_token,
+        }
+        if voice_port is not None
+        else {}
+    )
     services = [
         Service(
             name="api",
@@ -583,7 +603,7 @@ def build_services(
                 "--port",
                 str(api_port),
             ),
-            env=database_env,
+            env={**database_env, **voice_env},
             ports=(api_port,),
             cwd=root,
         ),
@@ -620,6 +640,28 @@ def build_services(
             cwd=root,
         ),
     ]
+    if voice_port is not None:
+        services.append(
+            Service(
+                name="voice",
+                argv=(
+                    "uv",
+                    "run",
+                    "uvicorn",
+                    "motet_voice.app:create_app",
+                    "--factory",
+                    "--reload",
+                    "--port",
+                    str(voice_port),
+                ),
+                env={
+                    "MOTET_VOICE_START_SESSION_TOKEN": voice_start_token,
+                    "MOTET_VOICE_ALLOWED_ORIGINS": f"http://localhost:{web_port}",
+                },
+                ports=(voice_port,),
+                cwd=root,
+            )
+        )
     return [service for service in services if service.name not in without]
 
 
@@ -662,6 +704,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--no-migrate",
         action="store_true",
         help="skip applying migrations before starting anything",
+    )
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help=(
+            "also run the voice service and point the API at it, so Play Live works "
+            "(off by default; MOTET_VOICE_ARM picks the arm, and the realtime arm is billed "
+            "per audio token in real mode)"
+        ),
+    )
+    parser.add_argument(
+        "--voice-port",
+        type=int,
+        default=DEFAULT_VOICE_PORT,
+        help=f"port for the voice service with --voice (default {DEFAULT_VOICE_PORT})",
     )
     parser.add_argument(
         "--without",
@@ -715,6 +772,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_url=database_url,
             inject_database_url=source == "default",
             without=args.without,
+            voice_port=args.voice_port if args.voice else None,
+            # Minted per run: it only has to agree between two children of this process.
+            voice_start_token=secrets.token_urlsafe(24) if args.voice else "",
         )
         check_ports(services)
 
@@ -739,9 +799,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not services:
             say("nothing left to start (--without)")
             return 0
+        voice = f", voice on http://localhost:{args.voice_port}" if args.voice else ""
         say(
             f"API on http://localhost:{args.api_port}, SPA on http://localhost:{args.web_port}"
-            " — Ctrl-C stops all of it"
+            f"{voice} — Ctrl-C stops all of it"
         )
         return Supervisor(services, out=out, colour=colour).run()
     except DevError as exc:

@@ -22,28 +22,60 @@ see :mod:`motet_voice.harness.report`.
 When the key exists, :class:`ServerVadRelay` turns ``input_audio_buffer.speech_started``
 events into barge-in decisions with ``trigger="openai_server_vad"``. It deliberately does
 *not* also run a local VAD and merge: measuring a vendor means measuring the vendor.
+
+**3. A live session is a socket of its own, not a turn.** :meth:`OpenAiRealtimeArm.respond`
+is the turn-shaped path — text in, one collected answer out — and it was all the arm had,
+which is why it was text-in/text-out and why the session never forwarded listener audio
+anywhere. :class:`OpenAiLiveConversation` is the speech-to-speech path: one vendor socket
+per :class:`~motet_voice.session.VoiceSession`, listener PCM appended as it arrives, the
+vendor's server VAD deciding when the utterance ended, and the reply streamed back as raw
+PCM chunks. It yields *our* event types (:mod:`.interfaces`), so nothing upstream of this
+module sees a vendor frame.
+
+**The wire shape is the GA protocol** (``session.type = "realtime"``, ``audio.input`` /
+``audio.output``, ``response.output_audio.delta``), with the older event names accepted on
+read because the vendor served both for a while and a client that dies on a rename is a
+client that breaks on the vendor's next release.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Final, Protocol, runtime_checkable
 
-from ..audio import DEFAULT_FRAME_MS, PcmFrame, dbfs, zero_crossing_rate
+from ..audio import (
+    DEFAULT_FRAME_MS,
+    TARGET_SAMPLE_RATE,
+    PcmFrame,
+    dbfs,
+    resample_pcm16,
+    zero_crossing_rate,
+)
 from ..bargein import BargeInDecision, BargeInPolicy, TurnDetector, VadTurnDetector
 from ..config import OPENAI_KEY_ENV, OPENAI_REALTIME_ARM, VoiceSettings
 from ..vad import EnergyVad, Vad, VadReading
 from .interfaces import (
     ArmCapabilities,
     ArmDormant,
+    AssistantAudio,
+    AssistantTranscript,
     AssistantTurn,
+    LiveConversation,
+    LiveEvent,
     PendingToolCall,
+    ProviderError,
+    SpeechStarted,
+    SpeechStopped,
+    ToolCallRequested,
+    TurnDone,
     TurnRequest,
+    UserTranscript,
 )
 
 logger = logging.getLogger("motet.voice.openai_realtime")
@@ -59,6 +91,35 @@ DEFAULT_SERVER_VAD: Final[Mapping[str, Any]] = {
     "prefix_padding_ms": 300,
     "silence_duration_ms": 500,
 }
+
+
+#: The provider speaks 24 kHz PCM and nothing else raw; everything on our side speaks 16 kHz.
+PROVIDER_SAMPLE_RATE: Final = 24_000
+
+#: The provider's transcription model for what the *listener* said. Without asking for it
+#: the vendor answers the question and never says what it heard — and a reply nobody can
+#: match to a question is a reply nobody can debug after a walk.
+INPUT_TRANSCRIPTION_MODEL: Final = "gpt-4o-mini-transcribe"
+
+#: Our provider-neutral voice labels, mapped to the vendor's ids **here and nowhere else**
+#: (invariant 1). A label the map does not know falls through to the default rather than
+#: being sent as-is: the vendor rejects an unknown voice at ``session.update`` and the
+#: session would open and then answer nothing.
+VOICE_MAP: Final[Mapping[str, str]] = {"narrator": "marin", "default": "marin"}
+DEFAULT_VENDOR_VOICE: Final = "marin"
+VENDOR_VOICES: Final = frozenset(
+    {"alloy", "ash", "ballad", "cedar", "coral", "echo", "marin", "sage", "shimmer", "verse"}
+)
+
+
+def vendor_voice(label: str) -> str:
+    """Map a persona's voice label to a vendor voice id."""
+    cleaned = label.strip().lower()
+    if cleaned in VOICE_MAP:
+        return VOICE_MAP[cleaned]
+    if cleaned in VENDOR_VOICES:
+        return cleaned
+    return DEFAULT_VENDOR_VOICE
 
 
 class RealtimeProtocolError(RuntimeError):
@@ -136,7 +197,13 @@ class WebsocketRealtimeTransport:
 
     async def send(self, event: Mapping[str, Any]) -> None:
         socket = await self._connect()
-        await socket.send(json.dumps(dict(event)))
+        try:
+            await socket.send(json.dumps(dict(event)))
+        except Exception:
+            # A socket the vendor closed — quota, an idle timeout — must not be kept: every
+            # later send would fail the same way until the process restarts.
+            self._socket = None
+            raise
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         socket = await self._connect()
@@ -269,6 +336,13 @@ class OpenAiRealtimeArm:
 
     model: str
     transport: RealtimeTransport | None = None
+    #: Builds one transport per live session. ``None`` means the arm cannot hold a live
+    #: conversation — the key is missing, or the mode is fake — and ``open_live`` says so.
+    transport_factory: Callable[[], RealtimeTransport] | None = None
+    #: Builds a live conversation directly, bypassing the vendor protocol entirely. Set
+    #: only in fake mode, to :class:`~motet_voice.realtime.fake_live.FakeLiveConversation`:
+    #: the streamed loop can then be felt in a browser with no key and no spend.
+    conversation_factory: Callable[[TurnRequest], LiveConversation] | None = None
     api_key_present: bool = False
     server_vad: Mapping[str, Any] = field(default_factory=lambda: dict(DEFAULT_SERVER_VAD))
     #: How long one conversational turn may take before it is abandoned. Generous for a
@@ -280,6 +354,18 @@ class OpenAiRealtimeArm:
         return OPENAI_REALTIME_ARM
 
     def capabilities(self) -> ArmCapabilities:
+        if self.conversation_factory is not None and not self.api_key_present:
+            return ArmCapabilities(
+                name=self.name,
+                turn_detection="server",
+                conversational=True,
+                replayable=True,
+                turn_detection_emulated=True,
+                notes=(
+                    f"model={self.model} fake live conversation (MOTET_INFERENCE_MODE=fake): "
+                    "no vendor is called and nothing is billed"
+                ),
+            )
         dormant = (
             ""
             if self.api_key_present
@@ -358,15 +444,40 @@ class OpenAiRealtimeArm:
         instructions = request.persona_instructions
         if request.context_notes.strip():
             instructions += "\n\nWhat you already know:\n" + request.context_notes
+        if request.position_notes.strip():
+            # Only on the turn-shaped path. The live path sends the position as a
+            # conversation item at each interruption instead, so the base instructions
+            # stay stable and the provider's prompt cache with them — see
+            # :meth:`OpenAiLiveConversation.add_context`.
+            instructions += "\n\n" + request.position_notes
+        instructions += (
+            "\n\nAnswer only from what you have been given above, or from what a tool "
+            "returns. If you are asked something it does not cover, say you do not have it — "
+            "do not fill the gap from memory. Numbers, names and dates especially: quote them "
+            "from the material or fetch them, never recall them. Answer in one or two spoken "
+            "sentences; you are being listened to, not read."
+        )
         return {
             "type": "session.update",
             "session": {
-                "modalities": ["audio", "text"],
+                "type": "realtime",
+                "output_modalities": ["audio"],
                 "instructions": instructions,
-                "voice": request.voice,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "turn_detection": dict(self.server_vad),
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": PROVIDER_SAMPLE_RATE},
+                        "turn_detection": {
+                            **dict(self.server_vad),
+                            "create_response": True,
+                            "interrupt_response": True,
+                        },
+                        "transcription": {"model": INPUT_TRANSCRIPTION_MODEL},
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": PROVIDER_SAMPLE_RATE},
+                        "voice": vendor_voice(request.voice),
+                    },
+                },
                 "tools": [
                     {
                         "type": "function",
@@ -376,8 +487,27 @@ class OpenAiRealtimeArm:
                     }
                     for tool in request.tools
                 ],
+                "tool_choice": "auto",
             },
         }
+
+    def open_live(self, request: TurnRequest) -> LiveConversation:
+        """A speech-to-speech channel for one session — see the module docstring, point 3.
+
+        A **fresh transport per session**, because the vendor socket is stateful: one
+        ``session.update`` applies to it, and two listeners on one socket would hear each
+        other's answers. The process-wide ``transport`` the turn-shaped path uses is not
+        reused for the same reason.
+        """
+        if self.conversation_factory is not None:
+            return self.conversation_factory(request)
+        if self.transport_factory is None:
+            raise ArmDormant(self.capabilities().dormant_reason or "no transport")
+        return OpenAiLiveConversation(
+            transport=self.transport_factory(),
+            session_update=self.session_update(request),
+            history=request.history,
+        )
 
     async def respond(self, request: TurnRequest) -> AssistantTurn:
         if self.transport is None:
@@ -415,7 +545,10 @@ class OpenAiRealtimeArm:
 
         async for event in self.transport.events():
             kind = str(event.get("type", ""))
-            if kind == "response.audio_transcript.delta":
+            if kind in (
+                "response.audio_transcript.delta",
+                "response.output_audio_transcript.delta",
+            ):
                 text_parts.append(str(event.get("delta", "")))
             elif kind == "conversation.item.input_audio_transcription.completed":
                 user_transcript = str(event.get("transcript", ""))
@@ -440,6 +573,216 @@ class OpenAiRealtimeArm:
     async def aclose(self) -> None:
         if self.transport is not None:
             await self.transport.aclose()
+
+
+class OpenAiLiveConversation:
+    """One session's live channel to the vendor. Yields our events, never the vendor's.
+
+    The shape of a turn on this channel, and who decides each step:
+
+    1. The session forwards listener PCM (:meth:`append_audio`) once the listener has taken
+       the floor. **The vendor's server VAD decides when the utterance ended** and starts a
+       response on its own — that is the property the realtime arm is being measured for,
+       and this class does not second-guess it with a local commit.
+    2. The reply streams back as ``response.output_audio.delta`` chunks, each relayed as
+       :class:`AssistantAudio` the moment it arrives, so a client can start playing before
+       the sentence is finished.
+    3. Transcripts of both sides arrive as their own events, and a completed response is a
+       :class:`TurnDone` carrying the vendor's ``usage`` — which is where audio tokens are
+       billed, and the number the cost note in the issue is about.
+
+    A function call is the one place the turn waits on us: the vendor asks, the session runs
+    the tool and answers through :meth:`tool_output`, and the vendor then continues.
+    """
+
+    def __init__(
+        self,
+        *,
+        transport: RealtimeTransport,
+        session_update: Mapping[str, Any],
+        history: Sequence[Mapping[str, str]] = (),
+    ) -> None:
+        self._transport = transport
+        self._session_update = dict(session_update)
+        self._history = list(history)
+        self._pending_tools = 0
+
+    async def start(self) -> None:
+        await self._transport.send(self._session_update)
+        if recap := history_recap(self._history):
+            # A reopened channel: the vendor's socket died and took its conversation with
+            # it. One system item rather than a message per turn, so no assistant turn is
+            # replayed in a content type the vendor might read as something it said.
+            await self.add_context(recap)
+
+    async def append_audio(self, pcm: bytes) -> None:
+        if not pcm:
+            return
+        upsampled = resample_pcm16(pcm, from_rate=TARGET_SAMPLE_RATE, to_rate=PROVIDER_SAMPLE_RATE)
+        await self._transport.send(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(upsampled).decode("ascii"),
+            }
+        )
+
+    async def add_context(self, text: str) -> None:
+        """A system-role item rather than a ``session.update``, deliberately.
+
+        The base instructions carry the persona and the whole episode and do not change
+        across a session; the position changes at every interruption. Putting the position
+        in the instructions would rewrite the prefix on every turn and throw away whatever
+        the vendor caches of it. An item is appended to the conversation and read by the
+        next response — which, under server VAD, the vendor creates on its own once the
+        listener stops talking, so the item has to be in place *before* the audio.
+        """
+        if not text.strip():
+            return
+        await self._transport.send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+        )
+
+    async def add_user_text(self, text: str) -> None:
+        await self._transport.send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+        )
+        await self._transport.send({"type": "response.create"})
+
+    async def tool_output(self, call_id: str, output: Mapping[str, Any]) -> None:
+        await self._transport.send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(dict(output)),
+                },
+            }
+        )
+        self._pending_tools = max(0, self._pending_tools - 1)
+        await self._transport.send({"type": "response.create"})
+
+    async def truncate(self, item_id: str, audio_end_ms: int) -> None:
+        if not item_id:
+            return
+        await self._transport.send(
+            {
+                "type": "conversation.item.truncate",
+                "item_id": item_id,
+                "content_index": 0,
+                "audio_end_ms": max(0, audio_end_ms),
+            }
+        )
+
+    async def cancel_response(self) -> None:
+        # Both, in this order: the reply stops, and audio already appended but not yet
+        # answered is thrown away rather than committed into a question nobody is asking.
+        await self._transport.send({"type": "response.cancel"})
+        await self._transport.send({"type": "input_audio_buffer.clear"})
+
+    async def events(self) -> AsyncIterator[LiveEvent]:
+        """Vendor frames in, our events out. Unknown types are ignored, not raised on."""
+        async for event in self._transport.events():
+            translated = self._translate(event)
+            if translated is not None:
+                yield translated
+
+    def _translate(self, event: Mapping[str, Any]) -> LiveEvent | None:
+        kind = str(event.get("type", ""))
+        if kind == "input_audio_buffer.speech_started":
+            return SpeechStarted(audio_start_ms=_as_int(event.get("audio_start_ms")))
+        if kind == "input_audio_buffer.speech_stopped":
+            return SpeechStopped(audio_end_ms=_as_int(event.get("audio_end_ms")))
+        if kind == "conversation.item.input_audio_transcription.completed":
+            return UserTranscript(text=str(event.get("transcript", "")).strip())
+        if kind in ("response.output_audio.delta", "response.audio.delta"):
+            try:
+                pcm = base64.b64decode(str(event.get("delta", "")))
+            except ValueError:
+                logger.warning("provider sent an undecodable audio delta; dropped")
+                return None
+            return AssistantAudio(
+                pcm=pcm, sample_rate=PROVIDER_SAMPLE_RATE, item_id=str(event.get("item_id", ""))
+            )
+        if kind in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
+            return AssistantTranscript(
+                text=str(event.get("transcript", "")).strip(),
+                item_id=str(event.get("item_id", "")),
+            )
+        if kind == "response.function_call_arguments.done":
+            self._pending_tools += 1
+            call_id = str(event.get("call_id", ""))
+            return ToolCallRequested(
+                PendingToolCall(
+                    call_id=call_id,
+                    name=str(event.get("name", "")),
+                    arguments=_decode_arguments(event.get("arguments")),
+                )
+            )
+        if kind == "response.done":
+            raw_response = event.get("response")
+            response: dict[str, Any] = raw_response if isinstance(raw_response, dict) else {}
+            usage = response.get("usage")
+            return TurnDone(
+                pending_tools=self._pending_tools > 0,
+                cancelled=str(response.get("status", "")) == "cancelled",
+                usage=dict(usage) if isinstance(usage, dict) else {},
+            )
+        if kind == "error":
+            error = event.get("error")
+            if isinstance(error, dict):
+                return ProviderError(
+                    message=str(error.get("message") or error.get("type") or "provider error"),
+                    code=str(error.get("code") or error.get("type") or "provider_error"),
+                )
+            return ProviderError(message=str(error or "provider error"))
+        return None
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
+
+
+def history_recap(history: Sequence[Mapping[str, str]], *, max_chars: int = 4_000) -> str:
+    """Earlier turns of this session, as one block a reopened channel is handed.
+
+    Newest kept when the cap bites: the last exchange is what a follow-up refers to.
+    """
+    lines = [
+        f"{'Listener' if turn.get('role') == 'user' else 'You'}: {turn.get('text', '')}"
+        for turn in history
+        if turn.get("text")
+    ]
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        if kept and total + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        total += len(line) + 1
+    if not kept:
+        return ""
+    return "Earlier in this conversation:\n" + "\n".join(reversed(kept))
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _decode_arguments(raw: Any) -> dict[str, Any]:
@@ -467,15 +810,34 @@ def build_openai_arm(
     spike measures — needs no credential at all.
     """
     if transport is not None:
+        # A test's scripted transport serves both shapes: the turn path uses it directly and
+        # the live path gets it back from the factory. One session per test, so sharing is
+        # exactly what the test wants.
         return OpenAiRealtimeArm(
-            model=settings.openai_realtime_model, transport=transport, api_key_present=True
+            model=settings.openai_realtime_model,
+            transport=transport,
+            transport_factory=lambda: transport,
+            api_key_present=True,
         )
-    if not settings.openai_api_key_present or not settings.real:
+    if not settings.real:
+        # Fake mode never reaches a vendor, key or no key (invariant 7). The live channel
+        # is a deterministic fake so the whole spoken loop — barge-in, position, streamed
+        # reply, resume — can be exercised in a browser for free.
+        from .fake_live import FakeLiveConversation  # noqa: PLC0415 — avoid an import cycle
+
+        return OpenAiRealtimeArm(
+            model=settings.openai_realtime_model,
+            conversation_factory=FakeLiveConversation.for_request,
+            api_key_present=False,
+        )
+    if not settings.openai_api_key_present:
         return OpenAiRealtimeArm(model=settings.openai_realtime_model, api_key_present=False)
 
     resolved = api_key or os.environ.get(OPENAI_KEY_ENV, "")
+    model = settings.openai_realtime_model
     return OpenAiRealtimeArm(
-        model=settings.openai_realtime_model,
-        transport=WebsocketRealtimeTransport(resolved, settings.openai_realtime_model),
+        model=model,
+        transport=WebsocketRealtimeTransport(resolved, model),
+        transport_factory=lambda: WebsocketRealtimeTransport(resolved, model),
         api_key_present=True,
     )

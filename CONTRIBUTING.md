@@ -36,7 +36,12 @@ bin/dev --api-port 8123      # ...and the Vite proxy follows it
 bin/dev --without web        # ...when you are running the SPA yourself
 bin/dev --no-db              # use the Postgres DATABASE_URL already names
 bin/dev --no-migrate         # start without applying anything
+bin/dev --voice              # also the voice service, so Play Live works locally
 ```
+
+`--voice` is off by default. With `MOTET_VOICE_ARM=openai_realtime` and the default fake
+mode, the whole Play Live loop — barge-in, reply, resume — runs against a fake live channel
+and calls no vendor; in real mode that arm is billed per audio token.
 
 `docker-compose.yml` owns Postgres and deliberately nothing else — see the comment at the
 top of it for why `uvicorn --reload` and `vite` stay on the host. It creates **both**

@@ -537,8 +537,9 @@ a hard prosody break at every sentence, for an error well inside what a caption 
 If word-level timing is ever needed, the upgrade is Cartesia's own timestamp output rather
 than more calls.
 
-**Out, and still out:** X bookmarks (verify the API tier first — Tadas's spend decision),
-the voice/interaction path, and the iOS app.
+**Out, and still out:** X bookmarks (verify the API tier first — Tadas's spend decision)
+and the iOS app. The voice/interaction path is built and **dormant** — no voice service is
+deployed — see "Play Live" below.
 
 ---
 
@@ -1820,6 +1821,77 @@ desk, with the transcript beside it.
   is the browser's autoplay policy, and the controls are right there. Safari usually
   refuses — `play()` runs after the feed token and the metadata arrive, outside the click —
   so there the pill behaves as *Open*.
+
+### Play Live is built, and dormant until a voice service is deployed
+
+`voice/` (`live.py`, `position.py`, `realtime/`), `motet_api.voice`, `web/src/screens/Live.tsx`,
+motet#93. **The owner chose the OpenAI Realtime arm over a batch STT leg on the composed arm,
+with "do nothing" named, in the 2026-09-12 prototyping session** — the issue records the
+alternatives. That choice is what this builds; **the design session invariant 12 asks for
+is still owed**, and the questions it has to settle are listed at the end of this section
+with the default each currently runs on. None of the defaults is a decision.
+
+**Nothing is deployed, and that is the state this ships in.** Staging and production run
+the API, the worker and the web app and no voice service; deploying one is its own
+sign-off. So `MOTET_VOICE_BASE_URL` and `MOTET_VOICE_START_SESSION_TOKEN` are unset there,
+`GET /v1/voice` answers `configured: false` with the reason, and the episode screen shows
+a disabled **Play Live** with that sentence beside it — no request to a host that does not
+exist, and `POST /v1/episodes/{id}/voice-session` is a 503 rather than a 500 for anyone
+who calls it anyway. Turning it on is configuration, listed in the PR.
+
+- **The API mints the session, never the browser (invariant 2).** The prototype's browser
+  assembled `SessionContext` and called the voice service directly, which worked only
+  because the start token was unset. Now the API builds the context from the database —
+  every segment, every claim with its apportioned `start_ms`/`duration_ms` (now on
+  `ClaimModel` too), the listener's position — calls `StartSession` server-to-server with
+  the start token, and returns a socket URL and the `authenticate` frame to send on it.
+  The browser never holds the start token and never names a vendor (invariant 1).
+- **Interruption is decided locally, on every arm, from every packet.** The session's
+  detector sees each listener packet *first*, including while the live channel is
+  forwarding, and a decision emits `interrupted_at` before the vendor is handed the
+  position and the pre-roll. The session's detector decides the interruption of
+  narration (invariant 4: the frozen clock is ours); the vendor's server VAD governs only
+  the reply turn. A vendor `speech_started` is `live_speech_starts`, never a barge-in;
+  a client `barge_in` frame is one, and is counted.
+- **`EnergyVad` tells silent, quiet and measurable frames apart**, and that is the fix for
+  the owner's `barge_ins: 0` sessions. A browser mic under echo cancellation delivers
+  -60 to -70 dBFS between words, never zeros; treated as silence, the floor seeded from
+  the listener's own voice and nothing could fire. A quiet frame now seeds the floor at the
+  absolute floor and walks it down. `listener audio: … route=… snr_db=…` every ten seconds
+  of mic audio, and `barge-in: …` per decision, are what make the next such session
+  diagnosable from the obs stack.
+- **Listener audio reaches the vendor only from a barge-in to the end of the reply** — the
+  spend gate, since realtime audio is billed per token in and out. `narration_resumed`
+  (and a paused player's `narration_paused`, which is *not* a barge-in) are the contract
+  frames that close it: "never mind, resume" cancels the reply and stops forwarding rather
+  than billing the briefing. `motet.voice.realtime.tokens{arm,kind}` and
+  `motet.voice.realtime.replies{arm,outcome}` are the cost as metrics (invariant 11);
+  `input_audio` growing while replies do not is the gate leaking.
+- **A reply the listener talked over is truncated, not recorded as spoken** — in the
+  vendor's history (`conversation.item.truncate`) and in ours — by how much of it could
+  have played.
+- **A live channel that opened and died is reopened**, at the next barge-in or question
+  and never on a timer, at most twice a session, carrying the conversation so far — and
+  never for `arm_dormant` or `insufficient_quota`, which a reconnect cannot fix. A typed
+  question with no channel still goes to the composed arm.
+- **The fake-mode realtime arm has a fake live channel** (`realtime/fake_live.py`), so the
+  whole loop can be felt in a browser for free: `bin/dev --voice` with
+  `MOTET_VOICE_ARM=openai_realtime`. Real mode without `OPENAI_API_KEY` is dormant and
+  says why; `MOTET_VOICE_ARM` still defaults to `composed`.
+- **The socket is the one cross-origin surface, and it checks `Origin`**
+  (`MOTET_VOICE_ALLOWED_ORIGINS`). `StartSession` has no CORS policy on purpose: only the
+  API calls it.
+
+Deliberately not built, each for a stated reason: a **startup probe that the realtime key
+is billable** is a vendor connection per instance start and belongs with the decision to
+deploy the service at all; **streaming the composed arm's reply** (2–5 s of silence today)
+waits on whether the composed arm is the default.
+
+**Open for the design session, with what runs today:** the default arm given realtime cost
+(`composed`); open mic relying on browser echo cancellation vs headphones (open mic,
+headphones recommended on screen); reply length (one or two sentences, by prompt); resume
+at the interruption offset vs a rewind (the offset); the batch-STT comparison (not built);
+whether talking over a reply is natural or rude (allowed).
 
 ### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
 

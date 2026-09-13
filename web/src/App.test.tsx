@@ -64,6 +64,8 @@ const EPISODE: Episode = {
           span: { source_item_id: 'si_1', start: 0, end: 25 },
           source_excerpt: 'Acme raises $20M Series A',
           source_title: 'Morning Brief',
+          start_ms: 0,
+          duration_ms: 92_000,
         },
       ],
     },
@@ -1476,6 +1478,7 @@ describe('the generated contract', () => {
       vault_backend: 'kms',
       vault_ready: true,
       drain_trigger: true,
+      voice_configured: false,
       inference_mode: 'fake',
     }
     expect(health.status).toBe('ok')

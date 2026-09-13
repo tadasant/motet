@@ -263,6 +263,11 @@ components:
         \ that display *is* the trust surface, and a client\nthat had to fetch the source separately to\
         \ render it would sometimes not bother."
       properties:
+        duration_ms:
+          default: 0
+          description: How long the claim is spoken for.
+          title: Duration Ms
+          type: integer
         source_excerpt:
           title: Source Excerpt
           type: string
@@ -271,6 +276,13 @@ components:
           type: string
         span:
           $ref: '#/components/schemas/SourceSpanModel'
+        start_ms:
+          default: 0
+          description: Where this claim is spoken in the episode audio. Apportioned from the segment's
+            measured duration by the TTS stage, so accurate to a fraction of a second rather than to the
+            word; zero until the episode has rendered.
+          title: Start Ms
+          type: integer
         text:
           title: Text
           type: string
@@ -559,6 +571,13 @@ components:
             \ from outside. It does not call Cloud KMS \u2014 this route is unauthenticated, and a billed\
             \ vendor call per request would be a free way to spend money."
           title: Vault Ready
+          type: boolean
+        voice_configured:
+          default: false
+          description: 'Whether Play Live can mint a voice session here: both MOTET_VOICE_BASE_URL and
+            MOTET_VOICE_START_SESSION_TOKEN are set. False is the deployed state until a voice service
+            exists. The voice service''s address is not reported; it is topology, and this route is public.'
+          title: Voice Configured
           type: boolean
       required:
       - status
@@ -1274,6 +1293,19 @@ components:
       - state
       title: StartLoginResponse
       type: object
+    StartVoiceSessionRequest:
+      properties:
+        spoken_through_ms:
+          anyOf:
+          - minimum: 0.0
+            type: integer
+          - type: 'null'
+          description: 'Where the listener''s player is. The session''s clock starts here (invariant 4:
+            the position is ours, reported by the client''s player). Omitted means the episode''s own
+            listened_through_ms.'
+          title: Spoken Through Ms
+      title: StartVoiceSessionRequest
+      type: object
     ValidationError:
       properties:
         ctx:
@@ -1299,6 +1331,64 @@ components:
       - msg
       - type
       title: ValidationError
+      type: object
+    VoiceSessionResponse:
+      description: What a client needs to open the voice socket, and nothing about the vendor behind it.
+      properties:
+        arm:
+          description: Which arm answers. Informational; never branched on.
+          title: Arm
+          type: string
+        authenticate_frame:
+          additionalProperties: true
+          description: Send this, verbatim and as the first frame, once the socket opens. It carries the
+            session config the token was signed over; the voice service checks the two match, so it must
+            not be altered.
+          title: Authenticate Frame
+          type: object
+        conversational:
+          title: Conversational
+          type: boolean
+        expires_at:
+          title: Expires At
+          type: string
+        session_id:
+          title: Session Id
+          type: string
+        session_token:
+          title: Session Token
+          type: string
+        websocket_url:
+          description: The socket to open, ws:// or wss://.
+          title: Websocket Url
+          type: string
+      required:
+      - session_id
+      - session_token
+      - expires_at
+      - websocket_url
+      - arm
+      - conversational
+      - authenticate_frame
+      title: VoiceSessionResponse
+      type: object
+    VoiceStatusResponse:
+      description: "Whether Play Live can run here \u2014 asked before a button is offered."
+      properties:
+        configured:
+          description: Whether this deployment can mint a voice session. False means no voice service
+            is configured, and the client should not offer Play Live.
+          title: Configured
+          type: boolean
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Why not, as a sentence to show. Null when configured.
+          title: Reason
+      required:
+      - configured
+      title: VoiceStatusResponse
       type: object
 info:
   description: 'Motet turns a reading backlog into an interactive podcast.
@@ -2003,6 +2093,53 @@ paths:
       summary: Episode Transcript
       tags:
       - feed
+  /v1/episodes/{episode_id}/voice-session:
+    post:
+      description: "Mint a Play Live session for a rendered episode.\n\nThe context \u2014 every segment,\
+        \ every claim with the moment it is spoken, where the\nlistener's player is \u2014 is built here\
+        \ from the database and sent to the voice service\nserver-to-server with the start token. The\
+        \ browser gets a token scoped to that one\nconfig, the socket to open, and the frame to open it\
+        \ with."
+      operationId: start_voice_session_v1_episodes__episode_id__voice_session_post
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartVoiceSessionRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceSessionResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+        '503':
+          description: No voice service is configured, or it would not mint a session.
+      summary: Start Voice Session
+      tags:
+      - voice
   /v1/feed:
     get:
       description: The private feed URL, minting a token on first ask.
@@ -2572,3 +2709,34 @@ paths:
       summary: Poll Source
       tags:
       - sources
+  /v1/voice:
+    get:
+      description: "Whether Play Live can run in this deployment.\n\nAsked by the SPA before it offers\
+        \ the button, so that an environment with no voice\nservice shows a disabled control with a reason\
+        \ \u2014 never a request to a host that does\nnot exist, and never a failed call in the console."
+      operationId: voice_status_v1_voice_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceStatusResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Voice Status
+      tags:
+      - voice

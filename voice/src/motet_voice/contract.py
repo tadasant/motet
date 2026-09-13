@@ -103,6 +103,30 @@ class McpServerBinding(BaseModel):
     slug: str = Field(min_length=1, max_length=128)
 
 
+class TimedClaim(BaseModel):
+    """One spoken claim and where it sits in the episode audio.
+
+    Timings are the pipeline's *apportioned* ones — segment boundaries are measured, claims
+    within a segment are proportioned by length (``apportion_claim_timings``) — so they are
+    accurate to a fraction of a second rather than to the word. Good enough to say "while
+    this was being said"; not good enough to say which word.
+    """
+
+    start_ms: Annotated[int, Field(ge=0)]
+    end_ms: Annotated[int, Field(ge=0)]
+    spoken_text: str = Field(max_length=4_000)
+
+
+class TimedSegment(BaseModel):
+    """One story in the episode, with its claims in narration order."""
+
+    title: str = Field(max_length=400)
+    start_ms: Annotated[int, Field(ge=0)]
+    end_ms: Annotated[int, Field(ge=0)]
+    news_item_id: str | None = None
+    claims: list[TimedClaim] = Field(default_factory=list, max_length=200)
+
+
 class SessionContext(BaseModel):
     """What the session already knows, passed in whole because it cannot look anything up.
 
@@ -112,6 +136,14 @@ class SessionContext(BaseModel):
     """
 
     episode_id: str | None = None
+    #: The episode as a **timed** transcript, so the service can work out from its own
+    #: clock what was playing when the listener interrupted — which story, which sentence,
+    #: what the last twenty seconds said. ``notes`` is the whole-episode backdrop the model
+    #: always has; this is what lets "what was that number?" mean the right number. Passed
+    #: in rather than looked up, like everything else here (invariant 2), and derived from
+    #: :class:`~motet_voice.clock.PlaybackClock` rather than from anything a provider says
+    #: (invariant 4). Empty means the position block is simply omitted from the turn.
+    transcript: list[TimedSegment] = Field(default_factory=list, max_length=500)
     #: Where narration had reached when the session opened. **Ours, not a provider's**
     #: (invariant 4): the caller reports it and :class:`~motet_voice.clock.PlaybackClock`
     #: takes it from here.
@@ -170,12 +202,19 @@ class TranscriptEvent(SessionEvent):
 
 class AudioChunkEvent(SessionEvent):
     type: Literal["audio_chunk"] = "audio_chunk"
-    #: Base64 PCM. Binary WebSocket frames are the efficient path and are what the iOS
+    #: Base64 audio. Binary WebSocket frames are the efficient path and are what the iOS
     #: client will use; the JSON form exists so the whole protocol is inspectable from a
     #: terminal, which matters more than bandwidth for a service being debugged outdoors.
+    #:
+    #: The field is named for the format the contract *intends* — raw PCM — and the
+    #: ``format`` field beside it says what is actually inside, because the composed arm's
+    #: TTS leg hands back a container (Cartesia's MP3, the fake's WAV) and a client that
+    #: trusted the name would play noise. ``pcm16`` is raw little-endian mono at
+    #: ``sample_rate``; anything else is a media type to hand to a decoder.
     pcm_base64: str
     sample_rate: int
     duration_ms: int
+    format: str = "pcm16"
 
 
 class ToolCallEvent(SessionEvent):
@@ -207,12 +246,22 @@ class InterruptedAtEvent(SessionEvent):
     #: The evidence, inline. The same record the harness writes to its decision log — a
     #: barge-in a client cannot explain is a barge-in nobody can debug.
     decision: dict[str, Any] = Field(default_factory=dict)
+    #: What was playing at ``offset_ms``, when the session was given a timed transcript:
+    #: ``segment_title``, ``claim_text`` and ``clock`` (``m:ss``). The same facts the model
+    #: is handed for the turn, so a tester can see that "that number" resolved to the
+    #: sentence they interrupted. Empty when the caller sent no transcript.
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionStateEvent(SessionEvent):
     type: Literal["session_state"] = "session_state"
     state: Literal["ready", "listening", "speaking", "closed"]
     detail: str | None = None
+    #: On the first ``ready`` of a session whose arm offers a live channel that did **not**
+    #: open: a short code saying why — ``insufficient_quota``, ``arm_dormant``,
+    #: ``connection_closed`` … — so a client can show "no credits" and "no key" as two
+    #: different sentences. ``detail`` carries the prose; this is the part to branch on.
+    reason: str | None = None
 
 
 class ErrorEvent(SessionEvent):

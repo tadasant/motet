@@ -242,6 +242,11 @@ def _system_prompt(request: TurnRequest) -> str:
     parts = [request.persona_instructions.strip()]
     if request.context_notes.strip():
         parts.append("What you already know about this episode:\n" + request.context_notes)
+    if request.position_notes.strip():
+        # Fresh per turn where the block above is fixed for the session: where the listener
+        # interrupted, from our clock (:mod:`motet_voice.position`). Empty when the caller
+        # sent no timed transcript, so the prompt is then exactly what it was.
+        parts.append(request.position_notes.strip())
     if request.tools:
         names = ", ".join(str(tool.get("name", "?")) for tool in request.tools)
         parts.append(f"Tools available to you: {names}.")

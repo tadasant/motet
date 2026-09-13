@@ -48,7 +48,7 @@ from .contract import (
     StartSessionRequest,
     StartSessionResponse,
 )
-from .realtime import RealtimeArm, build_arm
+from .realtime import LiveArm, RealtimeArm, build_arm, build_composed_arm
 from .session import VoiceSession
 from .tools import HttpToolTransport, ToolRegistry, ToolTransport, build_platform_tools
 
@@ -91,11 +91,19 @@ class HealthResponse(BaseModel):
     arm: str
     arm_conversational: bool
     arm_dormant_reason: str
+    #: Which arm answers a *typed* question when there is no live channel — the composed arm
+    #: behind the realtime arm, the arm itself otherwise, or ``None`` when nothing in this
+    #: process can (the fallback arm would not build). Reported because a realtime arm whose
+    #: vendor refuses and a process with no fallback look identical from the client.
+    text_arm: str | None
     session_secret_configured: bool
     #: ``False`` means anyone who can reach this service can mint a session. Reported for
     #: the same reason the API reports its own: an open deployment is indistinguishable
     #: from a working one until something goes wrong.
     start_session_authenticated: bool
+    #: Whether session sockets are restricted to configured browser origins. ``False`` is
+    #: fine on a laptop; deployed, it means any page can try a lifted token.
+    origins_restricted: bool
     #: Whether this process installed an exporter, as opposed to merely having the
     #: variables set. The two were different for months on the API, which is how a service
     #: looks monitored and emits nothing.
@@ -115,12 +123,37 @@ class VoiceApp:
         settings: VoiceSettings | None = None,
         *,
         arm: RealtimeArm | None = None,
+        text_arm: RealtimeArm | None = None,
         transport: ToolTransport | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.arm = arm or build_arm(self.settings)
+        self.text_arm = text_arm if text_arm is not None else self._build_text_arm()
         self._explicit_transport = transport is not None
         self.transport = transport or self._build_transport()
+
+    def _build_text_arm(self) -> RealtimeArm | None:
+        """The arm a typed question goes to when the live channel is not there.
+
+        The composed arm behind a :class:`LiveArm`, because a realtime arm's turn path is
+        the same vendor socket as its live channel: when the vendor refuses the channel it
+        refuses the turn too, and the listener has no way to ask anything. The composed
+        arm needs only the OpenRouter and Cartesia seams, which are the ones the rest of the
+        system already runs on. A fallback that will not build is an ERROR and ``None``
+        rather than a crash — the live channel may still work — and the session says so on
+        ``ready`` instead of retrying the vendor.
+        """
+        if not isinstance(self.arm, LiveArm):
+            return self.arm
+        try:
+            return build_composed_arm(self.settings)
+        except Exception:  # noqa: BLE001 — the fallback is optional, its absence is not silent
+            logger.exception(
+                "the composed arm could not be built as the typed-question fallback behind "
+                "arm %s; a session whose live channel does not open will be unable to answer",
+                self.arm.name,
+            )
+            return None
 
     def _build_transport(self) -> ToolTransport | None:
         if not self.settings.api_base_url:
@@ -143,6 +176,8 @@ class VoiceApp:
 
     async def aclose(self) -> None:
         await self.arm.aclose()
+        if self.text_arm is not None and self.text_arm is not self.arm:
+            await self.text_arm.aclose()
         if self.transport is not None and not self._explicit_transport:
             await self.transport.aclose()
 
@@ -151,10 +186,11 @@ def create_app(
     settings: VoiceSettings | None = None,
     *,
     arm: RealtimeArm | None = None,
+    text_arm: RealtimeArm | None = None,
     transport: ToolTransport | None = None,
 ) -> FastAPI:
     """Build the ASGI app. Injectable so tests never touch a network or a vendor."""
-    state = VoiceApp(settings, arm=arm, transport=transport)
+    state = VoiceApp(settings, arm=arm, text_arm=text_arm, transport=transport)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -220,8 +256,10 @@ def create_app(
             arm=capabilities.name,
             arm_conversational=capabilities.conversational,
             arm_dormant_reason=capabilities.dormant_reason,
+            text_arm=state.text_arm.name if state.text_arm is not None else None,
             session_secret_configured=state.settings.session_secret_provided,
             start_session_authenticated=state.settings.start_session_token is not None,
+            origins_restricted=bool(state.settings.allowed_origins),
             tools=registry.describe(),
         )
 
@@ -272,6 +310,14 @@ def create_app(
 
     @app.websocket(WEBSOCKET_PATH)
     async def stream(websocket: WebSocket, session_id: str) -> None:
+        origin = websocket.headers.get("origin")
+        if not origin_allowed(state.settings, origin):
+            # Refused before `accept`, which a browser reports as a failed handshake. A
+            # WebSocket is not covered by CORS — any page can open one to any host — so
+            # this check is the cross-origin control for the one route a browser reaches.
+            logger.warning("refusing a voice socket from origin %r", origin)
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
         await websocket.accept()
         session = await _authenticate(websocket, state, session_id)
         if session is None:
@@ -284,6 +330,24 @@ def create_app(
             await session.aclose()
 
     return app
+
+
+def origin_allowed(settings: VoiceSettings, origin: str | None) -> bool:
+    """Whether a browser page at ``origin`` may open a session socket.
+
+    **The browser only ever reaches this service over the socket.** It is handed a token
+    and a URL by Motet's API, which minted the session server-to-server with the start
+    token — so ``StartSession`` gets no CORS policy at all, and the socket is the one
+    cross-origin surface there is. The token on the first frame is the real control; this
+    is the second lock, so a token lifted into another site's page cannot be used from it.
+
+    Unset allows any origin, like the start token being unset: a laptop needs no setup. A
+    request with no ``Origin`` header is not a browser and is allowed — the header is what
+    a browser cannot omit, and a non-browser client could forge it anyway.
+    """
+    if not settings.allowed_origins or origin is None:
+        return True
+    return origin.rstrip("/").lower() in settings.allowed_origins
 
 
 def _authorize_start_session(settings: VoiceSettings, authorization: str | None) -> None:
@@ -368,7 +432,11 @@ async def _authenticate(
         config=config,
         arm=state.arm,
         tools=state.registry(config),
+        text_arm=state.text_arm,
     )
+    # Before `ready`, so the client learns in one frame whether it may speak its question or
+    # has to type it. A vendor socket that will not open costs a warning, not the session.
+    await session.start_live()
     await _send(websocket, session.ready())
     return session
 
@@ -394,7 +462,7 @@ async def _pump(websocket: WebSocket, session: VoiceSession) -> None:
                 return
 
             if (chunk := message.get("bytes")) is not None:
-                for event in session.observe_audio(chunk):
+                for event in await session.receive_audio(chunk):
                     session.outbox.put_nowait(event)
                 continue
 
@@ -487,11 +555,21 @@ async def _handle_control(session: VoiceSession, payload: dict[str, Any]) -> boo
         return False
 
     if kind == "barge_in":
-        session.outbox.put_nowait(session.barge_in())
+        for event in await session.client_barge_in():
+            session.outbox.put_nowait(event)
         return False
 
     if kind == "narration_delivered":
         session.narration_delivered(_as_int(payload.get("duration_ms")))
+        return False
+
+    if kind == "narration_paused":
+        session.narration_paused(_optional_position(payload))
+        return False
+
+    if kind == "narration_resumed":
+        for event in await session.narration_resumed(_optional_position(payload)):
+            session.outbox.put_nowait(event)
         return False
 
     if kind == "playback_position":
@@ -514,6 +592,13 @@ def _as_int(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_position(payload: dict[str, Any]) -> int | None:
+    """``spoken_through_ms`` when the frame carries one — the player's own position."""
+    if payload.get("spoken_through_ms") is None:
+        return None
+    return _as_int(payload.get("spoken_through_ms"))
 
 
 def _error(session: VoiceSession, code: str, message: str) -> ErrorEvent:

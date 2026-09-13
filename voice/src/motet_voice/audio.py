@@ -272,6 +272,38 @@ def to_mono_16k(pcm: bytes, fmt: PcmFormat) -> bytes:
     return pcm_from_samples(resampled)
 
 
+def resample_pcm16(pcm: bytes, *, from_rate: int, to_rate: int) -> bytes:
+    """Mono 16-bit PCM from one sample rate to another, by linear interpolation.
+
+    The same deliberately crude interpolation :func:`to_mono_16k` uses, in both directions:
+    the realtime provider speaks 24 kHz and everything here speaks 16 kHz, so listener audio
+    goes up on the way out and reply audio comes back at the provider's rate, labelled. Going
+    *up* by interpolation adds no energy above the original band, so a VAD that ran on the
+    original would see nothing new in the result.
+    """
+    if from_rate <= 0 or to_rate <= 0:
+        raise AudioError(f"nonsensical sample rates {from_rate}->{to_rate}")
+    if from_rate == to_rate or not pcm:
+        return pcm
+    samples = samples_from_pcm(pcm)
+    if len(samples) < 2:
+        return pcm
+    ratio = from_rate / to_rate
+    out_len = int(len(samples) / ratio)
+    resampled: array[int] = array("h", bytes(2 * out_len))
+    last = len(samples) - 1
+    for index in range(out_len):
+        position = index * ratio
+        left = int(position)
+        if left >= last:
+            resampled[index] = samples[last]
+            continue
+        fraction = position - left
+        value = samples[left] * (1.0 - fraction) + samples[left + 1] * fraction
+        resampled[index] = max(-32_768, min(32_767, int(round(value))))
+    return pcm_from_samples(resampled)
+
+
 def slice_ms(pcm: bytes, start_ms: int, end_ms: int, fmt: PcmFormat = TARGET_FORMAT) -> bytes:
     """Extract ``[start_ms, end_ms)`` from a recording, clamped to its bounds."""
     total = duration_ms(pcm, fmt)

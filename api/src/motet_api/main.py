@@ -133,8 +133,18 @@ from .schemas import (
     SourceSpanModel,
     StartLoginRequest,
     StartLoginResponse,
+    StartVoiceSessionRequest,
+    VoiceSessionResponse,
+    VoiceStatusResponse,
 )
 from .shownotes import chapters_json, transcript_vtt
+from .voice import (
+    VoiceConfig,
+    VoiceStarter,
+    VoiceUnavailableError,
+    build_starter,
+    session_config,
+)
 
 logger = logging.getLogger("motet.api")
 
@@ -492,6 +502,7 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         # a deployment whose invoker grant never landed looks exactly like one nobody has
         # pasted into.
         drain_trigger=trigger.enabled,
+        voice_configured=VoiceConfig.from_env().configured,
         inference_mode=config.inference_mode,
     )
 
@@ -1101,6 +1112,95 @@ def _news_item(item: StoredNewsItem) -> NewsItemResponse:
     )
 
 
+# --- Play Live ------------------------------------------------------------------------
+#
+# The browser asks the API for a voice session; the API assembles the episode's context and
+# mints it on the voice service with the start token (invariant 2 — the voice service looks
+# nothing up). See `motet_api.voice`. No voice service is deployed yet, so on staging and
+# production both routes say "not configured" and the SPA offers no Play Live button.
+
+
+def voice_config() -> VoiceConfig:
+    return VoiceConfig.from_env()
+
+
+def voice_starter(config: Annotated[VoiceConfig, Depends(voice_config)]) -> VoiceStarter | None:
+    """Built per request: it holds nothing but two strings, and the HTTP client inside is
+    opened and closed around the one call it makes."""
+    return build_starter(config)
+
+
+@app.get("/v1/voice", response_model=VoiceStatusResponse, tags=["voice"])
+def voice_status(
+    user_id: User, config: Annotated[VoiceConfig, Depends(voice_config)]
+) -> VoiceStatusResponse:
+    """Whether Play Live can run in this deployment.
+
+    Asked by the SPA before it offers the button, so that an environment with no voice
+    service shows a disabled control with a reason — never a request to a host that does
+    not exist, and never a failed call in the console.
+    """
+    return VoiceStatusResponse(configured=config.configured, reason=config.reason)
+
+
+@app.post(
+    "/v1/episodes/{episode_id}/voice-session",
+    response_model=VoiceSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["voice"],
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "No voice service is configured, or it would not mint a session."
+        }
+    },
+)
+def start_voice_session(
+    conn: Conn,
+    user_id: User,
+    episode_id: Annotated[str, Path()],
+    request: StartVoiceSessionRequest,
+    config: Annotated[VoiceConfig, Depends(voice_config)],
+    starter: Annotated[VoiceStarter | None, Depends(voice_starter)],
+) -> VoiceSessionResponse:
+    """Mint a Play Live session for a rendered episode.
+
+    The context — every segment, every claim with the moment it is spoken, where the
+    listener's player is — is built here from the database and sent to the voice service
+    server-to-server with the start token. The browser gets a token scoped to that one
+    config, the socket to open, and the frame to open it with.
+    """
+    if starter is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, config.reason)
+    episode = repo.get_episode(conn, episode_id, user_id=user_id)
+    if episode is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.")
+    if episode.state.value != "ready":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Play Live needs a rendered episode — its claims are not timed until then.",
+        )
+    view = _episode(conn, episode)
+    position = (
+        request.spoken_through_ms
+        if request.spoken_through_ms is not None
+        else view.listened_through_ms
+    )
+    body = session_config(view, spoken_through_ms=position)
+    try:
+        started = starter.start(body)
+    except VoiceUnavailableError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return VoiceSessionResponse(
+        session_id=started.session_id,
+        session_token=started.session_token,
+        expires_at=started.expires_at,
+        websocket_url=started.websocket_url,
+        arm=started.arm,
+        conversational=started.conversational,
+        authenticate_frame={"type": "authenticate", "token": started.session_token, "config": body},
+    )
+
+
 def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeResponse:
     """Build the episode view, resolving every claim's span to the text it cites.
 
@@ -1134,6 +1234,8 @@ def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeRe
                     ),
                     source_excerpt=excerpt,
                     source_title=source.title if source is not None else "(source removed)",
+                    start_ms=claim.start_ms,
+                    duration_ms=claim.duration_ms,
                 )
             )
         segments.append(

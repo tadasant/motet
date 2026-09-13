@@ -32,6 +32,8 @@ const UNLISTENED: Episode = {
           span: { source_item_id: 'si_1', start: 0, end: 25 },
           source_excerpt: 'Acme raises $20M Series A',
           source_title: 'Morning Brief',
+          start_ms: 0,
+          duration_ms: 1_865_000,
         },
       ],
     },

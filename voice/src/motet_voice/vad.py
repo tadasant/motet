@@ -28,12 +28,15 @@ if it is wrong the harness will say so.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from .audio import PcmFrame, dbfs, zero_crossing_rate
+
+logger = logging.getLogger("motet.voice.vad")
 
 
 class VadUnavailable(RuntimeError):
@@ -159,19 +162,33 @@ class EnergyVad:
         level = dbfs(frame.samples)
         zcr = zero_crossing_rate(frame.samples)
 
-        # A frame below the absolute floor carries no information about the environment: it
-        # is a dropout, a muted mic, or the exact zeros a phone's voice-memo export puts at
-        # the head of a file. It neither seeds nor moves the floor, and the warm-up counter
-        # does not start until the first frame that is actually a recording of something.
+        # Three kinds of frame, and the difference between the second and third is motet#93.
         #
-        # This is not tidiness. `dbfs()` reports digital silence as -100 dBFS; a floor that
-        # walks toward it — or seeds from it — reads ordinary ambient afterwards as a 25 dB
-        # event and fires on the first second of every export. The walk's headline number
-        # would then be about a codec rather than about the weather.
+        # * **Silent** — exact zeros: a dropout, a muted mic, the head of a phone's
+        #   voice-memo export. It carries no information about the environment, so it
+        #   neither seeds nor moves the floor. `dbfs()` reports it as -100 dBFS, and a floor
+        #   that seeded from it or walked toward it would read ordinary ambient afterwards
+        #   as a 25 dB event and fire on the first second of every export.
+        # * **Quiet** — below the absolute floor but not zero. This is what a *browser*
+        #   microphone delivers between utterances with echo cancellation and noise
+        #   suppression on under headphones: -60 to -70 dBFS of residual, never zeros. It
+        #   says the room is at least this quiet, so it seeds the floor *at* the absolute
+        #   floor and walks it down at the ordinary rate — which is what lets a floor seeded
+        #   too high recover, at 7.5 dB a second.
+        # * **Measurable** — at or above the absolute floor. Unchanged.
+        #
+        # Quiet frames used to be treated as silent, and the consequence was total: the
+        # first frame the detector counted was the listener's own voice, the floor seeded
+        # at speech level, every utterance read as ~0 dB SNR and nothing that followed
+        # could bring the floor down. The owner's two browser sessions closed with
+        # `barge_ins: 0` while the mic meter moved. **The cost of the fix**, which is the
+        # other direction: a recording whose quiet head gives way to a loud *sustained*
+        # ambient can fire once in its first half-second while the floor climbs to it.
+        silent = not any(frame.samples)
         measurable = level >= self.absolute_floor_dbfs
 
         if self._floor_dbfs is None:
-            if not measurable:
+            if silent:
                 return VadReading(
                     speech_probability=0.0,
                     rms_dbfs=level,
@@ -181,8 +198,16 @@ class EnergyVad:
                 )
             # Seed from the first measurable frame rather than from a constant: recordings
             # differ by 30 dB of gain between a phone in a pocket and a headset, and a
-            # constant seed measures the first seconds against the wrong scale.
-            self._floor_dbfs = level
+            # constant seed measures the first seconds against the wrong scale. A quiet
+            # frame is the exception, and seeds at the one level it proves the floor is
+            # at or below.
+            self._floor_dbfs = level if measurable else self.absolute_floor_dbfs
+            logger.info(
+                "noise floor seeded at %.1f dBFS from a %s frame (%.1f dBFS)",
+                self._floor_dbfs,
+                "measurable" if measurable else "quiet",
+                level,
+            )
 
         snr = level - self._floor_dbfs
         probability = _logistic((snr - self.snr_midpoint_db) / max(self.snr_scale_db, 1e-6))
@@ -198,9 +223,15 @@ class EnergyVad:
                 self._floor_dbfs += self.up_step_db * scale
             else:
                 self._floor_dbfs -= self.down_step_db * scale
-        # Belt and braces on top of the measurable check above: a long quiet stretch that is
-        # not quite silent could still walk the floor below anything real, and the recovery
-        # from there is 0.05 dB a frame.
+        elif not silent:
+            # A quiet frame is below the absolute floor by definition, so it is always
+            # quieter than the floor: walk down, at the ordinary rate. Not the warm-up
+            # rate, and it does not advance the warm-up counter — the environment's own
+            # level, when it shows up, is what the fast convergence is for.
+            self._floor_dbfs -= self.down_step_db
+        # The floor never goes below the absolute floor: a long quiet stretch would
+        # otherwise walk it below anything real, and the recovery from there is 0.05 dB a
+        # frame.
         self._floor_dbfs = max(self._floor_dbfs, self.absolute_floor_dbfs)
 
         return VadReading(
