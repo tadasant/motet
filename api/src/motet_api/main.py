@@ -61,7 +61,7 @@ from motet_workers import (
 from motet_workers.queues import PIPELINE
 from starlette.requests import ClientDisconnect
 
-from . import obs
+from . import admin_llm, obs
 from .auth import (
     ALLOWED_EMAILS_ENV,
     LOGIN_SCOPES,
@@ -791,6 +791,8 @@ def admin_overview(
     jobs_ = repo.admin_overview_jobs(conn, user_id=user_id)
     return AdminOverviewResponse(
         generated_at=datetime.now(UTC),
+        # PROTOTYPE: the llm_usage ledger, priced from the catalogue — see admin_llm.
+        costs=admin_llm.fold_costs(repo.llm_usage_totals(conn)),
         users=[
             AdminUserResponse(
                 user_id=user.user_id,
@@ -831,6 +833,10 @@ def admin_overview(
             for job in jobs_
         ],
     )
+
+
+# PROTOTYPE: model configuration and spend for the admin screen, in one deletable module.
+app.include_router(admin_llm.router)
 
 
 @app.get("/v1/news-items", response_model=list[NewsItemResponse], tags=["backlog"])

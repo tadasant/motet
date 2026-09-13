@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { apiBaseUrl, getToken } from '../api/client'
+import type { components } from '../api/schema.gen'
 
 // Hand-typed against the contract; swap for the generated schema type once the route is
 // in schema.gen.ts.
@@ -41,11 +42,17 @@ type AdminJob = {
   updated_at: string
   locked_at: string | null
 }
+type Costs = components['schemas']['AdminCostsResponse']
+type Spend = components['schemas']['LlmSpend']
+type LlmConfig = components['schemas']['LlmConfigResponse']
+type LlmStageConfig = components['schemas']['LlmStageConfigResponse']
+type LlmModel = components['schemas']['LlmModelOption']
 type Overview = {
   generated_at: string
   users: AdminUser[]
   queues: AdminQueue[]
   jobs: AdminJob[]
+  costs: Costs
 }
 
 const POLL_MS = 3_000
@@ -62,6 +69,94 @@ async function fetchOverview(userId: string | null): Promise<Overview> {
   })
   if (!response.ok) throw new Error(`GET /v1/admin/overview → ${response.status}`)
   return (await response.json()) as Overview
+}
+
+async function fetchLlmConfig(): Promise<LlmConfig> {
+  const token = getToken()
+  const response = await fetch(`${apiBaseUrl()}/v1/admin/llm-config`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!response.ok) throw new Error(`GET /v1/admin/llm-config → ${response.status}`)
+  return (await response.json()) as LlmConfig
+}
+
+// `null` clears an override; a key left out is untouched (see LlmStageConfigUpdate).
+async function putLlmConfig(
+  stage: string,
+  body: { model?: string | null; effort?: string | null },
+): Promise<LlmConfig> {
+  const token = getToken()
+  const response = await fetch(`${apiBaseUrl()}/v1/admin/llm-config/${encodeURIComponent(stage)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    let detail = `${response.status}`
+    try {
+      const parsed = (await response.json()) as { detail?: unknown }
+      if (typeof parsed.detail === 'string') detail = parsed.detail
+    } catch {
+      // keep the status
+    }
+    throw new Error(detail)
+  }
+  return (await response.json()) as LlmConfig
+}
+
+function usd(value: number | undefined): string {
+  if (value === undefined) return '—'
+  if (value === 0) return '$0'
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`
+}
+
+function tokens(value: number | undefined): string {
+  if (value === undefined || value === 0) return '0'
+  if (value < 10_000) return String(value)
+  if (value < 1_000_000) return `${(value / 1000).toFixed(1)}k`
+  return `${(value / 1_000_000).toFixed(2)}M`
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  settings: 'settings',
+  stage_env: 'stage env',
+  global_env: 'global env',
+  default: 'default',
+}
+
+// The precedence chain for one axis, winner first-class, the rest muted. Each rung is
+// `label=value`, or `label=—` where nothing is set on that rung.
+function Chain({
+  cfg,
+  axis,
+}: {
+  cfg: LlmStageConfig
+  axis: 'model' | 'effort'
+}) {
+  const winner = axis === 'model' ? cfg.model_source : cfg.effort_source
+  const rungs: Array<[string, string | null]> =
+    axis === 'model'
+      ? [
+          ['settings', cfg.setting_model],
+          ['stage_env', cfg.stage_env_model],
+          ['global_env', cfg.global_env_model],
+          ['default', cfg.default_model],
+        ]
+      : [
+          ['settings', cfg.setting_effort],
+          ['stage_env', cfg.stage_env_effort],
+          ['global_env', cfg.global_env_effort],
+          ['default', cfg.default_effort],
+        ]
+  return (
+    <div className="chain">
+      {rungs.map(([source, value]) => (
+        <span key={source} className={source === winner ? 'won' : 'lost'} title={`${axis} from ${source}`}>
+          {SOURCE_LABEL[source]}={value ? value.replace(/^anthropic\//, '') : '—'}
+        </span>
+      ))}
+    </div>
+  )
 }
 
 function ago(iso: string | null): string {
@@ -93,6 +188,31 @@ export function Admin() {
   const [queueFilter, setQueueFilter] = useState<string | null>(null)
   const [stateFilter, setStateFilter] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
+  const [llm, setLlm] = useState<LlmConfig | null>(null)
+  const [llmError, setLlmError] = useState('')
+  const [saving, setSaving] = useState<string | null>(null)
+
+  const loadLlm = useCallback(() => {
+    fetchLlmConfig()
+      .then((next) => {
+        setLlm(next)
+        setLlmError('')
+      })
+      .catch((err: unknown) => setLlmError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  useEffect(loadLlm, [loadLlm])
+
+  const update = (stage: string, body: { model?: string | null; effort?: string | null }) => {
+    setSaving(stage)
+    putLlmConfig(stage, body)
+      .then((next) => {
+        setLlm(next)
+        setLlmError('')
+      })
+      .catch((err: unknown) => setLlmError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(null))
+  }
 
   const refresh = useCallback(() => {
     fetchOverview(selectedUser)
@@ -136,6 +256,130 @@ export function Admin() {
       </div>
       {error && <p className="error">{error}</p>}
 
+      <div className="row">
+        <h3>Models &amp; spend</h3>
+        <span className="hint">
+          {data?.costs.since
+            ? `spend since ${new Date(data.costs.since).toLocaleString()} (nothing backfilled)`
+            : 'no completions recorded yet — the ledger starts empty, nothing is backfilled'}
+          {llm && (
+            <>
+              {' · '}
+              {llm.applies === 'next_job'
+                ? 'a change applies to the worker\u2019s next job'
+                : 'worker restart needed after a change'}
+              {' · precedence: '}
+              {llm.precedence.map((p) => SOURCE_LABEL[p] ?? p).join(' > ')}
+            </>
+          )}
+        </span>
+      </div>
+      {llmError && <p className="error">{llmError}</p>}
+      <table className="grid models">
+        <thead>
+          <tr>
+            <th>stage</th>
+            <th>model</th>
+            <th>effort</th>
+            <th className="num">compl.</th>
+            <th className="num">in</th>
+            <th className="num">out</th>
+            <th className="num">reason.</th>
+            <th className="num">cache rd</th>
+            <th className="num">cache wr</th>
+            <th className="num">spend</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {llm?.stages.map((cfg) => {
+            const spec: LlmModel | undefined = llm.models.find((m) => m.slug === cfg.model)
+            const efforts = spec?.efforts ?? []
+            const spend: Spend | undefined = data?.costs.stages[cfg.stage]
+            const overridden = cfg.setting_model !== null || cfg.setting_effort !== null
+            const busy = saving === cfg.stage
+            return (
+              <tr key={cfg.stage} className={overridden ? 'overridden' : ''}>
+                <td>
+                  <strong>{cfg.stage}</strong>
+                </td>
+                <td>
+                  <select
+                    value={cfg.model}
+                    disabled={busy}
+                    aria-label={`${cfg.stage} model`}
+                    onChange={(e) => {
+                      const slug = e.target.value
+                      const next = llm.models.find((m) => m.slug === slug)
+                      // A slug with no selectable effort only pairs with `off`; send both so
+                      // the server does not have to refuse the pairing.
+                      const body: { model: string; effort?: string } = { model: slug }
+                      if (next && next.efforts.length === 0 && cfg.effort !== 'off') body.effort = 'off'
+                      update(cfg.stage, body)
+                    }}
+                  >
+                    {llm.models.map((m) => (
+                      <option key={m.slug} value={m.slug}>
+                        {m.slug}
+                      </option>
+                    ))}
+                  </select>
+                  <Chain cfg={cfg} axis="model" />
+                </td>
+                <td>
+                  <select
+                    value={cfg.effort}
+                    disabled={busy}
+                    aria-label={`${cfg.stage} effort`}
+                    onChange={(e) => update(cfg.stage, { effort: e.target.value })}
+                  >
+                    {efforts.map((eff) => (
+                      <option key={eff} value={eff}>
+                        {eff}
+                      </option>
+                    ))}
+                    <option value="off">off</option>
+                  </select>
+                  <Chain cfg={cfg} axis="effort" />
+                </td>
+                <td className={`num ${spend?.completions ? '' : 'zero'}`}>{spend?.completions ?? 0}</td>
+                <td className={`num ${spend?.input_tokens ? '' : 'zero'}`}>{tokens(spend?.input_tokens)}</td>
+                <td className={`num ${spend?.output_tokens ? '' : 'zero'}`}>{tokens(spend?.output_tokens)}</td>
+                <td className={`num ${spend?.reasoning_tokens ? '' : 'zero'}`}>
+                  {tokens(spend?.reasoning_tokens)}
+                </td>
+                <td className={`num ${spend?.cache_read_tokens ? '' : 'zero'}`}>
+                  {tokens(spend?.cache_read_tokens)}
+                </td>
+                <td className={`num ${spend?.cache_write_tokens ? '' : 'zero'}`}>
+                  {tokens(spend?.cache_write_tokens)}
+                </td>
+                <td className={`num spend ${spend?.usd ? '' : 'zero'}`}>{usd(spend?.usd)}</td>
+                <td>
+                  {overridden && (
+                    <button
+                      type="button"
+                      className="linkish"
+                      disabled={busy}
+                      onClick={() => update(cfg.stage, { model: null, effort: null })}
+                    >
+                      reset to default
+                    </button>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+          {!llm && !llmError && (
+            <tr>
+              <td colSpan={11} className="hint">
+                loading model configuration…
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+
       <h3>Queues</h3>
       <table className="grid">
         <thead>
@@ -148,6 +392,7 @@ export function Admin() {
             ))}
             <th>oldest ready</th>
             <th>worker heartbeat</th>
+            <th className="num">spend</th>
           </tr>
         </thead>
         <tbody>
@@ -173,6 +418,16 @@ export function Admin() {
               >
                 {ago(q.last_heartbeat_at)}
               </td>
+              <td
+                className={`num spend ${data.costs.queues[q.queue]?.usd ? '' : 'zero'}`}
+                title={
+                  data.costs.queues[q.queue]
+                    ? `${data.costs.queues[q.queue]?.completions ?? 0} completions`
+                    : 'no LLM stage on this queue'
+                }
+              >
+                {usd(data.costs.queues[q.queue]?.usd)}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -187,6 +442,9 @@ export function Admin() {
             <th colSpan={NEWS_STATES.length}>news items</th>
             <th colSpan={EPISODE_STATES.length}>episodes</th>
             <th colSpan={JOB_STATES.length}>jobs</th>
+            <th rowSpan={2} className="num">
+              spend
+            </th>
           </tr>
           <tr>
             {[...SOURCE_STATES, ...NEWS_STATES, ...EPISODE_STATES, ...JOB_STATES].map((s, i) => (
@@ -219,6 +477,12 @@ export function Admin() {
               {JOB_STATES.map((s) => (
                 <Cell key={s} n={u.jobs[s]} state={s} />
               ))}
+              <td
+                className={`num spend ${data.costs.users[u.user_id]?.usd ? '' : 'zero'}`}
+                title={`${data.costs.users[u.user_id]?.completions ?? 0} completions`}
+              >
+                {usd(data.costs.users[u.user_id]?.usd)}
+              </td>
             </tr>
           ))}
         </tbody>

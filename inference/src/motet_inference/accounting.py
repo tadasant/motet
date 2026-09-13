@@ -41,7 +41,7 @@ nothing to add to.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -53,6 +53,7 @@ from .llm import LlmBudgetExhaustedError, LlmResponse, LlmStage, Usage
 __all__ = [
     "Ledger",
     "StageUsage",
+    "UsageSink",
     "collect_usage",
     "describe_usage",
     "record_budget_exhausted",
@@ -60,6 +61,7 @@ __all__ = [
     "record_script_drop",
     "record_tts_characters",
     "record_usage",
+    "usage_sink",
 ]
 
 logger = logging.getLogger("motet.inference.cost")
@@ -182,6 +184,30 @@ def collect_usage() -> Iterator[Ledger]:
         _ledger.reset(token)
 
 
+#: PROTOTYPE — a per-completion sink, for a caller that wants each entry *as a row* rather
+#: than as a total. The worker installs one around each job that writes to its `llm_usage`
+#: table; nothing in this package knows that. The voice service installs none, deliberately
+#: (invariant 2: it has no database), so its turns stay a metric and a log line.
+UsageSink = Callable[[StageUsage], None]
+
+_sink: ContextVar[UsageSink | None] = ContextVar("motet_llm_usage_sink", default=None)
+
+
+@contextmanager
+def usage_sink(sink: UsageSink) -> Iterator[None]:
+    """Hand every completion recorded inside the block to ``sink``, one call per completion.
+
+    Independent of :func:`collect_usage` — a caller may want either, or both — and a sink
+    that raises is the caller's bug rather than a reason to lose the metric, so the metric
+    and the log line are emitted before it is called.
+    """
+    token = _sink.set(sink)
+    try:
+        yield
+    finally:
+        _sink.reset(token)
+
+
 def record_usage(stage: LlmStage, response: LlmResponse) -> None:
     """Count one completion: on the obs stack, in the log, and in the ledger if there is one.
 
@@ -230,9 +256,13 @@ def _record(stage: LlmStage, model: str, usage: Usage) -> None:
 
     logger.info("llm %s on %s: %s", stage.value, model, describe_usage(usage))
 
+    entry = StageUsage(stage=stage, model=model, usage=usage)
     ledger = _ledger.get()
     if ledger is not None:
-        ledger.entries.append(StageUsage(stage=stage, model=model, usage=usage))
+        ledger.entries.append(entry)
+    sink = _sink.get()
+    if sink is not None:
+        sink(entry)
 
 
 def record_tts_characters(count: int) -> None:

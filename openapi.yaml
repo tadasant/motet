@@ -2,6 +2,46 @@
 # Regenerate with `bin/generate-openapi`; `bin/ci` fails if this file is stale.
 components:
   schemas:
+    AdminCostsResponse:
+      description: 'The `llm_usage` ledger, folded three ways.
+
+
+        Empty until the worker writes its first row: nothing is backfilled, and `since` is
+
+        when the first row landed (null if none).'
+      properties:
+        queues:
+          additionalProperties:
+            $ref: '#/components/schemas/LlmSpend'
+          description: "Queues that map onto LLM stages: integrate \u2192 dedup + dedup_confirm, script\
+            \ \u2192 script."
+          title: Queues
+          type: object
+        since:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Since
+        stages:
+          additionalProperties:
+            $ref: '#/components/schemas/LlmSpend'
+          description: Every LLM stage, at zero when unused.
+          title: Stages
+          type: object
+        users:
+          additionalProperties:
+            $ref: '#/components/schemas/LlmSpend'
+          description: Keyed by user id; rows with no user are omitted.
+          title: Users
+          type: object
+      required:
+      - since
+      - stages
+      - users
+      - queues
+      title: AdminCostsResponse
+      type: object
     AdminEpisodeCounts:
       properties:
         failed:
@@ -133,6 +173,9 @@ components:
 
         for. Every user and every pipeline queue is present, at zero when empty.'
       properties:
+        costs:
+          $ref: '#/components/schemas/AdminCostsResponse'
+          description: 'PROTOTYPE: LLM spend from the `llm_usage` ledger.'
         generated_at:
           format: date-time
           title: Generated At
@@ -158,6 +201,7 @@ components:
       - users
       - queues
       - jobs
+      - costs
       title: AdminOverviewResponse
       type: object
     AdminQueueResponse:
@@ -749,6 +793,212 @@ components:
       - listened_through_ms
       - news_items_marked_read
       title: ListenProgressResponse
+      type: object
+    LlmConfigResponse:
+      properties:
+        applies:
+          description: 'When a change takes effect on the worker: `next_job` when the worker re-reads
+            settings per job, `restart` otherwise.'
+          title: Applies
+          type: string
+        models:
+          items:
+            $ref: '#/components/schemas/LlmModelOption'
+          title: Models
+          type: array
+        precedence:
+          description: Sources from highest to lowest precedence, as `*_source` spells them.
+          items:
+            type: string
+          title: Precedence
+          type: array
+        stages:
+          items:
+            $ref: '#/components/schemas/LlmStageConfigResponse'
+          title: Stages
+          type: array
+      required:
+      - stages
+      - models
+      - precedence
+      - applies
+      title: LlmConfigResponse
+      type: object
+    LlmModelOption:
+      description: One catalogue row, as the admin screen's dropdown needs it.
+      properties:
+        adaptive_thinking:
+          title: Adaptive Thinking
+          type: boolean
+        cache_read_usd_per_mtok:
+          title: Cache Read Usd Per Mtok
+          type: number
+        cache_write_usd_per_mtok:
+          title: Cache Write Usd Per Mtok
+          type: number
+        efforts:
+          description: Reasoning efforts this slug accepts; empty if none.
+          items:
+            type: string
+          title: Efforts
+          type: array
+        input_usd_per_mtok:
+          title: Input Usd Per Mtok
+          type: number
+        output_usd_per_mtok:
+          title: Output Usd Per Mtok
+          type: number
+        reasoning_on_by_default:
+          title: Reasoning On By Default
+          type: boolean
+        slug:
+          title: Slug
+          type: string
+      required:
+      - slug
+      - efforts
+      - adaptive_thinking
+      - reasoning_on_by_default
+      - input_usd_per_mtok
+      - output_usd_per_mtok
+      - cache_read_usd_per_mtok
+      - cache_write_usd_per_mtok
+      title: LlmModelOption
+      type: object
+    LlmSpend:
+      description: Summed completions and tokens for one bucket, and what they cost in USD.
+      properties:
+        cache_read_tokens:
+          title: Cache Read Tokens
+          type: integer
+        cache_write_tokens:
+          title: Cache Write Tokens
+          type: integer
+        completions:
+          title: Completions
+          type: integer
+        input_tokens:
+          title: Input Tokens
+          type: integer
+        output_tokens:
+          title: Output Tokens
+          type: integer
+        reasoning_tokens:
+          title: Reasoning Tokens
+          type: integer
+        usd:
+          title: Usd
+          type: number
+      required:
+      - completions
+      - input_tokens
+      - output_tokens
+      - reasoning_tokens
+      - cache_read_tokens
+      - cache_write_tokens
+      - usd
+      title: LlmSpend
+      type: object
+    LlmStageConfigResponse:
+      description: 'One stage''s resolved model and effort, with the whole precedence chain beside it.
+
+
+        `model`/`effort` are what `load_config()` resolved; the `*_source` fields say which
+
+        rung won. The rungs themselves are reported so the UI can show the chain rather than
+
+        only its answer: `setting_*` is the settings-table row, `stage_env_*` the
+
+        `MOTET_LLM_*_<STAGE>` variable, `global_env_*` the `MOTET_LLM_*` variable, `default_*`
+
+        the committed default. `effort` values are effort names or `"off"`.'
+      properties:
+        default_effort:
+          title: Default Effort
+          type: string
+        default_model:
+          title: Default Model
+          type: string
+        effort:
+          title: Effort
+          type: string
+        effort_source:
+          title: Effort Source
+          type: string
+        global_env_effort:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Global Env Effort
+        global_env_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Global Env Model
+        model:
+          title: Model
+          type: string
+        model_source:
+          title: Model Source
+          type: string
+        setting_effort:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Setting Effort
+        setting_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Setting Model
+        stage:
+          title: Stage
+          type: string
+        stage_env_effort:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stage Env Effort
+        stage_env_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stage Env Model
+      required:
+      - stage
+      - model
+      - model_source
+      - effort
+      - effort_source
+      - setting_model
+      - stage_env_model
+      - global_env_model
+      - default_model
+      - setting_effort
+      - stage_env_effort
+      - global_env_effort
+      - default_effort
+      title: LlmStageConfigResponse
+      type: object
+    LlmStageConfigUpdate:
+      description: 'Set or clear a stage''s settings-table overrides.
+
+
+        A field left out is untouched; `null` clears that override; a string sets it. Effort
+
+        takes an effort name or `"off"`.'
+      properties:
+        effort:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Effort
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+      title: LlmStageConfigUpdate
       type: object
     LoginResponse:
       description: "A session, and the token that presents it.\n\n``token`` is returned exactly once,\
@@ -1348,6 +1598,83 @@ paths:
       summary: Health
       tags:
       - ops
+  /v1/admin/llm-config:
+    get:
+      description: Every LLM stage's resolved model and effort, and where each came from.
+      operationId: get_llm_config_v1_admin_llm_config_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmConfigResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Llm Config
+      tags:
+      - admin
+  /v1/admin/llm-config/{stage}:
+    put:
+      description: 'Set or clear one stage''s settings-table overrides, then return the whole config.
+
+
+        The candidate rows are resolved *before* they are written, through the same
+
+        ``load_config`` the worker will run: an unknown slug, an effort the slug does not
+
+        accept, or an effort on a model with none is a 400 with the resolver''s own message.'
+      operationId: put_llm_config_v1_admin_llm_config__stage__put
+      parameters:
+      - in: path
+        name: stage
+        required: true
+        schema:
+          title: Stage
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LlmStageConfigUpdate'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmConfigResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Put Llm Config
+      tags:
+      - admin
   /v1/admin/overview:
     get:
       description: 'The whole deployment at a glance, across every user.

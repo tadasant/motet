@@ -92,3 +92,14 @@ main.wide { max-width: 90rem; }
 .badge.running { color: #06c; border-color: #06c; }
 .badge.done { color: var(--muted); }
 .admin select { font: inherit; padding: .3rem; }
+
+/* PROTOTYPE — /admin "Models & spend" (05-admin-model-config-and-spend) */
+.grid.models tbody tr { cursor: default; }
+.grid.models tbody tr:hover { background: transparent; }
+.grid.models tr.overridden { background: #fffbe6; }
+.grid.models select { font: inherit; font-size: .85rem; padding: .2rem; max-width: 16rem; }
+.grid.models td { vertical-align: top; }
+.grid td.spend { font-variant-numeric: tabular-nums; white-space: nowrap; width: 5rem; }
+.chain { display: flex; flex-wrap: wrap; gap: .15rem .5rem; margin-top: .2rem; font-size: .7rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.chain .won { color: #06c; font-weight: 600; }
+.chain .lost { color: var(--muted); }

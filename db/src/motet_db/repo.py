@@ -1073,6 +1073,155 @@ def admin_overview_jobs(
     ]
 
 
+# --- settings and LLM usage (PROTOTYPE) ---------------------------------------------
+#
+# Two tables from migration 0012, both prototype-only and both invariant-12 items for the
+# real version: `settings` is a key/value store the admin screen writes LLM model choices
+# into, and `llm_usage` is a ledger with one row per completion. Nothing here knows what a
+# stage or a model *is* — `motet_db` sits below `motet_inference` — so the keys and the
+# slugs are strings, validated by the caller against the catalogue before they get here.
+
+
+def load_settings(conn: psycopg.Connection[Any], prefix: str = "") -> dict[str, str]:
+    """Every settings row whose key starts with ``prefix``, as a plain mapping."""
+    rows = _all(
+        conn,
+        "SELECT key, value FROM settings WHERE key LIKE %s || '%%' ORDER BY key",
+        (prefix,),
+    )
+    return {row["key"]: row["value"] for row in rows}
+
+
+def put_setting(conn: psycopg.Connection[Any], key: str, value: str | None) -> None:
+    """Set one settings row, or delete it when ``value`` is ``None``."""
+    if value is None:
+        conn.execute("DELETE FROM settings WHERE key = %s", (key,))
+        return
+    conn.execute(
+        """
+        INSERT INTO settings (key, value, updated_at) VALUES (%s, %s, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """,
+        (key, value),
+    )
+
+
+def insert_llm_usage(
+    conn: psycopg.Connection[Any],
+    *,
+    stage: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    reasoning_tokens: int,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+    subject: str | None,
+    job_id: int | None,
+) -> None:
+    """One completion's accounting as a row.
+
+    ``user_id`` is resolved from the subject here, at insert time, so that the ledger never
+    has to join: a ``si_`` subject is a source item, an ``ep_`` subject an episode, and
+    anything else (a voice session, say) has no user this table can name. Resolved by
+    subquery rather than by the caller because the caller is the worker loop, which knows
+    the job's payload and nothing about the tables the payload points at.
+    """
+    conn.execute(
+        """
+        INSERT INTO llm_usage (
+            stage, model, input_tokens, output_tokens, reasoning_tokens,
+            cache_read_tokens, cache_write_tokens, user_id, subject, job_id
+        )
+        VALUES (
+            %(stage)s, %(model)s, %(input)s, %(output)s, %(reasoning)s,
+            %(cache_read)s, %(cache_write)s,
+            COALESCE(
+                (SELECT user_id FROM source_items WHERE id = %(subject)s),
+                (SELECT user_id FROM episodes WHERE id = %(subject)s)
+            ),
+            %(subject)s, %(job_id)s
+        )
+        """,
+        {
+            "stage": stage,
+            "model": model,
+            "input": input_tokens,
+            "output": output_tokens,
+            "reasoning": reasoning_tokens,
+            "cache_read": cache_read_tokens,
+            "cache_write": cache_write_tokens,
+            "subject": subject,
+            "job_id": job_id,
+        },
+    )
+
+
+@dataclass(frozen=True)
+class LlmUsageTotals:
+    """Summed token counts for one ``(user_id, stage, model)`` cell of the ledger.
+
+    Grouped down to the model because prices are per model, and the caller — which is the
+    one that knows the catalogue — turns each cell into dollars and folds the cells into
+    whatever it is displaying: per stage, per user, per queue.
+    """
+
+    user_id: str | None
+    stage: str
+    model: str
+    completions: int
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+
+
+@dataclass(frozen=True)
+class LlmUsageLedger:
+    """The whole ledger, summed, plus the one fact the UI needs to caveat it with."""
+
+    since: datetime | None
+    cells: list[LlmUsageTotals]
+
+
+def llm_usage_totals(conn: psycopg.Connection[Any]) -> LlmUsageLedger:
+    """Every cell of the ledger, and when the first row landed (``None`` if empty)."""
+    first = _one(conn, "SELECT min(occurred_at) AS since FROM llm_usage", ())
+    rows = _all(
+        conn,
+        """
+        SELECT user_id, stage, model, count(*) AS completions,
+               sum(input_tokens)::bigint AS input_tokens,
+               sum(output_tokens)::bigint AS output_tokens,
+               sum(reasoning_tokens)::bigint AS reasoning_tokens,
+               sum(cache_read_tokens)::bigint AS cache_read_tokens,
+               sum(cache_write_tokens)::bigint AS cache_write_tokens
+        FROM llm_usage
+        GROUP BY 1, 2, 3
+        ORDER BY 2, 3, 1
+        """,
+        (),
+    )
+    return LlmUsageLedger(
+        since=first["since"],
+        cells=[
+            LlmUsageTotals(
+                user_id=row["user_id"],
+                stage=row["stage"],
+                model=row["model"],
+                completions=row["completions"],
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                reasoning_tokens=row["reasoning_tokens"],
+                cache_read_tokens=row["cache_read_tokens"],
+                cache_write_tokens=row["cache_write_tokens"],
+            )
+            for row in rows
+        ],
+    )
+
+
 # --- row plumbing ------------------------------------------------------------------
 
 

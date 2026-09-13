@@ -88,6 +88,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from . import jobs
 from .handlers import HANDLERS, Context, PermanentFailure, failure_recorders
+from .llm_context import llm_job_context
 from .queues import Queue
 
 logger = logging.getLogger("motet.worker")
@@ -525,6 +526,9 @@ def _run_one(
         # recording the outcome: a job whose lease lapsed between finishing and being
         # marked done is one another worker takes and runs again.
         _hold_lease(database_url, job),
+        # PROTOTYPE: settings-table model overrides in, one `llm_usage` row per completion
+        # out. Around `_execute` so the rows are written after its transactions settle.
+        llm_job_context(conn, job),
     ):
         outcome = _execute(conn, job, handler, stages, store, recorders)
         span.set_attribute("motet.job.outcome", outcome)
