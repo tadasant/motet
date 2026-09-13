@@ -72,7 +72,7 @@ APPLIES: Final = "next_job"
 #: Which LLM stages a pipeline queue's spend is made of. ``script`` maps to the script stage
 #: alone by decision; a stage not named here (voice) is on no queue.
 QUEUE_STAGES: Final[Mapping[str, tuple[LlmStage, ...]]] = {
-    Queue.INTEGRATE.value: (LlmStage.DEDUP, LlmStage.DEDUP_CONFIRM),
+    Queue.INTEGRATE.value: (LlmStage.TRIAGE, LlmStage.DEDUP, LlmStage.DEDUP_CONFIRM),
     Queue.SCRIPT.value: (LlmStage.SCRIPT,),
 }
 

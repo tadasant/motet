@@ -21,7 +21,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from motet_db import EpisodeKind, EpisodeState, RuleError, SmartRule, SourceItemState, phase2, repo
+from motet_db import (
+    EpisodeKind,
+    EpisodeState,
+    RuleError,
+    SmartRule,
+    SourceItemState,
+    connectors,
+    enrichment,
+    phase2,
+    repo,
+)
 from motet_db.models import StoredNewsItem, StoredSegment, StoredSourceItem
 from motet_inference import (
     MPEG_MEDIA_TYPE,
@@ -38,6 +48,7 @@ from motet_inference import (
 )
 from motet_storage import ObjectStore, episode_audio_key
 
+from .enrich import enrich_failed, handle_enrich
 from .ingest import handle_extract, handle_poll
 from .jobs import enqueue
 from .queues import Queue
@@ -110,6 +121,14 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
         logger.info("source item %s is already integrated; nothing to do", source_item_id)
         return
 
+    # PROTOTYPE — triage, once, before dedup. A `fetch` decision hands the item to the
+    # enrich queue and returns *without* deduping; the enrich handler enqueues integrate
+    # again with `enriched: true`, which is what skips this block the second time. A
+    # `triage_decision` already on the row skips it too: the decision is made once per
+    # item, and a replayed job that got past this block once must not make it again.
+    if not payload.get("enriched") and _triage(context, stored):
+        return
+
     window = repo.news_item_window(context.conn, stored.user_id)
     # Dedup is the volume stage — one completion per source item, with the whole window
     # in the prompt — so it is where per-item cost is worth attributing and where a
@@ -149,6 +168,71 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
         logger.info("source %s became new news item %s", stored.id, news_item_id)
 
     repo.mark_source_item(context.conn, stored.id, SourceItemState.INTEGRATED)
+
+
+def _triage(context: Context, stored: StoredSourceItem) -> bool:
+    """Decide whether ``stored`` is a preview worth fetching; queue the fetch if so.
+
+    Returns ``True`` when an enrich job was queued and dedup must wait for it. Every other
+    outcome — ``raw``, no triager wired, a decision already recorded, a fetch with nothing
+    to fetch — returns ``False`` and dedup proceeds on the text as it stands. Triage's
+    usage is recorded through the same ledger as dedup's, under
+    :attr:`~motet_inference.llm.LlmStage.TRIAGE`, so it lands in ``llm_usage`` beside it.
+    """
+    triager = context.stages.triager
+    if triager is None:
+        return False
+    current = enrichment.get_enrichment(context.conn, stored.id)
+    if current is None or current.triage_decision is not None:
+        return False
+
+    with collect_usage() as spend:
+        decision = triager.triage(_as_source_item(stored))
+    if spend.requests:
+        logger.info(
+            "source item %s triage cost %d completion(s): %s",
+            stored.id,
+            spend.requests,
+            spend.summary(),
+        )
+
+    if not decision.fetch:
+        enrichment.record_triage(
+            context.conn,
+            stored.id,
+            decision="raw",
+            reason=decision.reason,
+            article_url=None,
+            enrich_status=None,
+        )
+        logger.info("triage: source item %s is raw (%s)", stored.id, decision.reason)
+        return False
+
+    article_url = decision.article_url or ""
+    domain = connectors.normalize_domain(decision.domain or article_url)
+    enrichment.record_triage(
+        context.conn,
+        stored.id,
+        decision="fetch",
+        reason=decision.reason,
+        article_url=article_url,
+        enrich_status="pending",
+    )
+    # Under the user's serialization key, like integrate: one browser login per user at a
+    # time (invariant 6), and a burst of previews from one newsletter fetches one by one.
+    enqueue(
+        context.conn,
+        Queue.ENRICH,
+        {"source_item_id": stored.id, "article_url": article_url, "domain": domain},
+        serialize_key=stored.user_id,
+    )
+    logger.info(
+        "triage: source item %s is a preview of %s (%s); queued for enrichment",
+        stored.id,
+        domain or article_url,
+        decision.reason,
+    )
+    return True
 
 
 def _merge_target(
@@ -626,6 +710,7 @@ def enqueue_smart_episode(
 HANDLERS = {
     Queue.POLL: handle_poll,
     Queue.EXTRACT: handle_extract,
+    Queue.ENRICH: handle_enrich,
     Queue.INTEGRATE: handle_integrate,
     Queue.ASSEMBLE: handle_assemble,
     Queue.SCRIPT: handle_script,
@@ -740,6 +825,8 @@ def failure_recorders() -> Mapping[Queue, Any]:
         # highlight and every claim, and would be indistinguishable from a message that
         # arrived empty.
         Queue.INTEGRATE: source_item_failed,
+        # PROTOTYPE: an enrichment that exhausted its retries still integrates the preview.
+        Queue.ENRICH: enrich_failed,
         Queue.ASSEMBLE: episode_failed,
         Queue.SCRIPT: episode_failed,
         Queue.TTS: episode_failed,

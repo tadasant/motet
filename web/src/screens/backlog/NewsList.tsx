@@ -90,6 +90,11 @@ export function NewsList({
             <button type="button" className="linkish hint" onClick={() => onOpenSource(source.id)}>
               {source.title || source.id}
             </button>
+            {source.enriched && (
+              <span className="fetched-mark" title="The full article was fetched over the preview">
+                fetched
+              </span>
+            )}
           </span>
         ))}
       </p>

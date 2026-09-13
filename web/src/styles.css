@@ -380,3 +380,26 @@ details.status-strip .processing h3 { position: absolute; width: 1px; height: 1p
   .brow-meta { display: none; }
   .brow-action { width: auto; }
 }
+
+/* PROTOTYPE — agentic enrichment on the lifecycle view (SourceItemDetail.tsx) and the
+   transcript viewer (EnrichTranscript.tsx). */
+.substage { margin: .6rem 0 .2rem; padding: .5rem .75rem; border-left: 2px solid var(--line); }
+.substage h5 { margin: 0 0 .2rem; font-size: .85rem; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+.stage-status.status-enriching strong, .stage-status.status-pending strong, .stage-status.status-running strong { color: var(--accent, #7a5c00); }
+.facts dd.clip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fetched-mark { display: inline-block; margin-left: .35rem; padding: 0 .4rem; border: 1px solid var(--line); border-radius: 999px; font-size: .7rem; color: var(--muted); vertical-align: middle; }
+.transcript { margin: .5rem 0 0; }
+.transcript-summary { margin: 0 0 .4rem; font-size: .8rem; }
+.transcript-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); max-height: 32rem; overflow: auto; background: var(--surface); }
+.transcript-line { display: grid; grid-template-columns: 2.4rem 5.6rem 3.4rem 1fr; gap: .5rem; padding: .35rem .5rem; border-bottom: 1px solid var(--line); font-size: .82rem; align-items: start; }
+.transcript-line:last-child { border-bottom: 0; }
+.transcript-line.is-error { background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.transcript-seq, .transcript-at { color: var(--muted); font-size: .75rem; padding-top: .1rem; }
+.transcript-role { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; padding-top: .15rem; }
+.transcript-role.role-model { color: var(--good); }
+.transcript-role.role-call { color: var(--fg); }
+.transcript-role.role-result { color: var(--muted); }
+.transcript-body { min-width: 0; }
+.transcript-tool { font-size: .8rem; }
+.transcript-text { margin: .15rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; line-height: 1.35; }
+.transcript-text.is-clipped { max-height: 3.9em; overflow: hidden; -webkit-mask: linear-gradient(#000 60%, transparent); mask: linear-gradient(#000 60%, transparent); }

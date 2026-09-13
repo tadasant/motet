@@ -67,6 +67,9 @@ TABLES = (
     "llm_usage",
     # PROTOTYPE (migration 0013): the Credentials screen's connectors.
     "connectors",
+    # PROTOTYPE (migration 0014): agentic enrichment runs and sealed browser states.
+    "enrich_runs",
+    "browser_states",
 )
 
 #: Sources a test connected, without disturbing the seeded paste source. Cascades to that

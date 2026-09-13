@@ -31,7 +31,7 @@ from .accounting import (
     record_usage,
 )
 from .cartesia import CartesiaSpeechSynthesizer
-from .interfaces import IntegrationResult
+from .interfaces import IntegrationResult, TriageDecision
 from .llm import (
     LlmBudgetExhaustedError,
     LlmClient,
@@ -46,6 +46,7 @@ from .prompts import (
     SAME_EVENT,
     SCRIPT_SCHEMA,
     SECOND_LOOK_SCHEMA,
+    TRIAGE_SCHEMA,
     UNRELATED,
     PromptResponseError,
     integrate_messages,
@@ -55,6 +56,7 @@ from .prompts import (
     require_str,
     script_messages,
     second_look_messages,
+    triage_messages,
 )
 from .types import (
     Claim,
@@ -103,6 +105,72 @@ CONFIRM_MAX_TOKENS = 4_000
 #: A script for a duration-capped episode. Generous, because truncation here costs a
 #: whole episode's worth of upstream work.
 SCRIPT_MAX_TOKENS = 32_000
+
+
+#: A triage verdict is four short fields — but one of them is the article URL echoed
+#: back, and a newsletter's click-tracking link is ~600 characters of base64 (~500 tokens
+#: on its own). The first ceiling, 600, was exhausted by exactly that on the third real
+#: item; this is for the JSON, not for thinking, and the model has no effort to spend.
+TRIAGE_MAX_TOKENS = 2_000
+
+
+class ClaudeTriager:
+    """PROTOTYPE — one structured call: content, or a preview of an article to fetch?
+
+    Runs at :attr:`LlmStage.TRIAGE`'s model and depth (Haiku, no reasoning, by default).
+    Every failure short of a transport error degrades to ``raw``: a triage that could not
+    be read costs the item its enrichment, never its ingestion, and dedup runs on the
+    preview exactly as it did before this stage existed.
+    """
+
+    stage: ClassVar[LlmStage] = LlmStage.TRIAGE
+
+    def __init__(self, client: LlmClient | None = None) -> None:
+        self._client = client if client is not None else build_client()
+
+    def triage(self, item: SourceItem) -> TriageDecision:
+        request = build_request(
+            self.stage,
+            triage_messages(item),
+            max_output_tokens=TRIAGE_MAX_TOKENS,
+            response_format=TRIAGE_SCHEMA,
+        )
+        try:
+            response = self._client.complete(request)
+        except LlmBudgetExhaustedError as exc:
+            record_budget_exhausted(self.stage, exc)
+            return _raw(f"triage ran out of budget: {exc}")
+        record_usage(self.stage, response)
+        try:
+            data = parse_json_object(response, what="triage")
+            decision = require_str(data, "decision", what="triage").strip().lower()
+        except PromptResponseError as exc:
+            logger.warning(
+                "triage answer for source %s was unreadable (%s); keeping raw", item.id, exc
+            )
+            return _raw(f"unreadable triage answer: {exc}")
+        reason = str(data.get("reason") or "").strip()
+        url = data.get("article_url")
+        domain = data.get("domain")
+        if decision != "fetch":
+            return TriageDecision(decision="raw", article_url=None, domain=None, reason=reason)
+        if not isinstance(url, str) or not url.strip().lower().startswith(("http://", "https://")):
+            logger.warning(
+                "triage said fetch for source %s but gave no usable URL (%r); keeping raw",
+                item.id,
+                url,
+            )
+            return _raw(f"fetch without a usable URL: {reason}")
+        return TriageDecision(
+            decision="fetch",
+            article_url=url.strip(),
+            domain=domain.strip().lower() if isinstance(domain, str) and domain.strip() else None,
+            reason=reason,
+        )
+
+
+def _raw(reason: str) -> TriageDecision:
+    return TriageDecision(decision="raw", article_url=None, domain=None, reason=reason)
 
 
 class ClaudeIntegrator:

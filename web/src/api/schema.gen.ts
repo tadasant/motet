@@ -883,6 +883,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/source-items/{source_item_id}/enrich-transcript": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Enrich Transcript
+         * @description PROTOTYPE — the newest agent run's transcript, for review.
+         *
+         *     Redacted when it was written (``motet_workers.enrich.redact_transcript``): a mailbox
+         *     tool's result is never stored, and links, codes, addresses and cookie values are
+         *     scrubbed from everything else. There is no unredacted copy to serve.
+         */
+        get: operations["get_enrich_transcript_v1_source_items__source_item_id__enrich_transcript_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources": {
         parameters: {
             query?: never;
@@ -1449,6 +1473,75 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * EnrichRunResponse
+         * @description PROTOTYPE — one agent run's record, without the transcript.
+         */
+        EnrichRunResponse: {
+            /** Article Chars */
+            article_chars: number;
+            /**
+             * Cost Usd
+             * @description The agent's own accounting; null if unknown.
+             */
+            cost_usd: number | null;
+            /** Error */
+            error: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Id */
+            id: string;
+            /** Login Performed */
+            login_performed: boolean;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * Status
+             * @description 'done' or 'failed'.
+             */
+            status: string;
+            /** Tool Calls */
+            tool_calls: number;
+        };
+        /**
+         * EnrichTranscriptEntry
+         * @description One redacted line of an agent run: a tool call, its result, or the model's text.
+         */
+        EnrichTranscriptEntry: {
+            /** Args */
+            args?: string | null;
+            /** At */
+            at: string;
+            /** Cost Usd */
+            cost_usd?: number | null;
+            /**
+             * Kind
+             * @description 'tool_call', 'tool_result' or 'assistant'.
+             */
+            kind: string;
+            /** Ok */
+            ok?: boolean | null;
+            /** Result */
+            result?: string | null;
+            /** Seq */
+            seq: number;
+            /** Text */
+            text?: string | null;
+            /** Tool */
+            tool?: string | null;
+        };
+        /**
+         * EnrichTranscriptResponse
+         * @description PROTOTYPE — a run's redacted transcript, for review.
+         */
+        EnrichTranscriptResponse: {
+            /** Entries */
+            entries: components["schemas"]["EnrichTranscriptEntry"][];
+            run: components["schemas"]["EnrichRunResponse"];
+        };
         /** EpisodeResponse */
         EpisodeResponse: {
             /** Audio Bytes */
@@ -1947,6 +2040,12 @@ export interface components {
          * @description A source item a news item is backed by, named so a list can show it.
          */
         NewsItemSourceRef: {
+            /**
+             * Enriched
+             * @description PROTOTYPE — whether the full article was fetched over the preview.
+             * @default false
+             */
+            enriched: boolean;
             /** Id */
             id: string;
             /** Title */
@@ -2210,6 +2309,28 @@ export interface components {
             title: string;
         };
         /**
+         * SourceItemEnrichmentResponse
+         * @description PROTOTYPE — the agentic fetch of the full article, when triage asked for one.
+         */
+        SourceItemEnrichmentResponse: {
+            /** Enriched At */
+            enriched_at: string | null;
+            /** Error */
+            error: string | null;
+            /**
+             * Original Chars
+             * @description Length of the preview the article replaced; null until it did.
+             */
+            original_chars: number | null;
+            /** @description The newest run, once one has finished. */
+            run: components["schemas"]["EnrichRunResponse"] | null;
+            /**
+             * Status
+             * @description 'pending', 'running', 'done', 'failed' or 'skipped'.
+             */
+            status: string;
+        };
+        /**
          * SourceItemJobResponse
          * @description The newest ``integrate`` job for a source item, as the queue holds it.
          */
@@ -2302,6 +2423,8 @@ export interface components {
              * @description Whether dedup's relation / reason / closest candidate are persisted. Always false today: they are logged and counted, never stored.
              */
             decision_recorded: boolean;
+            /** @description PROTOTYPE — null unless triage decided to fetch the article. */
+            enrich: components["schemas"]["SourceItemEnrichmentResponse"] | null;
             /**
              * Error
              * @description The source item's recorded error, or the job's last one while retrying.
@@ -2317,7 +2440,7 @@ export interface components {
             outcome: string | null;
             /**
              * Status
-             * @description 'held', 'queued', 'running', 'done' or 'failed'.
+             * @description 'held', 'queued', 'enriching', 'running', 'done' or 'failed'.
              */
             status: string;
             /**
@@ -2330,6 +2453,8 @@ export interface components {
              * @description The news item's title as it stands now — dedup wrote or rewrote it.
              */
             title: string | null;
+            /** @description PROTOTYPE — null until the integrate job has run triage. */
+            triage: components["schemas"]["SourceItemTriageResponse"] | null;
         };
         /**
          * SourceItemPulledStage
@@ -2388,6 +2513,24 @@ export interface components {
             state: string;
             /** Title */
             title: string;
+        };
+        /**
+         * SourceItemTriageResponse
+         * @description PROTOTYPE — what triage decided about the item, before dedup.
+         */
+        SourceItemTriageResponse: {
+            /**
+             * Article Url
+             * @description Where the full article lives, for 'fetch'.
+             */
+            article_url: string | null;
+            /**
+             * Decision
+             * @description 'raw' (the text is the content) or 'fetch' (a preview).
+             */
+            decision: string;
+            /** Reason */
+            reason: string | null;
         };
         /**
          * SourceResponse
@@ -3690,6 +3833,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceItemDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_enrich_transcript_v1_source_items__source_item_id__enrich_transcript_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichTranscriptResponse"];
                 };
             };
             /** @description Validation Error */

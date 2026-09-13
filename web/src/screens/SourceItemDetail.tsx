@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react'
 
 import { apiBaseUrl, getToken } from '../api/client'
 import type { components } from '../api/schema.gen'
+import { EnrichTranscript } from './EnrichTranscript'
 
 export type SourceItemDetailData = components['schemas']['SourceItemDetailResponse']
 
@@ -35,6 +36,8 @@ function stamp(iso: string | null | undefined): string {
 const STATUS_COPY: Record<string, string> = {
   held: 'Not processed yet — waiting for you. Nothing has been spent on this item; select it under Waiting for you and press Ingest.',
   queued: 'Queued. An integrate job is waiting for a worker.',
+  enriching:
+    'Fetching the full article. Triage decided this is only a preview; an agent is on (or waiting for) the enrich queue, and dedup runs once it is back.',
   running: 'Running. A worker holds the integrate job now.',
   done: 'Done. Dedup read the extracted text against the current window of news items and wrote the result below.',
   failed: 'Failed.',
@@ -75,6 +78,7 @@ export function SourceItemDetail({
   const [data, setData] = useState<SourceItemDetailData | null>(null)
   const [error, setError] = useState('')
   const [showText, setShowText] = useState(false)
+  const [showTranscript, setShowTranscript] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -186,6 +190,97 @@ export function SourceItemDetail({
               </>
             )}
           </dl>
+        )}
+        {processed.triage && (
+          <div className="substage" data-testid="triage">
+            <h5>Triage</h5>
+            <dl className="facts">
+              <dt>decision</dt>
+              <dd>
+                {processed.triage.decision === 'fetch'
+                  ? 'fetch — this is a preview of an article that lives elsewhere'
+                  : 'raw — the text is the content'}
+              </dd>
+              {processed.triage.reason && (
+                <>
+                  <dt>reason</dt>
+                  <dd>{processed.triage.reason}</dd>
+                </>
+              )}
+              {processed.triage.article_url && (
+                <>
+                  <dt>article</dt>
+                  <dd className="mono clip">{processed.triage.article_url}</dd>
+                </>
+              )}
+            </dl>
+          </div>
+        )}
+        {processed.enrich && (
+          <div className="substage" data-testid="enrich">
+            <h5>Agentic fetch</h5>
+            <p className={`stage-status status-${processed.enrich.status}`}>
+              <strong>{processed.enrich.status}</strong>
+              {processed.enrich.status === 'done' && ' — the full article replaced the preview'}
+              {processed.enrich.status === 'failed' &&
+                ' — kept the preview; dedup ran on the email text'}
+              {(processed.enrich.status === 'pending' || processed.enrich.status === 'running') &&
+                ' — a browser agent is fetching the article'}
+              {processed.enrich.error && <span className="error"> {processed.enrich.error}</span>}
+            </p>
+            {processed.enrich.run && (
+              <dl className="facts">
+                <dt>cost</dt>
+                <dd>
+                  {processed.enrich.run.cost_usd != null
+                    ? `$${processed.enrich.run.cost_usd.toFixed(4)}`
+                    : 'unknown'}
+                </dd>
+                <dt>tool calls</dt>
+                <dd>{processed.enrich.run.tool_calls}</dd>
+                <dt>login performed</dt>
+                <dd>
+                  {processed.enrich.run.login_performed
+                    ? 'yes — the agent logged in during this run'
+                    : 'no — the page was readable without logging in (saved cookies, or an open link)'}
+                </dd>
+                <dt>article</dt>
+                <dd>
+                  {processed.enrich.run.article_chars.toLocaleString()} chars
+                  {processed.enrich.original_chars != null &&
+                    ` (the preview was ${processed.enrich.original_chars.toLocaleString()})`}
+                </dd>
+                <dt>ran</dt>
+                <dd>
+                  <span title={processed.enrich.run.started_at}>
+                    {stamp(processed.enrich.run.started_at)}
+                  </span>
+                  {processed.enrich.run.finished_at && (
+                    <span className="hint">
+                      {' '}
+                      ·{' '}
+                      {Math.round(
+                        (new Date(processed.enrich.run.finished_at).getTime() -
+                          new Date(processed.enrich.run.started_at).getTime()) /
+                          1000,
+                      )}
+                      s
+                    </span>
+                  )}
+                </dd>
+              </dl>
+            )}
+            {processed.enrich.run && (
+              <button
+                type="button"
+                className="linkish hint"
+                onClick={() => setShowTranscript((t) => !t)}
+              >
+                {showTranscript ? 'Hide transcript' : 'View transcript'}
+              </button>
+            )}
+            {showTranscript && processed.enrich.run && <EnrichTranscript sourceItemId={id} />}
+          </div>
         )}
         {processed.status === 'done' && (
           <dl className="facts">

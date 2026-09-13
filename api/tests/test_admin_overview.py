@@ -66,6 +66,7 @@ class TestAdminOverview:
         assert [queue["queue"] for queue in body["queues"]] == [
             "poll",
             "extract",
+            "enrich",
             "integrate",
             "assemble",
             "script",

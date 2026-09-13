@@ -88,6 +88,11 @@ class LlmStage(StrEnum):
     DEDUP_CONFIRM = "dedup_confirm"
     SCRIPT = "script"
     VOICE = "voice"
+    # PROTOTYPE — one cheap structured call at the top of integrate that decides whether a
+    # source item is the content or only a preview of an article worth fetching. It runs
+    # once per ingested item, before dedup, so it is the cheapest line in the system by
+    # design: Haiku, no reasoning, ~3k characters of input.
+    TRIAGE = "triage"
 
     @property
     def model_env(self) -> str:
@@ -269,6 +274,9 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
 #: pavement waiting for it, so a second of thinking is a second of silence.
 DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort | None]] = {
     LlmStage.DEDUP: "low",
+    # PROTOTYPE: no reasoning — the default model has no selectable effort anyway, and the
+    # question ("is this the article or a link to it?") is not one thinking improves.
+    LlmStage.TRIAGE: None,
     # Deeper than the pass it second-guesses, and that asymmetry is the whole cost
     # argument: the volume line stays cheap, and depth is spent only on the pairs the
     # volume line said it was unsure about. motet#41 is a story that was compared against
@@ -277,6 +285,20 @@ DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort | None]] = {
     LlmStage.SCRIPT: "high",
     LlmStage.VOICE: None,
 }
+
+
+#: PROTOTYPE — per-stage default *models*, for the stages whose default is not the global
+#: one. Triage is the only entry: it is a yes/no over a title and a few thousand characters,
+#: made once per ingested item, and the cheapest catalogue row is the right default for it.
+#: The chain is unchanged — settings > stage env > global env > this > ``DEFAULT_MODEL`` —
+#: so a deployment that sets the global model moves triage too.
+DEFAULT_STAGE_MODELS: Final[Mapping[LlmStage, str]] = {
+    LlmStage.TRIAGE: "anthropic/claude-haiku-4.5",
+}
+
+
+def default_model_for(stage: LlmStage) -> str:
+    return DEFAULT_STAGE_MODELS.get(stage, DEFAULT_MODEL)
 
 
 class ConfigSource(StrEnum):
@@ -498,9 +520,10 @@ def load_config(
                 stage.model_env,
                 ConfigSource.STAGE_ENV,
             )
+        elif global_model_set:
+            model, model_var, model_from = global_model, MODEL_ENV, ConfigSource.GLOBAL_ENV
         else:
-            model, model_var = global_model, MODEL_ENV
-            model_from = ConfigSource.GLOBAL_ENV if global_model_set else ConfigSource.DEFAULT
+            model, model_var, model_from = default_model_for(stage), MODEL_ENV, ConfigSource.DEFAULT
         effort: Effort | None
         if settings.get(stage.effort_setting, "").strip():
             effort = _parse_effort_setting(settings[stage.effort_setting], stage.effort_setting)
@@ -508,9 +531,26 @@ def load_config(
         elif environ.get(stage.effort_env, "").strip():
             effort = _parse_effort_setting(environ[stage.effort_env], stage.effort_env)
             effort_from = ConfigSource.STAGE_ENV
-        elif global_effort_set:
+        elif global_effort_set and not (
+            stage in DEFAULT_STAGE_MODELS
+            and model_from is ConfigSource.DEFAULT
+            and not KNOWN_MODELS[model].efforts
+        ):
             effort = global_effort
             effort_from = ConfigSource.GLOBAL_ENV
+        elif global_effort_set:
+            # PROTOTYPE: the global effort is an intention about the stages that think. A
+            # stage still on its own effortless default model keeps its default rather than
+            # turning `MOTET_LLM_EFFORT=high` into a startup crash naming triage; an
+            # explicit stage model paired with an effort it cannot take still refuses.
+            effort = DEFAULT_EFFORTS[stage]
+            effort_from = ConfigSource.DEFAULT
+            logger.info(
+                "%s does not apply to stage %r: its default model %s has no selectable effort",
+                EFFORT_ENV,
+                stage.value,
+                model,
+            )
         else:
             effort = DEFAULT_EFFORTS[stage]
             effort_from = ConfigSource.DEFAULT

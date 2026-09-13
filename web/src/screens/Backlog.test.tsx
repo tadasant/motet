@@ -34,7 +34,7 @@ const news = (id: string, title: string, read = false): NewsItem => ({
   title,
   summary: `${title}, summarised.`,
   source_item_ids: [`si_${id}`],
-  sources: [{ id: `si_${id}`, title: `${title} (newsletter)` }],
+  sources: [{ id: `si_${id}`, title: `${title} (newsletter)`, enriched: false }],
   read,
   created_at: '2026-09-12T14:00:00Z',
 })

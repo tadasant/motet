@@ -15,6 +15,10 @@ from enum import StrEnum
 class Queue(StrEnum):
     POLL = "poll"
     EXTRACT = "extract"
+    # PROTOTYPE — a browser agent fetching the full article behind a preview, between
+    # extract and integrate. Enqueued by `handle_integrate` when triage says `fetch`, and
+    # it enqueues integrate again when it is done (proto/issues/11-agentic-enrichment.md).
+    ENRICH = "enrich"
     INTEGRATE = "integrate"
     ASSEMBLE = "assemble"
     SCRIPT = "script"
@@ -35,6 +39,7 @@ class Queue(StrEnum):
 PIPELINE: tuple[Queue, ...] = (
     Queue.POLL,
     Queue.EXTRACT,
+    Queue.ENRICH,
     Queue.INTEGRATE,
     Queue.ASSEMBLE,
     Queue.SCRIPT,

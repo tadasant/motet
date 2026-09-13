@@ -498,6 +498,111 @@ public struct CreateSmartEpisodeRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// PROTOTYPE — one agent run's record, without the transcript.
+public struct EnrichRunResponse: Codable, Hashable, Sendable {
+    public var articleChars: Int
+    public var costUsd: Double?
+    public var error: String?
+    public var finishedAt: Date?
+    public var id: String
+    public var loginPerformed: Bool
+    public var startedAt: Date
+    public var status: String
+    public var toolCalls: Int
+
+    public init(
+        articleChars: Int,
+        costUsd: Double? = nil,
+        error: String? = nil,
+        finishedAt: Date? = nil,
+        id: String,
+        loginPerformed: Bool,
+        startedAt: Date,
+        status: String,
+        toolCalls: Int
+    ) {
+        self.articleChars = articleChars
+        self.costUsd = costUsd
+        self.error = error
+        self.finishedAt = finishedAt
+        self.id = id
+        self.loginPerformed = loginPerformed
+        self.startedAt = startedAt
+        self.status = status
+        self.toolCalls = toolCalls
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case articleChars = "article_chars"
+        case costUsd = "cost_usd"
+        case error
+        case finishedAt = "finished_at"
+        case id
+        case loginPerformed = "login_performed"
+        case startedAt = "started_at"
+        case status
+        case toolCalls = "tool_calls"
+    }
+}
+
+/// One redacted line of an agent run: a tool call, its result, or the model's text.
+public struct EnrichTranscriptEntry: Codable, Hashable, Sendable {
+    public var args: String?
+    public var at: String
+    public var costUsd: Double?
+    public var kind: String
+    public var ok: Bool?
+    public var result: String?
+    public var seq: Int
+    public var text: String?
+    public var tool: String?
+
+    public init(
+        args: String? = nil,
+        at: String,
+        costUsd: Double? = nil,
+        kind: String,
+        ok: Bool? = nil,
+        result: String? = nil,
+        seq: Int,
+        text: String? = nil,
+        tool: String? = nil
+    ) {
+        self.args = args
+        self.at = at
+        self.costUsd = costUsd
+        self.kind = kind
+        self.ok = ok
+        self.result = result
+        self.seq = seq
+        self.text = text
+        self.tool = tool
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case args
+        case at
+        case costUsd = "cost_usd"
+        case kind
+        case ok
+        case result
+        case seq
+        case text
+        case tool
+    }
+}
+
+/// PROTOTYPE — a run's redacted transcript, for review.
+public struct EnrichTranscriptResponse: Codable, Hashable, Sendable {
+    public var entries: [EnrichTranscriptEntry]
+    public var run: EnrichRunResponse
+
+    public init(entries: [EnrichTranscriptEntry], run: EnrichRunResponse) {
+        self.entries = entries
+        self.run = run
+    }
+}
+
 public struct EpisodeResponse: Codable, Hashable, Sendable {
     public var audioBytes: Int?
     public var audioMediaType: String?
@@ -1134,10 +1239,12 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
 
 /// A source item a news item is backed by, named so a list can show it.
 public struct NewsItemSourceRef: Codable, Hashable, Sendable {
+    public var enriched: Bool?
     public var id: String
     public var title: String
 
-    public init(id: String, title: String) {
+    public init(enriched: Bool? = nil, id: String, title: String) {
+        self.enriched = enriched
         self.id = id
         self.title = title
     }
@@ -1447,6 +1554,37 @@ public struct SourceItemDetailResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// PROTOTYPE — the agentic fetch of the full article, when triage asked for one.
+public struct SourceItemEnrichmentResponse: Codable, Hashable, Sendable {
+    public var enrichedAt: Date?
+    public var error: String?
+    public var originalChars: Int?
+    public var run: EnrichRunResponse?
+    public var status: String
+
+    public init(
+        enrichedAt: Date? = nil,
+        error: String? = nil,
+        originalChars: Int? = nil,
+        run: EnrichRunResponse? = nil,
+        status: String
+    ) {
+        self.enrichedAt = enrichedAt
+        self.error = error
+        self.originalChars = originalChars
+        self.run = run
+        self.status = status
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enrichedAt = "enriched_at"
+        case error
+        case originalChars = "original_chars"
+        case run
+        case status
+    }
+}
+
 /// The newest ``integrate`` job for a source item, as the queue holds it.
 public struct SourceItemJobResponse: Codable, Hashable, Sendable {
     public var attempts: Int
@@ -1543,6 +1681,7 @@ public struct SourceItemNewsItemResponse: Codable, Hashable, Sendable {
 public struct SourceItemProcessedStage: Codable, Hashable, Sendable {
     public var costRecorded: Bool
     public var decisionRecorded: Bool
+    public var enrich: SourceItemEnrichmentResponse?
     public var error: String?
     public var integratedAt: Date?
     public var job: SourceItemJobResponse?
@@ -1550,20 +1689,24 @@ public struct SourceItemProcessedStage: Codable, Hashable, Sendable {
     public var status: String
     public var summary: String?
     public var title: String?
+    public var triage: SourceItemTriageResponse?
 
     public init(
         costRecorded: Bool,
         decisionRecorded: Bool,
+        enrich: SourceItemEnrichmentResponse? = nil,
         error: String? = nil,
         integratedAt: Date? = nil,
         job: SourceItemJobResponse? = nil,
         outcome: String? = nil,
         status: String,
         summary: String? = nil,
-        title: String? = nil
+        title: String? = nil,
+        triage: SourceItemTriageResponse? = nil
     ) {
         self.costRecorded = costRecorded
         self.decisionRecorded = decisionRecorded
+        self.enrich = enrich
         self.error = error
         self.integratedAt = integratedAt
         self.job = job
@@ -1571,11 +1714,13 @@ public struct SourceItemProcessedStage: Codable, Hashable, Sendable {
         self.status = status
         self.summary = summary
         self.title = title
+        self.triage = triage
     }
 
     private enum CodingKeys: String, CodingKey {
         case costRecorded = "cost_recorded"
         case decisionRecorded = "decision_recorded"
+        case enrich
         case error
         case integratedAt = "integrated_at"
         case job
@@ -1583,6 +1728,7 @@ public struct SourceItemProcessedStage: Codable, Hashable, Sendable {
         case status
         case summary
         case title
+        case triage
     }
 }
 
@@ -1643,6 +1789,25 @@ public struct SourceItemResponse: Codable, Hashable, Sendable {
         self.id = id
         self.state = state
         self.title = title
+    }
+}
+
+/// PROTOTYPE — what triage decided about the item, before dedup.
+public struct SourceItemTriageResponse: Codable, Hashable, Sendable {
+    public var articleUrl: String?
+    public var decision: String
+    public var reason: String?
+
+    public init(articleUrl: String? = nil, decision: String, reason: String? = nil) {
+        self.articleUrl = articleUrl
+        self.decision = decision
+        self.reason = reason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case articleUrl = "article_url"
+        case decision
+        case reason
     }
 }
 
@@ -1963,6 +2128,11 @@ public enum MotetEndpoints {
     /// `GET /v1/source-items/{source_item_id}` — Get Source Item Detail
     public static func getSourceItemDetail(sourceItemId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/source-items/\(MotetPathComponent(sourceItemId))")
+    }
+
+    /// `GET /v1/source-items/{source_item_id}/enrich-transcript` — Get Enrich Transcript
+    public static func getEnrichTranscript(sourceItemId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/source-items/\(MotetPathComponent(sourceItemId))/enrich-transcript")
     }
 
     /// `GET /v1/sources` — List Sources

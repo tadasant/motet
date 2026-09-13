@@ -22,8 +22,8 @@ const NEWS_ITEM: NewsItem = {
   summary: 'Acme announced the round on Tuesday.',
   source_item_ids: ['si_1', 'si_2'],
   sources: [
-    { id: 'si_1', title: 'Acme newsletter' },
-    { id: 'si_2', title: 'Acme, again' },
+    { id: 'si_1', title: 'Acme newsletter', enriched: false },
+    { id: 'si_2', title: 'Acme, again', enriched: false },
   ],
   read: false,
   created_at: '2026-08-24T00:00:00Z',

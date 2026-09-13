@@ -1134,6 +1134,30 @@ def source_item_lifecycle(
     )
 
 
+@dataclass(frozen=True)
+class SourceItemRef:
+    """A source item by name, plus whether its text is a fetched article (PROTOTYPE)."""
+
+    title: str
+    enriched: bool
+
+
+def source_item_refs(
+    conn: psycopg.Connection[Any], item_ids: Sequence[str]
+) -> dict[str, SourceItemRef]:
+    """:func:`source_item_titles`, with the enrichment flag the backlog row shows."""
+    if not item_ids:
+        return {}
+    rows = _all(
+        conn,
+        "SELECT id, title, enrich_status = 'done' AS enriched FROM source_items WHERE id = ANY(%s)",
+        (list(dict.fromkeys(item_ids)),),
+    )
+    return {
+        row["id"]: SourceItemRef(title=row["title"], enriched=bool(row["enriched"])) for row in rows
+    }
+
+
 def source_item_titles(conn: psycopg.Connection[Any], item_ids: Sequence[str]) -> dict[str, str]:
     """Titles for many source items, for listing a news item's sources by name.
 
@@ -1207,7 +1231,7 @@ _ADMIN_JOBS_SQL = """
         j.run_at, j.created_at, j.updated_at, j.locked_at,
         COALESCE(
             si.user_id, ep.user_id, src.user_id,
-            CASE WHEN j.queue = 'integrate' THEN j.serialize_key END
+            CASE WHEN j.queue IN ('integrate', 'enrich') THEN j.serialize_key END
         ) AS user_id,
         COALESCE(
             j.payload ->> 'source_item_id',

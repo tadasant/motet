@@ -36,6 +36,7 @@ from motet_db import (
     StoredEpisode,
     StoredNewsItem,
     StoredSource,
+    enrichment,
     phase2,
     repo,
 )
@@ -109,6 +110,9 @@ from .schemas import (
     ConnectSourceResponse,
     CreateEpisodeRequest,
     CreateSmartEpisodeRequest,
+    EnrichRunResponse,
+    EnrichTranscriptEntry,
+    EnrichTranscriptResponse,
     EpisodeResponse,
     FeedInfoResponse,
     HealthResponse,
@@ -134,11 +138,13 @@ from .schemas import (
     SegmentResponse,
     SessionResponse,
     SourceItemDetailResponse,
+    SourceItemEnrichmentResponse,
     SourceItemJobResponse,
     SourceItemNewsItemResponse,
     SourceItemProcessedStage,
     SourceItemPulledStage,
     SourceItemResponse,
+    SourceItemTriageResponse,
     SourceResponse,
     SourceSpanModel,
     StartLoginRequest,
@@ -807,17 +813,80 @@ def get_source_item_detail(
     life = repo.source_item_lifecycle(conn, user_id, source_item_id)
     if life is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source item.")
-    return _source_item_detail(life)
+    current = enrichment.get_enrichment(conn, source_item_id)
+    run = enrichment.latest_enrich_run(conn, source_item_id, user_id=user_id)
+    return _source_item_detail(life, current, run)
 
 
-def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailResponse:
+@app.get(
+    "/v1/source-items/{source_item_id}/enrich-transcript",
+    response_model=EnrichTranscriptResponse,
+    tags=["ingestion"],
+)
+def get_enrich_transcript(
+    conn: Conn, user_id: User, source_item_id: Annotated[str, Path()]
+) -> EnrichTranscriptResponse:
+    """PROTOTYPE — the newest agent run's transcript, for review.
+
+    Redacted when it was written (``motet_workers.enrich.redact_transcript``): a mailbox
+    tool's result is never stored, and links, codes, addresses and cookie values are
+    scrubbed from everything else. There is no unredacted copy to serve.
+    """
+    if repo.source_item_lifecycle(conn, user_id, source_item_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source item.")
+    run = enrichment.latest_enrich_run(conn, source_item_id, user_id=user_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This source item has no enrich run.")
+    return EnrichTranscriptResponse(
+        run=_enrich_run(run),
+        entries=[
+            EnrichTranscriptEntry(
+                seq=int(entry.get("seq", index + 1)),
+                at=str(entry.get("at", "")),
+                kind=str(entry.get("kind", "")),
+                tool=entry.get("tool"),
+                args=entry.get("args"),
+                ok=entry.get("ok"),
+                result=entry.get("result"),
+                text=entry.get("text"),
+                cost_usd=entry.get("cost_usd"),
+            )
+            for index, entry in enumerate(run.transcript)
+            if isinstance(entry, dict)
+        ],
+    )
+
+
+def _enrich_run(run: enrichment.EnrichRun) -> EnrichRunResponse:
+    return EnrichRunResponse(
+        id=run.id,
+        status=run.status,
+        tool_calls=run.tool_calls,
+        cost_usd=run.cost_usd,
+        login_performed=run.login_performed,
+        article_chars=run.article_chars,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        error=run.error,
+    )
+
+
+def _source_item_detail(
+    life: repo.SourceItemLifecycle,
+    current: enrichment.Enrichment | None = None,
+    run: enrichment.EnrichRun | None = None,
+) -> SourceItemDetailResponse:
     job = life.job
+    enriching = current is not None and current.enrich_status in ("pending", "running")
     if life.state is SourceItemState.INTEGRATED:
         status_ = "done"
     elif life.state is SourceItemState.FAILED:
         status_ = "failed"
     elif job is None:
         status_ = "held"
+    elif enriching:
+        # The integrate job that ran triage is `done`; the item is waiting on the agent.
+        status_ = "enriching"
     elif job.state == "running":
         status_ = "running"
     elif job.state == "failed":
@@ -829,6 +898,26 @@ def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailRespo
     outcome = None
     if life.news_item is not None:
         outcome = "new" if life.news_item.position == 0 else "merged"
+    triage = None
+    enrich = None
+    if current is not None and current.triage_decision is not None:
+        triage = SourceItemTriageResponse(
+            decision=current.triage_decision,
+            reason=current.triage_reason,
+            article_url=current.article_url,
+        )
+    if current is not None and current.enrich_status is not None:
+        enrich = SourceItemEnrichmentResponse(
+            status=current.enrich_status,
+            error=current.enrich_error,
+            enriched_at=current.enriched_at,
+            original_chars=(
+                len(current.original_text) if current.original_text is not None else None
+            ),
+            run=_enrich_run(run) if run is not None else None,
+        )
+    # Stage 1 is what the scrape pulled in: the email, even after the article replaced it.
+    pulled_text = current.original_text if current and current.original_text else life.text
     return SourceItemDetailResponse(
         id=life.id,
         title=life.title,
@@ -839,8 +928,8 @@ def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailRespo
             source_name=life.source_name,
             external_id=life.external_id,
             received_at=life.received_at,
-            chars=len(life.text),
-            text=life.text,
+            chars=len(pulled_text),
+            text=pulled_text,
             raw_stored=False,
         ),
         processed=SourceItemProcessedStage(
@@ -861,6 +950,8 @@ def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailRespo
                 if job is not None
                 else None
             ),
+            triage=triage,
+            enrich=enrich,
             integrated_at=life.integrated_at,
             error=life.last_error or (job.last_error if job is not None else None),
             outcome=outcome,
@@ -998,7 +1089,7 @@ app.include_router(connectors.router)
 def list_news_items(conn: Conn, user_id: User) -> list[NewsItemResponse]:
     """The backlog: deduped news items with their read state (invariant 5)."""
     items = repo.list_news_items(conn, user_id)
-    titles = repo.source_item_titles(conn, [sid for item in items for sid in item.source_item_ids])
+    titles = repo.source_item_refs(conn, [sid for item in items for sid in item.source_item_ids])
     return [_news_item(item, titles) for item in items]
 
 
@@ -1017,7 +1108,7 @@ def set_news_item_read(
     updated = repo.set_news_item_read(conn, user_id=user_id, item_id=news_item_id, read=body.read)
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such news item.")
-    return _news_item(updated, repo.source_item_titles(conn, updated.source_item_ids))
+    return _news_item(updated, repo.source_item_refs(conn, updated.source_item_ids))
 
 
 @app.post(
@@ -1201,14 +1292,19 @@ def _ingestion_item(item: IngestionStatus) -> IngestionItemResponse:
     )
 
 
-def _news_item(item: StoredNewsItem, titles: Mapping[str, str]) -> NewsItemResponse:
+def _news_item(item: StoredNewsItem, refs: Mapping[str, repo.SourceItemRef]) -> NewsItemResponse:
     return NewsItemResponse(
         id=item.id,
         title=item.title,
         summary=item.summary,
         source_item_ids=list(item.source_item_ids),
         sources=[
-            NewsItemSourceRef(id=sid, title=titles.get(sid, "")) for sid in item.source_item_ids
+            NewsItemSourceRef(
+                id=sid,
+                title=refs[sid].title if sid in refs else "",
+                enriched=refs[sid].enriched if sid in refs else False,
+            )
+            for sid in item.source_item_ids
         ],
         read=item.read,
         created_at=item.created_at,

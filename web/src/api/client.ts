@@ -296,6 +296,14 @@ export const api = {
     apiPost('/v1/sources/callback', { state, code }),
   // What a connected source has pulled in and is holding for an explicit "ingest now".
   heldSourceItems: () => apiGet('/v1/source-items/held'),
+  // PROTOTYPE: the lifecycle view and, when an agent fetched the article, its transcript.
+  sourceItem: (id: string) =>
+    apiGetPath('/v1/source-items/{source_item_id}', `/v1/source-items/${encodeURIComponent(id)}`),
+  enrichTranscript: (id: string) =>
+    apiGetPath(
+      '/v1/source-items/{source_item_id}/enrich-transcript',
+      `/v1/source-items/${encodeURIComponent(id)}/enrich-transcript`,
+    ),
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),

@@ -31,6 +31,33 @@ class IntegrationResult:
     merged: bool
 
 
+@dataclass(frozen=True)
+class TriageDecision:
+    """PROTOTYPE — what triage decided about one source item.
+
+    ``fetch`` means the item is only a preview and ``article_url`` is where the full
+    article lives; ``raw`` means the text is the content and nothing more is needed.
+    ``domain`` is the publisher's domain when the model could name it, normalized by the
+    caller before it is matched against a connector.
+    """
+
+    decision: str
+    article_url: str | None
+    domain: str | None
+    reason: str
+
+    @property
+    def fetch(self) -> bool:
+        return self.decision == "fetch" and bool(self.article_url)
+
+
+@runtime_checkable
+class Triager(Protocol):
+    """PROTOTYPE — decide whether a source item is content or a preview of an article."""
+
+    def triage(self, item: SourceItem) -> TriageDecision: ...
+
+
 @runtime_checkable
 class Integrator(Protocol):
     """Dedup/integrate: fold one source item into the current window of news items.
@@ -69,3 +96,6 @@ class Stages:
     integrator: Integrator
     script_generator: ScriptGenerator
     speech_synthesizer: SpeechSynthesizer
+    # PROTOTYPE — optional, and ``None`` means "no triage: every item is raw", so that
+    # every existing ``Stages(...)`` construction and every test keeps its meaning.
+    triager: Triager | None = None

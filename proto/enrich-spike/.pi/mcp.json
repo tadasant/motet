@@ -1,0 +1,39 @@
+{
+  "settings": {
+    "toolPrefix": "server",
+    "requestTimeoutMs": 120000,
+    "idleTimeout": 600
+  },
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "playwright-stealth-mcp-server"
+      ],
+      "env": {
+        "STEALTH_MODE": "true",
+        "HEADLESS": "true",
+        "NAVIGATION_TIMEOUT": "45000",
+        "TIMEOUT": "90000"
+      },
+      "inheritEnv": true,
+      "lifecycle": "lazy-keep-alive",
+      "directTools": [
+        "browser_execute",
+        "browser_screenshot",
+        "browser_get_state",
+        "browser_close"
+      ]
+    },
+    "email": {
+      "url": "${PROTO_EMAIL_MCP_URL}",
+      "auth": "bearer",
+      "headers": {
+        "Authorization": "!./email-bearer.sh"
+      },
+      "lifecycle": "lazy",
+      "directTools": true
+    }
+  }
+}

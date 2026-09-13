@@ -299,9 +299,163 @@ class TestDetail:
         # And the backlog now names its sources, so a list can open them.
         [listed] = api.get("/v1/news-items", headers=AUTH).json()
         assert listed["sources"] == [
-            {"id": first, "title": "First write-up"},
-            {"id": second, "title": "Second write-up"},
+            {"id": first, "title": "First write-up", "enriched": False},
+            {"id": second, "title": "Second write-up", "enriched": False},
         ]
 
     def test_unknown_or_someone_elses_item_is_404(self, api: TestClient) -> None:
         assert api.get("/v1/source-items/si_nope", headers=AUTH).status_code == 404
+
+
+class TestEnrichmentDetail:
+    """PROTOTYPE — the triage and agentic-fetch fields on the lifecycle view."""
+
+    def _enriched_item(self, db: psycopg.Connection[Any], gmail: str) -> str:
+
+        from motet_db import enrichment
+
+        preview = "Two paragraphs.\n\nRead the full article: https://link.example/click/abc"
+        item = held_item(db, gmail, "Whitelist", preview)
+        # Triage said fetch; the integrate job that ran it is done.
+        jobs.enqueue(
+            db, Queue.INTEGRATE, {"source_item_id": item}, serialize_key=repo.OWNER_USER_ID
+        )
+        db.execute("UPDATE jobs SET state = 'done'")
+        enrichment.record_triage(
+            db,
+            item,
+            decision="fetch",
+            reason="A teaser with a read-more link.",
+            article_url="https://link.example/click/abc",
+            enrich_status="pending",
+        )
+        return item
+
+    def test_an_item_waiting_on_the_agent_is_enriching(
+        self, api: TestClient, db: psycopg.Connection[Any], gmail: str
+    ) -> None:
+        item = self._enriched_item(db, gmail)
+        db.commit()
+        body = api.get(f"/v1/source-items/{item}", headers=AUTH).json()
+        processed = body["processed"]
+        assert processed["status"] == "enriching"
+        assert processed["triage"] == {
+            "decision": "fetch",
+            "reason": "A teaser with a read-more link.",
+            "article_url": "https://link.example/click/abc",
+        }
+        assert processed["enrich"]["status"] == "pending"
+        assert processed["enrich"]["run"] is None
+        transcript = api.get(f"/v1/source-items/{item}/enrich-transcript", headers=AUTH)
+        assert transcript.status_code == 404
+
+    def test_a_fetched_article_shows_the_run_and_keeps_the_email_in_stage_one(
+        self, api: TestClient, db: psycopg.Connection[Any], gmail: str
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from motet_db import enrichment
+
+        item = self._enriched_item(db, gmail)
+        article = (
+            "Full article fetched from https://link.example/click/abc\n\n# Title\n\n"
+            + "Body. " * 200
+        )
+        enrichment.apply_enrichment(db, item, article_text=article)
+        started = datetime(2026, 9, 13, 1, 0, tzinfo=UTC)
+        run_id = enrichment.insert_enrich_run(
+            db,
+            source_item_id=item,
+            user_id=repo.OWNER_USER_ID,
+            started_at=started,
+            finished_at=datetime(2026, 9, 13, 1, 2, 40, tzinfo=UTC),
+            status="done",
+            tool_calls=11,
+            cost_usd=0.4146,
+            transcript=[
+                {
+                    "seq": 1,
+                    "at": "2026-09-13T01:00:05+00:00",
+                    "kind": "tool_call",
+                    "tool": "playwright_browser_execute",
+                    "args": "page.goto(<article>)",
+                },
+                {
+                    "seq": 2,
+                    "at": "2026-09-13T01:00:09+00:00",
+                    "kind": "tool_result",
+                    "tool": "playwright_browser_execute",
+                    "ok": True,
+                    "result": "Subscribe to read",
+                },
+                {
+                    "seq": 3,
+                    "at": "2026-09-13T01:02:39+00:00",
+                    "kind": "assistant",
+                    "text": "STATUS: ok\nLOGGED_IN: yes",
+                    "cost_usd": 0.41,
+                },
+            ],
+            article_chars=len(article),
+            login_performed=True,
+            error=None,
+        )
+        db.commit()
+
+        body = api.get(f"/v1/source-items/{item}", headers=AUTH).json()
+        assert body["pulled"]["text"].startswith("Two paragraphs."), "stage 1 is the email"
+        assert body["pulled"]["chars"] == len(
+            "Two paragraphs.\n\nRead the full article: https://link.example/click/abc"
+        )
+        enrich = body["processed"]["enrich"]
+        assert enrich["status"] == "done"
+        assert enrich["error"] is None
+        assert enrich["enriched_at"]
+        assert enrich["original_chars"] == body["pulled"]["chars"]
+        run = enrich["run"]
+        assert run["id"] == run_id
+        assert run["status"] == "done"
+        assert run["tool_calls"] == 11
+        assert run["cost_usd"] == pytest.approx(0.4146)
+        assert run["login_performed"] is True
+        assert run["article_chars"] == len(article)
+        assert run["started_at"].startswith("2026-09-13T01:00:00")
+
+        transcript = api.get(f"/v1/source-items/{item}/enrich-transcript", headers=AUTH).json()
+        assert transcript["run"]["id"] == run_id
+        assert [e["kind"] for e in transcript["entries"]] == [
+            "tool_call",
+            "tool_result",
+            "assistant",
+        ]
+        assert transcript["entries"][1]["ok"] is True
+        assert transcript["entries"][1]["result"] == "Subscribe to read"
+        assert transcript["entries"][2]["text"] == "STATUS: ok\nLOGGED_IN: yes"
+        assert transcript["entries"][2]["cost_usd"] == pytest.approx(0.41)
+
+        # The backlog row can say "fetched" without loading the item.
+        news = api.get("/v1/news-items", headers=AUTH).json()
+        assert news == [] or all("enriched" in src for item_ in news for src in item_["sources"])
+
+    def test_a_raw_decision_is_reported_without_an_enrich_block(
+        self, api: TestClient, db: psycopg.Connection[Any], gmail: str
+    ) -> None:
+        from motet_db import enrichment
+
+        item = held_item(db, gmail, "Newsletter", "The whole newsletter body, in full.")
+        enrichment.record_triage(
+            db,
+            item,
+            decision="raw",
+            reason="It is the content.",
+            article_url=None,
+            enrich_status=None,
+        )
+        db.commit()
+        processed = api.get(f"/v1/source-items/{item}", headers=AUTH).json()["processed"]
+        assert processed["triage"] == {
+            "decision": "raw",
+            "reason": "It is the content.",
+            "article_url": None,
+        }
+        assert processed["enrich"] is None

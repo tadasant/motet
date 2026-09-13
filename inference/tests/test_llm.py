@@ -60,6 +60,7 @@ from motet_inference.llm import (
     validate_startup,
 )
 from motet_inference.llm import credentials as credentials_module
+from motet_inference.llm.config import default_model_for
 from motet_inference.llm.openrouter import API_KEY_ENV, OpenRouterClient, build_payload
 from motet_inference.mode import current_mode
 
@@ -210,7 +211,31 @@ def test_the_fake_simulates_a_cache_hit_only_for_a_repeated_prefix() -> None:
 def test_every_stage_defaults_to_sonnet_5() -> None:
     config = load_config({})
     assert DEFAULT_MODEL == "anthropic/claude-sonnet-5"
-    assert {config.for_stage(stage).model for stage in LlmStage} == {DEFAULT_MODEL}
+    assert {config.for_stage(stage).model for stage in LlmStage} - {DEFAULT_MODEL} == {
+        "anthropic/claude-haiku-4.5"
+    }
+    assert config.for_stage(LlmStage.TRIAGE).model == "anthropic/claude-haiku-4.5"
+    for stage in LlmStage:
+        assert config.for_stage(stage).model == default_model_for(stage)
+
+
+def test_triage_is_the_cheap_line_and_a_global_effort_leaves_it_alone() -> None:
+    """PROTOTYPE: triage defaults to Haiku with no reasoning, and ``MOTET_LLM_EFFORT`` — an
+    intention about the stages that think — must not turn into a startup crash naming a
+    stage whose default model cannot take an effort. An explicit stage model still refuses
+    the pairing, exactly as before."""
+    everywhere = load_config({"MOTET_LLM_EFFORT": "medium"})
+    assert everywhere.for_stage(LlmStage.TRIAGE).effort is None
+    assert everywhere.for_stage(LlmStage.DEDUP).effort == "medium"
+    with pytest.raises(LlmConfigError, match="no selectable effort"):
+        load_config(
+            {
+                "MOTET_LLM_MODEL_TRIAGE": "anthropic/claude-haiku-4.5",
+                "MOTET_LLM_EFFORT": "medium",
+            }
+        )
+    raised = load_config({"MOTET_LLM_MODEL_TRIAGE": DEFAULT_MODEL, "MOTET_LLM_EFFORT": "low"})
+    assert raised.for_stage(LlmStage.TRIAGE).effort == "low"
 
 
 def test_the_global_default_can_be_overridden_for_every_stage_at_once() -> None:
@@ -482,7 +507,7 @@ def test_the_startup_summary_names_every_stage_and_its_effort() -> None:
     """
     summary = load_config({}).describe()
     for stage in LlmStage:
-        assert f"{stage.value}={DEFAULT_MODEL}@" in summary
+        assert f"{stage.value}={default_model_for(stage)}@" in summary
     assert f"voice={DEFAULT_MODEL}@off" in summary
     assert f"script={DEFAULT_MODEL}@high" in summary
 

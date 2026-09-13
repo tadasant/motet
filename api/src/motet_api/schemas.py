@@ -192,6 +192,61 @@ class SourceItemJobResponse(BaseModel):
     )
 
 
+class SourceItemTriageResponse(BaseModel):
+    """PROTOTYPE — what triage decided about the item, before dedup."""
+
+    decision: str = Field(description="'raw' (the text is the content) or 'fetch' (a preview).")
+    reason: str | None
+    article_url: str | None = Field(description="Where the full article lives, for 'fetch'.")
+
+
+class EnrichRunResponse(BaseModel):
+    """PROTOTYPE — one agent run's record, without the transcript."""
+
+    id: str
+    status: str = Field(description="'done' or 'failed'.")
+    tool_calls: int
+    cost_usd: float | None = Field(description="The agent's own accounting; null if unknown.")
+    login_performed: bool
+    article_chars: int
+    started_at: datetime
+    finished_at: datetime | None
+    error: str | None
+
+
+class SourceItemEnrichmentResponse(BaseModel):
+    """PROTOTYPE — the agentic fetch of the full article, when triage asked for one."""
+
+    status: str = Field(description="'pending', 'running', 'done', 'failed' or 'skipped'.")
+    error: str | None
+    enriched_at: datetime | None
+    original_chars: int | None = Field(
+        description="Length of the preview the article replaced; null until it did."
+    )
+    run: EnrichRunResponse | None = Field(description="The newest run, once one has finished.")
+
+
+class EnrichTranscriptEntry(BaseModel):
+    """One redacted line of an agent run: a tool call, its result, or the model's text."""
+
+    seq: int
+    at: str
+    kind: str = Field(description="'tool_call', 'tool_result' or 'assistant'.")
+    tool: str | None = None
+    args: str | None = None
+    ok: bool | None = None
+    result: str | None = None
+    text: str | None = None
+    cost_usd: float | None = None
+
+
+class EnrichTranscriptResponse(BaseModel):
+    """PROTOTYPE — a run's redacted transcript, for review."""
+
+    run: EnrichRunResponse
+    entries: list[EnrichTranscriptEntry]
+
+
 class SourceItemProcessedStage(BaseModel):
     """Stage 2: what processing did with the item — and, as often, what it has not done.
 
@@ -202,8 +257,14 @@ class SourceItemProcessedStage(BaseModel):
     the item is integrated.
     """
 
-    status: str = Field(description="'held', 'queued', 'running', 'done' or 'failed'.")
+    status: str = Field(description="'held', 'queued', 'enriching', 'running', 'done' or 'failed'.")
     job: SourceItemJobResponse | None
+    triage: SourceItemTriageResponse | None = Field(
+        description="PROTOTYPE — null until the integrate job has run triage."
+    )
+    enrich: SourceItemEnrichmentResponse | None = Field(
+        description="PROTOTYPE — null unless triage decided to fetch the article."
+    )
     integrated_at: datetime | None
     error: str | None = Field(
         description="The source item's recorded error, or the job's last one while retrying."
@@ -437,6 +498,10 @@ class NewsItemSourceRef(BaseModel):
 
     id: str
     title: str
+    enriched: bool = Field(
+        default=False,
+        description="PROTOTYPE — whether the full article was fetched over the preview.",
+    )
 
 
 class NewsItemResponse(BaseModel):

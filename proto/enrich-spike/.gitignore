@@ -1,0 +1,4 @@
+node_modules/
+runs/
+.pi-home/
+__pycache__/

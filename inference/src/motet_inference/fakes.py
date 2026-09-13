@@ -17,7 +17,7 @@ import re
 import struct
 from collections.abc import Mapping, Sequence
 
-from .interfaces import IntegrationResult
+from .interfaces import IntegrationResult, TriageDecision
 from .types import (
     Audio,
     Claim,
@@ -74,6 +74,27 @@ def first_sentence_span(item: SourceItem) -> SourceSpan:
     """
     start, end = first_sentence_bounds(item.text)
     return SourceSpan(source_item_id=item.id, start=start, end=end)
+
+
+class FakeTriager:
+    """PROTOTYPE — a scripted triage: ``raw`` for everything unless told otherwise.
+
+    ``decisions`` maps a source item id to the answer to give it; anything unlisted is
+    ``raw``, so the pipeline tests that paste plain prose never see an enrich job.
+    """
+
+    def __init__(self, decisions: Mapping[str, TriageDecision] | None = None) -> None:
+        self._decisions = dict(decisions or {})
+        self.calls: list[str] = []
+
+    def triage(self, item: SourceItem) -> TriageDecision:
+        self.calls.append(item.id)
+        decision = self._decisions.get(item.id)
+        if decision is not None:
+            return decision
+        return TriageDecision(
+            decision="raw", article_url=None, domain=None, reason="fake: nothing to fetch"
+        )
 
 
 class FakeIntegrator:

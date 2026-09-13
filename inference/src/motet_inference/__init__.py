@@ -24,6 +24,8 @@ from .interfaces import (
     ScriptGenerator,
     SpeechSynthesizer,
     Stages,
+    TriageDecision,
+    Triager,
 )
 from .pipeline import Briefing, build_briefing
 from .registry import MODE_ENV_VAR, current_mode, fake_stages, get_stages, real_stages
@@ -55,6 +57,8 @@ __all__ = [
     "SourceSpan",
     "SpeechSynthesizer",
     "Stages",
+    "TriageDecision",
+    "Triager",
     "WAV_MEDIA_TYPE",
     "collect_usage",
     "describe_usage",

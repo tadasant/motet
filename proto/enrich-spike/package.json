@@ -1,0 +1,21 @@
+{
+  "name": "enrich-spike",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "pi-mcp-adapter": "^2.33.0",
+    "playwright-stealth-mcp-server": "^0.2.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13"
+  }
+}

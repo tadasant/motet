@@ -536,6 +536,7 @@ class TestEndToEnd:
         assert [entry["queue"] for entry in empty["readiness"]] == [
             "poll",
             "extract",
+            "enrich",
             "integrate",
             "assemble",
             "script",

@@ -605,6 +605,122 @@ components:
       - max_duration_ms
       title: CreateSmartEpisodeRequest
       type: object
+    EnrichRunResponse:
+      description: "PROTOTYPE \u2014 one agent run's record, without the transcript."
+      properties:
+        article_chars:
+          title: Article Chars
+          type: integer
+        cost_usd:
+          anyOf:
+          - type: number
+          - type: 'null'
+          description: The agent's own accounting; null if unknown.
+          title: Cost Usd
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        finished_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Finished At
+        id:
+          title: Id
+          type: string
+        login_performed:
+          title: Login Performed
+          type: boolean
+        started_at:
+          format: date-time
+          title: Started At
+          type: string
+        status:
+          description: '''done'' or ''failed''.'
+          title: Status
+          type: string
+        tool_calls:
+          title: Tool Calls
+          type: integer
+      required:
+      - id
+      - status
+      - tool_calls
+      - cost_usd
+      - login_performed
+      - article_chars
+      - started_at
+      - finished_at
+      - error
+      title: EnrichRunResponse
+      type: object
+    EnrichTranscriptEntry:
+      description: 'One redacted line of an agent run: a tool call, its result, or the model''s text.'
+      properties:
+        args:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Args
+        at:
+          title: At
+          type: string
+        cost_usd:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Cost Usd
+        kind:
+          description: '''tool_call'', ''tool_result'' or ''assistant''.'
+          title: Kind
+          type: string
+        ok:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Ok
+        result:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Result
+        seq:
+          title: Seq
+          type: integer
+        text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Text
+        tool:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tool
+      required:
+      - seq
+      - at
+      - kind
+      title: EnrichTranscriptEntry
+      type: object
+    EnrichTranscriptResponse:
+      description: "PROTOTYPE \u2014 a run's redacted transcript, for review."
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/EnrichTranscriptEntry'
+          title: Entries
+          type: array
+        run:
+          $ref: '#/components/schemas/EnrichRunResponse'
+      required:
+      - run
+      - entries
+      title: EnrichTranscriptResponse
+      type: object
     EpisodeResponse:
       properties:
         audio_bytes:
@@ -1344,6 +1460,11 @@ components:
     NewsItemSourceRef:
       description: A source item a news item is backed by, named so a list can show it.
       properties:
+        enriched:
+          default: false
+          description: "PROTOTYPE \u2014 whether the full article was fetched over the preview."
+          title: Enriched
+          type: boolean
         id:
           title: Id
           type: string
@@ -1705,6 +1826,43 @@ components:
       - news_items
       title: SourceItemDetailResponse
       type: object
+    SourceItemEnrichmentResponse:
+      description: "PROTOTYPE \u2014 the agentic fetch of the full article, when triage asked for one."
+      properties:
+        enriched_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Enriched At
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        original_chars:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Length of the preview the article replaced; null until it did.
+          title: Original Chars
+        run:
+          anyOf:
+          - $ref: '#/components/schemas/EnrichRunResponse'
+          - type: 'null'
+          description: The newest run, once one has finished.
+        status:
+          description: '''pending'', ''running'', ''done'', ''failed'' or ''skipped''.'
+          title: Status
+          type: string
+      required:
+      - status
+      - error
+      - enriched_at
+      - original_chars
+      - run
+      title: SourceItemEnrichmentResponse
+      type: object
     SourceItemJobResponse:
       description: The newest ``integrate`` job for a source item, as the queue holds it.
       properties:
@@ -1814,6 +1972,11 @@ components:
             today: they are logged and counted, never stored.'
           title: Decision Recorded
           type: boolean
+        enrich:
+          anyOf:
+          - $ref: '#/components/schemas/SourceItemEnrichmentResponse'
+          - type: 'null'
+          description: "PROTOTYPE \u2014 null unless triage decided to fetch the article."
         error:
           anyOf:
           - type: string
@@ -1839,7 +2002,7 @@ components:
             which is the only durable trace of the decision.'
           title: Outcome
         status:
-          description: '''held'', ''queued'', ''running'', ''done'' or ''failed''.'
+          description: '''held'', ''queued'', ''enriching'', ''running'', ''done'' or ''failed''.'
           title: Status
           type: string
         summary:
@@ -1854,9 +2017,16 @@ components:
           - type: 'null'
           description: "The news item's title as it stands now \u2014 dedup wrote or rewrote it."
           title: Title
+        triage:
+          anyOf:
+          - $ref: '#/components/schemas/SourceItemTriageResponse'
+          - type: 'null'
+          description: "PROTOTYPE \u2014 null until the integrate job has run triage."
       required:
       - status
       - job
+      - triage
+      - enrich
       - integrated_at
       - error
       - outcome
@@ -1933,6 +2103,30 @@ components:
       - title
       - state
       title: SourceItemResponse
+      type: object
+    SourceItemTriageResponse:
+      description: "PROTOTYPE \u2014 what triage decided about the item, before dedup."
+      properties:
+        article_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Where the full article lives, for 'fetch'.
+          title: Article Url
+        decision:
+          description: '''raw'' (the text is the content) or ''fetch'' (a preview).'
+          title: Decision
+          type: string
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+      required:
+      - decision
+      - reason
+      - article_url
+      title: SourceItemTriageResponse
       type: object
     SourceResponse:
       description: "A place source items come from \u2014 pasted text, or a connected mailbox."
@@ -3441,6 +3635,44 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Get Source Item Detail
+      tags:
+      - ingestion
+  /v1/source-items/{source_item_id}/enrich-transcript:
+    get:
+      description: "PROTOTYPE \u2014 the newest agent run's transcript, for review.\n\nRedacted when it\
+        \ was written (``motet_workers.enrich.redact_transcript``): a mailbox\ntool's result is never\
+        \ stored, and links, codes, addresses and cookie values are\nscrubbed from everything else. There\
+        \ is no unredacted copy to serve."
+      operationId: get_enrich_transcript_v1_source_items__source_item_id__enrich_transcript_get
+      parameters:
+      - in: path
+        name: source_item_id
+        required: true
+        schema:
+          title: Source Item Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrichTranscriptResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Enrich Transcript
       tags:
       - ingestion
   /v1/sources:

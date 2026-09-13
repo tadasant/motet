@@ -12,11 +12,13 @@ from .adapters import (
     CartesiaSpeechSynthesizer,
     ClaudeIntegrator,
     ClaudeScriptGenerator,
+    ClaudeTriager,
 )
 from .fakes import (
     FakeIntegrator,
     FakeScriptGenerator,
     FakeSpeechSynthesizer,
+    FakeTriager,
 )
 from .interfaces import Stages
 from .mode import MODE_ENV_VAR, Mode, current_mode
@@ -29,6 +31,7 @@ def fake_stages() -> Stages:
         integrator=FakeIntegrator(),
         script_generator=FakeScriptGenerator(),
         speech_synthesizer=FakeSpeechSynthesizer(),
+        triager=FakeTriager(),
     )
 
 
@@ -46,6 +49,7 @@ def real_stages() -> Stages:
         integrator=ClaudeIntegrator(client),
         script_generator=ClaudeScriptGenerator(client),
         speech_synthesizer=CartesiaSpeechSynthesizer(),
+        triager=ClaudeTriager(client),
     )
 
 
