@@ -68,3 +68,27 @@ label { font-weight: 600; font-size: .9rem; }
 
 .tab-count { margin-left: .35rem; font-size: .75rem; border-radius: 999px; border: 1px solid var(--line); padding: 0 .35rem; }
 .tab-count.failed { color: var(--bad); border-color: var(--bad); }
+
+/* PROTOTYPE: /admin */
+main.wide { max-width: 90rem; }
+.admin-bar { justify-content: flex-start; }
+.admin-bar h2 { margin: 0; }
+.grid { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: .9rem; }
+.grid th { text-align: left; font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--line); padding: .35rem .5rem; }
+.grid th.sub { font-size: .7rem; border-bottom: 2px solid var(--line); }
+.grid td { border-bottom: 1px solid var(--line); padding: .35rem .5rem; vertical-align: top; }
+.grid th.num, .grid td.num { text-align: right; font-variant-numeric: tabular-nums; width: 4rem; }
+.grid td.zero { color: #bbb; }
+.grid td.bad, .grid td.err { color: var(--bad); }
+.grid td.live { color: #06c; font-weight: 600; }
+.grid td.ok { color: var(--good); }
+.grid tbody tr:hover { background: #f6f6f6; cursor: pointer; }
+.grid tr.selected { background: #eef4ff; }
+.grid.jobs tbody tr { cursor: default; }
+.grid.jobs tr.failed { background: #fdf6f6; }
+.grid.jobs tr.running { background: #f0f6ff; }
+.grid td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; white-space: nowrap; }
+.grid td.err { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; max-width: 28rem; overflow-wrap: anywhere; }
+.badge.running { color: #06c; border-color: #06c; }
+.badge.done { color: var(--muted); }
+.admin select { font: inherit; padding: .3rem; }
