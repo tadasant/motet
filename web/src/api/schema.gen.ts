@@ -58,6 +58,77 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/llm-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Llm Config
+         * @description Every LLM stage's resolved model and effort, where each came from, and the catalogue.
+         *
+         *     Where settings are not writable the rows are neither read nor shown: the answer is the
+         *     environment's, which is what every job on this deployment runs.
+         */
+        get: operations["get_llm_config_v1_admin_llm_config_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/llm-config/{stage}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Llm Config
+         * @description Set or clear one stage's model and effort. Applies to the next job a worker claims.
+         *
+         *     Validated before anything is written, by the same function the worker applies rows
+         *     through: an unknown slug, an effort the slug does not accept, or a slug outside the
+         *     catalogue is a 400 with the resolver's own message.
+         */
+        put: operations["put_llm_config_v1_admin_llm_config__stage__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/llm-spend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Llm Spend
+         * @description What each LLM stage, user and pipeline queue spent, from the `llm_usage` ledger.
+         *
+         *     Its own route rather than a field on `/v1/admin/overview`: that one is polled every few
+         *     seconds for queue state, and a sum over the ledger is neither cheap enough nor fresh
+         *     enough to be worth re-asking at that rate.
+         */
+        get: operations["get_llm_spend_v1_admin_llm_spend_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/overview": {
         parameters: {
             query?: never;
@@ -1203,6 +1274,32 @@ export interface components {
              */
             user_id: string | null;
         };
+        /**
+         * AdminLlmSpendResponse
+         * @description The `llm_usage` ledger: what each stage, user and queue spent. Admins only.
+         *
+         *     One row per pipeline completion, written by the worker. Nothing is backfilled, so
+         *     `since` is when the first retained row landed (null if none), and rows older than
+         *     `retention_days` are deleted. Voice turns are not in it: the voice service has no
+         *     database, so its spend is the `motet.llm.tokens` metric only.
+         */
+        AdminLlmSpendResponse: {
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Retention Days */
+            retention_days: number;
+            /** Since */
+            since: string | null;
+            /** @description Everything retained, since `since`. */
+            total: components["schemas"]["LlmSpendBreakdown"];
+            /** @description The last `window_days` days. */
+            window: components["schemas"]["LlmSpendBreakdown"];
+            /** Window Days */
+            window_days: number;
+        };
         /** AdminNewsItemCounts */
         AdminNewsItemCounts: {
             /** Read */
@@ -1295,6 +1392,14 @@ export interface components {
             jobs: components["schemas"]["AdminJobCounts"];
             news_items: components["schemas"]["AdminNewsItemCounts"];
             source_items: components["schemas"]["AdminSourceItemCounts"];
+            /** User Id */
+            user_id: string;
+        };
+        /** AdminUserSpend */
+        AdminUserSpend: {
+            /** Email */
+            email: string | null;
+            spend: components["schemas"]["LlmSpend"];
             /** User Id */
             user_id: string;
         };
@@ -1599,6 +1704,11 @@ export interface components {
              */
             inference_mode: string;
             /**
+             * Llm Overrides In Force
+             * @description Whether any `settings` row is changing what a worker's job runs on right now. Reported because an override and a clean environment look identical from outside, and the worker's boot log no longer describes what a job runs once one exists. Always false where settings_writable is false, without a database read; null when the table could not be read. Which stage and which model are not reported here — that is the admin screen's.
+             */
+            llm_overrides_in_force: boolean | null;
+            /**
              * Login Configured
              * @description Whether signing in with Google can succeed for anyone. False means either no allowlist is set — which denies everybody, deliberately — or, in real mode, no Google OAuth client is configured. Reported for the same reason as 'authenticated': a login that denies silently looks exactly like one nobody has tried.
              */
@@ -1613,6 +1723,11 @@ export interface components {
              * @description OTel service name this process reports as
              */
             service: string;
+            /**
+             * Settings Writable
+             * @description Whether this deployment honours runtime `settings` rows — per-stage LLM model and effort chosen on the admin screen. False in production, where the environment is the whole model configuration and no row is read.
+             */
+            settings_writable: boolean;
             /**
              * Status
              * @description 'ok' when the process is serving
@@ -1910,6 +2025,191 @@ export interface components {
             listened_through_ms: number;
             /** News Items Marked Read */
             news_items_marked_read: number;
+        };
+        /**
+         * LlmConfigResponse
+         * @description Every LLM stage's model and effort, where each came from, and what may be chosen.
+         */
+        LlmConfigResponse: {
+            /**
+             * Applies
+             * @description When a saved change takes effect on the worker: `next_job`, always.
+             */
+            applies: string;
+            /** Models */
+            models: components["schemas"]["LlmModelOption"][];
+            /**
+             * Precedence
+             * @description Sources from highest to lowest precedence, as `*_source` spells them.
+             */
+            precedence: string[];
+            /**
+             * Settings Error
+             * @description Why the stored rows are not being applied, when they do not resolve against this environment — a slug a later deploy took out of the catalogue, say. A worker ignores all of them in that case and says so at ERROR.
+             */
+            settings_error: string | null;
+            /** Stages */
+            stages: components["schemas"]["LlmStageConfigResponse"][];
+            /**
+             * Writable
+             * @description Whether this deployment honours `settings` rows at all. False — production — means the environment is the whole configuration, no row is read, and a PUT is refused with 409.
+             */
+            writable: boolean;
+            /**
+             * Writable Env
+             * @description The variable that decides `writable`.
+             */
+            writable_env: string;
+        };
+        /**
+         * LlmModelOption
+         * @description One catalogue row, as the admin screen's dropdown needs it.
+         */
+        LlmModelOption: {
+            /** Adaptive Thinking */
+            adaptive_thinking: boolean;
+            /** Cache Read Usd Per Mtok */
+            cache_read_usd_per_mtok: number;
+            /**
+             * Cache Write 1H Usd Per Mtok
+             * @description Cache writes at the 1-hour TTL.
+             */
+            cache_write_1h_usd_per_mtok: number;
+            /**
+             * Cache Write Usd Per Mtok
+             * @description Cache writes at the 5-minute TTL.
+             */
+            cache_write_usd_per_mtok: number;
+            /**
+             * Efforts
+             * @description Reasoning efforts this slug accepts; empty means it takes only `off`.
+             */
+            efforts: string[];
+            /** Input Usd Per Mtok */
+            input_usd_per_mtok: number;
+            /** Output Usd Per Mtok */
+            output_usd_per_mtok: number;
+            /** Reasoning On By Default */
+            reasoning_on_by_default: boolean;
+            /** Slug */
+            slug: string;
+        };
+        /**
+         * LlmSpend
+         * @description Summed completions and tokens for one bucket, and what they cost in USD.
+         */
+        LlmSpend: {
+            /** Cache Read Tokens */
+            cache_read_tokens: number;
+            /** Cache Write Tokens */
+            cache_write_tokens: number;
+            /** Completions */
+            completions: number;
+            /**
+             * Input Tokens
+             * @description Includes both cache figures, as billed.
+             */
+            input_tokens: number;
+            /**
+             * Output Tokens
+             * @description Includes reasoning, as billed.
+             */
+            output_tokens: number;
+            /** Reasoning Tokens */
+            reasoning_tokens: number;
+            /**
+             * Unpriced Completions
+             * @description Completions on a model the catalogue has no price for, which `usd` leaves out rather than counting as free. Nonzero means the total is a lower bound.
+             */
+            unpriced_completions: number;
+            /**
+             * Usd
+             * @description Priced from the committed catalogue, per model and TTL.
+             */
+            usd: number;
+        };
+        /**
+         * LlmSpendBreakdown
+         * @description One period of the ledger, folded three ways.
+         */
+        LlmSpendBreakdown: {
+            /**
+             * Queues
+             * @description Queues that make LLM calls: integrate is dedup + dedup_confirm, script is script. Voice is on no queue.
+             */
+            queues: {
+                [key: string]: components["schemas"]["LlmSpend"];
+            };
+            /**
+             * Stages
+             * @description Every LLM stage, at zero when unused.
+             */
+            stages: {
+                [key: string]: components["schemas"]["LlmSpend"];
+            };
+            /**
+             * Users
+             * @description Users with spend in the period, most expensive first.
+             */
+            users: components["schemas"]["AdminUserSpend"][];
+        };
+        /**
+         * LlmStageConfigResponse
+         * @description One stage's resolved model and effort, with the whole precedence chain beside it.
+         *
+         *     `model`/`effort` are what a job would resolve right now; the `*_source` fields say
+         *     which rung won. The rungs themselves are reported so the screen can show the chain and
+         *     not only its answer: `setting_*` is the `settings` row, `stage_env_*` the
+         *     `MOTET_LLM_*_<STAGE>` variable, `global_env_*` the `MOTET_LLM_*` variable, `default_*`
+         *     the committed default. Effort values are an effort name or `"off"`.
+         */
+        LlmStageConfigResponse: {
+            /** Default Effort */
+            default_effort: string;
+            /** Default Model */
+            default_model: string;
+            /** Effort */
+            effort: string;
+            /**
+             * Effort Source
+             * @description `settings`, `stage_env`, `global_env` or `default`.
+             */
+            effort_source: string;
+            /** Global Env Effort */
+            global_env_effort: string | null;
+            /** Global Env Model */
+            global_env_model: string | null;
+            /** Model */
+            model: string;
+            /**
+             * Model Source
+             * @description `settings`, `stage_env`, `global_env` or `default`.
+             */
+            model_source: string;
+            /** Setting Effort */
+            setting_effort: string | null;
+            /** Setting Model */
+            setting_model: string | null;
+            /** Stage */
+            stage: string;
+            /** Stage Env Effort */
+            stage_env_effort: string | null;
+            /** Stage Env Model */
+            stage_env_model: string | null;
+        };
+        /**
+         * LlmStageConfigUpdate
+         * @description Set or clear one stage's `settings` rows.
+         *
+         *     A field left out is untouched; `null` clears that row; a string sets it. Effort takes
+         *     an effort name or `"off"`. Only catalogue slugs are accepted, even where the
+         *     environment allows an unlisted one.
+         */
+        LlmStageConfigUpdate: {
+            /** Effort */
+            effort?: string | null;
+            /** Model */
+            model?: string | null;
         };
         /**
          * LoginResponse
@@ -2731,6 +3031,127 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    get_llm_config_v1_admin_llm_config_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConfigResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_llm_config_v1_admin_llm_config__stage__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                /** @description An LLM stage, as `GET` lists them. */
+                stage: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmStageConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConfigResponse"];
+                };
+            };
+            /** @description The change does not resolve: an unknown slug, or an effort the slug does not take. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such LLM stage. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Settings are read-only on this deployment. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_llm_spend_v1_admin_llm_spend_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminLlmSpendResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

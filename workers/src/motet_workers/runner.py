@@ -51,11 +51,14 @@ from dataclasses import dataclass
 from types import FrameType
 
 import motet_obs
+from motet_db import repo
+from motet_db import settings as settings_repo
 from motet_inference import get_stages
 from motet_inference.llm import validate_startup as validate_llm_startup
 from motet_storage import build_store
 from motet_vault import vault_status
 
+from .llm_context import job_overrides
 from .loop import MAX_JOBS_PER_RUN, drain, prune_jobs
 from .queues import PIPELINE, Queue
 
@@ -131,6 +134,38 @@ def _install_sigterm(stop: _Stop) -> None:
     signal.signal(signal.SIGTERM, _handler)
 
 
+def _report_llm_settings(database_url: str) -> None:
+    """Say at boot whether ``settings`` rows will change what the line above just logged.
+
+    Per-job overrides mean the ``llm:`` boot line is no longer the whole story where
+    ``MOTET_SETTINGS_WRITABLE`` is on, so this is the second half of it: which stages the
+    rows move, resolved by the same function each job will use (motet#92). **Never fatal**
+    — a bad row is ignored per job with an ERROR of its own, and refusing to boot over one
+    would make a dropdown able to stop the pipeline. Where the switch is off it reads
+    nothing and says so in one line, which is the answer production should always give.
+    """
+    if not settings_repo.settings_writable(os.environ):
+        logger.info(
+            "llm settings: %s is off, so settings rows are ignored and the line above is "
+            "what every job runs",
+            settings_repo.SETTINGS_WRITABLE_ENV,
+        )
+        return
+    try:
+        with repo.connect(database_url) as conn:
+            overrides = job_overrides(conn)
+    except Exception:  # noqa: BLE001 — a boot report must not stop a worker
+        logger.exception("llm settings: could not check the settings table at boot")
+        return
+    if overrides:
+        logger.warning(
+            "llm settings: rows override the environment for every job: %s",
+            ", ".join(f"{key}={value}" for key, value in sorted(overrides.items())),
+        )
+    else:
+        logger.info("llm settings: writable, and no row overrides the environment")
+
+
 def main(argv: list[str] | None = None) -> int:
     # `prog` is set because argparse would otherwise take it from `sys.argv[0]`, which
     # under `python -m` is the file — so `--help` announced itself as `runner.py`, a name
@@ -192,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         parser.error("DATABASE_URL is not set")
+    _report_llm_settings(database_url)
 
     queues = list(PIPELINE) if args.queue == ALL_QUEUES else [Queue(args.queue)]
 

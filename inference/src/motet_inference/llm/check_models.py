@@ -24,10 +24,21 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .config import KNOWN_MODELS
+from .config import KNOWN_MODELS, ModelSpec
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 TIMEOUT_SECONDS = 30
+
+#: Each catalogue price, and the ``pricing`` key OpenRouter quotes it under — per token
+#: there, per million tokens here. A key the live entry omits is a price of zero, which is
+#: how OpenRouter says "not charged" (OpenAI's cache writes).
+PRICE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("input_usd_per_mtok", "prompt"),
+    ("output_usd_per_mtok", "completion"),
+    ("cache_read_usd_per_mtok", "input_cache_read"),
+    ("cache_write_usd_per_mtok", "input_cache_write"),
+    ("cache_write_1h_usd_per_mtok", "input_cache_write_1h"),
+)
 
 
 def fetch_live_slugs() -> dict[str, Any]:
@@ -35,6 +46,60 @@ def fetch_live_slugs() -> dict[str, Any]:
     with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310
         payload = json.load(response)
     return {entry["id"]: entry for entry in payload["data"]}
+
+
+def drift(spec: ModelSpec, entry: dict[str, Any]) -> list[str]:
+    """Every way ``spec`` disagrees with OpenRouter's live ``entry`` for the same slug.
+
+    Pure, so the comparison is covered offline in ``inference/tests`` even though fetching
+    the list is not (invariant 7).
+    """
+    notes: list[str] = []
+    context = entry.get("context_length")
+    if isinstance(context, int) and context != spec.context_tokens:
+        notes.append(f"context {spec.context_tokens} -> {context}")
+
+    reasoning = entry.get("reasoning") or {}
+    # Some providers list "none" among the efforts. We model "do not think" as no
+    # reasoning config at all (`MOTET_LLM_EFFORT_<STAGE>=off`), not as an effort
+    # level, so it is not a catalogue entry and its absence is not drift.
+    live_efforts = tuple(e for e in (reasoning.get("supported_efforts") or ()) if e != "none")
+    if set(live_efforts) != set(spec.efforts):
+        notes.append(f"efforts {sorted(spec.efforts)} -> {sorted(live_efforts)}")
+
+    # Absent means off, which is how Sonnet 4.6 reports it. This one *is* published,
+    # and checking it is the point: the catalogue's first draft asserted "on by
+    # default from Claude 4.6 onward" and was wrong for two rows, which nothing would
+    # have caught. See ModelSpec for why the two reasoning facts are not one fact.
+    live_default_enabled = bool(reasoning.get("default_enabled"))
+    if live_default_enabled != spec.reasoning_on_by_default:
+        notes.append(
+            f"reasoning on by default {spec.reasoning_on_by_default} -> {live_default_enabled}"
+        )
+
+    pricing = entry.get("pricing") or {}
+    live_ttl_1h = "input_cache_write_1h" in pricing
+    if live_ttl_1h != spec.supports_cache_ttl_1h:
+        notes.append(f"1h cache {spec.supports_cache_ttl_1h} -> {live_ttl_1h}")
+
+    # Prices were a dated comment until motet#92 put them in front of an operator as
+    # dollars; a stale one is now a wrong number on a screen rather than a wrong comment.
+    for field, key in PRICE_FIELDS:
+        try:
+            live = float(pricing.get(key) or 0) * 1_000_000
+        except (TypeError, ValueError):
+            notes.append(f"{key} price unreadable: {pricing.get(key)!r}")
+            continue
+        ours = float(getattr(spec, field))
+        if abs(live - ours) > 1e-6:
+            notes.append(f"{field} {ours:g} -> {live:g}")
+
+    # The snapshot a response reports its model as. A stale one prices every real
+    # completion as an unknown model — see ModelSpec.canonical_slug.
+    live_canonical = entry.get("canonical_slug")
+    if isinstance(live_canonical, str) and live_canonical != spec.canonical_slug:
+        notes.append(f"canonical slug {spec.canonical_slug!r} -> {live_canonical!r}")
+    return notes
 
 
 def main(argv: list[str]) -> int:
@@ -54,34 +119,7 @@ def main(argv: list[str]) -> int:
             failures += 1
             continue
 
-        notes: list[str] = []
-        context = entry.get("context_length")
-        if isinstance(context, int) and context != spec.context_tokens:
-            notes.append(f"context {spec.context_tokens} -> {context}")
-
-        reasoning = entry.get("reasoning") or {}
-        # Some providers list "none" among the efforts. We model "do not think" as no
-        # reasoning config at all (`MOTET_LLM_EFFORT_<STAGE>=off`), not as an effort
-        # level, so it is not a catalogue entry and its absence is not drift.
-        live_efforts = tuple(e for e in (reasoning.get("supported_efforts") or ()) if e != "none")
-        if set(live_efforts) != set(spec.efforts):
-            notes.append(f"efforts {sorted(spec.efforts)} -> {sorted(live_efforts)}")
-
-        # Absent means off, which is how Sonnet 4.6 reports it. This one *is* published,
-        # and checking it is the point: the catalogue's first draft asserted "on by
-        # default from Claude 4.6 onward" and was wrong for two rows, which nothing would
-        # have caught. See ModelSpec for why the two reasoning facts are not one fact.
-        live_default_enabled = bool(reasoning.get("default_enabled"))
-        if live_default_enabled != spec.reasoning_on_by_default:
-            notes.append(
-                f"reasoning on by default {spec.reasoning_on_by_default} -> {live_default_enabled}"
-            )
-
-        pricing = entry.get("pricing") or {}
-        live_ttl_1h = "input_cache_write_1h" in pricing
-        if live_ttl_1h != spec.supports_cache_ttl_1h:
-            notes.append(f"1h cache {spec.supports_cache_ttl_1h} -> {live_ttl_1h}")
-
+        notes = drift(spec, entry)
         if notes:
             print(f"DRIFT    {slug}  — {'; '.join(notes)}")
             failures += 1

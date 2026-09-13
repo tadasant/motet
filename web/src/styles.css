@@ -747,3 +747,14 @@ details > summary:hover { color: var(--ink); }
 /* A pill drawn rather than pressed — the landing's picture of the transport. */
 .pill-static { border: 1px solid var(--rule); border-radius: 999px; color: var(--ink); }
 .wordmark-link { text-decoration: none; }
+
+/* /admin "Models & spend" (motet#92) */
+.grid.models tbody tr, .grid.spend-by tbody tr { cursor: default; }
+.grid.models tbody tr:hover, .grid.spend-by tbody tr:hover { background: transparent; }
+.grid.models tr.overridden { background: color-mix(in srgb, var(--ochre) 14%, transparent); }
+.grid.models select { font: inherit; font-size: 13px; padding: .2rem .4rem; max-width: 16rem; }
+.grid td.spend { font-variant-numeric: tabular-nums; white-space: nowrap; width: 6rem; }
+.grid.spend-by { max-width: 36rem; }
+.chain { display: flex; flex-wrap: wrap; gap: .15rem .5rem; margin-top: .25rem; font-size: 11px; font-family: var(--mono); }
+.chain .won { color: var(--teal); font-weight: 600; }
+.chain .lost { color: var(--ink-mute); }

@@ -92,6 +92,7 @@ OVERRIDE_NAMES = (
     "OTEL_SERVICE_NAME",
     "OTEL_RESOURCE_ATTRIBUTES",
     "MOTET_VOICE_API_BASE_URL",
+    "MOTET_SETTINGS_WRITABLE",
 )
 
 #: The variables the block deliberately leaves *unset*. They are reserved for the same
@@ -152,6 +153,10 @@ OTEL_RESOURCE_ATTRIBUTES=service.version=local
 
 # Only matters if the voice service is run; harmless otherwise.
 MOTET_VOICE_API_BASE_URL=http://localhost:8000
+
+# The admin screen's per-stage model and effort dropdowns save, and the worker applies
+# them from its next job. A laptop and staging only; production never sets it (motet#92).
+MOTET_SETTINGS_WRITABLE=1
 
 # Deliberately unset, each for its own reason:
 #

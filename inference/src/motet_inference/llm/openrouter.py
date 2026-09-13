@@ -292,6 +292,7 @@ class OpenRouterClient:
                     + self._budget_detail(request, usage, finish_reason),
                     usage=usage,
                     model=served_model(data, request),
+                    cache_ttl=request.cache_ttl,
                 )
             raise LlmTransportError(
                 "OpenRouter returned an empty completion "
@@ -303,6 +304,7 @@ class OpenRouterClient:
                 + self._budget_detail(request, usage, finish_reason),
                 usage=usage,
                 model=served_model(data, request),
+                cache_ttl=request.cache_ttl,
             )
         if finish_reason == "length":
             logger.warning(
@@ -316,6 +318,7 @@ class OpenRouterClient:
             usage=usage,
             reasoning_applied=applied,
             finish_reason=finish_reason,
+            cache_ttl=request.cache_ttl,
         )
 
         if request.reasoning is not None and not applied:

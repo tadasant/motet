@@ -30,6 +30,13 @@ logged on close. Same mechanism, one scope smaller; ``voice/src/motet_voice/sess
 where it lives, named as a path rather than as a cross-reference because ``motet-inference``
 knows nothing about ``motet-voice`` and must not start.
 
+**A third caller wants each completion as a row rather than as a total**, which is the
+worker writing ``llm_usage`` (motet#92): per-user spend is the one number neither shape
+above can produce, because the metric must not carry an id and a log line cannot be summed
+from a route. :func:`usage_sink` is that hook, beside :func:`collect_usage` and independent
+of it. The voice service installs none — it has no database (invariant 2) — so its turns
+stay a metric and a log line.
+
 The ledger is a :class:`~contextvars.ContextVar` rather than a parameter, and that is the
 whole reason this is cheap: threading a cost accumulator through
 :meth:`~motet_inference.interfaces.ScriptGenerator.generate` would put it in the Protocol,
@@ -41,18 +48,19 @@ nothing to add to.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from opentelemetry import metrics
 
-from .llm import LlmBudgetExhaustedError, LlmResponse, LlmStage, Usage
+from .llm import CacheTtl, LlmBudgetExhaustedError, LlmResponse, LlmStage, Usage
 
 __all__ = [
     "Ledger",
     "StageUsage",
+    "UsageSink",
     "collect_usage",
     "describe_usage",
     "record_budget_exhausted",
@@ -60,6 +68,7 @@ __all__ = [
     "record_script_drop",
     "record_tts_characters",
     "record_usage",
+    "usage_sink",
 ]
 
 logger = logging.getLogger("motet.inference.cost")
@@ -137,6 +146,9 @@ class StageUsage:
     stage: LlmStage
     model: str
     usage: Usage
+    #: Which rate ``usage.cache_write_tokens`` was billed at — see
+    #: :attr:`~motet_inference.llm.LlmRequest.cache_ttl`.
+    cache_ttl: CacheTtl | None = None
 
 
 @dataclass
@@ -182,6 +194,29 @@ def collect_usage() -> Iterator[Ledger]:
         _ledger.reset(token)
 
 
+#: Something that wants every completion as it is recorded, one call each.
+UsageSink = Callable[[StageUsage], None]
+
+_sink: ContextVar[UsageSink | None] = ContextVar("motet_llm_usage_sink", default=None)
+
+
+@contextmanager
+def usage_sink(sink: UsageSink) -> Iterator[None]:
+    """Hand every completion recorded inside the block to ``sink``, one call per completion.
+
+    **The sink is called last, after the metric and the log line, and it may not raise.**
+    Last so that a sink with a bug cannot cost the two signals that already existed; and an
+    exception out of it is caught and logged here rather than propagated, because it would
+    otherwise surface inside a stage adapter as if the *completion* had failed — and a
+    stage that retried on that would bill the call a second time to record it once.
+    """
+    token = _sink.set(sink)
+    try:
+        yield
+    finally:
+        _sink.reset(token)
+
+
 def record_usage(stage: LlmStage, response: LlmResponse) -> None:
     """Count one completion: on the obs stack, in the log, and in the ledger if there is one.
 
@@ -190,7 +225,7 @@ def record_usage(stage: LlmStage, response: LlmResponse) -> None:
     does not carry one — a request knows its model, which is already decided by the time it
     exists.
     """
-    _record(stage, response.model, response.usage)
+    _record(stage, response.model, response.usage, response.cache_ttl)
 
 
 def record_budget_exhausted(stage: LlmStage, error: LlmBudgetExhaustedError) -> None:
@@ -212,10 +247,10 @@ def record_budget_exhausted(stage: LlmStage, error: LlmBudgetExhaustedError) -> 
         "llm %s on %s spent its budget without producing an answer: %s", stage.value, model, error
     )
     if error.usage is not None:
-        _record(stage, model, error.usage)
+        _record(stage, model, error.usage, error.cache_ttl)
 
 
-def _record(stage: LlmStage, model: str, usage: Usage) -> None:
+def _record(stage: LlmStage, model: str, usage: Usage, cache_ttl: CacheTtl | None) -> None:
     attributes = {"stage": stage.value, "model": model}
     _requests.add(1, attributes)
     for kind, value in (
@@ -230,9 +265,16 @@ def _record(stage: LlmStage, model: str, usage: Usage) -> None:
 
     logger.info("llm %s on %s: %s", stage.value, model, describe_usage(usage))
 
+    entry = StageUsage(stage=stage, model=model, usage=usage, cache_ttl=cache_ttl)
     ledger = _ledger.get()
     if ledger is not None:
-        ledger.entries.append(StageUsage(stage=stage, model=model, usage=usage))
+        ledger.entries.append(entry)
+    sink = _sink.get()
+    if sink is not None:
+        try:
+            sink(entry)
+        except Exception:  # noqa: BLE001 — recording a bill must not look like a failed call
+            logger.exception("a usage sink raised for %s on %s; the entry is dropped", stage, model)
 
 
 def record_tts_characters(count: int) -> None:
