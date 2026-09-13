@@ -934,7 +934,9 @@ describe('the /oauth/callback landing', () => {
 
     const sources = await screen.findByRole('region', { name: 'Sources' })
     expect(window.location.pathname).toBe('/sources')
-    expect(within(sources).getByRole('status').textContent).toMatch(/did not grant access/)
+    // The first status on the screen, above the catalog's own per-row notices.
+    const [first] = within(sources).getAllByRole('status')
+    expect(first?.textContent).toMatch(/did not grant access/)
 
     // Once: leaving the section takes it down, and coming back does not bring it back.
     fireEvent.click(screen.getByRole('link', { name: /^Backlog/ }))

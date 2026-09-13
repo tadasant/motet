@@ -149,7 +149,7 @@ label { font-weight: 600; font-size: .9rem; }
    not an error: the deployment is misconfigured or idle, not broken (motet#38). */
 /* Something that happened and is worth saying once — a consent that was cancelled. The
    same shape as `.stalled` in a neutral colour, because it is news rather than a fault. */
-.notice { border-left: 3px solid var(--line); background: #f6f6f6; padding: .5rem .75rem; margin: .5rem 0 1rem; }
+.consent-notice { border-left: 3px solid var(--line); background: #f6f6f6; padding: .5rem .75rem; margin: .5rem 0 1rem; }
 .stalled { border-left: 3px solid var(--bad); background: #fdf6f6; padding: .5rem .75rem; margin: .5rem 0 0; font-size: .9rem; }
 /* A button that reads as a link, for choosing between things rather than doing one. */
 .linkish { background: none; border: 0; padding: 0; color: var(--fg); text-decoration: underline; }

@@ -108,7 +108,7 @@ export default function App() {
   const [callback, setCallback] = useState(readCallback)
   // What Google said when it refused, carried from the callback page to the screen the
   // flow started on (motet#98). Cancelling a consent is an answer, and until this existed
-  // the only trace of it on Sources was a row reading "waiting for consent" — which is
+  // the only trace of it on Sources was a row reading "Consent not finished" — which is
   // what an *abandoned* attempt and one still in progress both look like. Cleared when
   // the section changes, so it is said once rather than sitting there for the rest of the
   // session.

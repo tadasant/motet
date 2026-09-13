@@ -47,10 +47,9 @@ const REFRESH_MS = 10_000
 export function Sources({
   /**
    * What Google said when it refused the last consent, if it refused one — carried here
-   * from the callback page by App (motet#98). Shown at the top, because this is the
-   * screen the flow started on and the screen it lands back on: the row it produced says
-   * "waiting for consent", which is what an abandoned attempt and a live one both look
-   * like, so without this sentence a cancelled grant leaves no trace anybody can read.
+   * from the callback page by App (motet#98). Shown once at the top, because this is the
+   * screen the flow lands back on, and the row the attempt left says only "Consent not
+   * finished" — which a Cancel, a closed tab and a flow still in progress all look like.
    */
   notice = '',
   /** Overridden only by tests: jsdom cannot navigate. */
@@ -159,7 +158,7 @@ export function Sources({
       {/* `role="status"` and not `alert`: pressing Cancel on Google's page is a supported
           answer, and the sentence says what was *not* changed rather than what broke. */}
       {notice && (
-        <p className="hint notice" role="status">
+        <p className="hint consent-notice" role="status">
           {notice}
         </p>
       )}
