@@ -90,7 +90,7 @@ export function Credentials({
       <p className="lead">
         The sites Motet may fetch full articles from, when a newsletter is only a preview of
         one — and the logins and tools the fetching agent may use there. Nothing is fetched
-        until enrichment is switched on for this deployment.
+        until enrichment runs in this deployment.
       </p>
 
       {error && (

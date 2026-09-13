@@ -406,11 +406,19 @@ export interface paths {
          * Authorize Connector
          * @description Discover the server's authorization server, register a client, mint a consent URL.
          *
-         *     Discovery runs on every authorize: the row records what it found so a *refresh* can skip
-         *     it, but a person re-authorizing is the moment to notice a server that moved.
-         *     Registration is skipped while the recorded issuer is unchanged, so pressing Authorize
-         *     twice does not mint a client per click. ``redirect_uri`` comes from the client for
-         *     ``/v1/sources/connect``'s reason, and the server validates it against the registration.
+         *     **Nothing about the connector changes until consent completes.** What discovery and
+         *     registration produced is bound to the state row and written onto the connector only by
+         *     the callback, beside the token set it issued — so a re-authorize the owner abandons
+         *     leaves a working server's client, endpoint and grant exactly as they were.
+         *
+         *     Discovery runs on every authorize, because a person re-authorizing is the moment to
+         *     notice a server that moved. The recorded client is reused only while both the issuer
+         *     and the redirect URI it was registered with are unchanged: a dynamically registered
+         *     client is bound to its redirect URI, so a new app origin needs a new client.
+         *
+         *     ``redirect_uri`` must be this deployment's own callback (``Settings.callback_uri_allowed``,
+         *     as sign-in checks it). Unlike Google's, a dynamically registered client accepts whatever
+         *     URI it was registered with, so the server's own check proves nothing here.
          */
         post: operations["authorize_connector_v1_connectors__connector_id__authorize_post"];
         delete?: never;

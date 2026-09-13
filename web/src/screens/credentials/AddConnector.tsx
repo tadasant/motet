@@ -164,10 +164,11 @@ export function AddConnector({ onAdded }: { onAdded: (connector: Connector) => v
                 account — to read what the server can see and carry it somewhere else.
               </p>
               <p>
-                Motet narrows that: the browser is locked to the article&rsquo;s site, runs with
-                no access to Motet&rsquo;s database or keys, and the transcript keeps no tool
-                result from a server like this one. It does not close it. Connect only a server
-                whose worst case you would accept — a read-only mailbox, not one that can send.
+                Enrichment is built to narrow that: its browser is locked to the article&rsquo;s
+                site, it runs with no access to Motet&rsquo;s database or keys, and its
+                transcript keeps no tool result from a server like this one. That narrows the
+                risk; it does not close it. Connect only a server whose worst case you would
+                accept — a read-only mailbox, not one that can send.
               </p>
               <label className="check">
                 <input

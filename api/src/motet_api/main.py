@@ -72,6 +72,7 @@ from motet_sources.mcp_oauth import (
     AuthorizationServer,
     McpOAuthError,
     RegistrationUnsupportedError,
+    UnsafeUrlError,
     authorization_url,
     build_mcp_oauth_client,
 )
@@ -2299,16 +2300,31 @@ def authorize_connector(
     body: AuthorizeConnectorRequest,
     conn: Conn,
     user_id: User,
+    config: Config,
     connector_id: Annotated[str, Path()],
 ) -> AuthorizeConnectorResponse:
     """Discover the server's authorization server, register a client, mint a consent URL.
 
-    Discovery runs on every authorize: the row records what it found so a *refresh* can skip
-    it, but a person re-authorizing is the moment to notice a server that moved.
-    Registration is skipped while the recorded issuer is unchanged, so pressing Authorize
-    twice does not mint a client per click. ``redirect_uri`` comes from the client for
-    ``/v1/sources/connect``'s reason, and the server validates it against the registration.
+    **Nothing about the connector changes until consent completes.** What discovery and
+    registration produced is bound to the state row and written onto the connector only by
+    the callback, beside the token set it issued — so a re-authorize the owner abandons
+    leaves a working server's client, endpoint and grant exactly as they were.
+
+    Discovery runs on every authorize, because a person re-authorizing is the moment to
+    notice a server that moved. The recorded client is reused only while both the issuer
+    and the redirect URI it was registered with are unchanged: a dynamically registered
+    client is bound to its redirect URI, so a new app origin needs a new client.
+
+    ``redirect_uri`` must be this deployment's own callback (``Settings.callback_uri_allowed``,
+    as sign-in checks it). Unlike Google's, a dynamically registered client accepts whatever
+    URI it was registered with, so the server's own check proves nothing here.
     """
+    redirect_uri = body.redirect_uri.strip()
+    if not config.callback_uri_allowed(redirect_uri):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"redirect_uri must be this deployment's app origin plus {CALLBACK_PATH}.",
+        )
     connector = connector_repo.get_connector(conn, connector_id, user_id=user_id)
     if connector is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such connector.")
@@ -2318,31 +2334,30 @@ def authorize_connector(
     client = build_mcp_oauth_client()
     try:
         server = client.discover(connector.url)
+    except UnsafeUrlError as exc:
+        raise _connector_refused(
+            conn, connector, "error", status.HTTP_400_BAD_REQUEST, exc
+        ) from exc
     except McpOAuthError as exc:
         raise _connector_refused(
-            conn, connector.id, "error", status.HTTP_502_BAD_GATEWAY, exc
+            conn, connector, "error", status.HTTP_502_BAD_GATEWAY, exc
         ) from exc
 
-    client_id = connector.oauth_client_id if connector.oauth_issuer == server.issuer else None
+    reusable = (
+        connector.oauth_issuer == server.issuer and connector.oauth_redirect_uri == redirect_uri
+    )
+    client_id = connector.oauth_client_id if reusable else None
     if client_id is None:
         try:
-            client_id = client.register(server, redirect_uri=body.redirect_uri)
+            client_id = client.register(server, redirect_uri=redirect_uri)
         except RegistrationUnsupportedError as exc:
             raise _connector_refused(
-                conn, connector.id, "needs_auth", status.HTTP_409_CONFLICT, exc
+                conn, connector, "needs_auth", status.HTTP_409_CONFLICT, exc
             ) from exc
         except McpOAuthError as exc:
             raise _connector_refused(
-                conn, connector.id, "error", status.HTTP_502_BAD_GATEWAY, exc
+                conn, connector, "error", status.HTTP_502_BAD_GATEWAY, exc
             ) from exc
-    connector_repo.set_connector_oauth_client(
-        conn,
-        connector.id,
-        issuer=server.issuer,
-        client_id=client_id,
-        token_endpoint=server.token_endpoint,
-        resource=server.resource,
-    )
 
     phase2.purge_expired_oauth_states(conn)
     verifier, challenge = new_pkce_pair()
@@ -2355,13 +2370,20 @@ def authorize_connector(
         source_id_=None,
         connector_id_=connector.id,
         code_verifier=verifier,
-        redirect_uri=body.redirect_uri,
+        redirect_uri=redirect_uri,
         scopes=server.scopes,
+        oauth_client={
+            "issuer": server.issuer,
+            "client_id": client_id,
+            "token_endpoint": server.token_endpoint,
+            "resource": server.resource,
+            "iss_parameter_supported": server.iss_parameter_supported,
+        },
     )
     url = authorization_url(
         server,
         client_id=client_id,
-        redirect_uri=body.redirect_uri,
+        redirect_uri=redirect_uri,
         state=state,
         code_challenge=challenge,
     )
@@ -2393,38 +2415,60 @@ def connector_oauth_callback(
     connector = connector_repo.get_connector(conn, pending["connector_id"] or "", user_id=user_id)
     if connector is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The connector being authorized is gone.")
-    if not (
-        connector.oauth_client_id and connector.oauth_token_endpoint and connector.oauth_resource
+    bound = pending.get("oauth_client")
+    if not isinstance(bound, dict) or not all(
+        bound.get(key) for key in ("issuer", "client_id", "token_endpoint", "resource")
     ):
         raise HTTPException(status.HTTP_409_CONFLICT, "This connector was never sent to consent.")
-    if body.iss and connector.oauth_issuer and body.iss.rstrip("/") != connector.oauth_issuer:
-        # RFC 9207: a code delivered under another issuer is a mix-up, not a grant.
+    issuer = str(bound["issuer"])
+    # RFC 9207. A code delivered under another issuer is a mix-up, not a grant — and a
+    # server that promised to name itself on every response and did not name itself on this
+    # one is exactly the response a mix-up attacker would strip the name from.
+    if body.iss:
+        if body.iss.rstrip("/") != issuer:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "The authorization response came from a different issuer.",
+            )
+    elif bound.get("iss_parameter_supported"):
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "The authorization response came from a different issuer."
+            status.HTTP_400_BAD_REQUEST,
+            "The server says it names itself on every authorization response, and this one "
+            "did not. Start again.",
         )
 
     server = AuthorizationServer(
-        issuer=connector.oauth_issuer or "",
+        issuer=issuer,
         authorization_endpoint="",
-        token_endpoint=connector.oauth_token_endpoint,
+        token_endpoint=str(bound["token_endpoint"]),
         registration_endpoint=None,
-        resource=connector.oauth_resource,
-        scopes=tuple((pending.get("scopes") or "").split()),
-        iss_parameter_supported=False,
+        resource=str(bound["resource"]),
+        scopes=(),
+        iss_parameter_supported=bool(bound.get("iss_parameter_supported")),
     )
     try:
         tokens = build_mcp_oauth_client().exchange_code(
             server,
-            client_id=connector.oauth_client_id,
+            client_id=str(bound["client_id"]),
             code=body.code,
             redirect_uri=pending["redirect_uri"],
             code_verifier=pending["code_verifier"],
         )
     except McpOAuthError as exc:
         raise _connector_refused(
-            conn, connector.id, "needs_auth", status.HTTP_400_BAD_REQUEST, exc
+            conn, connector, "needs_auth", status.HTTP_400_BAD_REQUEST, exc
         ) from exc
 
+    # The client that issued this grant, recorded beside it, so a refresh asks the right one.
+    connector_repo.set_connector_oauth_client(
+        conn,
+        connector.id,
+        issuer=issuer,
+        client_id=str(bound["client_id"]),
+        token_endpoint=server.token_endpoint,
+        resource=server.resource,
+        redirect_uri=pending["redirect_uri"],
+    )
     try:
         stored = connector_repo.store_connector_secret(
             conn,
@@ -2444,7 +2488,7 @@ def connector_oauth_callback(
 
 def _connector_refused(
     conn: psycopg.Connection[Any],
-    connector_id: str,
+    connector: connector_repo.StoredConnector,
     outcome: connector_repo.ConnectorStatus,
     http_status: int,
     exc: McpOAuthError,
@@ -2454,8 +2498,15 @@ def _connector_refused(
     ``deps.connection`` rolls back on the exception about to be raised, which would undo the
     very ``last_error`` the screen needs to explain the pill — the same reason
     ``require_caller`` commits its revoke before raising.
+
+    **A server that already works stays `ready`.** A failed *re*-authorize — a network blip
+    during discovery, a Cancel, a refused code — leaves its sealed grant in force, so only
+    the reason is recorded; demoting the row would switch off a working server over a click.
     """
-    connector_repo.set_connector_status(conn, connector_id, status=outcome, last_error=str(exc))
+    keep = connector.has_secret and connector.status == "ready"
+    connector_repo.set_connector_status(
+        conn, connector.id, status="ready" if keep else outcome, last_error=str(exc)
+    )
     conn.commit()
     return HTTPException(http_status, str(exc))
 

@@ -127,7 +127,7 @@ describe('the Credentials screen', () => {
       expect.stringMatching(/No sites yet.*login is optional/s),
       expect.stringMatching(/No MCP servers yet.*Only OAuth-secured servers/s),
     ])
-    expect(screen.getByText(/Nothing is fetched until enrichment is switched on/)).toBeDefined()
+    expect(screen.getByText(/Nothing is fetched until enrichment runs/)).toBeDefined()
   })
 
   it('adds a site from its domain alone, normalized', async () => {

@@ -241,6 +241,79 @@ class TestOnTheWire:
     def test_canonical_resource_strips_the_selection_hint(self) -> None:
         assert canonical_resource("https://MCP.Example/mcp/?servers=a,b#x") == f"{ORIGIN}/mcp"
 
+    def test_a_confidential_client_is_refused(self) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201,
+                json={
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "token_endpoint_auth_method": "client_secret_basic",
+                },
+            )
+
+        oauth = HttpMcpOAuthClient(transport=httpx.MockTransport(handle), resolve=public)
+        found = FakeMcpOAuthClient().discover(MCP_URL)
+        with pytest.raises(McpOAuthError, match="confidential"):
+            oauth.register(found, redirect_uri=REDIRECT)
+
+    def test_a_client_registered_for_another_redirect_is_refused(self) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201, json={"client_id": "c", "redirect_uris": ["https://evil.example/cb"]}
+            )
+
+        oauth = HttpMcpOAuthClient(transport=httpx.MockTransport(handle), resolve=public)
+        with pytest.raises(McpOAuthError, match="different redirect URI"):
+            oauth.register(FakeMcpOAuthClient().discover(MCP_URL), redirect_uri=REDIRECT)
+
+    def test_a_non_json_page_at_one_location_falls_through_to_the_next(self) -> None:
+        seen: list[httpx.Request] = []
+        inner = server(seen)
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/mcp":
+                # No 401 pointer, so discovery walks the well-known locations.
+                seen.append(request)
+                return httpx.Response(405)
+            if request.url.path == "/.well-known/oauth-protected-resource/mcp":
+                seen.append(request)
+                return httpx.Response(200, text="<html>not here</html>")
+            if request.url.path == "/.well-known/oauth-protected-resource":
+                seen.append(request)
+                return httpx.Response(200, json=PRM)
+            return inner.handle_request(request)
+
+        found = HttpMcpOAuthClient(transport=httpx.MockTransport(handle), resolve=public).discover(
+            MCP_URL
+        )
+        assert found.issuer == ORIGIN
+        assert f"{ORIGIN}/.well-known/oauth-protected-resource" in [str(r.url) for r in seen]
+
+    def test_scopes_that_are_not_a_list_are_refused(self) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/.well-known/oauth-protected-resource/mcp":
+                return httpx.Response(200, json={**PRM, "scopes_supported": "mcp"})
+            return server([]).handle_request(request)
+
+        oauth = HttpMcpOAuthClient(transport=httpx.MockTransport(handle), resolve=public)
+        with pytest.raises(McpOAuthError, match="not a list"):
+            oauth.discover(MCP_URL)
+
+    def test_the_consent_url_never_lands_after_a_fragment(self) -> None:
+        found = FakeMcpOAuthClient().discover(MCP_URL)
+        odd = type(found)(
+            **{**found.__dict__, "authorization_endpoint": f"{ORIGIN}/authorize?a=1#x"}
+        )
+        url = authorization_url(
+            odd, client_id="cid", redirect_uri=REDIRECT, state="connector.s", code_challenge="ch"
+        )
+        parts = urlsplit(url)
+        assert parts.fragment == ""
+        assert parse_qs(parts.query)["a"] == ["1"] and parse_qs(parts.query)["state"] == [
+            "connector.s"
+        ]
+
 
 class TestTheGuards:
     def test_a_server_on_a_private_address_is_never_asked(self) -> None:
@@ -250,7 +323,18 @@ class TestTheGuards:
             oauth.discover(MCP_URL)
         assert seen == []
 
-    @pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "::1", "fd00::1"])
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "127.0.0.1",
+            "169.254.169.254",
+            "::1",
+            "fd00::1",
+            # `ipaddress` calls these global, and both still reach inwards.
+            "64:ff9b::a9fe:a9fe",
+            "::127.0.0.1",
+        ],
+    )
     def test_every_inward_address_is_refused(self, address: str) -> None:
         oauth = HttpMcpOAuthClient(transport=server([]), resolve=lambda _host: [address])
         with pytest.raises(UnsafeUrlError):

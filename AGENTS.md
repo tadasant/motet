@@ -1832,7 +1832,7 @@ built", are left alone.
 ### The SPA is a shell with a URL per section, and still not a router
 
 `web/src/shell/`. A fixed sidebar, a top bar holding the page title and the account menu,
-and one path per section — `/backlog`, `/episodes`, `/sources`, `/paste`, `/admin` — kept in
+and one path per section — `/backlog`, `/episodes`, `/sources`, `/paste`, `/credentials`, `/admin` — kept in
 React state by `usePath()`, about forty lines of `pushState` and `popstate` (motet#88). It
 replaced a tab strip held in component state, which lost its place on every reload: the
 shape of motet#44 one level up.
@@ -2761,8 +2761,9 @@ domain without one, so its username and password are both optional: a site reada
 the newsletter's own link needs neither, and one that emails a code needs only the
 address. A password with no username is refused by the table, because nobody can log in
 with it. The domain is normalized to a bare host — scheme, `www.`, path and port gone — and
-an IP literal is not a domain, because a site is a publication and an address is how a
-fetch gets pointed inwards.
+an IP literal is not a domain, because a site is a publication. **That is not an SSRF
+guard**: a host name can resolve inwards, so whatever fetches from a site checks the address
+it resolves to at fetch time.
 
 **An MCP server is kept (E1), and the risk is stated at the moment it is added rather than
 buried.** The agent that is handed a server also reads pages nobody at Motet wrote, so a
@@ -2786,6 +2787,18 @@ callback refuses a connector state before consuming it, for the reason it alread
 sign-in's. The state row rides `oauth_states` with a `connector_id` column beside
 `source_id`, which is a foreign key to `sources` and could not be reused.
 
+**Nothing on the connector changes until consent completes.** What discovery and registration
+produced for an authorization — issuer, client id, token endpoint, resource, and whether the
+server promises RFC 9207's `iss` — rides the state row (`oauth_states.oauth_client`) and is
+written onto the connector by the callback, beside the grant it issued. So an abandoned
+re-authorize leaves a working server's client and grant as they were, and a failed one
+records its reason without demoting a `ready` row. A recorded client is reused only while
+its issuer *and* the redirect URI it was registered with are unchanged, and that redirect
+URI must be this deployment's own callback, checked as sign-in checks it: a dynamically
+registered client accepts whatever it was registered with, so the server's own check proves
+nothing. A server that promises `iss` and omits it is refused, because that is the response
+a mix-up attacker strips.
+
 **The OAuth 2.1 client is in `motet_sources`, not the API**, because a worker has to refresh
 a token set before handing the server to the agent and the worker cannot import the API.
 It is the MCP specification's composition of RFCs 9728, 8414, 7591, 7636, 8707 and 9207 and
@@ -2795,9 +2808,12 @@ human step this does not automate. **Every URL a server hands it is untrusted, s
 stand in front of them.** Each request must be `https` to a host that resolves to a public
 address — a metadata document must not be able to point the API at the metadata server —
 and the authorization endpoint must be `https` too, because the SPA hands it to
-`window.location` and a `javascript:` URL there would run in Motet's own origin. The address
-check runs before the request rather than pinning the connection, so a DNS answer that
-changes in between is not covered; the docstring says so rather than implying more.
+`window.location` and a `javascript:` URL there would run in Motet's own origin. "Public"
+also excludes the NAT64 and IPv4-compatible IPv6 blocks `ipaddress` counts as global, and
+the HTTP client ignores ambient proxy settings, since through a proxy the guard would be
+checking a host the connection never reaches. The address check runs before the request
+rather than pinning the connection, so a DNS answer that changes in between is not covered;
+the docstring says so rather than implying more.
 
 **The invariant-12 reading, recorded as invariant 12 asks.** This adds a table, a new role
 for the vault, API routes and a screen — every one inside the design session above. Nothing

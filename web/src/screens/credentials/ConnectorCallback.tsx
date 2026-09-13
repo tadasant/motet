@@ -71,7 +71,8 @@ export function ConnectorCallback({ callback, onDone }: { callback: Callback; on
       )}
       {callback.kind === 'granted' && status.kind === 'done' && (
         <p className="ok" role="status">
-          {status.connector.label} is authorized. The enrichment agent may use it from now on.
+          {status.connector.label} is authorized. The enrichment agent may use it whenever
+          enrichment runs for one of your sites.
         </p>
       )}
       {callback.kind === 'granted' && status.kind === 'error' && (

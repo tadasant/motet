@@ -45,13 +45,15 @@ MCP: Final = "mcp"
 _PUBLIC_COLUMNS: Final = """
     id, user_id, kind, label, domain, domains, url, username,
     (ciphertext IS NOT NULL) AS has_secret, secret_expires_at,
-    oauth_issuer, oauth_client_id, oauth_token_endpoint, oauth_resource,
+    oauth_issuer, oauth_client_id, oauth_token_endpoint, oauth_resource, oauth_redirect_uri,
     risk_acknowledged_at, status, last_error, created_at, updated_at
 """
 
 #: A registrable host name: dot-separated labels of letters, digits and inner hyphens, and a
-#: top-level label that is not all digits. An IP literal is refused on purpose — a site the
-#: owner adds is a publication, and an address is how a fetch gets pointed inwards.
+#: top-level label that is not all digits. An IP literal is refused because a site the owner
+#: adds is a publication. **This is not an SSRF guard**: a host *name* can resolve inwards
+#: (an internal metadata name passes this pattern), so whatever fetches from a site must
+#: check the address it resolves to at fetch time, as `motet_sources.mcp_oauth` does.
 _DOMAIN_RE: Final = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
@@ -75,6 +77,7 @@ class StoredConnector:
     oauth_client_id: str | None
     oauth_token_endpoint: str | None
     oauth_resource: str | None
+    oauth_redirect_uri: str | None
     risk_acknowledged_at: datetime | None
     status: str
     last_error: str | None
@@ -229,16 +232,21 @@ def set_connector_oauth_client(
     client_id: str,
     token_endpoint: str,
     resource: str,
+    redirect_uri: str,
 ) -> None:
-    """Record what discovery and registration produced, so a refresh can skip both."""
+    """Record the client that issued a grant, so a refresh can skip discovery.
+
+    Called when consent completes, beside :func:`store_connector_secret`, never when it
+    starts — so these fields always describe the grant that is sealed on the row.
+    """
     conn.execute(
         """
         UPDATE connectors
         SET oauth_issuer = %s, oauth_client_id = %s, oauth_token_endpoint = %s,
-            oauth_resource = %s, updated_at = now()
+            oauth_resource = %s, oauth_redirect_uri = %s, updated_at = now()
         WHERE id = %s
         """,
-        (issuer, client_id, token_endpoint, resource, connector_id),
+        (issuer, client_id, token_endpoint, resource, redirect_uri, connector_id),
     )
 
 
@@ -346,6 +354,7 @@ def _connector(row: dict[str, Any]) -> StoredConnector:
         oauth_client_id=row["oauth_client_id"],
         oauth_token_endpoint=row["oauth_token_endpoint"],
         oauth_resource=row["oauth_resource"],
+        oauth_redirect_uri=row["oauth_redirect_uri"],
         risk_acknowledged_at=row["risk_acknowledged_at"],
         status=row["status"],
         last_error=row["last_error"],

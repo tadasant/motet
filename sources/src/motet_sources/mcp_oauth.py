@@ -65,6 +65,15 @@ _WELL_KNOWN_OIDC: Final = "/.well-known/openid-configuration"
 #: Resolves a host name to the addresses a connection to it would use.
 Resolver = Callable[[str], Sequence[str]]
 
+#: Addresses `ipaddress` calls global that still reach inwards: NAT64 prefixes, which a
+#: gateway maps onto IPv4 (169.254.169.254 among it), and the deprecated IPv4-compatible
+#: block, where `::127.0.0.1` is loopback.
+_INWARD_NETWORKS: Final = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("::/96"),
+)
+
 
 class McpOAuthError(RuntimeError):
     """The server did not do what the MCP authorization spec says it should."""
@@ -176,8 +185,9 @@ def authorization_url(
     }
     if server.scopes:
         params["scope"] = " ".join(server.scopes)
-    joiner = "&" if "?" in server.authorization_endpoint else "?"
-    return f"{server.authorization_endpoint}{joiner}{urlencode(params)}"
+    parts = urlsplit(server.authorization_endpoint)
+    query = f"{parts.query}&{urlencode(params)}" if parts.query else urlencode(params)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
 
 
 def canonical_resource(mcp_url: str) -> str:
@@ -215,6 +225,9 @@ class HttpMcpOAuthClient:
             timeout=timeout_seconds,
             transport=transport,
             follow_redirects=False,
+            # No ambient proxy and no .netrc: through a proxy the connection goes somewhere
+            # other than the host `_guard` resolved, and the guard would be checking nothing.
+            trust_env=False,
             headers={"User-Agent": "motet-connectors/1"},
         )
 
@@ -244,7 +257,10 @@ class HttpMcpOAuthClient:
             # The SPA hands this URL to `window.location`. Anything but https — and a
             # `javascript:` URL above all — would run in Motet's origin, not the server's.
             raise UnsafeUrlError("The authorization endpoint is not an https URL.")
-        scopes = tuple(str(s) for s in (prm.get("scopes_supported") or ()))
+        raw_scopes = prm.get("scopes_supported") or []
+        if not isinstance(raw_scopes, list):
+            raise McpOAuthError("The resource metadata's scopes_supported is not a list.")
+        scopes = tuple(str(s) for s in raw_scopes)
         return AuthorizationServer(
             issuer=str(meta["issuer"]).rstrip("/"),
             authorization_endpoint=authorize,
@@ -347,6 +363,11 @@ class HttpMcpOAuthClient:
         client_id = registered.get("client_id")
         if not client_id:
             raise McpOAuthError("Client registration answered without a client_id.")
+        echoed = registered.get("redirect_uris")
+        if isinstance(echoed, list) and redirect_uri not in echoed:
+            raise McpOAuthError(
+                "The server registered a client for a different redirect URI than Motet's."
+            )
         if (
             registered.get("client_secret")
             and registered.get("token_endpoint_auth_method") != "none"
@@ -429,7 +450,7 @@ class HttpMcpOAuthClient:
                 ip = ipaddress.ip_address(address.split("%", 1)[0])
             except ValueError as exc:
                 raise UnsafeUrlError(f"{host} resolves to {address!r}, not an address.") from exc
-            if not ip.is_global:
+            if not ip.is_global or any(ip in net for net in _INWARD_NETWORKS):
                 raise UnsafeUrlError(
                     f"{host} resolves to a private or reserved address, which a connector "
                     "may not reach."
@@ -454,7 +475,11 @@ class HttpMcpOAuthClient:
             return None
         if response.status_code != 200:
             return None
-        return _document(response, url, what)
+        try:
+            return _document(response, url, what)
+        except McpOAuthError:
+            # A catch-all HTML page at one well-known location is not the end of discovery.
+            return None
 
     def _json(self, url: str, what: str) -> dict[str, Any]:
         response = self._send("GET", url, what, headers={"Accept": "application/json"})

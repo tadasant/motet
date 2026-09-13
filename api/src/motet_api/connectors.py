@@ -47,8 +47,8 @@ MCP_RISK: Final = (
     "Connecting an MCP server hands its tools to the enrichment agent, and that agent also "
     "reads web pages nobody at Motet wrote. A hostile page can instruct it to use this "
     "server with your account — to read what the server can see and carry it somewhere "
-    "else. Motet's safeguards narrow that; they do not close it. Confirm you understand "
-    "this before connecting a server."
+    "else. The safeguards enrichment is built with narrow that; they do not close it. "
+    "Confirm you understand this before connecting a server."
 )
 
 
@@ -95,6 +95,9 @@ def connector_spec(body: CreateConnectorRequest) -> ConnectorSpec:
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname:
         raise ConnectorInputError("An MCP server URL must be an https URL.")
+    if parts.username is not None or parts.password is not None:
+        # It would be stored and shown in plaintext; a server's credential is its OAuth grant.
+        raise ConnectorInputError("An MCP server URL must not carry a username or password.")
     if not body.acknowledge_risk:
         raise ConnectorInputError(MCP_RISK)
     domains: list[str] = []

@@ -52,6 +52,9 @@ CREATE TABLE connectors (
     oauth_client_id        text,
     oauth_token_endpoint   text,
     oauth_resource         text,
+    -- `mcp`: the redirect URI that client was registered with. A dynamically registered
+    -- client is bound to it, so a different app origin needs a new client.
+    oauth_redirect_uri     text,
     risk_acknowledged_at   timestamptz,
     -- 'ready' can be used; 'needs_auth' is an `mcp` row with no working grant yet (or one
     -- whose grant died); 'error' is a `last_error` worth reading.
@@ -94,3 +97,10 @@ ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
     CHECK (provider IN ('gmail', 'google', 'mcp'));
 ALTER TABLE oauth_states ADD COLUMN connector_id text
     REFERENCES connectors (id) ON DELETE CASCADE;
+
+-- What discovery and registration produced for *this* authorization: the issuer, client id,
+-- token endpoint, resource and whether the server promises an RFC 9207 `iss`. None of it is
+-- secret. It rides the state row rather than the connector so that nothing on the connector
+-- changes until consent completes — an abandoned re-authorize must not leave a working
+-- grant pointing at a client that did not issue it.
+ALTER TABLE oauth_states ADD COLUMN oauth_client jsonb;

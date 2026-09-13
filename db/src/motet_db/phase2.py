@@ -519,6 +519,7 @@ def start_oauth(
     scopes: Sequence[str],
     nonce: str | None = None,
     connector_id_: str | None = None,
+    oauth_client: dict[str, Any] | None = None,
     ttl_seconds: int = 600,
 ) -> None:
     """Record an in-flight authorization so its callback can be believed.
@@ -531,14 +532,19 @@ def start_oauth(
 
     ``connector_id_`` is the third flow — authorizing an MCP connector (motet#102) — and it
     is a column beside ``source_id`` rather than a reuse of it, because that one is a
-    foreign key to ``sources`` (migration 0018).
+    foreign key to ``sources`` (migration 0018). ``oauth_client`` is what that flow's
+    discovery and registration produced, held here until consent completes so the connector
+    itself is not touched by an authorization nobody finishes.
     """
+    import json  # noqa: PLC0415
+
     conn.execute(
         """
         INSERT INTO oauth_states
             (state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-             nonce, connector_id, expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))
+             nonce, connector_id, oauth_client, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                now() + make_interval(secs => %s))
         """,
         (
             state,
@@ -550,6 +556,7 @@ def start_oauth(
             " ".join(scopes),
             nonce,
             connector_id_,
+            json.dumps(oauth_client) if oauth_client is not None else None,
             ttl_seconds,
         ),
     )
@@ -568,7 +575,7 @@ def consume_oauth_state(conn: psycopg.Connection[Any], state: str) -> dict[str, 
         DELETE FROM oauth_states
         WHERE state = %s AND expires_at > now()
         RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-                  nonce, connector_id
+                  nonce, connector_id, oauth_client
         """,
         (state,),
     )

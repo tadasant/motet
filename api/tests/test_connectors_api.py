@@ -203,16 +203,24 @@ class TestMcpServers:
         assert query["resource"] == [f"{ORIGIN}/mcp"]
         assert query["redirect_uri"] == [REDIRECT]
 
+        # Nothing on the connector moves until consent completes: the client rides the state.
         listed = api.get("/v1/connectors", headers=AUTH).json()[0]
-        assert listed["oauth_registered"] is True and listed["oauth_issuer"] == ORIGIN
+        assert listed["oauth_registered"] is False and listed["oauth_issuer"] is None
         pending = db.execute(
-            "SELECT provider, connector_id, source_id, code_verifier FROM oauth_states "
-            "WHERE state = %s",
+            "SELECT provider, connector_id, source_id, code_verifier, oauth_client "
+            "FROM oauth_states WHERE state = %s",
             (state,),
         ).fetchone()
         assert pending is not None
         assert pending["provider"] == "mcp" and pending["connector_id"] == connector["id"]
         assert pending["source_id"] is None
+        assert pending["oauth_client"] == {
+            "issuer": ORIGIN,
+            "client_id": "fake-client",
+            "token_endpoint": f"{ORIGIN}/oauth/token",
+            "resource": f"{ORIGIN}/mcp",
+            "iss_parameter_supported": True,
+        }
         digest = hashlib.sha256(pending["code_verifier"].encode()).digest()
         assert query["code_challenge"] == [base64.urlsafe_b64encode(digest).decode().rstrip("=")]
 
@@ -230,6 +238,7 @@ class TestMcpServers:
         body = finished.json()
         assert body["status"] == "ready" and body["has_secret"] is True
         assert body["secret_expires_at"] is not None
+        assert body["oauth_registered"] is True and body["oauth_issuer"] == ORIGIN
         assert "fake-access" not in finished.text and "fake-refresh" not in finished.text
         opened = connector_repo.load_connector_secret(
             db, key_manager(), connector_id=connector["id"]
@@ -248,11 +257,13 @@ class TestMcpServers:
         connector = add_mcp(api)
         state = authorize(api, connector["id"])
         refused = api.post(
-            "/v1/connectors/oauth/callback", json={"state": state, "code": "bad-code"}, headers=AUTH
+            "/v1/connectors/oauth/callback",
+            json={"state": state, "code": "bad-code", "iss": ORIGIN},
+            headers=AUTH,
         )
         assert refused.status_code == 400
         listed = api.get("/v1/connectors", headers=AUTH).json()[0]
-        assert listed["status"] == "needs_auth" and "invalid_grant" in listed["last_error"]
+        assert listed["status"] == "needs_auth" and "invalid_grant" in (listed["last_error"] or "")
 
     def test_an_issuer_mismatch_is_refused(self, api: TestClient) -> None:
         connector = add_mcp(api)
@@ -264,6 +275,155 @@ class TestMcpServers:
         )
         assert mixed.status_code == 400
         assert "issuer" in mixed.json()["detail"]
+
+    def test_a_missing_iss_from_a_server_that_promised_one_is_refused(
+        self, api: TestClient
+    ) -> None:
+        # The fake advertises RFC 9207 support, so a response without `iss` is a stripped one.
+        connector = add_mcp(api)
+        state = authorize(api, connector["id"])
+        stripped = api.post(
+            "/v1/connectors/oauth/callback", json={"state": state, "code": "the-code"}, headers=AUTH
+        )
+        assert stripped.status_code == 400
+        assert "names itself" in stripped.json()["detail"]
+
+    def test_a_server_url_carrying_credentials_is_refused(self, api: TestClient) -> None:
+        refused = api.post(
+            "/v1/connectors",
+            json={
+                "kind": "mcp",
+                "url": "https://user:pw@mcp.example/mcp",
+                "acknowledge_risk": True,
+            },
+            headers=AUTH,
+        )
+        assert refused.status_code == 400
+
+    def test_a_server_that_resolves_inwards_is_a_400_on_the_row(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from motet_api import main
+        from motet_sources.mcp_oauth import UnsafeUrlError
+
+        class Inward(FakeMcpOAuthClient):
+            def discover(self, mcp_url: str) -> Any:
+                raise UnsafeUrlError("mcp.example resolves to a private or reserved address")
+
+        monkeypatch.setattr(main, "build_mcp_oauth_client", Inward)
+        connector = add_mcp(api)
+        refused = api.post(
+            f"/v1/connectors/{connector['id']}/authorize",
+            json={"redirect_uri": REDIRECT},
+            headers=AUTH,
+        )
+        assert refused.status_code == 400
+        listed = api.get("/v1/connectors", headers=AUTH).json()[0]
+        assert listed["status"] == "error" and "private" in (listed["last_error"] or "")
+
+
+class TestReauthorizing:
+    """A server that already works must survive every way a second authorization can go."""
+
+    @pytest.fixture
+    def registrations(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        from motet_api import main
+
+        seen: list[str] = []
+
+        class Counting(FakeMcpOAuthClient):
+            def register(self, server: Any, *, redirect_uri: str) -> str:
+                seen.append(redirect_uri)
+                return f"client-{len(seen)}"
+
+        monkeypatch.setattr(main, "build_mcp_oauth_client", Counting)
+        return seen
+
+    def connected(self, api: TestClient) -> dict[str, Any]:
+        connector = add_mcp(api)
+        state = authorize(api, connector["id"])
+        finished = api.post(
+            "/v1/connectors/oauth/callback",
+            json={"state": state, "code": "first", "iss": ORIGIN},
+            headers=AUTH,
+        )
+        assert finished.status_code == 200, finished.text
+        return dict(finished.json())
+
+    def test_the_registered_client_is_reused_while_nothing_moved(
+        self, api: TestClient, registrations: list[str]
+    ) -> None:
+        connector = self.connected(api)
+        authorize(api, connector["id"])
+        assert registrations == [REDIRECT]
+
+    def test_a_new_redirect_uri_gets_a_new_client(
+        self, api: TestClient, registrations: list[str]
+    ) -> None:
+        connector = self.connected(api)
+        other = "http://127.0.0.1:5173/oauth/callback"
+        api.post(
+            f"/v1/connectors/{connector['id']}/authorize",
+            json={"redirect_uri": other},
+            headers=AUTH,
+        ).raise_for_status()
+        assert registrations == [REDIRECT, other]
+
+    def test_an_abandoned_reauthorize_leaves_the_working_client_alone(
+        self, api: TestClient, db: psycopg.Connection[Any], registrations: list[str]
+    ) -> None:
+        connector = self.connected(api)
+        before = db.execute(
+            "SELECT oauth_client_id, oauth_redirect_uri FROM connectors WHERE id = %s",
+            (connector["id"],),
+        ).fetchone()
+        api.post(
+            f"/v1/connectors/{connector['id']}/authorize",
+            json={"redirect_uri": "http://127.0.0.1:5173/oauth/callback"},
+            headers=AUTH,
+        ).raise_for_status()
+        after = db.execute(
+            "SELECT oauth_client_id, oauth_redirect_uri FROM connectors WHERE id = %s",
+            (connector["id"],),
+        ).fetchone()
+        assert before == after == {"oauth_client_id": "client-1", "oauth_redirect_uri": REDIRECT}
+
+    def test_a_failed_reauthorize_keeps_a_working_server_ready(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch, registrations: list[str]
+    ) -> None:
+        from motet_api import main
+        from motet_sources.mcp_oauth import McpOAuthError
+
+        connector = self.connected(api)
+
+        class Unreachable(FakeMcpOAuthClient):
+            def discover(self, mcp_url: str) -> Any:
+                raise McpOAuthError("Could not reach the server")
+
+        monkeypatch.setattr(main, "build_mcp_oauth_client", Unreachable)
+        failed = api.post(
+            f"/v1/connectors/{connector['id']}/authorize",
+            json={"redirect_uri": REDIRECT},
+            headers=AUTH,
+        )
+        assert failed.status_code == 502
+        listed = api.get("/v1/connectors", headers=AUTH).json()[0]
+        assert listed["status"] == "ready" and listed["has_secret"] is True
+        assert "Could not reach" in (listed["last_error"] or "")
+
+    def test_a_refused_code_on_reauthorize_keeps_a_working_server_ready(
+        self, api: TestClient, registrations: list[str]
+    ) -> None:
+        connector = self.connected(api)
+        state = authorize(api, connector["id"])
+        refused = api.post(
+            "/v1/connectors/oauth/callback",
+            json={"state": state, "code": "bad-code", "iss": ORIGIN},
+            headers=AUTH,
+        )
+        assert refused.status_code == 400
+        listed = api.get("/v1/connectors", headers=AUTH).json()[0]
+        assert listed["status"] == "ready" and "invalid_grant" in (listed["last_error"] or "")
 
     def test_the_mailbox_callback_refuses_a_connector_state(self, api: TestClient) -> None:
         refused = api.post(
@@ -291,6 +451,26 @@ class TestMcpServers:
         api.post("/v1/connectors/oauth/callback", json={"state": state, "code": "c"}, headers=AUTH)
         still = db.execute("SELECT 1 FROM oauth_states WHERE state = %s", (state,)).fetchone()
         assert still is not None
+
+    def test_a_redirect_uri_that_is_not_this_deployments_callback_is_refused(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dynamically registered client accepts whatever it was registered with, so this
+        # route has to be the check the provider is for Google.
+        monkeypatch.setenv("MOTET_APP_BASE_URL", "https://app.example")
+        connector = add_mcp(api)
+        refused = api.post(
+            f"/v1/connectors/{connector['id']}/authorize",
+            json={"redirect_uri": "https://evil.example/oauth/callback"},
+            headers=AUTH,
+        )
+        assert refused.status_code == 400
+        allowed = api.post(
+            f"/v1/connectors/{connector['id']}/authorize",
+            json={"redirect_uri": "https://app.example/oauth/callback"},
+            headers=AUTH,
+        )
+        assert allowed.status_code == 200, allowed.text
 
     def test_authorizing_a_site_is_refused(self, api: TestClient) -> None:
         created = add_site(api, domain="x.example").json()
