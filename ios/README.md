@@ -213,9 +213,17 @@ disagree. Small, and worth doing on its own.
 
 ## Configuration
 
-The `/v1` token is typed into Settings on first run and kept in the Keychain, on this device
-only. It is never baked in, because a default token would be a credential in every copy of
-the binary.
+**Settings → Sign in with Google** is how the app gets its `/v1` credential. It opens the web
+sign-in in the system sign-in sheet. That returns a one-time code on a `motet://signed-in`
+link, which the app redeems with its PKCE verifier for an ordinary thirty-day session
+(AGENTS.md, "The phone signs in through the web sign-in"). The session is kept in the
+Keychain, on this device only, and **Sign out** revokes it on the server. Pasting an API
+token still works, under "Use an API token instead". No token is ever baked in, because a
+default token would be a credential in every copy of the binary.
+
+The sign-in needs the deployment's web app to exist (`MOTET_APP_BASE_URL`), because Google
+returns to the web app's registered callback. The `motet` scheme needs no `Info.plist`
+registration: the sheet watches for it itself, and nothing else in the app handles it.
 
 The server URL is typed in too, except on a TestFlight build, which arrives with it
 prefilled. `MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL`

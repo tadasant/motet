@@ -1683,26 +1683,41 @@ components:
       title: LlmStageConfigUpdate
       type: object
     LoginResponse:
-      description: "A session, and the token that presents it.\n\n``token`` is returned exactly once,\
-        \ here \u2014 the API stores only its hash, so it cannot\nbe read back. A client that loses it\
-        \ signs in again."
+      description: "A session and the token that presents it \u2014 or, for a sign-in the iOS app started,\n\
+        the link that hands it back to the app.\n\n``token`` is returned exactly once, here \u2014 the\
+        \ API stores only its hash, so it cannot\nbe read back. A client that loses it signs in again.\n\
+        \nExactly one of ``token`` and ``handoff_url`` is set. A browser sign-in gets a token.\nA sign-in\
+        \ started by ``POST /v1/auth/native/start`` finishes in the app's in-app\nbrowser, which must\
+        \ not keep the session: it gets ``handoff_url`` instead, navigates\nto it, and the app redeems\
+        \ the code inside it at ``POST /v1/auth/native/redeem``."
       properties:
         email:
           description: The Google account that signed in.
           title: Email
           type: string
         expires_at:
-          format: date-time
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When the session expires. Absent when handoff_url is set.
           title: Expires At
-          type: string
+        handoff_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Set only for a sign-in the iOS app started: a motet:// link carrying a one-time
+            code, built by the API. Navigate to it; do not store anything.'
+          title: Handoff Url
         token:
-          description: 'Send as ''Authorization: Bearer <token>'', like the API token.'
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Send as ''Authorization: Bearer <token>'', like the API token. Absent when handoff_url
+            is set.'
           title: Token
-          type: string
       required:
-      - token
       - email
-      - expires_at
       title: LoginResponse
       type: object
     MarkListenedResponse:
@@ -2003,6 +2018,23 @@ components:
       required:
       - redirect_uri
       title: ReauthorizeSourceRequest
+      type: object
+    RedeemNativeLoginRequest:
+      description: The code the handoff link carried, and the verifier only the app holds.
+      properties:
+        code:
+          maxLength: 128
+          minLength: 1
+          title: Code
+          type: string
+        code_verifier:
+          pattern: ^[A-Za-z0-9._~-]{43,128}$
+          title: Code Verifier
+          type: string
+      required:
+      - code
+      - code_verifier
+      title: RedeemNativeLoginRequest
       type: object
     RevokedResponse:
       description: How many sessions a revoke-everywhere took out.
@@ -2593,6 +2625,36 @@ components:
       - state
       title: StartLoginResponse
       type: object
+    StartNativeLoginRequest:
+      description: Begin a Google sign-in on behalf of the iOS app.
+      properties:
+        code_challenge:
+          description: base64url(SHA-256(code_verifier)) without padding (RFC 7636 S256). The verifier
+            stays in the app and is presented only when the handoff is redeemed.
+          pattern: ^[A-Za-z0-9_-]{43}$
+          title: Code Challenge
+          type: string
+      required:
+      - code_challenge
+      title: StartNativeLoginRequest
+      type: object
+    StartNativeLoginResponse:
+      description: Where the app's in-app browser should go.
+      properties:
+        authorization_url:
+          description: Google's consent URL. It returns to this deployment's web app, which finishes the
+            sign-in and then navigates to a motet:// link.
+          title: Authorization Url
+          type: string
+        callback_scheme:
+          description: The URL scheme the in-app browser session should wait for.
+          title: Callback Scheme
+          type: string
+      required:
+      - authorization_url
+      - callback_scheme
+      title: StartNativeLoginResponse
+      type: object
     StartVoiceSessionRequest:
       properties:
         spoken_through_ms:
@@ -3145,6 +3207,79 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Logout Everywhere
+      tags:
+      - auth
+  /v1/auth/native/redeem:
+    post:
+      description: 'Collect a sign-in the iOS app started: code plus verifier in, session out.
+
+
+        The code alone is not enough, which is the point of the verifier. The handoff link
+
+        travels through a custom URL scheme, and another app can register the same one; what
+
+        it cannot have is the verifier, which never left the app that made the challenge.
+
+
+        The allowlist is asked again here, because this is the moment a session is minted and
+
+        ``create_session``''s contract is that every writer asks.'
+      operationId: redeem_native_login_v1_auth_native_redeem_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemNativeLoginRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Redeem Native Login
+      tags:
+      - auth
+  /v1/auth/native/start:
+    post:
+      description: "Begin a sign-in for the iOS app: the web sign-in, returned to the app by a handoff.\n\
+        \nDecided by Tadas, 2026-09-13 (AGENTS.md, \"The phone signs in through the web sign-in\").\n\
+        The app opens the URL this returns in its system sign-in sheet. Google sends that\nsheet back\
+        \ to this deployment's *web app*, whose callback is the one already\nregistered on the OAuth client\
+        \ \u2014 so the phone needs no Google client of its own \u2014 and\nthe web app posts the code\
+        \ to ``/v1/auth/google/callback`` exactly as a browser does.\nThe pending row carries the app's\
+        \ PKCE challenge, which is what makes that callback\nanswer with a handoff link rather than a\
+        \ session.\n\nThe redirect URI is built here from ``MOTET_APP_BASE_URL`` rather than taken from\
+        \ the\ncaller: the app knows the API's address, not the web app's, and a caller-supplied\nredirect\
+        \ on an unauthenticated route is the shape ``start_login`` already refuses."
+      operationId: start_native_login_v1_auth_native_start_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartNativeLoginRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartNativeLoginResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Start Native Login
       tags:
       - auth
   /v1/auth/session:

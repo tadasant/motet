@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
+from urllib.parse import urlencode
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
@@ -189,6 +190,7 @@ from .schemas import (
     QueueReadinessResponse,
     ReadStateRequest,
     ReauthorizeSourceRequest,
+    RedeemNativeLoginRequest,
     RevokedResponse,
     SaveHighlightRequest,
     SegmentResponse,
@@ -204,6 +206,8 @@ from .schemas import (
     SourceSyncResult,
     StartLoginRequest,
     StartLoginResponse,
+    StartNativeLoginRequest,
+    StartNativeLoginResponse,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
     VoiceStatusResponse,
@@ -671,6 +675,75 @@ def start_login(body: StartLoginRequest, conn: Conn, config: Config) -> StartLog
     return StartLoginResponse(authorization_url=url, state=state)
 
 
+#: The URL scheme the iOS app's sign-in sheet waits for. The API builds the whole handoff
+#: link from this constant; nothing a caller sends ever becomes part of it.
+NATIVE_CALLBACK_SCHEME: Final = "motet"
+NATIVE_HANDOFF_URI: Final = f"{NATIVE_CALLBACK_SCHEME}://signed-in"
+
+
+@app.post("/v1/auth/native/start", response_model=StartNativeLoginResponse, tags=["auth"])
+def start_native_login(
+    body: StartNativeLoginRequest, conn: Conn, config: Config
+) -> StartNativeLoginResponse:
+    """Begin a sign-in for the iOS app: the web sign-in, returned to the app by a handoff.
+
+    Decided by Tadas, 2026-09-13 (AGENTS.md, "The phone signs in through the web sign-in").
+    The app opens the URL this returns in its system sign-in sheet. Google sends that
+    sheet back to this deployment's *web app*, whose callback is the one already
+    registered on the OAuth client — so the phone needs no Google client of its own — and
+    the web app posts the code to ``/v1/auth/google/callback`` exactly as a browser does.
+    The pending row carries the app's PKCE challenge, which is what makes that callback
+    answer with a handoff link rather than a session.
+
+    The redirect URI is built here from ``MOTET_APP_BASE_URL`` rather than taken from the
+    caller: the app knows the API's address, not the web app's, and a caller-supplied
+    redirect on an unauthenticated route is the shape ``start_login`` already refuses.
+    """
+    if not config.allowed_emails:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{ALLOWED_EMAILS_ENV} is unset, so no Google account would be accepted and "
+            "signing in is switched off. This deployment still takes the API token.",
+        )
+    origins = config.cors_origins
+    if not origins:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{APP_BASE_URL_ENV} is unset, so there is no web app for Google to return the "
+            "sign-in to. Paste an API token instead.",
+        )
+    redirect_uri = f"{origins[0]}{CALLBACK_PATH}"
+
+    phase2.purge_expired_oauth_states(conn)
+    auth_repo.purge_expired_sessions(conn)
+    auth_repo.purge_expired_handoffs(conn)
+
+    verifier, challenge = new_pkce_pair()
+    state = new_login_state()
+    nonce = new_nonce()
+    phase2.start_oauth(
+        conn,
+        state=state,
+        user_id=repo.OWNER_USER_ID,
+        provider=GOOGLE_PROVIDER,
+        source_id_=None,
+        code_verifier=verifier,
+        redirect_uri=redirect_uri,
+        scopes=LOGIN_SCOPES,
+        nonce=nonce,
+        handoff_challenge=body.code_challenge,
+    )
+
+    try:
+        url = build_identity_provider().authorization_url(
+            redirect_uri=redirect_uri, state=state, nonce=nonce, code_challenge=challenge
+        )
+    except IdentityError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    return StartNativeLoginResponse(authorization_url=url, callback_scheme=NATIVE_CALLBACK_SCHEME)
+
+
 @app.post("/v1/auth/google/callback", response_model=LoginResponse, tags=["auth"])
 def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> LoginResponse:
     """Finish a sign-in: verify the ID token, check the allowlist, mint a session.
@@ -733,12 +806,81 @@ def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> Lo
             "That Google account is not allowed to use this Motet.",
         )
 
+    handoff_challenge = pending.get("handoff_challenge")
+    if handoff_challenge:
+        # Started by the iOS app, finishing in its in-app browser. That browser must not
+        # hold the session, so it gets a one-time code to hand back instead; the app
+        # redeems it with the verifier only it holds. Same code shape as a session token,
+        # and only its hash is stored.
+        code = auth_repo.new_session_token()
+        auth_repo.create_handoff(
+            conn,
+            user_id=repo.OWNER_USER_ID,
+            email=identity.email,
+            code=code,
+            code_challenge=handoff_challenge,
+        )
+        logger.info("handed a sign-in for %s back to the iOS app", identity.email)
+        return LoginResponse(
+            email=identity.email, handoff_url=f"{NATIVE_HANDOFF_URI}?{urlencode({'code': code})}"
+        )
+
     token = auth_repo.new_session_token()
     session = auth_repo.create_session(
         conn, user_id=repo.OWNER_USER_ID, email=identity.email, token=token
     )
     logger.info("signed in %s until %s", session.email, session.expires_at.isoformat())
     # The only time the token is ever readable. Only its hash is stored.
+    return LoginResponse(token=token, email=session.email, expires_at=session.expires_at)
+
+
+@app.post("/v1/auth/native/redeem", response_model=LoginResponse, tags=["auth"])
+def redeem_native_login(
+    body: RedeemNativeLoginRequest, conn: Conn, config: Config
+) -> LoginResponse:
+    """Collect a sign-in the iOS app started: code plus verifier in, session out.
+
+    The code alone is not enough, which is the point of the verifier. The handoff link
+    travels through a custom URL scheme, and another app can register the same one; what
+    it cannot have is the verifier, which never left the app that made the challenge.
+
+    The allowlist is asked again here, because this is the moment a session is minted and
+    ``create_session``'s contract is that every writer asks.
+    """
+    if not config.allowed_emails:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{ALLOWED_EMAILS_ENV} is unset, so no Google account would be accepted.",
+        )
+
+    handoff = auth_repo.take_handoff(conn, body.code)
+    if handoff is None or not auth_repo.verifier_matches(
+        body.code_verifier, handoff.code_challenge
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This sign-in is unknown, already used, expired, or was started by another app. "
+            "Sign in again.",
+        )
+
+    if not is_allowed(handoff.email, config.allowed_emails):
+        logger.warning(
+            "refused to hand a sign-in to the app for %s: no longer on %s",
+            handoff.email,
+            ALLOWED_EMAILS_ENV,
+        )
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "That Google account is not allowed to use this Motet.",
+        )
+
+    token = auth_repo.new_session_token()
+    session = auth_repo.create_session(
+        conn, user_id=handoff.user_id, email=handoff.email, token=token
+    )
+    logger.info(
+        "signed the iOS app in as %s until %s", session.email, session.expires_at.isoformat()
+    )
     return LoginResponse(token=token, email=session.email, expires_at=session.expires_at)
 
 

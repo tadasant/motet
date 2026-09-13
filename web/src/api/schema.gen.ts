@@ -291,6 +291,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/native/redeem": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem Native Login
+         * @description Collect a sign-in the iOS app started: code plus verifier in, session out.
+         *
+         *     The code alone is not enough, which is the point of the verifier. The handoff link
+         *     travels through a custom URL scheme, and another app can register the same one; what
+         *     it cannot have is the verifier, which never left the app that made the challenge.
+         *
+         *     The allowlist is asked again here, because this is the moment a session is minted and
+         *     ``create_session``'s contract is that every writer asks.
+         */
+        post: operations["redeem_native_login_v1_auth_native_redeem_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/native/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Native Login
+         * @description Begin a sign-in for the iOS app: the web sign-in, returned to the app by a handoff.
+         *
+         *     Decided by Tadas, 2026-09-13 (AGENTS.md, "The phone signs in through the web sign-in").
+         *     The app opens the URL this returns in its system sign-in sheet. Google sends that
+         *     sheet back to this deployment's *web app*, whose callback is the one already
+         *     registered on the OAuth client — so the phone needs no Google client of its own — and
+         *     the web app posts the code to ``/v1/auth/google/callback`` exactly as a browser does.
+         *     The pending row carries the app's PKCE challenge, which is what makes that callback
+         *     answer with a handoff link rather than a session.
+         *
+         *     The redirect URI is built here from ``MOTET_APP_BASE_URL`` rather than taken from the
+         *     caller: the app knows the API's address, not the web app's, and a caller-supplied
+         *     redirect on an unauthenticated route is the shape ``start_login`` already refuses.
+         */
+        post: operations["start_native_login_v1_auth_native_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/session": {
         parameters: {
             query?: never;
@@ -2507,10 +2566,16 @@ export interface components {
         };
         /**
          * LoginResponse
-         * @description A session, and the token that presents it.
+         * @description A session and the token that presents it — or, for a sign-in the iOS app started,
+         *     the link that hands it back to the app.
          *
          *     ``token`` is returned exactly once, here — the API stores only its hash, so it cannot
          *     be read back. A client that loses it signs in again.
+         *
+         *     Exactly one of ``token`` and ``handoff_url`` is set. A browser sign-in gets a token.
+         *     A sign-in started by ``POST /v1/auth/native/start`` finishes in the app's in-app
+         *     browser, which must not keep the session: it gets ``handoff_url`` instead, navigates
+         *     to it, and the app redeems the code inside it at ``POST /v1/auth/native/redeem``.
          */
         LoginResponse: {
             /**
@@ -2520,14 +2585,19 @@ export interface components {
             email: string;
             /**
              * Expires At
-             * Format: date-time
+             * @description When the session expires. Absent when handoff_url is set.
              */
-            expires_at: string;
+            expires_at?: string | null;
+            /**
+             * Handoff Url
+             * @description Set only for a sign-in the iOS app started: a motet:// link carrying a one-time code, built by the API. Navigate to it; do not store anything.
+             */
+            handoff_url?: string | null;
             /**
              * Token
-             * @description Send as 'Authorization: Bearer <token>', like the API token.
+             * @description Send as 'Authorization: Bearer <token>', like the API token. Absent when handoff_url is set.
              */
-            token: string;
+            token?: string | null;
         };
         /**
          * MarkListenedResponse
@@ -2748,6 +2818,16 @@ export interface components {
              * @description Where the provider sends the user back to. See ConnectSourceRequest.
              */
             redirect_uri: string;
+        };
+        /**
+         * RedeemNativeLoginRequest
+         * @description The code the handoff link carried, and the verifier only the app holds.
+         */
+        RedeemNativeLoginRequest: {
+            /** Code */
+            code: string;
+            /** Code Verifier */
+            code_verifier: string;
         };
         /**
          * RevokedResponse
@@ -3185,6 +3265,33 @@ export interface components {
              * @description The CSRF token for this sign-in. Returned so a client can verify the callback it receives is the one it started, and prefixed 'login.' so the single /oauth/callback path can tell a sign-in from a mailbox connection.
              */
             state: string;
+        };
+        /**
+         * StartNativeLoginRequest
+         * @description Begin a Google sign-in on behalf of the iOS app.
+         */
+        StartNativeLoginRequest: {
+            /**
+             * Code Challenge
+             * @description base64url(SHA-256(code_verifier)) without padding (RFC 7636 S256). The verifier stays in the app and is presented only when the handoff is redeemed.
+             */
+            code_challenge: string;
+        };
+        /**
+         * StartNativeLoginResponse
+         * @description Where the app's in-app browser should go.
+         */
+        StartNativeLoginResponse: {
+            /**
+             * Authorization Url
+             * @description Google's consent URL. It returns to this deployment's web app, which finishes the sign-in and then navigates to a motet:// link.
+             */
+            authorization_url: string;
+            /**
+             * Callback Scheme
+             * @description The URL scheme the in-app browser session should wait for.
+             */
+            callback_scheme: string;
         };
         /** StartVoiceSessionRequest */
         StartVoiceSessionRequest: {
@@ -3637,6 +3744,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RevokedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    redeem_native_login_v1_auth_native_redeem_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RedeemNativeLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_native_login_v1_auth_native_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartNativeLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartNativeLoginResponse"];
                 };
             };
             /** @description Validation Error */

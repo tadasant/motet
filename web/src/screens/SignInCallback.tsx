@@ -12,11 +12,13 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, api } from '../api/client'
-import { type OAuthCallback as Callback, stateMatches, takeState } from '../oauth'
+import { type OAuthCallback as Callback, beginConsent, stateMatches, takeState } from '../oauth'
 
 type Status =
   | { kind: 'busy' }
   | { kind: 'done'; email: string }
+  /** Verified, and on its way back to the iOS app that started it. Nothing was stored. */
+  | { kind: 'handoff'; email: string }
   | { kind: 'error'; message: string }
 
 /**
@@ -36,11 +38,14 @@ export function SignInCallback({
   callback,
   onSignedIn,
   onDone,
+  handOff = beginConsent,
 }: {
   callback: Callback
   /** Hands the session token up to the app, which stores it and stops showing the door. */
   onSignedIn: (token: string) => void
   onDone: () => void
+  /** Follows the iOS app's handoff link. Overridden only by tests: jsdom cannot navigate. */
+  handOff?: (url: string) => void
 }) {
   const [status, setStatus] = useState<Status>({ kind: 'busy' })
   // StrictMode runs an effect twice on mount, and an authorization code is single-use:
@@ -74,6 +79,18 @@ export function SignInCallback({
     api
       .completeLogin(callback.state, callback.code)
       .then((session) => {
+        if (session.handoff_url) {
+          // A sign-in the iOS app started, finishing in its in-app browser. Nothing is
+          // stored here: the link carries a one-time code back to the app, which redeems
+          // it for its own session. The API built the link, so it is followed as given.
+          setStatus({ kind: 'handoff', email: session.email })
+          handOff(session.handoff_url)
+          return
+        }
+        if (!session.token) {
+          setStatus({ kind: 'error', message: 'The sign-in finished without a session. Try again.' })
+          return
+        }
         // Stored before anything is rendered about it: this is the credential every
         // later request carries, and a success message with no token behind it would be
         // a lie the next screen would then contradict.
@@ -88,7 +105,7 @@ export function SignInCallback({
           message: err instanceof ApiError ? err.message : String(err),
         }),
       )
-  }, [callback, onSignedIn])
+  }, [callback, onSignedIn, handOff])
 
   return (
     <section aria-labelledby="signin-callback-heading">
@@ -103,6 +120,11 @@ export function SignInCallback({
       {callback.kind === 'granted' && status.kind === 'busy' && (
         <p className="hint" role="status">
           Finishing up — checking who you are.
+        </p>
+      )}
+      {callback.kind === 'granted' && status.kind === 'handoff' && (
+        <p className="ok" role="status">
+          Signed in as {status.email}. Returning you to the Motet app…
         </p>
       )}
       {callback.kind === 'granted' && status.kind === 'done' && (

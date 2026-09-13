@@ -1362,24 +1362,38 @@ public struct LlmStageConfigUpdate: Codable, Hashable, Sendable {
     }
 }
 
-/// A session, and the token that presents it.
+/// A session and the token that presents it — or, for a sign-in the iOS app started,
+/// the link that hands it back to the app.
 ///
 /// ``token`` is returned exactly once, here — the API stores only its hash, so it cannot
 /// be read back. A client that loses it signs in again.
+///
+/// Exactly one of ``token`` and ``handoff_url`` is set. A browser sign-in gets a token.
+/// A sign-in started by ``POST /v1/auth/native/start`` finishes in the app's in-app
+/// browser, which must not keep the session: it gets ``handoff_url`` instead, navigates
+/// to it, and the app redeems the code inside it at ``POST /v1/auth/native/redeem``.
 public struct LoginResponse: Codable, Hashable, Sendable {
     public var email: String
-    public var expiresAt: Date
-    public var token: String
+    public var expiresAt: Date?
+    public var handoffUrl: String?
+    public var token: String?
 
-    public init(email: String, expiresAt: Date, token: String) {
+    public init(
+        email: String,
+        expiresAt: Date? = nil,
+        handoffUrl: String? = nil,
+        token: String? = nil
+    ) {
         self.email = email
         self.expiresAt = expiresAt
+        self.handoffUrl = handoffUrl
         self.token = token
     }
 
     private enum CodingKeys: String, CodingKey {
         case email
         case expiresAt = "expires_at"
+        case handoffUrl = "handoff_url"
         case token
     }
 }
@@ -1632,6 +1646,22 @@ public struct ReauthorizeSourceRequest: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case redirectUri = "redirect_uri"
+    }
+}
+
+/// The code the handoff link carried, and the verifier only the app holds.
+public struct RedeemNativeLoginRequest: Codable, Hashable, Sendable {
+    public var code: String
+    public var codeVerifier: String
+
+    public init(code: String, codeVerifier: String) {
+        self.code = code
+        self.codeVerifier = codeVerifier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case codeVerifier = "code_verifier"
     }
 }
 
@@ -2143,6 +2173,35 @@ public struct StartLoginResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// Begin a Google sign-in on behalf of the iOS app.
+public struct StartNativeLoginRequest: Codable, Hashable, Sendable {
+    public var codeChallenge: String
+
+    public init(codeChallenge: String) {
+        self.codeChallenge = codeChallenge
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case codeChallenge = "code_challenge"
+    }
+}
+
+/// Where the app's in-app browser should go.
+public struct StartNativeLoginResponse: Codable, Hashable, Sendable {
+    public var authorizationUrl: String
+    public var callbackScheme: String
+
+    public init(authorizationUrl: String, callbackScheme: String) {
+        self.authorizationUrl = authorizationUrl
+        self.callbackScheme = callbackScheme
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case authorizationUrl = "authorization_url"
+        case callbackScheme = "callback_scheme"
+    }
+}
+
 public struct StartVoiceSessionRequest: Codable, Hashable, Sendable {
     public var spokenThroughMs: Int?
 
@@ -2308,6 +2367,16 @@ public enum MotetEndpoints {
     /// `POST /v1/auth/logout-all` — Logout Everywhere
     public static var logoutEverywhere: HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/auth/logout-all")
+    }
+
+    /// `POST /v1/auth/native/redeem` — Redeem Native Login
+    public static var redeemNativeLogin: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/native/redeem")
+    }
+
+    /// `POST /v1/auth/native/start` — Start Native Login
+    public static var startNativeLogin: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/native/start")
     }
 
     /// `GET /v1/auth/session` — Current Session

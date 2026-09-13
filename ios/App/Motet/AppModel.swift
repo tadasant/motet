@@ -16,12 +16,18 @@ final class AppModel: ObservableObject {
     /// cache underneath it, so this is a banner rather than an error screen.
     @Published private(set) var connectionMessage: String?
     @Published var settings = PlaybackSettings()
+    /// The Google account the app is signed in as, or nil for a pasted token or none.
+    @Published private(set) var signedInEmail: String?
+    @Published private(set) var isSigningIn = false
+    /// Why the last sign-in did not finish. Shown under the button, never as a modal.
+    @Published private(set) var signInMessage: String?
 
     private let environment: AppEnvironment
     private var snapshotTask: Task<Void, Never>?
 
     init(environment: AppEnvironment) {
         self.environment = environment
+        self.signedInEmail = environment.credentials.signedInEmail
     }
 
     var library: MotetLibrary { environment.library }
@@ -178,12 +184,80 @@ final class AppModel: ObservableObject {
 
     func saveCredentials(baseURL: String, apiToken: String) async {
         environment.credentials.save(baseURL: baseURL, apiToken: apiToken)
+        signedInEmail = environment.credentials.signedInEmail
+        await applyCredentialChange()
+    }
+
+    private func applyCredentialChange() async {
         // Rebuilds the controller *and* re-activates it, so the engine's single event
         // handler points at the new one.
         await environment.reconfigure()
         settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
         observeSnapshots()
         await refresh()
+    }
+
+    // MARK: - Signing in (AGENTS.md, "The phone signs in through the web sign-in")
+
+    /// Ask the API to start a Google sign-in for this app. The caller opens `url` in the
+    /// system sign-in sheet and hands whatever comes back to `finishSignIn`.
+    func beginSignIn() async -> (url: URL, callbackScheme: String, pkce: PKCEPair)? {
+        signInMessage = nil
+        let configuration = environment.credentials.configuration()
+        guard configuration.baseURL != nil else {
+            signInMessage = "Set the server first."
+            return nil
+        }
+        isSigningIn = true
+        let pkce = PKCEPair.generate()
+        do {
+            let started = try await MotetHTTPClient(configuration: configuration)
+                .startNativeSignIn(codeChallenge: pkce.challenge)
+            guard let url = URL(string: started.authorizationUrl) else {
+                throw NativeSignIn.Failure.notAHandoff
+            }
+            return (url, started.callbackScheme, pkce)
+        } catch {
+            isSigningIn = false
+            signInMessage = Self.describe(error)
+            return nil
+        }
+    }
+
+    /// Redeem the handoff link the sheet returned, and keep the session it buys.
+    func finishSignIn(callback: URL, pkce: PKCEPair) async {
+        defer { isSigningIn = false }
+        do {
+            let code = try NativeSignIn.handoffCode(from: callback)
+            let session = try await MotetHTTPClient(configuration: environment.credentials.configuration())
+                .redeemNativeSignIn(code: code, codeVerifier: pkce.verifier)
+            guard let token = session.token else { throw NativeSignIn.Failure.missingCode }
+            environment.credentials.saveSession(token: token, email: session.email)
+            signedInEmail = session.email
+            await applyCredentialChange()
+        } catch {
+            signInMessage = Self.describe(error)
+        }
+    }
+
+    /// The sheet closed without a link: cancelled (no message) or failed (say why).
+    func abandonSignIn(_ error: Error?) {
+        isSigningIn = false
+        signInMessage = error.map(Self.describe)
+    }
+
+    /// Revoke the session on the server where possible, and forget it here regardless.
+    func signOut() async {
+        try? await MotetHTTPClient(configuration: environment.credentials.configuration()).signOut()
+        environment.credentials.clearSession()
+        signedInEmail = nil
+        await applyCredentialChange()
+    }
+
+    private static func describe(_ error: Error) -> String {
+        if let error = error as? MotetError { return error.description }
+        if let error = error as? NativeSignIn.Failure { return error.description }
+        return error.localizedDescription
     }
 
     func currentCredentials() -> (baseURL: String, apiToken: String) {
