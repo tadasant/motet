@@ -25,7 +25,7 @@
 // Google account to hand; it has just stopped being the thing a human is expected to
 // type into a phone.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   ApiError,
@@ -41,7 +41,8 @@ import {
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
-import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
+import { IN_PROGRESS } from './screens/EpisodeScreen'
+import { Episodes, newestFirst } from './screens/Episodes'
 import { OAuthCallback } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
@@ -72,16 +73,23 @@ export default function App() {
   // Whether anything is draining the queues, or null when the question could not be
   // asked. Best-effort in exactly the way `ingestion` is, and for the same reason.
   const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
-  // The episode on screen, and every episode there is.
+  // Every episode there is, and which one's detail the Episodes section has open.
   //
-  // **Both, because `episode` alone was only ever what happened in this page's lifetime.**
-  // Nothing loaded it on mount, so a reload — the realistic thing to do while a
+  // **The list, because one episode was only ever what happened in this page's lifetime.**
+  // Nothing loaded episodes on mount, so a reload — the realistic thing to do while a
   // multi-minute pipeline runs — emptied the tab and left a finished episode reachable
-  // only through the RSS feed (motet#44). The list is what makes the second-newest one
-  // reachable too, since "make an episode" is the only other way in and it always makes a
-  // new one.
-  const [episode, setEpisode] = useState<Episode | null>(null)
+  // only through the RSS feed (motet#44). The section is a shelf of all of them now
+  // (motet#89), so the list is the thing it shows.
+  //
+  // **The open id lives here, not in the section**, because the section unmounts whenever
+  // another one is open and "which episode was I looking at" has to survive that. An id
+  // rather than a copy of the episode, so there is one copy of each episode to keep
+  // current — the refresh below and a position report both write the list, and the detail
+  // reads its episode out of it. Null is the shelf.
   const [episodes, setEpisodes] = useState<Episode[]>([])
+  const [openEpisodeId, setOpenEpisodeId] = useState<string | null>(null)
+  // Whether the Episodes section has been shown yet — see the landing rule below.
+  const landed = useRef(false)
   // Three states, not two, for the same reason `ingestionUnavailable` exists: "you have no
   // episodes", "I have not looked yet" and "I could not find out" are different claims,
   // and showing the first for either of the others is the disappearance motet#44 is about
@@ -148,26 +156,35 @@ export default function App() {
         setError('')
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
-  }, [])
 
-  // The episode list, loaded once the app has a way in. Separate from `refresh` because
-  // it seeds `episode`, and seeding on every three-second poll would drag the screen back
-  // to the newest episode while somebody was reading an older one.
-  const loadEpisodes = useCallback(() => {
+    // The episode list rides the same refresh, so a Mark listened, a render finishing, or
+    // a position reported from another device shows without a reload — and the shelf
+    // needs no fetch of its own. Its own promise rather than a fourth member of the one
+    // above: a failed episode list must not blank the backlog, nor the reverse.
+    //
+    // It is the heaviest of the four (every episode, with its claims), and it is polled
+    // only while something is in flight, exactly like the rest.
     api
       .episodes()
       .then((list) => {
-        // Merged rather than assigned, so an episode created while this request was in
-        // flight is not dropped from the picker — `openEpisode` puts it in front, and the
-        // server's copy of the list is a moment older than that.
+        // **Merged, and never a change to which episode is open.** Merged so an episode
+        // created while this request was in flight is not dropped — `openEpisode` puts it
+        // in front, and the server's copy of the list is a moment older than that. The
+        // position is kept at the larger of the two copies because the server's is
+        // monotonic and a report answered after this request left is newer than it.
         setEpisodes((current) => {
+          const mine = new Map(current.map((entry) => [entry.id, entry]))
           const known = new Set(list.map((entry) => entry.id))
-          return [...current.filter((entry) => !known.has(entry.id)), ...list]
+          return [
+            ...current.filter((entry) => !known.has(entry.id)),
+            ...list.map((entry) => {
+              const local = mine.get(entry.id)
+              return local && local.listened_through_ms > entry.listened_through_ms
+                ? { ...entry, listened_through_ms: local.listened_through_ms }
+                : entry
+            }),
+          ]
         })
-        // `current ?? list[0]` and never a plain assignment: this runs after an episode may
-        // already have been opened from the backlog, and the newest episode is a
-        // starting point rather than an override.
-        setEpisode((current) => current ?? list[0] ?? null)
         setEpisodesUnavailable(false)
       })
       .catch(() => setEpisodesUnavailable(true))
@@ -179,23 +196,21 @@ export default function App() {
   // error above the answer the user is actually waiting for — "GET /v1/news-items failed:
   // 401" over the top of a sign-in button being the silliest version of that.
   useEffect(() => {
-    if (!callback && (token || unlocked)) {
-      refresh()
-      loadEpisodes()
-    }
-  }, [callback, loadEpisodes, refresh, token, unlocked])
+    if (!callback && (token || unlocked)) refresh()
+  }, [callback, refresh, token, unlocked])
 
   // Poll while — and only while — something is actually in flight. Ingestion takes
   // seconds, so an item that resolves has to resolve *on screen*: a status that is only
   // correct until you look away is the same disappearance in slow motion. It stops on its
   // own the moment nothing is pending, so an idle tab makes no requests.
-  // An episode mid-pipeline counts too, and not only for the badge: `processing` is
-  // fetched by `refresh`, and the episode screen's own "is anything draining the queues"
-  // banner would otherwise be computed from a heartbeat frozen at mount — going stale on
+  // An episode mid-pipeline counts too — any of them, not only an open one. The refresh is
+  // what moves a shelf row from Working… to ready and what moves the open detail along its
+  // stages, and it fetches `processing`, without which the detail's "is anything draining
+  // the queues" banner would be computed from a heartbeat frozen at mount — going stale on
   // its own after a few minutes and accusing a worker that is running fine.
   const waiting =
     ingestion.some((item) => item.state === 'pending') ||
-    (episode !== null && IN_PROGRESS.has(episode.state))
+    episodes.some((entry) => IN_PROGRESS.has(entry.state))
   // A stuck item gets a louder count than a busy one. "3 in flight" and "3, one of which
   // is never coming back" want different reactions. Settled items are not counted at all:
   // a badge that stays at 3 for ten minutes after everything landed means nothing.
@@ -206,6 +221,20 @@ export default function App() {
     const timer = window.setInterval(refresh, POLL_MS)
     return () => window.clearInterval(timer)
   }, [waiting, callback, refresh, token, unlocked])
+
+  // The landing rule, applied the first time the Episodes section is shown with the list
+  // in hand (motet#89, question 4). The shelf is the landing — except when an episode is
+  // *still* being made at that moment: that is almost always the one somebody just asked
+  // for, its Working… copy and its "not moving" banner live on the detail, and a reload
+  // mid-render is the realistic way to arrive. Once, and only then: judged at a later visit
+  // it would open a render that finished long ago, and judged on a later refresh it would
+  // pull the screen out from under somebody.
+  useEffect(() => {
+    if (landed.current || section.id !== 'episodes' || !episodesLoaded) return
+    landed.current = true
+    const making = [...episodes].sort(newestFirst).find((entry) => IN_PROGRESS.has(entry.state))
+    if (making) setOpenEpisodeId((current) => current ?? making.id)
+  }, [episodes, episodesLoaded, section.id])
 
   // Take the code out of the address bar as soon as it has been read into state. A reload
   // would otherwise re-POST a code the API has already consumed and report a flow that
@@ -278,19 +307,26 @@ export default function App() {
     navigate(signingIn ? '/' : '/sources', { replace: true })
   }
 
+  // "Make an episode" on the backlog: straight to the new one's detail, skipping the shelf,
+  // because its Working… copy is what somebody who just asked for it wants to see.
   const openEpisode = (next: Episode) => {
-    setEpisode(next)
     // In front, and de-duplicated: the backlog's button makes a *new* episode, so this is
     // normally an id the list has never seen.
     setEpisodes((list) => [next, ...list.filter((entry) => entry.id !== next.id)])
+    setOpenEpisodeId(next.id)
     navigate('/episodes')
   }
 
-  // The polling episode screen reports every state change. The list has to hear it too,
-  // or the picker keeps saying "pending" about an episode that finished ten minutes ago.
-  const episodeChanged = useCallback((next: Episode) => {
-    setEpisode(next)
-    setEpisodes((list) => list.map((entry) => (entry.id === next.id ? next : entry)))
+  // A position the server has confirmed — from the player, or from Mark listened — moves
+  // the shelf at once rather than on the next refresh. Never downwards: it is monotonic.
+  const positionReported = useCallback((episodeId: string, listenedThroughMs: number) => {
+    setEpisodes((list) =>
+      list.map((entry) =>
+        entry.id === episodeId && listenedThroughMs > entry.listened_through_ms
+          ? { ...entry, listened_through_ms: listenedThroughMs }
+          : entry,
+      ),
+    )
   }, [])
 
   const signOut = () => {
@@ -384,27 +420,19 @@ export default function App() {
           onOpenEpisode={openEpisode}
         />
       )}
-      {section.id === 'episodes' &&
-        (episode ? (
-          <EpisodeScreen
-            episode={episode}
-            episodes={episodes}
-            processing={processing}
-            onEpisodeChanged={episodeChanged}
-            onSelectEpisode={setEpisode}
-            onBacklogChanged={refresh}
-          />
-        ) : (
-          <section aria-label="Episode">
-            <p className="hint">
-              {!episodesLoaded
-                ? 'Looking for your episodes…'
-                : episodesUnavailable
-                  ? 'Could not load your episodes. This is not the same as having none.'
-                  : 'Make one from the backlog.'}
-            </p>
-          </section>
-        ))}
+      {section.id === 'episodes' && (
+        <Episodes
+          episodes={episodes}
+          openId={openEpisodeId}
+          loaded={episodesLoaded}
+          unavailable={episodesUnavailable}
+          processing={processing}
+          onOpen={(next) => setOpenEpisodeId(next.id)}
+          onBack={() => setOpenEpisodeId(null)}
+          onPositionReported={positionReported}
+          onChanged={refresh}
+        />
+      )}
       {section.id === 'sources' && <Sources />}
       {section.id === 'admin' &&
         (isAdmin ? (

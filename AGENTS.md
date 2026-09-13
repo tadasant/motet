@@ -438,7 +438,9 @@ environment the services get are tracked in the private infrastructure repo.
 this repo is: the one CI command, the OpenAPI contract, the fake adapters, the golden set.
 
 RSS rather than an in-app player is deliberate: it buys background audio, offline,
-lockscreen, CarPlay, and speed control with zero iOS code.
+lockscreen, CarPlay, and speed control with zero iOS code. The SPA grew an in-page player
+in motet#89 for listening at a desk; it does not change this, because a browser tab still
+has no background audio and no offline.
 
 ---
 
@@ -1751,17 +1753,79 @@ reachable only through the RSS feed (motet#44). **The shape of that bug is that 
 an episode takes, the more likely it is to be lost**, and the first one is the slowest
 because the backlog is fullest.
 
-`GET /v1/episodes` is loaded once the app has a way in, and it **seeds** rather than
-assigns: `current ?? list[0]`, so an episode already opened from the backlog is not dragged back
-to the newest episode, and the three-second backlog poll does not do it either. The list is
-kept as well as the newest item, because "make an episode" is the only other way into this
-screen and it always makes a *new* one — one loaded episode would leave yesterday's just as
-unreachable.
+**The section is a shelf of every episode, and the detail is a click in** (motet#89).
+`web/src/screens/Episodes.tsx` lists them newest first, grouped into *Up next* (unlistened,
+in progress, still being made, failed) and *Listened* (folded past five), and opens the
+existing detail under a back link. Before it, the section *was* one episode's detail, seeded
+with the newest, and the only way to another was an inline "Other episodes:" line.
+
+- **Listened is derived, not stored** — `listenState` in `screens/listening.ts`, from
+  `listened_through_ms` against `duration_ms` with five seconds of slack for the sign-off.
+  That is option (b) of the issue's question 2, and it accepts by design that a row's
+  verdict can disagree with its stories' read state (invariant 5): tick every story off on
+  the Backlog and the row still says Unlistened; un-read one and it still says Listened,
+  because the position cannot go down. A read flag on the segment response is options (a)
+  and (c), and they are the owner's call rather than a refactor.
+- **Mark listened writes both facts, in order, and is one-way**: `POST …/listened` (every
+  story read), then `PUT …/position` at the duration. There is no "mark unlistened"
+  because there is nothing to write — un-listening could only mean un-reading.
+- **App holds which episode is open, as an id, and the list is the only copy.** The section
+  unmounts whenever another is showing, so "which one was I looking at" has to live above
+  it. No path segment: the shell's note above says a nested path is the moment to revisit
+  forty lines of `pushState`, and App state answered the question without that.
+- **The list rides the backlog's refresh**, merged rather than assigned — an episode
+  created while the request was in flight is kept, the position is the larger of the two
+  copies, and which episode is open is never touched. So the shelf and the detail fetch
+  nothing themselves, and there is one poller. The refresh polls while any episode is in
+  the pipeline, not only an open one.
+- **The landing is the shelf, except the first time the section is shown while an episode
+  is still being made**, which opens that episode's detail (question 4): its Working… copy
+  and "not moving" banner live there, and a reload mid-render is the realistic way to
+  arrive. It is judged once, when the section is first shown rather than when the list
+  first arrives — a render that finished while somebody was on the Backlog is a shelf, not
+  a detail — and a later refresh never moves the screen.
+
+### The episode detail has a player, which reverses a Phase 1 decision
+
+`web/src/screens/EpisodeScreen.tsx`, motet#89. **The owner's go for shipping it came with
+the #87–#95 batch, relayed by that batch's release orchestrator (Zimmer session 17607)**;
+the issue gate left "fix the player or relabel the pill *Open*" to the implementing PR,
+and #101 records the call. Phase 1 shipped RSS *instead* of a player. That reason still
+holds for the walk, so the feed URL is still offered on the detail; the player is for a
+desk, with the transcript beside it.
+
+- **An `<audio>` pointed at the audio route, never a `fetch` into a blob.** A deployed API
+  answers `GET /v1/episodes/{id}/audio` with a 307 to a signed URL on the object store's
+  origin; a media element follows that without CORS and gets range requests from the
+  store, while a `fetch` would need CORS on the bucket, which nothing grants. The prototype
+  fetched a blob because the local backend serves no `Range` — so locally, seeking is
+  limited to what has buffered, and that is the dev path only. The route takes the feed
+  token in the query because a media element cannot send a header.
+- **It resumes from `listened_through_ms` and writes `PUT …/position`**, the position
+  resource a syncing player wants, so listening here moves the shelf and marks stories
+  read as their segments pass. It is the first client to write the position from real
+  playback — iOS keeps its own and RSS clients cannot report. It reports every ten seconds
+  of playback and flushes on pause, on the end and on leaving the screen; a refused report
+  is not retried per tick, because the next one carries the same frontier.
+- **Only continuous listening from the frontier already heard moves the position.** The
+  server marks every story the position has *passed*, so a reported position is a claim
+  about everything before it. A tick counts only while playing, only as a step of five
+  seconds or less (a seek's echo is a jump), and only when it starts at the frontier — so
+  scrubbing, a ▶ jump to a later story, and playing on from past a skip all leave the
+  skipped stories unread, and `ended` counts only when the frontier had reached the last
+  step. That is the iOS player's `maxListeningStepMs` rule fitted to a route that knows
+  positions rather than coverage. The cost is the safe direction: after a skip, Resume
+  lands back at the skip, and Mark listened is how to say the rest was heard.
+- **The shelf's Play pill starts playback; a row click only opens.** A rejected `play()`
+  is the browser's autoplay policy, and the controls are right there. Safari usually
+  refuses — `play()` runs after the feed token and the metadata arrive, outside the click —
+  so there the pill behaves as *Open*.
 
 ### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
 
 `api/src/motet_api/feed.py`. RSS is Phase 1's listening surface *instead of* an in-app
 player, because a browser has no background audio and no offline and a dog walk needs both.
+The SPA has had an in-page player since motet#89, for a desk; the walk is still this.
 
 **Validate the feed by parsing it with a real client's parser, not by asserting on XML you
 wrote.** `podcastparser` is the parser inside gPodder; `feedparser` is what most other

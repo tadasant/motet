@@ -419,17 +419,182 @@ describe('App', () => {
     )
   })
 
-  it('offers every other episode, so the second-newest is reachable too', async () => {
+  it('lands on a shelf of every episode, and opens any of them', async () => {
+    // motet#89: the section used to *be* one episode's detail, seeded with the newest,
+    // and the second-newest was a link in an "Other episodes:" line.
+    const older = {
+      ...EPISODE,
+      id: 'ep_0',
+      title: 'Yesterday briefing',
+      created_at: '2026-08-23T00:00:00Z',
+      published_at: '2026-08-23T00:01:00Z',
+    }
+    mockApi({ 'GET /v1/episodes': [EPISODE, older] })
+    render(<App />)
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+
+    expect(await screen.findByRole('region', { name: 'Episodes' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Play Morning briefing' })).toBeDefined()
+    fireEvent.click(screen.getByRole('button', { name: 'Yesterday briefing' }))
+    expect(await screen.findByText('Yesterday briefing', { selector: 'strong' })).toBeDefined()
+    // The section's own address throughout: which episode is open is App state, not a path.
+    expect(window.location.pathname).toBe('/episodes')
+
+    fireEvent.click(screen.getByRole('button', { name: '← All episodes' }))
+    expect(await screen.findByRole('region', { name: 'Episodes' })).toBeDefined()
+  })
+
+  it('lands on the detail of an episode still being made — a reload mid-render', async () => {
+    // motet#89, question 4: a finished shelf lands on the list, but an episode in the
+    // pipeline is almost always the one somebody just asked for, and its Working… copy
+    // lives on the detail.
+    const rendering = {
+      ...EPISODE,
+      id: 'ep_2',
+      title: 'Fresh briefing',
+      state: 'rendering',
+      duration_ms: 0,
+      created_at: '2026-08-25T00:00:00Z',
+      published_at: null,
+      segments: [],
+    }
+    mockApi({ 'GET /v1/episodes': [rendering, EPISODE], '/v1/episodes': rendering })
+    window.history.replaceState({}, '', '/episodes')
+    render(<App />)
+
+    expect(await screen.findByText('Fresh briefing', { selector: 'strong' })).toBeDefined()
+    expect(screen.getByRole('button', { name: '← All episodes' })).toBeDefined()
+  })
+
+  it('lands on the shelf when the render finished before the section was first shown', async () => {
+    // The landing rule is judged when the section is first shown, not when the first list
+    // arrives: a cold load on the backlog mid-render, then a visit once it is done, is a
+    // shelf with one more finished episode on it — not a detail nobody asked to open.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const rendering = {
+        ...EPISODE,
+        id: 'ep_2',
+        title: 'Fresh briefing',
+        state: 'rendering',
+        duration_ms: 0,
+        created_at: '2026-08-25T00:00:00Z',
+        published_at: null,
+      }
+      mockApi({ 'GET /v1/episodes': [rendering, EPISODE] })
+      window.history.replaceState({}, '', '/backlog')
+      render(<App />)
+      await screen.findByText('Acme raises $20M Series A')
+
+      mockApi({
+        'GET /v1/episodes': [{ ...rendering, state: 'ready', duration_ms: 60_000 }, EPISODE],
+      })
+      await vi.advanceTimersByTimeAsync(4_000)
+      fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+
+      expect(await screen.findByRole('region', { name: 'Episodes' })).toBeDefined()
+      expect(screen.getByRole('button', { name: 'Play Fresh briefing' })).toBeDefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('moves a row on Mark listened, and a stale refresh answer does not move it back', async () => {
+    // The position is monotonic on the server, so the list the refresh brings back can be
+    // older than a write this page has already seen answered. The merge keeps the larger.
+    const calls = mockApi({
+      '/v1/episodes/ep_1/listened': { episode_id: 'ep_1', news_items_marked_read: 1 },
+      '/v1/episodes/ep_1/position': {
+        episode_id: 'ep_1',
+        listened_through_ms: 92_000,
+        news_items_marked_read: 0,
+      },
+    })
+    render(<App />)
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+    await screen.findByRole('region', { name: /Up next/ })
+    const lists = () =>
+      calls.filter((call) => call.method === 'GET' && call.url.endsWith('/v1/episodes')).length
+    const before = lists()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark listened' }))
+
+    // Moved on the write's answer, before any refresh has come back...
+    expect(await screen.findByRole('heading', { name: 'Listened (1)' })).toBeDefined()
+    // ...and still there once the refresh has, with the server's older copy in it.
+    await waitFor(() => expect(lists()).toBeGreaterThan(before))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Listened (1)' })).toBeDefined())
+    expect(screen.getByText('All caught up — everything here has been heard.')).toBeDefined()
+  })
+
+  it('remembers which episode is open across a visit to another section', async () => {
+    // The section unmounts whenever another is showing, so this is App's to remember.
     const older = { ...EPISODE, id: 'ep_0', title: 'Yesterday briefing' }
     mockApi({ 'GET /v1/episodes': [EPISODE, older] })
     render(<App />)
     fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
-    await screen.findByText(/Morning briefing/)
-
     fireEvent.click(await screen.findByRole('button', { name: 'Yesterday briefing' }))
-    // The heading line, not the picker entry it was chosen from: `strong` is the title
-    // of the episode on screen, and the picker only ever lists the *other* ones.
+    await screen.findByText('Yesterday briefing', { selector: 'strong' })
+
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
+    await screen.findByText('Acme raises $20M Series A')
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
     expect(await screen.findByText('Yesterday briefing', { selector: 'strong' })).toBeDefined()
+
+    // And the shelf, once it is where the section was left.
+    fireEvent.click(screen.getByRole('button', { name: '← All episodes' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Paste in' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+    expect(await screen.findByRole('region', { name: 'Episodes' })).toBeDefined()
+  })
+
+  it('moves the shelf on the refresh, and never moves which episode is open', async () => {
+    // The list rides App's refresh — the section has no fetch of its own — and the merge
+    // is what stops a poll from dragging the screen to a different episode.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const rendering = {
+        ...EPISODE,
+        id: 'ep_2',
+        title: 'Fresh briefing',
+        state: 'rendering',
+        duration_ms: 0,
+        created_at: '2026-08-25T00:00:00Z',
+        published_at: null,
+      }
+      const calls = mockApi({ 'GET /v1/episodes': [rendering, EPISODE] })
+      render(<App />)
+      fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
+      fireEvent.click(await screen.findByRole('button', { name: '← All episodes' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Morning briefing' }))
+      await screen.findByText('Morning briefing', { selector: 'strong' })
+
+      // Polls while the other one is still rendering: the list is re-asked, and the
+      // landing rule — which would open the rendering episode — does not fire again.
+      const lists = () =>
+        calls.filter((call) => call.method === 'GET' && call.url.endsWith('/v1/episodes')).length
+      const before = lists()
+      await vi.advanceTimersByTimeAsync(7_000)
+      expect(lists()).toBeGreaterThan(before)
+      expect(screen.getByText('Morning briefing', { selector: 'strong' })).toBeDefined()
+
+      // Then the render finishes between two polls.
+      const later = mockApi({
+        'GET /v1/episodes': [{ ...rendering, state: 'ready', duration_ms: 60_000 }, EPISODE],
+      })
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(
+        later.filter((call) => call.method === 'GET' && call.url.endsWith('/v1/episodes')).length,
+      ).toBeGreaterThan(0)
+      // Still on the episode that was open, not on the one that just changed.
+      expect(screen.getByText('Morning briefing', { selector: 'strong' })).toBeDefined()
+
+      fireEvent.click(screen.getByRole('button', { name: '← All episodes' }))
+      expect(await screen.findByRole('button', { name: 'Play Fresh briefing' })).toBeDefined()
+      expect(screen.queryByText('Working…')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows every claim beside the source span it cites', async () => {
@@ -449,17 +614,19 @@ describe('App', () => {
     expect(screen.getByText(/chars 0–25/)).toBeDefined()
   })
 
-  it('offers the private feed URL rather than an in-page player', async () => {
+  it('offers an in-page player and still the private feed URL for the walk', async () => {
     mockApi()
     render(<App />)
     fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
 
+    // motet#89 reverses Phase 1's "no player, RSS instead": the player is for a desk,
+    // with the transcript beside it. The feed stays, because a browser tab still has no
+    // background audio and no offline, and a dog walk needs both.
     expect(await screen.findByText('https://example.test/feed.xml?token=secret')).toBeDefined()
-    // Phase 1 deliberately ships RSS instead of a player: a browser has no background
-    // audio and no offline, and a dog walk needs both.
-    expect(document.querySelector('audio')).toBeNull()
+    const audio = document.querySelector('audio')
+    expect(audio?.getAttribute('src')).toBe('/v1/episodes/ep_1/audio?token=secret')
   })
 })
 
