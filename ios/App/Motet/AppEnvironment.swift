@@ -8,9 +8,9 @@ import MotetPlayback
 /// background-download callback and the CarPlay scene, neither of which can be handed an
 /// environment object.
 ///
-/// Nothing here is configured at build time. The server URL and the token are typed into
-/// Settings on first run: this repo is public, so a baked-in hostname would be an
-/// infrastructure fact in it and a baked-in token would be a credential in a binary.
+/// The token is typed into Settings on first run, because a baked-in token would be a
+/// credential in a binary. The server URL is typed in too, except on a distribution build,
+/// which is handed a default at build time; `CredentialStore` owns both.
 @MainActor
 final class AppEnvironment {
     static let shared = AppEnvironment()

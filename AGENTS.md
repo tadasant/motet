@@ -800,7 +800,8 @@ run even if a guard were dropped.
 project — which is why the iOS app went months without a compiler ever being pointed at
 it. It is free because this repo is public, and it needs no Apple Developer Program
 credential because a **simulator** build needs no identity, no certificate, no provisioning
-profile and no App Store Connect key. That is the property to preserve: adding signing, a
+profile and no App Store Connect key — and neither does the unsigned device archive it also
+runs (`ios/bin/testflight check`). That is the property to preserve: adding signing, a
 TestFlight upload, or a `CODE_SIGN_ENTITLEMENTS` pointing at
 `ios/App/Motet/Motet.entitlements` would put a credential and a human back into a job that
 currently needs neither — and the entitlement it asks for
@@ -818,7 +819,31 @@ is workflow-wide and `all-checks-pass` has to keep aggregating exactly one workf
 skipped job is already a first-class outcome for that gate, so this reuses the existing
 design rather than working around it.
 
-Deploy workflows are a different matter — they live in the private repo.
+Deploy workflows are a different matter — they live in the private repo, **with one
+exception: `testflight.yml`.** Asked for by Tadas on 2026-09-13 ("get it into
+TestFlight"), in Zimmer session 17604, and built in session 17805. It is here rather than in
+the private repo for the reason the `ios` job is on a hosted runner: macOS minutes are free
+on a public repo and billed at a multiplier on a private one. It is the one workflow in this
+repo that holds a credential, so it is fenced four ways and **all four have to stay**:
+
+1. **`workflow_dispatch` is its only trigger.** No push and no pull request — from a fork or
+   a branch — starts it, and a fork cannot dispatch here.
+2. **The job refuses any ref but `main`** and any repository but this one.
+3. **The key is an environment secret, in `testflight`, whose deployment-branch policy
+   admits `main` only.** That is the fence that survives a branch editing (2) away: GitHub
+   withholds an environment's secrets from a job on a ref the policy does not admit.
+   Never move them to repository secrets.
+4. **It runs on a GitHub-hosted, ephemeral runner**, never the self-hosted pool, where a key
+   written to disk would outlive the job on a shared machine.
+
+What it holds is one App Store Connect API key (Admin role, so Apple's cloud-managed
+distribution certificate signs at export and there is no .p12 or profile to store) and the
+team id. No GCP identity, no registry login, nothing about the infrastructure. The server
+the build defaults to is the environment variable `MOTET_IOS_API_BASE_URL`, so this repo
+still names no host. Creating the Apple identity, the app record and the key is invariant
+9's human half; running the workflow afterwards is not, and an agent does it with
+`gh workflow run testflight.yml --ref main`. `ios/README.md`, "Distribution", is the
+procedure.
 
 ---
 
