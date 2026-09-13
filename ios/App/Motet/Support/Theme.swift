@@ -35,8 +35,13 @@ enum Theme {
         LinearGradient(colors: voices, startPoint: .leading, endPoint: .trailing)
     }
 
-    /// The only status colour that is a hue.
+    /// The only status colour that is a hue: dots, swipes and hairlines.
     static let error = vermilion
+
+    /// Error *text*: vermilion a fifth of the way toward ink. True vermilion is 3.7:1 on
+    /// parchment, under AA for words, so text gets the derived shade (about 5:1) — the same
+    /// departure the web makes (AGENTS.md, "Two readability departures").
+    static let errorText = Color(red: 0xB1 / 255, green: 0x41 / 255, blue: 0x2B / 255)
 
     // MARK: - Radii
 
@@ -132,8 +137,9 @@ extension Theme {
 // MARK: - Components
 
 extension View {
-    /// An uppercase Instrument Sans label with wide tracking, in ink-mute.
-    func brandLabel(size: CGFloat = 12, color: Color = Theme.inkMute) -> some View {
+    /// An uppercase Instrument Sans label with wide tracking, in ink-soft: these labels carry
+    /// information, and ink-mute (2.6:1) is kept for decorative captions.
+    func brandLabel(size: CGFloat = 12, color: Color = Theme.inkSoft) -> some View {
         font(Theme.label(size))
             .textCase(.uppercase)
             .tracking(size * 0.14)
@@ -185,6 +191,8 @@ struct Wordmark: View {
             .tracking(size * -0.03)
             .foregroundStyle(Theme.ink)
             .accessibilityLabel("Motet")
+            // It stands where a navigation title would, and a title is a heading.
+            .accessibilityAddTraits(.isHeader)
     }
 }
 

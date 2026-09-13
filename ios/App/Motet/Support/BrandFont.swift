@@ -76,6 +76,9 @@ enum BrandFont {
             VariationAxis.wght: weight,
             VariationAxis.opsz: opsz,
             VariationAxis.soft: 100,
+            // The file's default is WONK 1, the leaning "wonky" alternates; the web's
+            // Google-served subset renders without them, so set it rather than differ.
+            VariationAxis.wonk: 0,
         ]
         if let font = variableFont(face: face, size: size, axes: axes) {
             return font
@@ -99,6 +102,7 @@ enum BrandFont {
         static let wght = 0x7767_6874  // 'wght'
         static let opsz = 0x6F70_737A  // 'opsz'
         static let soft = 0x534F_4654  // 'SOFT'
+        static let wonk = 0x574F_4E4B  // 'WONK'
     }
 
     private static func font(_ uiFont: UIFont, relativeTo style: Font.TextStyle) -> Font {

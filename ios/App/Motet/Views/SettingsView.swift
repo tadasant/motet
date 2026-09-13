@@ -53,7 +53,7 @@ struct SettingsView: View {
         } footer: {
             Text("The token is kept in the Keychain, on this device only.")
                 .font(Theme.aside(14))
-                .foregroundStyle(Theme.inkMute)
+                .foregroundStyle(Theme.inkSoft)
         }
     }
 
@@ -96,7 +96,7 @@ struct SettingsView: View {
         } footer: {
             Text("Downloaded before you leave, so a walk with no signal still plays.")
                 .font(Theme.aside(14))
-                .foregroundStyle(Theme.inkMute)
+                .foregroundStyle(Theme.inkSoft)
         }
         .listRowBackground(Theme.surface)
         .monospacedDigit()

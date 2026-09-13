@@ -43,7 +43,7 @@ struct BacklogView: View {
                                 .foregroundStyle(item.read ? Theme.inkSoft : Theme.ink)
                             Text(item.summary)
                                 .font(Theme.body(15, relativeTo: .subheadline))
-                                .foregroundStyle(item.read ? Theme.inkMute : Theme.inkSoft)
+                                .foregroundStyle(Theme.inkSoft)
                         }
                         .padding(.vertical, 6)
                         .listRowBackground(Theme.parchment)

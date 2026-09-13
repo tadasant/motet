@@ -113,13 +113,13 @@ struct EpisodeRow: View {
                     )
                     .font(Theme.body(12, weight: 500, relativeTo: .caption2))
                     .monospacedDigit()
-                    .foregroundStyle(Theme.inkMute)
+                    .foregroundStyle(Theme.inkSoft)
                 }
 
                 if let error = episode.lastError, episode.episodeState == .failed {
                     Text(error)
                         .font(Theme.body(12, relativeTo: .caption2))
-                        .foregroundStyle(Theme.error)
+                        .foregroundStyle(Theme.errorText)
                 }
             }
             Spacer(minLength: 0)
@@ -153,7 +153,7 @@ struct EpisodeRow: View {
 struct NewEpisodeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var title = "Episode"
+    @State private var title = "Episode — \(Date.now.formatted(date: .abbreviated, time: .omitted))"
     @State private var minutes = 20
 
     var body: some View {

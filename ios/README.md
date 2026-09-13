@@ -166,8 +166,15 @@ links. It says nothing about any of this.
     not do.
 11. **The brand typefaces.** Fraunces and Instrument Sans are bundled under `App/Motet/Fonts`
     and registered at runtime (`BrandFont`), with `wght`/`opsz`/`SOFT` set through a
-    variation descriptor. A build cannot tell a registered face from the system fallback;
-    look at a screen — titles in a soft serif, the `motet` wordmark in italic.
+    variation descriptor (`WONK` 0 too). A build cannot tell a registered face from the
+    system fallback, and the fallback is also a serif, so look for what only the real face
+    does wrong: **headings in a heavy black weight mean the variations were dropped** (the
+    file's default instance is 9pt Black). The `fonts` log category says which faces
+    registered.
+12. **The custom scrubber and Dynamic Type.** Check a drag that is released, a drag cancelled
+    by pulling the sheet down (the knob and both times must return to the playback
+    position), VoiceOver's adjust gesture (it skips), and a text-size change in Control
+    Centre while the app is open (the tree rebuilds at the new size).
 
 ## Playback position is still device-local, and that is now a client gap
 

@@ -9,6 +9,11 @@ struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingPlayer = false
+    /// Read so that a text-size change re-renders this view, and used as the tree's identity
+    /// below. The brand faces are resolved to a size when a body runs, not tracked by
+    /// SwiftUI the way a system text style is, so without a rebuild a size change would
+    /// leave every screen at the old size until it happened to redraw.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,7 +30,8 @@ struct RootView: View {
                     .transition(.move(edge: .bottom))
             }
         }
-        .sheet(isPresented: $showingPlayer) { PlayerView() }
+        .id(dynamicTypeSize)
+        .sheet(isPresented: $showingPlayer) { PlayerView().id(dynamicTypeSize) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await model.handleForeground() }

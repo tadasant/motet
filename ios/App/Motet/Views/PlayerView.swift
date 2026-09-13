@@ -6,8 +6,9 @@ import SwiftUI
 struct PlayerView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var isScrubbing = false
-    @State private var scrubPositionMs: Double = 0
+    /// Where a drag has the knob, or nil when nothing is being dragged. Cleared by the
+    /// track itself when its gesture ends *or is cancelled* — see `ScrubberTrack`.
+    @State private var scrubFraction: Double?
 
     private var episode: EpisodeResponse? {
         model.episodes.first { $0.id == model.playback.episodeId }
@@ -64,20 +65,16 @@ struct PlayerView: View {
     /// the finger.
     private var scrubber: some View {
         let durationMs = Double(max(model.playback.durationMs, 1))
-        let shownMs = isScrubbing ? scrubPositionMs : Double(model.playback.positionMs)
+        let shownMs = scrubFraction.map { $0 * durationMs } ?? Double(model.playback.positionMs)
         return VStack(spacing: 6) {
             ScrubberTrack(
                 fraction: shownMs / durationMs,
                 onDragChanged: { fraction in
-                    if !isScrubbing {
-                        isScrubbing = true
-                    }
-                    scrubPositionMs = fraction * durationMs
+                    scrubFraction = fraction
                 },
                 onDragEnded: { fraction in
                     let target = Int(fraction * durationMs)
-                    scrubPositionMs = Double(target)
-                    isScrubbing = false
+                    scrubFraction = nil
                     Task { await model.perform(.seek(toMs: target)) }
                 }
             )
@@ -131,9 +128,16 @@ struct PlayerView: View {
 
     /// The speed pill and the mic pill, as the brand's transport draws them.
     private var pills: some View {
-        HStack(spacing: 8) {
-            speedControl
-            askPill
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                speedControl
+                askPill
+            }
+            // Said where it can be seen, not only to VoiceOver: a dimmed pill with no reason
+            // beside it reads as a control that is broken.
+            Text("Asking out loud isn’t in the app yet.")
+                .font(Theme.body(12, relativeTo: .caption))
+                .foregroundStyle(Theme.inkSoft)
         }
     }
 
@@ -156,22 +160,24 @@ struct PlayerView: View {
         .accessibilityValue(Format.rate(model.settings.rate))
     }
 
-    /// "Hold to ask", shown and switched off.
+    /// The brand's mic pill, shown and switched off.
     ///
-    /// The brand's transport has it, and this app has nothing behind it: the voice path is
-    /// a seam (`NarrationControl`) with no implementation on the phone. So the pill is drawn
-    /// disabled rather than wired to anything — building push-to-talk is not a restyle.
+    /// The transport has it, and this app has nothing behind it: the voice path is a seam
+    /// (`NarrationControl`) with no implementation on the phone. So the pill is drawn
+    /// disabled rather than wired to anything — building push-to-talk is not a restyle. It
+    /// says "just ask", as the web's pill does, rather than the reference's "hold to ask":
+    /// no hold-and-release interaction exists on either client (AGENTS.md, motet#110).
     private var askPill: some View {
         Button {} label: {
             Pill(filled: true) {
                 Image(systemName: "mic.fill").font(.system(size: 12, weight: .semibold))
-                Text("hold to ask")
+                Text("just ask")
             }
         }
         .buttonStyle(.plain)
         .disabled(true)
         .opacity(0.42)
-        .accessibilityLabel("Hold to ask")
+        .accessibilityLabel("Just ask")
         .accessibilityHint("Asking out loud is not available in the app yet.")
     }
 
@@ -195,8 +201,14 @@ struct PlayerView: View {
 /// which is still "seek on release".
 struct ScrubberTrack: View {
     let fraction: Double
-    let onDragChanged: (Double) -> Void
+    let onDragChanged: (Double?) -> Void
     let onDragEnded: (Double) -> Void
+
+    /// The drag in progress. `@GestureState` rather than `@State` because SwiftUI resets it
+    /// when the gesture ends *or is cancelled* — a sheet's pull-down, a system swipe, a call —
+    /// where `onEnded` never runs. A plain flag set in `onChanged` stayed set in exactly
+    /// those cases and froze the knob and both times where the finger had been.
+    @GestureState private var dragFraction: Double?
 
     private let trackHeight: CGFloat = 6
     private let knobSize: CGFloat = 16
@@ -204,7 +216,7 @@ struct ScrubberTrack: View {
     var body: some View {
         GeometryReader { geometry in
             let width = max(geometry.size.width - knobSize, 1)
-            let clamped = min(max(fraction, 0), 1)
+            let clamped = min(max(dragFraction ?? fraction, 0), 1)
             let knobX = width * clamped
 
             ZStack(alignment: .leading) {
@@ -221,8 +233,8 @@ struct ScrubberTrack: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        onDragChanged(Self.fraction(at: value.location.x, width: width, inset: knobSize / 2))
+                    .updating($dragFraction) { value, state, _ in
+                        state = Self.fraction(at: value.location.x, width: width, inset: knobSize / 2)
                     }
                     .onEnded { value in
                         onDragEnded(Self.fraction(at: value.location.x, width: width, inset: knobSize / 2))
@@ -230,6 +242,11 @@ struct ScrubberTrack: View {
             )
         }
         .frame(height: 32)
+        // Reported rather than owned upstream, so the player's times follow the knob — and a
+        // cancelled drag reports nil, which is what puts them back on the playback position.
+        .onChange(of: dragFraction) { _, current in
+            onDragChanged(current)
+        }
     }
 
     private static func fraction(at x: CGFloat, width: CGFloat, inset: CGFloat) -> Double {
@@ -286,7 +303,7 @@ struct TranscriptList: View {
                             Text(Format.time(segment.startMs))
                                 .font(Theme.body(12, weight: 500, relativeTo: .caption))
                                 .monospacedDigit()
-                                .foregroundStyle(Theme.inkMute)
+                                .foregroundStyle(Theme.inkSoft)
                         }
                     }
                     .buttonStyle(.plain)
@@ -298,7 +315,7 @@ struct TranscriptList: View {
                                 .foregroundStyle(Theme.ink)
                             Text("“\(claim.sourceExcerpt)” — \(claim.sourceTitle)")
                                 .font(Theme.aside(13, relativeTo: .caption))
-                                .foregroundStyle(Theme.inkMute)
+                                .foregroundStyle(Theme.inkSoft)
                         }
                     }
                 }
