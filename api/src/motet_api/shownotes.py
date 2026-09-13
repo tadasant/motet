@@ -29,7 +29,7 @@ and ask "wait, who said that?".
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -174,6 +174,40 @@ def _timestamp(milliseconds: int) -> str:
     return f"{hours:02d}:{mins:02d}:{secs:02d}.{millis:03d}"
 
 
+#: The last line of every episode's show notes, in both forms. Brand copy
+#: (``brand/GUIDELINES.md``): it points at the two value props — the content you trust, and
+#: asking for more — and does not lead with citations, which are a property of the product
+#: rather than its pitch.
+CLOSING_LINE = (
+    "From the content you trust, as one podcast. Want more on a story? "
+    "Open this episode in Motet and just ask: it goes deeper, then picks back up."
+)
+
+#: Longest source quote the show notes print under a story, in characters. The feed carries
+#: every published episode, and a podcast client re-fetches the whole document on every
+#: poll — so a quote is a pointer to the source, not a copy of it. Longer spans are cut at a
+#: word and marked with an ellipsis rather than silently shortened.
+MAX_QUOTE_CHARS = 280
+
+# The brand's type and colour as inline CSS (brand/GUIDELINES.md). Inline because a podcast
+# client that honours styling at all honours only this: `<style>` blocks are stripped, and a
+# webfont link would be a third-party request from a private feed that no client makes
+# anyway — hence the fallback stacks, which are what a listener will actually see.
+_SERIF = "font-family: Fraunces, 'Iowan Old Style', Palatino, Georgia, serif"
+_SANS = "font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif"
+_INK = "#1B1A2E"
+_INK_SOFT = "rgba(27,26,46,.66)"
+_RULE = "rgba(27,26,46,.14)"
+
+
+@dataclass(frozen=True)
+class SourceExcerpt:
+    """The source text one claim cites: the source item's title and its verbatim span."""
+
+    source_title: str
+    text: str
+
+
 def show_notes_text(episode: StoredEpisode, titles: dict[str, str]) -> str:
     """Plain-text show notes: what is in this episode, in the order it is spoken.
 
@@ -191,36 +225,88 @@ def show_notes_text(episode: StoredEpisode, titles: dict[str, str]) -> str:
         stamp = _clock(segment.start_ms) if segment.duration_ms > 0 else None
         lines.append(f"{index + 1}. {title}" + (f" ({stamp})" if stamp else ""))
     lines.append("")
-    lines.append(
-        "Every claim in this episode is traceable to the source it came from. "
-        "The full transcript, with sources, is in the app."
-    )
+    lines.append(CLOSING_LINE)
     return "\n".join(lines)
 
 
-def show_notes_html(episode: StoredEpisode, titles: dict[str, str]) -> str:
+def show_notes_html(
+    episode: StoredEpisode,
+    titles: dict[str, str],
+    excerpts: Mapping[str, SourceExcerpt] | None = None,
+) -> str:
     """Show notes as markup, for ``<content:encoded>``.
 
-    Deliberately austere — an ordered list and a closing line. Podcast clients render show
-    notes in a webview with their own stylesheet, so anything beyond structure is either
-    ignored or fights the client's theme.
+    Semantic first and styled second: a heading, an ordered list with a heading per story,
+    and under each story a ``<blockquote>`` of the source text its lead claim cites, with
+    the source's title in a ``<cite>`` — one claim beside its span, the structure invariant
+    3 keeps. Most clients strip every ``style`` attribute and render this in their own
+    theme, so it has to read well as bare structure; the few that keep inline styles get
+    the brand's type stacks, ink, and hairline rule. No voice hue is used: they mean *which
+    source is singing*, and nothing here needs to say that.
+
+    ``excerpts`` maps a claim id to its source text. A story whose lead claim has none — a
+    source item since removed, or a caller that did not look — gets no quote rather than an
+    empty one.
 
     Escaping is done here rather than left to the XML writer because this string is placed
     inside a CDATA section: the whole point of ``content:encoded`` is that its markup
     survives, so the writer must not escape it and *this* must.
     """
+    closing = f'<p style="{_SANS}; color: {_INK_SOFT}">{_escape(CLOSING_LINE)}</p>'
     if not episode.segments:
-        return "<p>No stories in this episode.</p>"
+        return f'<p style="{_SANS}; color: {_INK}">No stories in this episode.</p>' + closing
 
+    quotes = excerpts or {}
     items = []
     for index, segment in enumerate(episode.segments):
         title = _escape(titles.get(segment.news_item_id) or f"Story {index + 1}")
-        stamp = f" <em>({_clock(segment.start_ms)})</em>" if segment.duration_ms > 0 else ""
-        items.append(f"<li>{title}{stamp}</li>")
+        stamp = (
+            f' <span style="{_SANS}; font-size: .8em; color: {_INK_SOFT}; '
+            f'font-variant-numeric: tabular-nums">{_clock(segment.start_ms)}</span>'
+            if segment.duration_ms > 0
+            else ""
+        )
+        heading = (
+            f'<h3 style="{_SERIF}; font-weight: 400; font-size: 1.1em; margin: 0; '
+            f'color: {_INK}">{title}{stamp}</h3>'
+        )
+        lead = next((quotes[c.id] for c in segment.claims if c.id in quotes), None)
+        quote = _quote_html(lead) if lead is not None else ""
+        items.append(f'<li style="margin: 0 0 1.1em">{heading}{quote}</li>')
     return (
-        "<ol>" + "".join(items) + "</ol>"
-        "<p>Every claim in this episode is traceable to the source it came from.</p>"
+        f'<h2 style="{_SERIF}; font-weight: 400; font-size: 1.3em; color: {_INK}">'
+        "In this episode</h2>"
+        f'<ol style="{_SANS}; color: {_INK}; padding-left: 1.4em">'
+        + "".join(items)
+        + "</ol>"
+        + closing
     )
+
+
+def _quote_html(excerpt: SourceExcerpt) -> str:
+    text = _clip(excerpt.text, MAX_QUOTE_CHARS)
+    if not text:
+        return ""
+    cite = (
+        f'<footer><cite style="font-style: normal; font-size: .85em">'
+        f"{_escape(excerpt.source_title)}</cite></footer>"
+        if excerpt.source_title.strip()
+        else ""
+    )
+    return (
+        f'<blockquote style="{_SANS}; margin: .4em 0 0; padding: 0 0 0 .9em; '
+        f'border-left: 2px solid {_RULE}; color: {_INK_SOFT}">'
+        f'<p style="margin: 0">{_escape(text)}</p>{cite}</blockquote>'
+    )
+
+
+def _clip(text: str, limit: int) -> str:
+    """Whitespace collapsed, and cut at a word with an ellipsis when over ``limit``."""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit].rsplit(" ", 1)[0] or flat[:limit]
+    return cut.rstrip(" ,;:.") + "…"
 
 
 def _escape(text: str) -> str:

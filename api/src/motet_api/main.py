@@ -110,7 +110,15 @@ from .deps import (
     store,
 )
 from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
-from .feed import FeedMetadata, feed_url, render_feed
+from .feed import (
+    ARTWORK_MEDIA_TYPE,
+    ARTWORK_PATH,
+    FeedMetadata,
+    artwork_bytes,
+    artwork_version,
+    feed_url,
+    render_feed,
+)
 from .schemas import (
     AdminEpisodeCounts,
     AdminJobCounts,
@@ -173,7 +181,7 @@ from .schemas import (
     VoiceStatusResponse,
     WaitlistJoinResponse,
 )
-from .shownotes import chapters_json, transcript_vtt
+from .shownotes import SourceExcerpt, chapters_json, transcript_vtt
 from .voice import (
     VoiceConfig,
     VoiceStarter,
@@ -1350,6 +1358,31 @@ def rss_feed(request: Request, conn: Conn, user_id: FeedUser, config: Config) ->
     token = repo.active_feed_token(conn, user_id)
     assert token is not None  # the dependency resolved this request's token from this row
     base = public_base_url(config, str(request.base_url))
+    episodes = repo.list_published_episodes(conn, user_id)
+    # Story titles for the show notes and chapters — without them every story is "Story N"
+    # — and the source text each story's lead claim cites, for the quote under it, resolved
+    # the way the episode screen resolves a span. Two reads for the whole feed rather than
+    # two per episode. `load_source_items` carries each lead source's full text, which is
+    # fine at one user's volume; if feed polls ever show up in the database's load, cutting
+    # the span in SQL is the fix, not dropping the quote.
+    segments = [segment for episode in episodes for segment in episode.segments]
+    titles = {
+        item_id: item.title
+        for item_id, item in repo.load_news_items(
+            conn, list(dict.fromkeys(segment.news_item_id for segment in segments))
+        ).items()
+    }
+    leads = [segment.claims[0] for segment in segments if segment.claims]
+    sources = repo.load_source_items(
+        conn, list(dict.fromkeys(claim.source_item_id for claim in leads))
+    )
+    excerpts = {
+        claim.id: SourceExcerpt(
+            source_title=source.title, text=source.text[claim.span_start : claim.span_end]
+        )
+        for claim in leads
+        if (source := sources.get(claim.source_item_id)) is not None
+    }
     body = render_feed(
         FeedMetadata(
             title=config.feed_title,
@@ -1358,9 +1391,47 @@ def rss_feed(request: Request, conn: Conn, user_id: FeedUser, config: Config) ->
             base_url=base,
             token=token,
         ),
-        repo.list_published_episodes(conn, user_id),
+        episodes,
+        titles,
+        excerpts,
     )
     return Response(content=body, media_type="application/rss+xml")
+
+
+@app.get(
+    ARTWORK_PATH,
+    tags=["feed"],
+    response_class=Response,
+    responses={
+        200: {"content": {ARTWORK_MEDIA_TYPE: {}}, "description": "The podcast artwork"},
+        304: {"description": "The artwork the client already holds is current"},
+    },
+)
+def feed_artwork(request: Request) -> Response:
+    """The podcast artwork the feed's ``<itunes:image>`` points at: the Motet mark.
+
+    **Unauthenticated, deliberately — the one feed URL without the token.** The image is
+    not secret: it is the public brand mark, the same bytes for every user, and committed
+    to this public repo. And the clients that fetch it are the ones least likely to carry a
+    credential faithfully: a podcast app hands artwork to an image cache or a proxy, a
+    directory fetches it server-side, and either may drop the query string or keep the URL
+    far longer than the feed. A feed token in that URL would copy a bearer secret into more
+    caches and logs for nothing — and a token rotation, which is meant to unsubscribe
+    players, would also blank the cover in every client that still holds the old image URL.
+
+    No database, no storage backend: it is package data, so it answers wherever the process
+    runs, including a container with no ``DATABASE_URL`` at all.
+    """
+    etag = f'"{artwork_version()}"'
+    headers = {
+        # A week, and not `immutable`: the feed's URL carries the content hash, so a new
+        # mark is a new URL, but a client that dropped the query string still revalidates.
+        "Cache-Control": "public, max-age=604800",
+        "ETag": etag,
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(content=artwork_bytes(), media_type=ARTWORK_MEDIA_TYPE, headers=headers)
 
 
 @app.get(

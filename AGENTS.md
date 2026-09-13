@@ -2051,6 +2051,15 @@ better than HTTP auth — and it is stored in the clear because the owner has to
 read it back onto a new device. Hashing it would make every device change a rotation, and a
 rotation unsubscribes every client already using the URL.
 
+**The artwork is the one feed URL without the token** (motet#110). `<itunes:image>` and RSS
+2.0's `<image>` point at `GET /v1/feed/artwork.png`, which serves a package-data copy of
+`brand/mark/motet-mark-3000.png` with no authentication: the image is the public brand mark,
+identical for every user, and the clients that fetch artwork hand it to image caches and
+proxies that keep a URL far longer than a feed — a bearer secret there is a leak for
+nothing, and a rotation would blank the cover. The URL carries a content hash (`?v=`), so a
+re-rendered mark is a new URL rather than a stale cache; a test holds the copy byte-equal to
+its source, and `bin/build-images` asks the real container for it.
+
 ### Gmail is the seam to the mailbox, and the extractor is where it earns its keep
 
 `sources/` holds one `MailClient` Protocol, one `OAuthClient` Protocol, a real Gmail
@@ -2597,6 +2606,15 @@ Where clients actually look, which is not always where the spec says:
   Podcasting 2.0. Different clients read different ones, and the inline form also works for
   a client that will not make a second authenticated request.
 - `<podcast:transcript>` points at WebVTT with `rel="captions"`, because the cues are timed.
+
+**The markup is structure first and brand second.** `content:encoded` is a heading per story
+with a `<blockquote>` of the span its lead claim cites and the source's title in a `<cite>`
+— one claim beside its source, not the whole transcript, because the feed carries every
+episode on every poll. Most clients strip styling, so it must read as bare HTML; the few
+that keep inline `style` attributes get `brand/GUIDELINES.md`'s type stacks, ink and rule.
+Never a `<style>` block or a webfont link: clients drop the first, and the second would be a
+third-party request from a private feed. Copy follows the guidelines too — "podcast" and
+"episode", and citations are not the closing line.
 
 `ElementTree` has no CDATA support and escapes everything, which is wrong for
 `content:encoded` — so that element gets an opaque token that is swapped for a real CDATA

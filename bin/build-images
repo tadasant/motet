@@ -192,6 +192,18 @@ smoke_api() {
   # the real FastAPI application rather than as something that merely answers health.
   curl -fsS --max-time 5 "http://127.0.0.1:${port}/openapi.json" >/dev/null
   echo "    /openapi.json -> ok"
+
+  # The podcast artwork is package data read at request time, so whether the PNG is in the
+  # *image* is the same kind of claim as the SDK checks above: the workspace's venv reads it
+  # from the source tree and cannot answer for the container. No database is needed.
+  local artwork
+  artwork="$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' --max-time 5 \
+    "http://127.0.0.1:${port}/v1/feed/artwork.png" || true)"
+  echo "    /v1/feed/artwork.png -> ${artwork}"
+  if [ "$artwork" != "200 image/png" ]; then
+    echo "smoke: the image does not serve the podcast artwork — the PNG is missing" >&2
+    return 1
+  fi
 }
 
 # --- worker ----------------------------------------------------------------

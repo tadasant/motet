@@ -1913,6 +1913,11 @@ public enum MotetEndpoints {
         return HTTPEndpoint(method: "GET", path: "/v1/feed")
     }
 
+    /// `GET /v1/feed/artwork.png` — Feed Artwork
+    public static var feedArtwork: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/feed/artwork.png")
+    }
+
     /// `POST /v1/feed/rotate` — Rotate Feed
     public static var rotateFeed: HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/feed/rotate")

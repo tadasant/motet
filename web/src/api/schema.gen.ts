@@ -537,6 +537,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/feed/artwork.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Feed Artwork
+         * @description The podcast artwork the feed's ``<itunes:image>`` points at: the Motet mark.
+         *
+         *     **Unauthenticated, deliberately — the one feed URL without the token.** The image is
+         *     not secret: it is the public brand mark, the same bytes for every user, and committed
+         *     to this public repo. And the clients that fetch it are the ones least likely to carry a
+         *     credential faithfully: a podcast app hands artwork to an image cache or a proxy, a
+         *     directory fetches it server-side, and either may drop the query string or keep the URL
+         *     far longer than the feed. A feed token in that URL would copy a bearer secret into more
+         *     caches and logs for nothing — and a token rotation, which is meant to unsubscribe
+         *     players, would also blank the cover in every client that still holds the old image URL.
+         *
+         *     No database, no storage backend: it is package data, so it answers wherever the process
+         *     runs, including a container with no ``DATABASE_URL`` at all.
+         */
+        get: operations["feed_artwork_v1_feed_artwork_png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/feed/rotate": {
         parameters: {
             query?: never;
@@ -3388,6 +3420,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    feed_artwork_v1_feed_artwork_png_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The podcast artwork */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            /** @description The artwork the client already holds is current */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
