@@ -188,8 +188,8 @@ describe('App', () => {
   it('shows the three Phase 1 screens and starts on paste-in', async () => {
     mockApi()
     render(<App />)
-    for (const label of ['Paste in', 'Backlog', 'Episode']) {
-      expect(screen.getByRole('button', { name: label })).toBeDefined()
+    for (const label of ['Paste in', 'Backlog', 'Episodes']) {
+      expect(screen.getByRole('link', { name: label })).toBeDefined()
     }
     expect(await screen.findByRole('heading', { name: 'Paste in' })).toBeDefined()
   })
@@ -224,7 +224,7 @@ describe('App', () => {
       '/v1/news-items/ni_1/read': { ...NEWS_ITEM, read: true },
     })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
 
     expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
     fireEvent.click(screen.getByRole('button', { name: 'Mark read' }))
@@ -240,7 +240,7 @@ describe('App', () => {
     // and then there was nowhere at all it could be seen again.
     mockApi({ '/v1/ingestion': [QUEUED] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+    fireEvent.click(screen.getByRole('link', { name: /Backlog/ }))
 
     expect(await screen.findByRole('heading', { name: 'Processing' })).toBeDefined()
     expect(screen.getByText('Newsletter I just pasted')).toBeDefined()
@@ -269,7 +269,7 @@ describe('App', () => {
       ],
     })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+    fireEvent.click(screen.getByRole('link', { name: /Backlog/ }))
 
     await screen.findByRole('heading', { name: 'Processing' })
     // An item on its fourth attempt and an item nobody will ever try again are not the
@@ -291,7 +291,7 @@ describe('App', () => {
     // must not be reported as "nothing is being processed", which is a different claim.
     mockApi({ '/v1/ingestion': undefined })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+    fireEvent.click(screen.getByRole('link', { name: /Backlog/ }))
 
     expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
     expect(screen.getByText(/Could not check what is still being processed/)).toBeDefined()
@@ -334,7 +334,7 @@ describe('App', () => {
     })
     render(<App />)
 
-    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
+    expect(await screen.findByRole('link', { name: 'Backlog 1' })).toBeDefined()
   })
 
   it('counts what is in flight on the tab, so it is visible from the paste screen', async () => {
@@ -344,13 +344,13 @@ describe('App', () => {
     // Still on Paste in: someone who has just pasted has no reason to go to the backlog
     // unless something there tells them to.
     await screen.findByRole('heading', { name: 'Paste in' })
-    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
+    expect(await screen.findByRole('link', { name: 'Backlog 1' })).toBeDefined()
   })
 
   it('creates an episode from the backlog and opens it', async () => {
     const calls = mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
 
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
@@ -367,7 +367,7 @@ describe('App', () => {
     // backlog visit, no "Make an episode", straight to the tab.
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
 
     expect(await screen.findByText(/Morning briefing/)).toBeDefined()
     expect(screen.queryByText('Make one from the backlog.')).toBeNull()
@@ -376,7 +376,7 @@ describe('App', () => {
   it('says so when there is genuinely no episode, and not before it has looked', async () => {
     mockApi({ 'GET /v1/episodes': [] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
 
     expect(await screen.findByText('Make one from the backlog.')).toBeDefined()
   })
@@ -387,7 +387,7 @@ describe('App', () => {
     // is exactly the disappearance motet#44 is about.
     mockApi({ 'GET /v1/episodes': undefined, '/v1/episodes': undefined })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
 
     expect(await screen.findByText(/Could not load your episodes/)).toBeDefined()
     expect(screen.queryByText('Make one from the backlog.')).toBeNull()
@@ -401,7 +401,7 @@ describe('App', () => {
     const pending = { ...EPISODE, state: 'rendering', segments: [] }
     const calls = mockApi({ 'GET /v1/episodes': [pending], '/v1/episodes': pending })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
     await screen.findByText(/Working…/)
 
     const before = calls.filter((call) => call.url.startsWith('/v1/processing')).length
@@ -418,7 +418,7 @@ describe('App', () => {
     const older = { ...EPISODE, id: 'ep_0', title: 'Yesterday briefing' }
     mockApi({ 'GET /v1/episodes': [EPISODE, older] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
     await screen.findByText(/Morning briefing/)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Yesterday briefing' }))
@@ -430,7 +430,7 @@ describe('App', () => {
   it('shows every claim beside the source span it cites', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
     await screen.findByRole('heading', { name: 'Episode' })
@@ -447,7 +447,7 @@ describe('App', () => {
   it('offers the private feed URL rather than an in-page player', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
 
@@ -458,11 +458,39 @@ describe('App', () => {
   })
 })
 
+// PROTOTYPE (proto/local-ux): the shell puts the section in the address bar.
+describe('the app shell', () => {
+  it('puts the section in the address bar, so a reload keeps its place', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Paste in' })
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
+    expect(window.location.pathname).toBe('/backlog')
+    expect(screen.getByRole('link', { name: 'Backlog' }).getAttribute('aria-current')).toBe('page')
+  })
+
+  it('lands on the section the address bar names', async () => {
+    mockApi()
+    window.history.replaceState({}, '', '/episodes')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Episodes', level: 1 })).toBeDefined()
+    expect(await screen.findByText(/Morning briefing/)).toBeDefined()
+  })
+
+  it('mounts the admin screen as a section rather than a separate page', async () => {
+    mockApi({ '/v1/admin/overview': undefined })
+    window.history.replaceState({}, '', '/admin')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Admin', level: 1 })).toBeDefined()
+    expect(screen.getByRole('link', { name: 'Admin' }).getAttribute('aria-current')).toBe('page')
+  })
+})
+
 describe('connecting a mailbox', () => {
   it('lists sources and reads a pending one as waiting, not as failed', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
 
     expect(await screen.findByText('Gmail')).toBeDefined()
     expect(screen.getByText(/gmail . waiting for consent/)).toBeDefined()
@@ -481,7 +509,7 @@ describe('connecting a mailbox', () => {
     }
     mockApi({ '/v1/sources': [connected] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
 
     expect(await screen.findByText(/gmail . connected/)).toBeDefined()
     expect(screen.getByText(/^Last polled .* . gmail.readonly$/)).toBeDefined()
@@ -493,7 +521,7 @@ describe('connecting a mailbox', () => {
     // abandoned OAuth attempt, directly under copy saying pasting in needs nothing.
     mockApi({ '/v1/sources': [PASTE_SOURCE] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
 
     expect(await screen.findByText('Pasted text')).toBeDefined()
     expect(screen.getByText(/paste . ready/)).toBeDefined()
@@ -510,7 +538,7 @@ describe('connecting a mailbox', () => {
     // button for one would be a promise the backend refuses to keep.
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
     await screen.findByText('Gmail')
 
     expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeDefined()
@@ -888,7 +916,8 @@ describe('signing out', () => {
   it('says who is signed in and revokes the session', async () => {
     const calls = mockApi({ '/v1/auth/logout': {} })
     render(<App />)
-    await screen.findByRole('button', { name: 'Sign out' })
+    // The address is the account button in the top bar; the menu behind it holds Sign out.
+    fireEvent.click(await screen.findByRole('button', { name: /owner@motet.test/ }))
     expect(screen.getByText(/owner@motet.test/)).toBeDefined()
 
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
@@ -904,6 +933,9 @@ describe('signing out', () => {
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Paste in' })
+    // Opened, so that the assertion is about the menu's contents and not about it being shut.
+    fireEvent.click(screen.getByRole('button', { name: 'Account' }))
+    expect(screen.getByText('Using the shared API token.')).toBeDefined()
     expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull()
   })
 })
