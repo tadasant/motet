@@ -44,7 +44,13 @@ final class CredentialStore {
 
     func save(baseURL: String, apiToken: String) {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(trimmed, forKey: baseURLKey)
+        // Settings shows the build's default, so saving it unchanged must not pin it: a later
+        // build pointed somewhere else would otherwise be ignored on this phone forever.
+        if trimmed == Self.buildDefaultBaseURL?.absoluteString {
+            UserDefaults.standard.removeObject(forKey: baseURLKey)
+        } else {
+            UserDefaults.standard.set(trimmed, forKey: baseURLKey)
+        }
         writeToken(apiToken.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 

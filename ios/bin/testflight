@@ -24,7 +24,8 @@
 #
 # NO ENTITLEMENTS FILE IS SIGNED IN. App/Motet/Motet.entitlements asks for
 # `com.apple.developer.carplay-audio`, which Apple grants by manual review, and an ungranted
-# entitlement fails a build to sign. The assertions below refuse an archive carrying it.
+# entitlement fails a build to sign. The script refuses to archive if CODE_SIGN_ENTITLEMENTS
+# is set at all.
 #
 # `upload` reads, and never prints:
 #   APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_API_ISSUER_ID,
@@ -107,6 +108,17 @@ printf '    using %s\n' "$(xcodebuild -version | head -1)"
 printf '==> archiving build %s (signing: %s)\n' "$build_number" "$([ "$mode" = check ] && echo none || echo "$signing")"
 
 archive="$work/Motet.xcarchive"
+
+# The CarPlay guard is asked of the build settings, before anything is built: an unsigned
+# archive carries no entitlements to inspect, and the signed binary only exists inside the
+# upload. Captured rather than piped into `grep -q`, which under pipefail can report a match
+# as a miss when the writer dies of SIGPIPE.
+settings="$(xcodebuild -showBuildSettings -project App/Motet.xcodeproj -scheme Motet -configuration Release 2>/dev/null)"
+entitlements="$(printf '%s\n' "$settings" | awk '$1 == "CODE_SIGN_ENTITLEMENTS" { $1 = ""; $2 = ""; print }' | tr -d ' ')"
+[ -z "$entitlements" ] ||
+  fail "CODE_SIGN_ENTITLEMENTS is '$entitlements' — CarPlay is not granted, and an ungranted entitlement fails signing"
+printf '    ok  %-44s none\n' "CODE_SIGN_ENTITLEMENTS"
+
 # Options before build settings, and no empty array expanded: macOS's bash is 3.2, where
 # "${empty[@]}" under `set -u` is an unbound-variable error.
 if [ "$mode" = upload ] && [ "$signing" = archive ]; then
@@ -131,15 +143,18 @@ app="$archive/Products/Applications/Motet.app"
 plist="$app/Info.plist"
 [ -f "$plist" ] || fail "the archive has no Motet.app — did the scheme's archive action change?"
 
-value() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist" 2>/dev/null || true; }
+# A key that is absent fails, rather than reading as an empty string that happens to match.
+value() {
+  /usr/libexec/PlistBuddy -c "Print :$1" "$plist" 2>/dev/null || fail "Info.plist has no $1"
+}
 expect() {
   local actual
   actual="$(value "$1")"
   [ "$actual" = "$2" ] || fail "Info.plist $1 is '$actual', expected '$2'"
-  printf '    ok  %-44s %s\n' "$1" "$2"
+  printf '    ok  %-44s %s\n' "$1" "matches"
 }
 present() {
-  [ -n "$(value "$1")" ] || fail "Info.plist has no $1"
+  [ -n "$(value "$1")" ] || fail "Info.plist has an empty $1"
   printf '    ok  %-44s present\n' "$1"
 }
 
@@ -154,11 +169,7 @@ expect CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName AppIcon
 expect MotetDefaultBaseURL "$base_url"
 [ -f "$app/Assets.car" ] || fail "no compiled asset catalog — the app icon is missing"
 [ -f "$app/PrivacyInfo.xcprivacy" ] || fail "no privacy manifest in the app bundle"
-if grep -aq '\$(' "$plist"; then fail "Info.plist carries an unexpanded \$(...) build setting"; fi
-if strings "$app/Motet" 2>/dev/null | grep -q 'com.apple.developer.carplay-audio'; then
-  fail "the binary carries the CarPlay entitlement, which Apple has not granted"
-fi
-printf '    ok  %-44s none\n' "CarPlay entitlement"
+if grep -aq '\$(' "$plist"; then fail "Info.plist carries a malformed \$(...) build setting"; fi
 
 version="$(value CFBundleShortVersionString)"
 

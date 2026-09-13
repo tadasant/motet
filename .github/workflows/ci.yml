@@ -199,7 +199,7 @@ jobs:
           fi
 
           printf '%s\n' "$files" | sed 's/^/  /'
-          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/ci\.yml$)'; then
+          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/(ci|testflight)\.yml$)'; then
             echo "ios=true" >> "$GITHUB_OUTPUT"
           else
             echo "ios=false" >> "$GITHUB_OUTPUT"

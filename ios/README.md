@@ -220,8 +220,10 @@ the binary.
 The server URL is typed in too, except on a TestFlight build, which arrives with it
 prefilled. `MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL`
 build setting, which is empty in this repo and in CI. The TestFlight workflow fills it from
-the `testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so this public repo still
-names no host. Only an `https://` value is honoured, and a URL saved in Settings always wins.
+the `testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in
+this repo's files. The variable holds the product's public API name, which the public SPA
+already serves in its `config.js`. It is not masked, and it shows in the workflow's logs.
+Never set it to an internal address such as a `*.run.app` URL. Only an `https://` value is honoured, and a URL saved in Settings always wins.
 
 ## Distribution: TestFlight
 
@@ -241,7 +243,10 @@ cloud-managed distribution certificate and creates the App Store profile. So the
 credential is one key: no .p12, no profile, no keychain on the runner. If Apple ever refuses
 export-time signing of an unsigned archive, `signing=archive` signs during the archive
 instead. It works from the same key, but mints a development certificate per run, so it
-is the fallback rather than the default.
+is the fallback rather than the default. Apple caps a team's development certificates, so
+a run of fallback builds eventually needs old ones revoked in Certificates, IDs & Profiles.
+If the first real run shows export-time signing is refused, make `archive` the default
+rather than living on the fallback.
 
 **Build numbers** are `run_number.run_attempt`, which are unique and increasing, including
 for a re-run. The marketing version is `MARKETING_VERSION` in the project. Bump it for a
@@ -261,8 +266,9 @@ release that should read differently in TestFlight.
    file), and the variable `APPLE_TEAM_ID`. `MOTET_IOS_API_BASE_URL` is already there.
 6. After the first build processes, add testers under TestFlight → Internal Testing.
 
-The workflow checks steps 3–5 before it spends ten minutes archiving (`app_store_connect.py
-preflight`), and says which one is missing.
+Before it spends ten minutes archiving, the workflow checks that the variables are set and
+that the key can see the app record (`app_store_connect.py preflight`). A pending
+agreement shows up there as a 403. A wrong team id is only caught at export.
 
 **The app icon is a placeholder**: four lines converging on parchment, generated so that an
 upload is not refused for lacking one. The brand restyle

@@ -37,6 +37,10 @@ TOKEN_LIFETIME_SECONDS = 15 * 60  # Apple refuses anything over 20 minutes.
 POLL_SECONDS = 30
 
 
+class TransientError(Exception):
+    """A failure worth asking again about: the network, a timeout, a 429 or a 5xx."""
+
+
 def _say(line: str) -> None:
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
@@ -115,6 +119,8 @@ class Client:
                 return body
         except urllib.error.HTTPError as error:
             detail = _error_detail(error)
+            if error.code == 429 or error.code >= 500:
+                raise TransientError(f"{error.code} for {path}. {detail}") from None
             if error.code == 401:
                 raise SystemExit(
                     "App Store Connect refused the key (401). Check that "
@@ -130,6 +136,8 @@ class Client:
             raise SystemExit(
                 f"App Store Connect answered {error.code} for {path}. {detail}"
             ) from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            raise TransientError(f"{path}: {error}") from None
 
 
 def _error_detail(error: urllib.error.HTTPError) -> str:
@@ -159,28 +167,42 @@ def _app_id(client: Client, bundle_id: str) -> str:
 
 
 def preflight(args: argparse.Namespace) -> None:
-    _app_id(Client(), args.bundle_id)
+    try:
+        _app_id(Client(), args.bundle_id)
+    except TransientError as error:
+        # Nothing has been built yet, so failing here costs a re-run and nothing else.
+        raise SystemExit(f"App Store Connect could not be asked: {error}") from None
 
 
 def wait(args: argparse.Namespace) -> None:
+    """Poll until processed. The upload has already happened by the time this runs, so a
+    network blip or an Apple 5xx is retried until the deadline rather than turning a
+    successful upload into a red run whose re-run would upload a second build."""
     client = Client()
-    app_id = _app_id(client, args.bundle_id)
     label = f"{args.version} ({args.build})"
     deadline = time.monotonic() + args.timeout_minutes * 60
+    app_id = ""
     seen = False
     while True:
-        body = client.get(
-            "/v1/builds",
-            {
-                "filter[app]": app_id,
-                "filter[version]": args.build,
-                "filter[preReleaseVersion.version]": args.version,
-                "fields[builds]": "version,processingState,uploadedDate,expired",
-                "limit": "1",
-            },
-        )
+        try:
+            app_id = app_id or _app_id(client, args.bundle_id)
+            body = client.get(
+                "/v1/builds",
+                {
+                    "filter[app]": app_id,
+                    "filter[version]": args.build,
+                    "filter[preReleaseVersion.version]": args.version,
+                    "fields[builds]": "version,processingState,uploadedDate,expired",
+                    "limit": "1",
+                },
+            )
+        except TransientError as error:
+            _say(f"  App Store Connect did not answer, asking again: {error}")
+            body = {"transient": True}
         builds = body.get("data", [])
-        if builds:
+        if body.get("transient"):
+            pass
+        elif builds:
             state = builds[0]["attributes"].get("processingState")
             if not seen:
                 _say(f"build {label} has reached App Store Connect")

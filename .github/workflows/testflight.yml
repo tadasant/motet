@@ -46,7 +46,9 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      # Pinned by SHA, not tag, in the one workflow that holds a key: a moved tag would run
+      # code inside this job. actions/checkout v4.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 

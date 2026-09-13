@@ -31,7 +31,9 @@ Application code reads configuration from the environment and does not know what
 behind it. If a change seems to require an infrastructure fact in this repo, that is the
 signal it belongs in the private repo instead — say so and stop rather than inlining it.
 
-Deploy workflows live in the private repo. CI in *this* repo runs on the shared
+Deploy workflows live in the private repo — with one exception, the TestFlight upload, which
+lives here for its free macOS runner and is fenced to `main` (see
+[Runner policy](#runner-policy)). CI in *this* repo runs on the shared
 self-hosted runner pool behind a fork guard, with one job on a GitHub-hosted macOS runner
 because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
 
@@ -760,7 +762,9 @@ bin/build-images api web      # a subset
 context rooted at `api/` could not resolve it.
 
 **This repo builds images and never pushes them.** It is public and holds no cloud
-credential of any kind — no GCP identity, no registry login, nothing to leak. Publishing
+credential of any kind — no GCP identity, no registry login, nothing to leak. (Its one
+credential of any kind is the App Store Connect key behind `testflight.yml`, which reaches
+Apple and nothing in the infrastructure; see [Runner policy](#runner-policy).) Publishing
 and deploying belong to the private infrastructure repo. A PR that adds a push step here
 is a PR that adds a cloud credential to a public repo; the answer is the other repo.
 
@@ -834,7 +838,17 @@ repo that holds a credential, so it is fenced four ways and **all four have to s
    withholds an environment's secrets from a job on a ref the policy does not admit.
    Never move them to repository secrets.
 4. **It runs on a GitHub-hosted, ephemeral runner**, never the self-hosted pool, where a key
-   written to disk would outlive the job on a shared machine.
+   written to disk would outlive the job on a shared machine. Its one action is pinned by
+   commit SHA, because a moved tag would run inside the job holding the key.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** The owner asked for the outcome
+(a TestFlight build), not for this placement. The alternatives, and why they lost:
+the private repo on a paid macOS runner (the same workflow at a multiplier, for a key that
+reaches no infrastructure); Xcode Cloud (its setup needs Xcode on a Mac, and no Mac exists
+anywhere in this project); and uploading by hand from Xcode (the same missing Mac, plus a
+human in a routine operation, which invariant 9 calls a defect). Merging the PR that added
+it is the owner's choice of this option, so a reversal is a move to the private repo, not a
+rewrite: the script is the workflow's whole body.
 
 What it holds is one App Store Connect API key (Admin role, so Apple's cloud-managed
 distribution certificate signs at export and there is no .p12 or profile to store) and the
