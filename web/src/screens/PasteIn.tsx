@@ -33,8 +33,8 @@ export function PasteIn({ onIngested }: { onIngested: () => void }) {
   }
 
   return (
-    <section aria-labelledby="paste-in-heading">
-      <h2 id="paste-in-heading">Paste in</h2>
+    <section aria-label="Paste in">
+      {/* PROTOTYPE: the "Paste in" title is the shell's top bar now (App.tsx). */}
       <p className="hint">
         Paste a newsletter. A worker deduplicates it against your backlog and turns it into
         a news item — it will not appear here instantly.

@@ -1,22 +1,28 @@
-// A tab strip, and no router.
+// An app shell, and still no router.
 //
 // The SPA is the eyes-on backlog surface, not the product — "SPA work still running after
 // a week" is a named tripwire in AGENTS.md. A handful of screens do not need a routing
 // library, a state manager, or a design system, and adding one would be the first step
 // toward building a product instead of a factory.
 //
-// OAuth is the one thing that forces a path on us, because Google redirects to a URL
-// rather than back into a running app. It is handled by reading `location` once at boot
-// (see oauth.ts) and rendering the callback instead of the tabs — a few lines, against a
-// dependency that would then be available for every future "shouldn't this be a route?".
-// Two flows come back on that one path — signing in, and connecting a mailbox — and the
-// `state` says which, because it is the only thing that survives the round trip.
+// PROTOTYPE (proto/local-ux): the tab strip has become a sidebar + top bar (`shell/`), and
+// the URL now says which section is open — `/backlog`, `/episodes`, `/sources`, `/paste`,
+// `/admin` — through a ~40-line `pushState`/`popstate` hook rather than a router. A reload
+// keeps its place, which a tab held in component state never did. Each screen renders
+// unchanged inside the shell; see proto/issues/06-app-shell.md.
+//
+// OAuth is the one path that was always forced on us, because Google redirects to a URL
+// rather than back into a running app. It is handled exactly as before: `location` is
+// read once at boot (see oauth.ts) and the callback renders instead of the app, with no
+// sidebar. Two flows come back on that one path — signing in, and connecting a mailbox —
+// and the `state` says which, because it is the only thing that survives the round trip.
 //
 // **A browser holding no token sees the door and nothing else.** That is the whole point
 // of Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN"
-// is now a button. The disclosure stays, because the shared token still works and is
-// still the answer when there is no Google account to hand — it has just stopped being
-// the thing a human is expected to type into a phone.
+// is now a button. The disclosure stays — on the door, and in the account menu once
+// inside — because the shared token still works and is still the answer when there is no
+// Google account to hand; it has just stopped being the thing a human is expected to
+// type into a phone.
 
 import { useCallback, useEffect, useState } from 'react'
 
@@ -40,42 +46,20 @@ import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
 import { SignInCallback } from './screens/SignInCallback'
 import { Sources } from './screens/Sources'
-
-type Tab = 'paste' | 'backlog' | 'episode' | 'sources'
+import { Popover, Shell } from './shell/Shell'
+import { sectionFor } from './shell/sections'
+import { usePath } from './shell/useLocation'
 
 // How often the backlog re-asks while an item is still being processed. Short enough that
 // a paste which integrates in seconds is seen to integrate, and it only runs while
 // something is pending.
 const POLL_MS = 3_000
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'paste', label: 'Paste in' },
-  { id: 'backlog', label: 'Backlog' },
-  { id: 'episode', label: 'Episode' },
-  { id: 'sources', label: 'Sources' },
-]
-
-// PROTOTYPE: /admin is a second path, handled the way /oauth/callback is.
-const ADMIN = globalThis.window?.location.pathname === '/admin'
-
 export default function App() {
-  if (ADMIN) return <AdminApp />
-  return <MainApp />
-}
-
-function AdminApp() {
-  return (
-    <main className="wide">
-      <header>
-        <h1>Motet</h1>
-      </header>
-      <Admin />
-    </main>
-  )
-}
-
-function MainApp() {
-  const [tab, setTab] = useState<Tab>('paste')
+  // The path is state, and the section is a function of it. Read in an initializer like
+  // the callback below; changed only through `navigate` and the back button.
+  const [path, navigate] = usePath()
+  const section = sectionFor(path)
   const [items, setItems] = useState<NewsItem[]>([])
   // What has been pasted and is not a news item yet. Held here rather than in the backlog
   // screen because the tab strip labels it too: the person who needs to see it is on the
@@ -241,8 +225,10 @@ function MainApp() {
   const finishCallback = () => {
     setCallback(null)
     // Back to where the flow started from: a mailbox connection belongs on Sources, and a
-    // sign-in belongs at the front of the app the person was trying to reach.
-    setTab(signingIn ? 'paste' : 'sources')
+    // sign-in belongs at the front of the app the person was trying to reach. `replace`,
+    // because `forgetCallbackUrl` has already put `/` in the address bar and a history
+    // entry for it would be a back button that goes nowhere.
+    navigate(signingIn ? '/' : '/sources', { replace: true })
   }
 
   const openEpisode = (next: Episode) => {
@@ -250,7 +236,7 @@ function MainApp() {
     // In front, and de-duplicated: the backlog's button makes a *new* episode, so this is
     // normally an id the list has never seen.
     setEpisodes((list) => [next, ...list.filter((entry) => entry.id !== next.id)])
-    setTab('episode')
+    navigate('/episodes')
   }
 
   // The polling episode screen reports every state change. The list has to hear it too,
@@ -269,109 +255,125 @@ function MainApp() {
     setWho(null)
   }
 
-  return (
-    <main>
-      <header>
-        <h1>Motet</h1>
-        {/* The address alone, not "signed in as …": the button beside it already says
-            what state this is, and the callback screen is the place that spells it out. */}
-        {who?.email && (
-          <p className="hint">
-            {who.email}{' '}
-            <button type="button" onClick={signOut}>
-              Sign out
-            </button>
-          </p>
-        )}
-        {/* Hidden during the callback, and before there is anything to navigate: there is
-            one thing to do on either screen, and the screen offers it. */}
-        {!callback && (token || unlocked) && (
-          <nav aria-label="Screens">
-            {TABS.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                aria-current={tab === entry.id ? 'page' : undefined}
-                onClick={() => setTab(entry.id)}
-              >
-                {entry.label}
-                {entry.id === 'backlog' && unsettled > 0 && (
-                  <span className={`tab-count${anyFailed ? ' failed' : ''}`}>{unsettled}</span>
-                )}
-              </button>
-            ))}
-          </nav>
-        )}
-      </header>
+  // The API token disclosure. One shared token for the single Phase 1 account, the same
+  // one the RSS feed and any script use; signing in with Google puts a session token in
+  // this same slot, so this field is the fallback rather than the way in. On the door it
+  // is inline, because SignIn points at it; inside the app it lives in the account menu.
+  const tokenField = (
+    <details className="token">
+      <summary>API token</summary>
+      <p className="hint">
+        One shared token for the single Phase 1 account — the same one the RSS feed and
+        any script use. Signing in with Google puts a session token in this same slot,
+        so this field is the fallback rather than the way in. Stored in this browser
+        only. (Connecting a mailbox under Sources is a different thing again: that is
+        Google&rsquo;s consent, and its token never comes back here.)
+      </p>
+      <input
+        aria-label="API token"
+        type="password"
+        value={token}
+        onChange={(e) => saveToken(e.target.value)}
+        placeholder="MOTET_API_TOKEN"
+      />
+    </details>
+  )
 
-      <details className="token">
-        <summary>API token</summary>
-        <p className="hint">
-          One shared token for the single Phase 1 account — the same one the RSS feed and
-          any script use. Signing in with Google puts a session token in this same slot,
-          so this field is the fallback rather than the way in. Stored in this browser
-          only. (Connecting a mailbox under Sources is a different thing again: that is
-          Google&rsquo;s consent, and its token never comes back here.)
-        </p>
-        <input
-          aria-label="API token"
-          type="password"
-          value={token}
-          onChange={(e) => saveToken(e.target.value)}
-          placeholder="MOTET_API_TOKEN"
-        />
-      </details>
+  const errorLine = error && (
+    <p className="error" role="alert">
+      {error}
+    </p>
+  )
 
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {callback && signingIn ? (
-        <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
-      ) : callback ? (
-        <OAuthCallback callback={callback} onDone={finishCallback} />
-      ) : !token && !unlocked ? (
-        <SignIn />
-      ) : (
-        <>
-          {tab === 'paste' && <PasteIn onIngested={refresh} />}
-          {tab === 'backlog' && (
-            <Backlog
-              items={items}
-              ingestion={ingestion}
-              ingestionUnavailable={ingestionUnavailable}
-              processing={processing}
-              onChanged={refresh}
-              onOpenEpisode={openEpisode}
-            />
+  // The callback and the door render without the sidebar: there is one thing to do on
+  // either screen, and the screen offers it. Nothing to navigate to yet, either.
+  if (callback || (!token && !unlocked)) {
+    return (
+      <div className="door">
+        <header className="door-bar">
+          <span className="brand">Motet</span>
+        </header>
+        <main className="door-main">
+          {errorLine}
+          {callback && signingIn ? (
+            <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
+          ) : callback ? (
+            <OAuthCallback callback={callback} onDone={finishCallback} />
+          ) : (
+            <>
+              {tokenField}
+              <SignIn />
+            </>
           )}
-          {tab === 'episode' &&
-            (episode ? (
-              <EpisodeScreen
-                episode={episode}
-                episodes={episodes}
-                processing={processing}
-                onEpisodeChanged={episodeChanged}
-                onSelectEpisode={setEpisode}
-                onBacklogChanged={refresh}
-              />
-            ) : (
-              <section aria-labelledby="episode-heading">
-                <h2 id="episode-heading">Episode</h2>
-                <p className="hint">
-                  {!episodesLoaded
-                    ? 'Looking for your episodes…'
-                    : episodesUnavailable
-                      ? 'Could not load your episodes. This is not the same as having none.'
-                      : 'Make one from the backlog.'}
-                </p>
-              </section>
-            ))}
-          {tab === 'sources' && <Sources />}
+        </main>
+      </div>
+    )
+  }
+
+  // The address alone as the button, not "signed in as …": the menu it opens says what
+  // state this is. With no address — the shared token, or an open deployment — the button
+  // says "Account" and the menu says which.
+  const account = (
+    <Popover label={who?.email ?? 'Account'}>
+      {who?.email ? (
+        <>
+          <p className="hint">Signed in with Google.</p>
+          <button type="button" onClick={signOut}>
+            Sign out
+          </button>
         </>
+      ) : who?.how === 'token' ? (
+        <p className="hint">Using the shared API token.</p>
+      ) : unlocked ? (
+        <p className="hint">This deployment has no lock on it. Everything answers.</p>
+      ) : null}
+      {tokenField}
+    </Popover>
+  )
+
+  return (
+    <Shell
+      section={section}
+      onNavigate={navigate}
+      badge={{ count: unsettled, failed: anyFailed }}
+      account={account}
+    >
+      {errorLine}
+      {section.id === 'paste' && <PasteIn onIngested={refresh} />}
+      {section.id === 'backlog' && (
+        <Backlog
+          items={items}
+          ingestion={ingestion}
+          ingestionUnavailable={ingestionUnavailable}
+          processing={processing}
+          onChanged={refresh}
+          onOpenEpisode={openEpisode}
+        />
       )}
-    </main>
+      {section.id === 'episodes' &&
+        (episode ? (
+          <EpisodeScreen
+            episode={episode}
+            episodes={episodes}
+            processing={processing}
+            onEpisodeChanged={episodeChanged}
+            onSelectEpisode={setEpisode}
+            onBacklogChanged={refresh}
+          />
+        ) : (
+          <section aria-labelledby="episode-heading">
+            <h2 id="episode-heading">Episode</h2>
+            <p className="hint">
+              {!episodesLoaded
+                ? 'Looking for your episodes…'
+                : episodesUnavailable
+                  ? 'Could not load your episodes. This is not the same as having none.'
+                  : 'Make one from the backlog.'}
+            </p>
+          </section>
+        ))}
+      {section.id === 'sources' && <Sources />}
+      {section.id === 'admin' && <Admin />}
+    </Shell>
   )
 }
