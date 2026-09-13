@@ -19,7 +19,7 @@ from motet_inference import fake_stages
 from motet_sources import GMAIL_READONLY_SCOPE, PROVIDER, SourceAuthError
 from motet_storage import LocalObjectStore
 from motet_vault import build_key_manager
-from motet_workers import Queue, drain, enqueue_source_poll, poll_key
+from motet_workers import Queue, drain, enqueue_integration, enqueue_source_poll, poll_key
 from motet_workers.handlers import Context, PermanentFailure
 from motet_workers.ingest import handle_extract, handle_poll
 from motet_workers.jobs import DEFAULT_MAX_ATTEMPTS
@@ -193,23 +193,48 @@ def test_the_poll_serialization_key_is_per_source(db: psycopg.Connection[Any]) -
 # --- extract -------------------------------------------------------------------------
 
 
-def test_extraction_produces_a_source_item_and_queues_integration(
+def test_extraction_produces_a_source_item_and_holds_it(
     db: psycopg.Connection[Any],
 ) -> None:
+    """Extract is the last free stage; the item waits there for a person.
+
+    Integration is the first stage that spends inference, so a connected source stops
+    short of it: the row is `pending` with no integrate job, which is what "held" means.
+    """
     source_id = connected_source(db)
     handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
 
     items = _source_items(db, source_id)
     assert len(items) == 1
     assert items[0]["external_id"] == "01_acme_series_a"
+    assert items[0]["state"] == SourceItemState.PENDING.value
     assert "Acme" in items[0]["title"]
     assert "Northwind Ventures" in items[0]["text"]
     assert "Unsubscribe" not in items[0]["text"], "the footer should have been cut"
 
+    assert _jobs(db, Queue.INTEGRATE) == [], "extraction must not spend inference"
+    held = repo.list_held_source_items(db, USER)
+    assert [item.id for item in held] == [items[0]["id"]]
+
+
+def test_ingest_now_queues_a_held_item_exactly_as_a_paste_would(
+    db: psycopg.Connection[Any],
+) -> None:
+    source_id = connected_source(db)
+    handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
+    item_id = _source_items(db, source_id)[0]["id"]
+
+    queued = enqueue_integration(db, user_id=USER, source_item_ids=[item_id, "si_nope"])
+    assert queued == [item_id]
     integrate = _jobs(db, Queue.INTEGRATE)
     assert len(integrate) == 1
-    assert integrate[0]["payload"]["source_item_id"] == items[0]["id"]
+    assert integrate[0]["payload"]["source_item_id"] == item_id
     assert integrate[0]["serialize_key"] == USER, "invariant 6 lives on the integrate stage"
+
+    # Asking twice writes one job: the item is no longer held.
+    assert enqueue_integration(db, user_id=USER, source_item_ids=[item_id]) == []
+    assert len(_jobs(db, Queue.INTEGRATE)) == 1
+    assert repo.list_held_source_items(db, USER) == []
 
 
 def test_extracting_the_same_message_twice_is_a_no_op(
@@ -221,7 +246,7 @@ def test_extracting_the_same_message_twice_is_a_no_op(
     handle_extract(context(db), payload)
     handle_extract(context(db), payload)
     assert len(_source_items(db, source_id)) == 1
-    assert len(_jobs(db, Queue.INTEGRATE)) == 1, "and exactly one integrate job"
+    assert _jobs(db, Queue.INTEGRATE) == []
 
 
 def test_a_message_that_is_not_a_newsletter_is_skipped_not_failed(
@@ -258,11 +283,12 @@ def test_a_missing_payload_field_is_a_permanent_failure(
 def test_gmail_ingestion_reaches_the_backlog(
     db: psycopg.Connection[Any], database_url: str
 ) -> None:
-    """`poll -> extract -> integrate`, drained by the actual runner.
+    """`poll -> extract`, then "ingest now", then `integrate` — drained by the actual runner.
 
     The point of going through `drain` rather than calling handlers is that it exercises the
     three transaction boundaries and the advisory lock — which is where a serialization bug
-    would live, and which a direct handler call would skip entirely.
+    would live, and which a direct handler call would skip entirely. The explicit step in
+    the middle is the product: nothing reaches dedup until a person asks.
     """
     source_id = connected_source(db)
     enqueue_source_poll(db, source_id)
@@ -270,6 +296,13 @@ def test_gmail_ingestion_reaches_the_backlog(
 
     assert drain(Queue.POLL, database_url) == 1
     assert drain(Queue.EXTRACT, database_url) >= 3
+    assert drain(Queue.INTEGRATE, database_url) == 0, "nothing is queued until asked for"
+    assert repo.list_news_items(db, USER) == []
+
+    held = [item.id for item in repo.list_held_source_items(db, USER)]
+    assert len(held) >= 3
+    assert enqueue_integration(db, user_id=USER, source_item_ids=held) == held
+    db.commit()
     assert drain(Queue.INTEGRATE, database_url) >= 3
 
     items = repo.list_news_items(db, USER)
@@ -287,19 +320,25 @@ def test_gmail_ingestion_reaches_the_backlog(
 
 def test_a_second_full_run_adds_nothing(db: psycopg.Connection[Any], database_url: str) -> None:
     """The property that makes a scheduled poll safe to run every five minutes."""
+
+    def full_run() -> None:
+        enqueue_source_poll(db, source_id)
+        db.commit()
+        for queue in (Queue.POLL, Queue.EXTRACT):
+            drain(queue, database_url)
+        held = [item.id for item in repo.list_held_source_items(db, USER)]
+        enqueue_integration(db, user_id=USER, source_item_ids=held)
+        db.commit()
+        drain(Queue.INTEGRATE, database_url)
+
     source_id = connected_source(db)
-    enqueue_source_poll(db, source_id)
-    db.commit()
-    for queue in (Queue.POLL, Queue.EXTRACT, Queue.INTEGRATE):
-        drain(queue, database_url)
+    full_run()
     before = {item.id for item in repo.list_news_items(db, USER)}
+    assert before
 
-    enqueue_source_poll(db, source_id)
-    db.commit()
-    for queue in (Queue.POLL, Queue.EXTRACT, Queue.INTEGRATE):
-        drain(queue, database_url)
-
+    full_run()
     assert {item.id for item in repo.list_news_items(db, USER)} == before
+    assert repo.list_held_source_items(db, USER) == [], "a re-poll holds nothing new"
 
 
 # --- a message that never becomes a source item ---------------------------------------
@@ -488,7 +527,7 @@ def _clear(db: psycopg.Connection[Any], queue: Queue) -> None:
 def _source_items(db: psycopg.Connection[Any], source_id: str) -> list[dict[str, Any]]:
     with db.cursor() as cur:
         cur.execute(
-            "SELECT id, external_id, title, text FROM source_items WHERE source_id = %s "
+            "SELECT id, external_id, title, text, state FROM source_items WHERE source_id = %s "
             "ORDER BY created_at, id",
             (source_id,),
         )

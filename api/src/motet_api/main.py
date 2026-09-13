@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -31,6 +31,7 @@ from motet_db import (
     IngestionStatus,
     RuleError,
     SmartRule,
+    SourceItemState,
     SourceKind,
     StoredEpisode,
     StoredNewsItem,
@@ -53,6 +54,7 @@ from motet_vault import DekWrapper, VaultError, vault_status
 from motet_workers import (
     DEFAULT_MAX_ATTEMPTS,
     enqueue_episode,
+    enqueue_integration,
     enqueue_paste,
     enqueue_smart_episode,
     enqueue_source_poll,
@@ -109,13 +111,17 @@ from .schemas import (
     EpisodeResponse,
     FeedInfoResponse,
     HealthResponse,
+    HeldSourceItemResponse,
     HighlightResponse,
     IngestionItemResponse,
+    IntegrateRequest,
+    IntegrateResponse,
     ListenProgressRequest,
     ListenProgressResponse,
     LoginResponse,
     MarkListenedResponse,
     NewsItemResponse,
+    NewsItemSourceRef,
     OAuthCallbackRequest,
     PasteRequest,
     ProcessingStatusResponse,
@@ -126,6 +132,11 @@ from .schemas import (
     SaveHighlightRequest,
     SegmentResponse,
     SessionResponse,
+    SourceItemDetailResponse,
+    SourceItemJobResponse,
+    SourceItemNewsItemResponse,
+    SourceItemProcessedStage,
+    SourceItemPulledStage,
     SourceItemResponse,
     SourceResponse,
     SourceSpanModel,
@@ -732,6 +743,148 @@ def list_ingestion(conn: Conn, user_id: User) -> list[IngestionItemResponse]:
     return [_ingestion_item(item) for item in repo.list_ingestion(conn, user_id)]
 
 
+@app.get("/v1/source-items/held", response_model=list[HeldSourceItemResponse], tags=["ingestion"])
+def list_held_source_items(conn: Conn, user_id: User) -> list[HeldSourceItemResponse]:
+    """Source items extracted from a connected source and waiting to be ingested.
+
+    Connecting a source does the deterministic, free work on its own — poll, fetch,
+    extract — and stops before ``integrate``, the first stage that spends inference. What
+    it leaves is a ``pending`` source item with no integrate job, and that combination is
+    the held state: no column records it. Oldest first, so the list reads as a queue. A
+    paste is never here for longer than its own transaction, because pasting is asking.
+    """
+    return [
+        HeldSourceItemResponse(
+            id=item.id,
+            title=item.title,
+            source_id=item.source_id,
+            source_kind=item.source_kind,
+            source_name=item.source_name,
+            received_at=item.received_at,
+            chars=item.chars,
+            preview=item.preview,
+        )
+        for item in repo.list_held_source_items(conn, user_id)
+    ]
+
+
+@app.post("/v1/source-items/integrate", response_model=IntegrateResponse, tags=["ingestion"])
+def integrate_source_items(
+    body: IntegrateRequest, conn: Conn, user_id: User, nudge: Nudge
+) -> IntegrateResponse:
+    """Queue held source items for integration — the owner saying "ingest now".
+
+    Each id that is the caller's, ``pending`` and without an integrate job gets one,
+    written exactly as a paste's is: same queue, same payload, same per-user serialization
+    key (invariant 6). Every other id is skipped rather than refused — an item that was
+    queued a moment ago by a second tab is not an error, and a response that 4xx'd on it
+    would make the first tab's success look like a failure.
+    """
+    ids = list(dict.fromkeys(body.ids))
+    queued = enqueue_integration(conn, user_id=user_id, source_item_ids=ids)
+    if queued:
+        nudge.arm(DrainReason.INTEGRATE)
+    return IntegrateResponse(queued=len(queued), skipped=len(ids) - len(queued))
+
+
+@app.get(
+    "/v1/source-items/{source_item_id}",
+    response_model=SourceItemDetailResponse,
+    tags=["ingestion"],
+)
+def get_source_item_detail(
+    conn: Conn, user_id: User, source_item_id: Annotated[str, Path()]
+) -> SourceItemDetailResponse:
+    """PROTOTYPE — one source item across its three stages.
+
+    Pulled in (the deterministic scrape), processed (the integrate job and what dedup
+    wrote), and the news item it feeds. Stage 2 is reported even when it is empty — held,
+    queued, running, failed — because that is where enrichment steps will go. What is not
+    persisted is said rather than omitted: ``decision_recorded`` and ``cost_recorded`` are
+    both false today.
+    """
+    life = repo.source_item_lifecycle(conn, user_id, source_item_id)
+    if life is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source item.")
+    return _source_item_detail(life)
+
+
+def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailResponse:
+    job = life.job
+    if life.state is SourceItemState.INTEGRATED:
+        status_ = "done"
+    elif life.state is SourceItemState.FAILED:
+        status_ = "failed"
+    elif job is None:
+        status_ = "held"
+    elif job.state == "running":
+        status_ = "running"
+    elif job.state == "failed":
+        status_ = "failed"
+    else:
+        # `ready` — first attempt or a retry backing off; `done` with a pending item is
+        # a reclaimed lease mid-flight, and "queued" is the honest word for both.
+        status_ = "queued"
+    outcome = None
+    if life.news_item is not None:
+        outcome = "new" if life.news_item.position == 0 else "merged"
+    return SourceItemDetailResponse(
+        id=life.id,
+        title=life.title,
+        state=life.state.value,
+        pulled=SourceItemPulledStage(
+            source_id=life.source_id,
+            source_kind=life.source_kind,
+            source_name=life.source_name,
+            external_id=life.external_id,
+            received_at=life.received_at,
+            chars=len(life.text),
+            text=life.text,
+            raw_stored=False,
+        ),
+        processed=SourceItemProcessedStage(
+            status=status_,
+            job=(
+                SourceItemJobResponse(
+                    id=job.id,
+                    state=job.state,
+                    attempts=job.attempts,
+                    max_attempts=DEFAULT_MAX_ATTEMPTS,
+                    run_at=job.run_at,
+                    locked_at=job.locked_at,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                    last_error=job.last_error,
+                    work_committed=job.work_committed,
+                )
+                if job is not None
+                else None
+            ),
+            integrated_at=life.integrated_at,
+            error=life.last_error or (job.last_error if job is not None else None),
+            outcome=outcome,
+            title=life.news_item.title if life.news_item is not None else None,
+            summary=life.news_item.summary if life.news_item is not None else None,
+            decision_recorded=False,
+            cost_recorded=False,
+        ),
+        news_items=(
+            [
+                SourceItemNewsItemResponse(
+                    id=life.news_item.id,
+                    title=life.news_item.title,
+                    summary=life.news_item.summary,
+                    read=life.news_item.read,
+                    source_count=life.news_item.source_count,
+                    position=life.news_item.position,
+                )
+            ]
+            if life.news_item is not None
+            else []
+        ),
+    )
+
+
 @app.get("/v1/processing", response_model=ProcessingStatusResponse, tags=["ingestion"])
 def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
     """Whether anything is draining the queues — the other half of "where did my paste go".
@@ -836,7 +989,9 @@ def admin_overview(
 @app.get("/v1/news-items", response_model=list[NewsItemResponse], tags=["backlog"])
 def list_news_items(conn: Conn, user_id: User) -> list[NewsItemResponse]:
     """The backlog: deduped news items with their read state (invariant 5)."""
-    return [_news_item(item) for item in repo.list_news_items(conn, user_id)]
+    items = repo.list_news_items(conn, user_id)
+    titles = repo.source_item_titles(conn, [sid for item in items for sid in item.source_item_ids])
+    return [_news_item(item, titles) for item in items]
 
 
 @app.post("/v1/news-items/{news_item_id}/read", response_model=NewsItemResponse, tags=["backlog"])
@@ -854,7 +1009,7 @@ def set_news_item_read(
     updated = repo.set_news_item_read(conn, user_id=user_id, item_id=news_item_id, read=body.read)
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such news item.")
-    return _news_item(updated)
+    return _news_item(updated, repo.source_item_titles(conn, updated.source_item_ids))
 
 
 @app.post(
@@ -1038,12 +1193,15 @@ def _ingestion_item(item: IngestionStatus) -> IngestionItemResponse:
     )
 
 
-def _news_item(item: StoredNewsItem) -> NewsItemResponse:
+def _news_item(item: StoredNewsItem, titles: Mapping[str, str]) -> NewsItemResponse:
     return NewsItemResponse(
         id=item.id,
         title=item.title,
         summary=item.summary,
         source_item_ids=list(item.source_item_ids),
+        sources=[
+            NewsItemSourceRef(id=sid, title=titles.get(sid, "")) for sid in item.source_item_ids
+        ],
         read=item.read,
         created_at=item.created_at,
     )

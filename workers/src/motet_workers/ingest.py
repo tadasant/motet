@@ -1,8 +1,17 @@
 """Connected-source ingestion: the ``poll`` and ``extract`` stages.
 
-``Poll → Extract → Integrate``. Both stages were named in :class:`~motet_workers.queues.Queue`
-from the start — Phase 1 shipped the enum with them in it and no handlers — so this is
-filling in a shape that was already settled rather than adding one.
+``Poll → Extract``, and then a person. Both stages were named in
+:class:`~motet_workers.queues.Queue` from the start — Phase 1 shipped the enum with them in
+it and no handlers — so this is filling in a shape that was already settled rather than
+adding one.
+
+**Extraction does not queue integration.** Polling, fetching and parsing are deterministic
+and free; ``integrate`` is the first stage that spends inference. A connected source
+therefore does all of the former on its own and stops: the source item sits ``pending``
+with no ``integrate`` job — that combination *is* the "held, awaiting ingest" state, and
+no column says so — until the owner asks for it through ``POST /v1/source-items/integrate``
+(:func:`~motet_workers.handlers.enqueue_integration`). Paste is the deliberate exception
+and still queues integration on arrival: a person pasting is a person asking.
 
 **Where the invariants land in this file:**
 
@@ -18,7 +27,7 @@ filling in a shape that was already settled rather than adding one.
   :class:`~motet_vault.DekWrapper`, which has no ``unwrap``.
 * **Idempotence.** A poll that crashed after fetching and before committing re-fetches the
   same messages; ``source_items`` is unique on ``(source_id, external_id)``, so the second
-  pass inserts nothing and enqueues nothing.
+  pass inserts nothing.
 """
 
 from __future__ import annotations
@@ -137,12 +146,14 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
 
 
 def handle_extract(context: Context, payload: Mapping[str, Any]) -> None:
-    """Fetch one message, turn it into a source item, and queue it for dedup.
+    """Fetch one message and turn it into a source item — and stop there.
 
-    The extract job is *not* serialized per user, and integrate is. That is the right
-    split: extraction writes only its own row, while dedup reads the whole window and
-    decides against it — so serializing extraction would cost throughput and buy nothing
-    (invariant 6 is about the compare-and-write, not about the fetch).
+    The row is left ``pending`` with no ``integrate`` job. Dedup is the first stage that
+    spends inference, and a connected source must not spend it until the owner says so;
+    the module docstring says why. The extract job is *not* serialized per user, and
+    integrate is: extraction writes only its own row, while dedup reads the whole window
+    and decides against it — so serializing extraction would cost throughput and buy
+    nothing (invariant 6 is about the compare-and-write, not about the fetch).
     """
     source_id = _require(payload, "source_id")
     message_id = _require(payload, "message_id")
@@ -180,18 +191,12 @@ def handle_extract(context: Context, payload: Mapping[str, Any]) -> None:
     )
     if source_item_id is None:
         # Another worker won the race. The unique index did its job; there is exactly one
-        # row and exactly one integrate job, which is the whole point of it.
-        logger.info("message %s was ingested concurrently; not queueing again", message_id)
+        # row, which is the whole point of it.
+        logger.info("message %s was ingested concurrently", message_id)
         return
 
-    enqueue(
-        context.conn,
-        Queue.INTEGRATE,
-        {"source_item_id": source_item_id},
-        serialize_key=source.user_id,
-    )
     logger.info(
-        "extracted message %s from source %s into source item %s (%d chars)",
+        "extracted message %s from source %s into source item %s (%d chars); held for ingest",
         message_id,
         source_id,
         source_item_id,

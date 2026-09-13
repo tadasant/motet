@@ -565,6 +565,53 @@ components:
       - inference_mode
       title: HealthResponse
       type: object
+    HeldSourceItemResponse:
+      description: "A source item that is extracted and waiting for the owner to say \"ingest now\".\n\
+        \nA connected source polls, fetches and extracts on its own \u2014 the deterministic, free\nhalf\
+        \ \u2014 and stops before ``integrate``, the first stage that spends inference. Held is\n``state\
+        \ = 'pending'`` with no integrate job, and this is the list of those. A paste\nnever lingers here:\
+        \ it queues its job on arrival."
+      properties:
+        chars:
+          description: Length of the extracted text.
+          title: Chars
+          type: integer
+        id:
+          title: Id
+          type: string
+        preview:
+          description: The first ~200 characters, whitespace collapsed.
+          title: Preview
+          type: string
+        received_at:
+          description: When the source item was stored.
+          format: date-time
+          title: Received At
+          type: string
+        source_id:
+          title: Source Id
+          type: string
+        source_kind:
+          description: '''gmail'' or ''paste''.'
+          title: Source Kind
+          type: string
+        source_name:
+          title: Source Name
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - source_id
+      - source_kind
+      - source_name
+      - received_at
+      - chars
+      - preview
+      title: HeldSourceItemResponse
+      type: object
     HighlightResponse:
       description: "A saved passage, anchored to the span of source text it quotes.\n\nThe anchor is the\
         \ source span and nothing else \u2014 claims are rewritten on every script\nretry and audio offsets\
@@ -699,6 +746,36 @@ components:
       - source_kind
       title: IngestionItemResponse
       type: object
+    IntegrateRequest:
+      description: Which held source items to queue for integration.
+      properties:
+        ids:
+          items:
+            type: string
+          maxItems: 500
+          minItems: 1
+          title: Ids
+          type: array
+      required:
+      - ids
+      title: IntegrateRequest
+      type: object
+    IntegrateResponse:
+      properties:
+        queued:
+          description: Ids that were held and now have an integrate job.
+          title: Queued
+          type: integer
+        skipped:
+          description: 'Ids that did not qualify: unknown, another user''s, already queued, or already
+            integrated. Never an error.'
+          title: Skipped
+          type: integer
+      required:
+      - queued
+      - skipped
+      title: IntegrateResponse
+      type: object
     ListenProgressRequest:
       description: 'How far into an episode the listener has got.
 
@@ -805,6 +882,12 @@ components:
             type: string
           title: Source Item Ids
           type: array
+        sources:
+          description: The same source items as source_item_ids, with their titles, in position order.
+          items:
+            $ref: '#/components/schemas/NewsItemSourceRef'
+          title: Sources
+          type: array
         summary:
           title: Summary
           type: string
@@ -816,9 +899,24 @@ components:
       - title
       - summary
       - source_item_ids
+      - sources
       - read
       - created_at
       title: NewsItemResponse
+      type: object
+    NewsItemSourceRef:
+      description: A source item a news item is backed by, named so a list can show it.
+      properties:
+        id:
+          title: Id
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      title: NewsItemSourceRef
       type: object
     OAuthCallbackRequest:
       description: What the provider redirected back with.
@@ -1132,6 +1230,254 @@ components:
           title: Window Days
           type: integer
       title: SmartRuleModel
+      type: object
+    SourceItemDetailResponse:
+      description: 'One source item across its three stages: pulled in, processed, news item.
+
+
+        PROTOTYPE. A read over ``source_items``, the newest ``integrate`` job and
+
+        ``news_item_sources``; nothing new is stored. See ``repo.source_item_lifecycle``.'
+      properties:
+        id:
+          title: Id
+          type: string
+        news_items:
+          description: "Zero or one today \u2014 a source item belongs to at most one news item."
+          items:
+            $ref: '#/components/schemas/SourceItemNewsItemResponse'
+          title: News Items
+          type: array
+        processed:
+          $ref: '#/components/schemas/SourceItemProcessedStage'
+        pulled:
+          $ref: '#/components/schemas/SourceItemPulledStage'
+        state:
+          description: '''pending'', ''integrated'' or ''failed''.'
+          title: State
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - state
+      - pulled
+      - processed
+      - news_items
+      title: SourceItemDetailResponse
+      type: object
+    SourceItemJobResponse:
+      description: The newest ``integrate`` job for a source item, as the queue holds it.
+      properties:
+        attempts:
+          title: Attempts
+          type: integer
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        id:
+          title: Id
+          type: integer
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        locked_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When a worker last touched its lease.
+          title: Locked At
+        max_attempts:
+          description: The ceiling the queue counts to.
+          title: Max Attempts
+          type: integer
+        run_at:
+          description: When the job is (or was) due.
+          format: date-time
+          title: Run At
+          type: string
+        state:
+          description: '''ready'', ''running'', ''done'' or ''failed''.'
+          title: State
+          type: string
+        updated_at:
+          format: date-time
+          title: Updated At
+          type: string
+        work_committed:
+          description: Whether the handler's work landed durably (the work fence), even if the job row
+            has not been completed yet.
+          title: Work Committed
+          type: boolean
+      required:
+      - id
+      - state
+      - attempts
+      - max_attempts
+      - run_at
+      - locked_at
+      - created_at
+      - updated_at
+      - last_error
+      - work_committed
+      title: SourceItemJobResponse
+      type: object
+    SourceItemNewsItemResponse:
+      description: 'Stage 3: the deduped news item this source item feeds.'
+      properties:
+        id:
+          title: Id
+          type: string
+        position:
+          description: This source item's position among them; 0 created it.
+          title: Position
+          type: integer
+        read:
+          title: Read
+          type: boolean
+        source_count:
+          description: How many source items back this story.
+          title: Source Count
+          type: integer
+        summary:
+          title: Summary
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - summary
+      - read
+      - source_count
+      - position
+      title: SourceItemNewsItemResponse
+      type: object
+    SourceItemProcessedStage:
+      description: "Stage 2: what processing did with the item \u2014 and, as often, what it has not done.\n\
+        \nRendered as an explicit stage even when empty, because this is where enrichment steps\nwill\
+        \ be added between the scrape and the news item. ``status`` is derived from the\nsource item's\
+        \ state and the newest job's: ``held`` means nobody has asked for\ninference yet; ``queued``,\
+        \ ``running`` and ``failed`` follow the job; ``done`` means\nthe item is integrated."
+      properties:
+        cost_recorded:
+          description: 'Whether this item''s inference spend is persisted. Always false today: usage is
+            logged per item and metered per stage, never stored on the row.'
+          title: Cost Recorded
+          type: boolean
+        decision_recorded:
+          description: 'Whether dedup''s relation / reason / closest candidate are persisted. Always false
+            today: they are logged and counted, never stored.'
+          title: Decision Recorded
+          type: boolean
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The source item's recorded error, or the job's last one while retrying.
+          title: Error
+        integrated_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Integrated At
+        job:
+          anyOf:
+          - $ref: '#/components/schemas/SourceItemJobResponse'
+          - type: 'null'
+        outcome:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: '''new'' if this source item created its news item, ''merged'' if it was folded
+            into one that already existed; null until integrated. Read off news_item_sources.position,
+            which is the only durable trace of the decision.'
+          title: Outcome
+        status:
+          description: '''held'', ''queued'', ''running'', ''done'' or ''failed''.'
+          title: Status
+          type: string
+        summary:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Likewise the summary.
+          title: Summary
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: "The news item's title as it stands now \u2014 dedup wrote or rewrote it."
+          title: Title
+      required:
+      - status
+      - job
+      - integrated_at
+      - error
+      - outcome
+      - title
+      - summary
+      - decision_recorded
+      - cost_recorded
+      title: SourceItemProcessedStage
+      type: object
+    SourceItemPulledStage:
+      description: "Stage 1 of a source item's life: what the deterministic scrape pulled in.\n\nEverything\
+        \ here was produced without a model \u2014 a poll, a fetch, and\n``motet_sources.extract``. ``text``\
+        \ is the extracted text, not the raw message: the\nRFC 822 bytes are never stored, which ``raw_stored``\
+        \ says out loud so that the UI does\nnot call the extracted text \"the email\"."
+      properties:
+        chars:
+          description: Length of the extracted text.
+          title: Chars
+          type: integer
+        external_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The provider's own id for the message; null for a paste.
+          title: External Id
+        raw_stored:
+          description: Whether the raw bytes the text was extracted from are kept. Always false.
+          title: Raw Stored
+          type: boolean
+        received_at:
+          description: When the source item was stored.
+          format: date-time
+          title: Received At
+          type: string
+        source_id:
+          title: Source Id
+          type: string
+        source_kind:
+          description: '''gmail'' or ''paste''.'
+          title: Source Kind
+          type: string
+        source_name:
+          title: Source Name
+          type: string
+        text:
+          description: The extracted text, in full.
+          title: Text
+          type: string
+      required:
+      - source_id
+      - source_kind
+      - source_name
+      - external_id
+      - received_at
+      - chars
+      - text
+      - raw_stored
+      title: SourceItemPulledStage
       type: object
     SourceItemResponse:
       properties:
@@ -2286,6 +2632,122 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Processing Status
+      tags:
+      - ingestion
+  /v1/source-items/held:
+    get:
+      description: "Source items extracted from a connected source and waiting to be ingested.\n\nConnecting\
+        \ a source does the deterministic, free work on its own \u2014 poll, fetch,\nextract \u2014 and\
+        \ stops before ``integrate``, the first stage that spends inference. What\nit leaves is a ``pending``\
+        \ source item with no integrate job, and that combination is\nthe held state: no column records\
+        \ it. Oldest first, so the list reads as a queue. A\npaste is never here for longer than its own\
+        \ transaction, because pasting is asking."
+      operationId: list_held_source_items_v1_source_items_held_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/HeldSourceItemResponse'
+                title: Response List Held Source Items V1 Source Items Held Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Held Source Items
+      tags:
+      - ingestion
+  /v1/source-items/integrate:
+    post:
+      description: "Queue held source items for integration \u2014 the owner saying \"ingest now\".\n\n\
+        Each id that is the caller's, ``pending`` and without an integrate job gets one,\nwritten exactly\
+        \ as a paste's is: same queue, same payload, same per-user serialization\nkey (invariant 6). Every\
+        \ other id is skipped rather than refused \u2014 an item that was\nqueued a moment ago by a second\
+        \ tab is not an error, and a response that 4xx'd on it\nwould make the first tab's success look\
+        \ like a failure."
+      operationId: integrate_source_items_v1_source_items_integrate_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntegrateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrateResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Integrate Source Items
+      tags:
+      - ingestion
+  /v1/source-items/{source_item_id}:
+    get:
+      description: "PROTOTYPE \u2014 one source item across its three stages.\n\nPulled in (the deterministic\
+        \ scrape), processed (the integrate job and what dedup\nwrote), and the news item it feeds. Stage\
+        \ 2 is reported even when it is empty \u2014 held,\nqueued, running, failed \u2014 because that\
+        \ is where enrichment steps will go. What is not\npersisted is said rather than omitted: ``decision_recorded``\
+        \ and ``cost_recorded`` are\nboth false today."
+      operationId: get_source_item_detail_v1_source_items__source_item_id__get
+      parameters:
+      - in: path
+        name: source_item_id
+        required: true
+        schema:
+          title: Source Item Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceItemDetailResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Source Item Detail
       tags:
       - ingestion
   /v1/sources:
