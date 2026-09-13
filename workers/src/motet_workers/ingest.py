@@ -191,7 +191,9 @@ def record_poll_failure(
     """
     source_id = payload.get("source_id")
     source = phase2.get_source(conn, source_id) if isinstance(source_id, str) else None
-    if source is None:
+    if source is None or source.kind != SourceKind.GMAIL.value:
+        # Gone, or a poll asked of a source nothing polls — the job row says so, and a
+        # sync result on a source that has no sync would be a fact about nothing.
         return
     previous = source.sync_state.get("last_sync")
     caught_up = previous.get("caught_up", False) if isinstance(previous, dict) else False

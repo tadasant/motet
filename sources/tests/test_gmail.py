@@ -149,6 +149,21 @@ def test_the_window_is_a_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     assert page.first_sync_days == 60
 
 
+def test_a_window_wider_than_the_epoch_is_clamped_and_its_cursor_still_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A negative bound would never decode, and a first sync would restart on every poll."""
+    monkeypatch.setenv(FIRST_SYNC_DAYS_ENV, "40000")
+    stub = StubGmail(mail=backlog(80))
+    first = client(stub).list_messages(query=FILTER, cursor=None, limit=50)
+    assert stub.queries == [f"({FILTER}) after:0"]
+    assert first.more is True
+
+    second = client(stub).list_messages(query=FILTER, cursor=first.cursor, limit=50)
+    assert second.first_sync_days is None, "resumed, not restarted"
+    assert stub.requests[-1][1]["pageToken"] == "50"
+
+
 @pytest.mark.parametrize("raw", ["", "soon", "0", "-3"])
 def test_an_unusable_window_falls_back_to_the_default(
     monkeypatch: pytest.MonkeyPatch, raw: str

@@ -371,7 +371,10 @@ class GmailMailClient:
                 )
             window_days = first_sync_days()
             logger.info("first sync: bounded to the last %d days", window_days)
-            state = _SearchCursor(after=now - window_days * _SECONDS_PER_DAY)
+            # Clamped at the epoch: a window wider than 1970 would otherwise write a negative
+            # bound, which `decode` refuses — and a cursor that never decodes is a first sync
+            # restarted on every poll, re-arming itself for ever.
+            state = _SearchCursor(after=max(0, now - window_days * _SECONDS_PER_DAY))
         if state.page_token is None:
             state = _SearchCursor(after=state.after, started=now)
 
