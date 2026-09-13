@@ -367,6 +367,8 @@ class TestRendering:
             "OTEL_SERVICE_NAME": "motet-local",
             "OTEL_RESOURCE_ATTRIBUTES": "service.version=local",
             "MOTET_VOICE_API_BASE_URL": "http://localhost:8000",
+            # motet#92: a laptop's model dropdowns save. Production never sets this.
+            "MOTET_SETTINGS_WRITABLE": "1",
         }
 
     def test_the_three_unset_variables_are_named_and_left_unset(self) -> None:

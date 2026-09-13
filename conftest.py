@@ -63,6 +63,10 @@ TABLES = (
     # so a test that drains a queue cannot make a later test think one is running.
     "worker_heartbeats",
     "waitlist_signups",
+    # The admin screen's model overrides and its spend ledger (migration 0015). A leftover
+    # `settings` row would move a later test's model; a leftover ledger row, its totals.
+    "settings",
+    "llm_usage",
 )
 
 #: Sources a test connected, without disturbing the seeded paste source. Cascades to that

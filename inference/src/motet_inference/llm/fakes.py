@@ -112,6 +112,7 @@ class FakeLlmClient:
             ),
             reasoning_applied=applied,
             finish_reason="stop",
+            cache_ttl=request.cache_ttl,
         )
 
     def _match_by_substring(self, request: LlmRequest) -> str | None:

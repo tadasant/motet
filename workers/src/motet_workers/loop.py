@@ -79,7 +79,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import psycopg
-from motet_db import repo
+from motet_db import llm_usage, repo
 from motet_inference import Stages, get_stages
 from motet_inference.llm import LlmBudgetExhaustedError
 from motet_storage import ObjectStore, build_store
@@ -88,6 +88,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from . import jobs
 from .handlers import HANDLERS, Context, PermanentFailure, failure_recorders
+from .llm_context import llm_job_context
 from .queues import Queue
 
 logger = logging.getLogger("motet.worker")
@@ -138,6 +139,22 @@ _jobs_pruned = _meter.create_counter(
     "motet.jobs.pruned",
     unit="{job}",
     description="Terminal job rows deleted by the retention sweep, by state.",
+)
+
+#: ``llm_usage`` rows the same sweep deleted past ``motet_db.llm_usage.RETENTION_SECONDS``.
+#: Added to at zero for :data:`_jobs_pruned`'s reason; a failed sweep is on the counter below.
+_ledger_pruned = _meter.create_counter(
+    "motet.llm_usage.pruned",
+    unit="{row}",
+    description="LLM spend-ledger rows deleted by the retention sweep.",
+)
+
+#: Ledger sweeps that failed. Its own series rather than an outcome on the one below: a
+#: failure here must not relabel a jobs sweep that worked, and vice versa.
+_ledger_prune_failures = _meter.create_counter(
+    "motet.llm_usage.prune_failures",
+    unit="{sweep}",
+    description="Retention sweeps of the LLM spend ledger that failed.",
 )
 
 #: Whether the sweep ran, and whether it worked. The row count above cannot answer either.
@@ -348,7 +365,11 @@ def _record_readiness(conn: psycopg.Connection[Any]) -> None:
 
 
 def prune_jobs(database_url: str) -> jobs.Pruned:
-    """Run one retention sweep over the ``jobs`` table, and say what it deleted.
+    """Run one retention sweep over the ``jobs`` table and the ``llm_usage`` ledger.
+
+    The ledger rides this sweep rather than having one of its own because it is the same
+    shape — bounded, oldest-first, on an autocommit connection — and a second schedule
+    would be a second thing that can quietly stop running (motet#92).
 
     The observable half of :func:`~motet_workers.jobs.prune`: that function is the SQL and
     its bounds, this is the connection, the counter and the line an operator reads. Same
@@ -371,6 +392,7 @@ def prune_jobs(database_url: str) -> jobs.Pruned:
         with repo.connect(database_url) as conn:
             conn.autocommit = True
             pruned = jobs.prune(conn)
+            ledger = _prune_ledger(conn)
     except Exception:  # noqa: BLE001 — a sweep must never be able to stop a worker
         # At ERROR, and on its own counter, because a swallowed failure records no rows and
         # is therefore invisible on `_jobs_pruned` — identical to a sweep that found nothing.
@@ -388,16 +410,29 @@ def prune_jobs(database_url: str) -> jobs.Pruned:
         pruned.total,
         ", ".join(f"{count} {state}" for state, count in sorted(pruned.deleted.items())),
     )
-    if pruned.capped:
+    if ledger is not None:
+        _ledger_pruned.add(ledger.deleted)
+        logger.info("pruned %d llm_usage row(s)", ledger.deleted)
+    if pruned.capped or (ledger is not None and ledger.capped):
         # Not an error — the next sweep continues, and a backlog built up before this
         # existed drains over a few of them. Said out loud because a cap reached every
         # hour forever is the table growing faster than this removes it, and the counter
         # above cannot distinguish that from a busy deployment.
         logger.warning(
-            "the retention sweep used its whole batch budget; more terminal rows are "
+            "the retention sweep used its whole batch budget; more job or ledger rows are "
             "probably past their window and the next sweep will take them"
         )
     return pruned
+
+
+def _prune_ledger(conn: psycopg.Connection[Any]) -> llm_usage.Pruned | None:
+    """The ledger's half of the sweep, failing on its own so the jobs half still counts."""
+    try:
+        return llm_usage.prune(conn)
+    except Exception:  # noqa: BLE001 — same reasoning as the jobs sweep above
+        _ledger_prune_failures.add(1)
+        logger.exception("could not prune llm_usage rows; will try again")
+        return None
 
 
 @contextlib.contextmanager
@@ -530,6 +565,10 @@ def _run_one(
         # recording the outcome: a job whose lease lapsed between finishing and being
         # marked done is one another worker takes and runs again.
         _hold_lease(database_url, job),
+        # `settings` overrides in, one `llm_usage` row per completion out. Around
+        # `_execute` rather than inside it so the rows are written after its transactions
+        # settle — a completion billed inside a job that rolled back still happened.
+        llm_job_context(conn, job),
     ):
         outcome = _execute(conn, job, handler, stages, store, recorders, after_commit)
         span.set_attribute("motet.job.outcome", outcome)

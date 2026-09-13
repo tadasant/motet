@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { type AdminOverview, ApiError, api } from '../api/client'
 import { AdminWaitlist } from './AdminWaitlist'
+import { ModelsAndSpend } from './ModelsAndSpend'
 
 const POLL_MS = 3_000
 const SOURCE_STATES = ['held', 'pending', 'integrated', 'failed', 'dismissed'] as const
@@ -111,6 +112,8 @@ export function Admin() {
         </button>
       </div>
       {error && <p className="error">{error}</p>}
+
+      <ModelsAndSpend />
 
       <h2>Queues</h2>
       <table className="grid">

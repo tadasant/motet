@@ -688,8 +688,10 @@ def test_the_dropped_config_guard_still_fires_on_a_budget_based_model() -> None:
     carrying no reasoning can only mean the reasoning config never reached the upstream —
     the failure the guard was written for, still loud.
     """
-    config = load_config({"MOTET_LLM_MODEL_DEDUP": "openai/gpt-5.1"})
-    request = build_request(LlmStage.DEDUP, MESSAGES, max_output_tokens=2_000, config=config)
+    # The script stage rather than dedup: dedup caches for an hour, which gpt-5.1 cannot,
+    # so that pairing is now refused at load (motet#92).
+    config = load_config({"MOTET_LLM_MODEL_SCRIPT": "openai/gpt-5.1"})
+    request = build_request(LlmStage.SCRIPT, MESSAGES, max_output_tokens=2_000, config=config)
     assert request.reasoning is not None and request.reasoning.thinking == "budget"
 
     client = a_client(responder(completion(reasoning_tokens=0)))
@@ -949,9 +951,9 @@ def test_asking_for_more_output_tokens_than_the_model_allows_is_rejected() -> No
 
 def test_a_1h_cache_ttl_on_a_model_without_extended_ttls_is_rejected() -> None:
     """Another field a provider would quietly downgrade rather than reject."""
-    # gpt-5.1 caps at `high`, so the global effort comes down with the model — which is
-    # itself the startup guard doing its job.
-    config = load_config({"MOTET_LLM_MODEL": "openai/gpt-5.1", "MOTET_LLM_EFFORT": "high"})
+    # The script stage alone: pointing *dedup* at gpt-5.1 is refused at load, because every
+    # dedup request caches for an hour — the stage-level half of this same check.
+    config = load_config({"MOTET_LLM_MODEL_SCRIPT": "openai/gpt-5.1"})
     with pytest.raises(LlmConfigError, match="1h cache TTL"):
         build_request(
             LlmStage.SCRIPT,
@@ -979,6 +981,14 @@ def test_cache_write_tokens_are_parsed_when_the_provider_reports_them() -> None:
     payload["usage"]["prompt_tokens_details"]["cache_creation_tokens"] = 2048
     response = a_client(responder(payload)).complete(a_request())
     assert response.usage.cache_write_tokens == 2048
+
+
+def test_cache_write_tokens_are_parsed_under_openrouters_own_name() -> None:
+    """``cache_write_tokens`` is the spelling OpenRouter documents; motet#92 prices it."""
+    payload = completion()
+    payload["usage"]["prompt_tokens_details"]["cache_write_tokens"] = 4096
+    response = a_client(responder(payload)).complete(a_request())
+    assert response.usage.cache_write_tokens == 4096
 
 
 def test_a_boolean_is_not_mistaken_for_a_token_count() -> None:

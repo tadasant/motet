@@ -158,8 +158,13 @@ def _usage(raw: object) -> Usage:
         cache_read_tokens=_int(prompt_details.get("cached_tokens")),
         # Cache-*write* accounting is provider-specific and not always surfaced. Reads
         # are the number that tells you whether caching is working, so a missing write
-        # count is a zero here rather than an error.
-        cache_write_tokens=_int(prompt_details.get("cache_creation_tokens")),
+        # count is a zero here rather than an error. Both spellings are read: OpenRouter
+        # documents `cache_write_tokens`, and `cache_creation_tokens` is Anthropic's own
+        # word, which this read alone until motet#92 put a price on writes. Neither has
+        # been checked against a live response from this repo (invariant 7).
+        cache_write_tokens=_int(
+            prompt_details.get("cache_write_tokens", prompt_details.get("cache_creation_tokens"))
+        ),
     )
 
 
@@ -292,6 +297,7 @@ class OpenRouterClient:
                     + self._budget_detail(request, usage, finish_reason),
                     usage=usage,
                     model=served_model(data, request),
+                    cache_ttl=request.cache_ttl,
                 )
             raise LlmTransportError(
                 "OpenRouter returned an empty completion "
@@ -303,6 +309,7 @@ class OpenRouterClient:
                 + self._budget_detail(request, usage, finish_reason),
                 usage=usage,
                 model=served_model(data, request),
+                cache_ttl=request.cache_ttl,
             )
         if finish_reason == "length":
             logger.warning(
@@ -316,6 +323,7 @@ class OpenRouterClient:
             usage=usage,
             reasoning_applied=applied,
             finish_reason=finish_reason,
+            cache_ttl=request.cache_ttl,
         )
 
         if request.reasoning is not None and not applied:

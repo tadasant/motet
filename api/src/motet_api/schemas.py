@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class HealthResponse(BaseModel):
@@ -108,6 +108,23 @@ class HealthResponse(BaseModel):
     )
     inference_mode: str = Field(
         description="'fake' or 'real'. 'fake' means no vendor is ever called."
+    )
+    settings_writable: bool = Field(
+        description=(
+            "Whether this deployment honours runtime `settings` rows — per-stage LLM "
+            "model and effort chosen on the admin screen. False in production, where the "
+            "environment is the whole model configuration and no row is read."
+        )
+    )
+    llm_overrides_in_force: bool | None = Field(
+        description=(
+            "Whether any `settings` row is changing what a worker's job runs on right "
+            "now. Reported because an override and a clean environment look identical "
+            "from outside, and the worker's boot log no longer describes what a job runs "
+            "once one exists. Always false where settings_writable is false, without a "
+            "database read; null when the table could not be read. Which stage and which "
+            "model are not reported here — that is the admin screen's."
+        )
     )
 
 
@@ -1198,3 +1215,153 @@ class AdminWaitlistResponse(BaseModel):
     next_before: int | None = Field(
         description="Pass as `before` for the next, older page; null when this page is the last."
     )
+
+
+# --- admin: LLM models and spend (motet#92) ------------------------------------------------
+
+
+class LlmModelOption(BaseModel):
+    """One catalogue row, as the admin screen's dropdown needs it."""
+
+    slug: str
+    efforts: list[str] = Field(
+        description="Reasoning efforts this slug accepts; empty means it takes only `off`."
+    )
+    adaptive_thinking: bool
+    reasoning_on_by_default: bool
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    cache_read_usd_per_mtok: float
+    cache_write_usd_per_mtok: float = Field(description="Cache writes at the 5-minute TTL.")
+    cache_write_1h_usd_per_mtok: float = Field(description="Cache writes at the 1-hour TTL.")
+
+
+class LlmStageConfigResponse(BaseModel):
+    """One stage's resolved model and effort, with the whole precedence chain beside it.
+
+    `model`/`effort` are what a job would resolve right now; the `*_source` fields say
+    which rung won. The rungs themselves are reported so the screen can show the chain and
+    not only its answer: `setting_*` is the `settings` row, `stage_env_*` the
+    `MOTET_LLM_*_<STAGE>` variable, `global_env_*` the `MOTET_LLM_*` variable, `default_*`
+    the committed default. Effort values are an effort name or `"off"`.
+    """
+
+    stage: str
+    model: str
+    model_source: str = Field(description="`settings`, `stage_env`, `global_env` or `default`.")
+    effort: str
+    effort_source: str = Field(description="`settings`, `stage_env`, `global_env` or `default`.")
+    setting_model: str | None
+    stage_env_model: str | None
+    global_env_model: str | None
+    default_model: str
+    setting_effort: str | None
+    stage_env_effort: str | None
+    global_env_effort: str | None
+    default_effort: str
+    models: list[str] = Field(
+        description=(
+            "The catalogue slugs this stage may be set to — narrower than `models` on the "
+            "response where the stage's requests need something a model lacks (dedup "
+            "caches for an hour)."
+        )
+    )
+
+
+class LlmConfigResponse(BaseModel):
+    """Every LLM stage's model and effort, where each came from, and what may be chosen."""
+
+    stages: list[LlmStageConfigResponse]
+    models: list[LlmModelOption]
+    precedence: list[str] = Field(
+        description="Sources from highest to lowest precedence, as `*_source` spells them."
+    )
+    applies: str = Field(
+        description="When a saved change takes effect on the worker: `next_job`, always."
+    )
+    writable: bool = Field(
+        description=(
+            "Whether this deployment honours `settings` rows at all. False — production — "
+            "means the environment is the whole configuration, no row is read, and a PUT "
+            "is refused with 409. Resolved against the API's own environment: the worker "
+            "reads the same variable from its own, and the two must agree."
+        )
+    )
+    writable_env: str = Field(description="The variable that decides `writable`.")
+    settings_error: str | None = Field(
+        description=(
+            "Why the stored rows are not being applied, when they do not resolve against "
+            "this environment — a slug a later deploy took out of the catalogue, say. A "
+            "worker ignores all of them in that case and says so at ERROR."
+        )
+    )
+
+
+class LlmStageConfigUpdate(BaseModel):
+    """Set or clear one stage's `settings` rows.
+
+    A field left out is untouched; `null` clears that row; a string sets it. Effort takes
+    an effort name or `"off"`. Only catalogue slugs are accepted, even where the
+    environment allows an unlisted one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = None
+    effort: str | None = None
+
+
+class LlmSpend(BaseModel):
+    """Summed completions and tokens for one bucket, and what they cost in USD."""
+
+    completions: int
+    input_tokens: int = Field(description="Includes both cache figures, as billed.")
+    output_tokens: int = Field(description="Includes reasoning, as billed.")
+    reasoning_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    usd: float = Field(description="Priced from the committed catalogue, per model and TTL.")
+    unpriced_completions: int = Field(
+        description=(
+            "Completions on a model the catalogue has no price for, which `usd` leaves out "
+            "rather than counting as free. Nonzero means the total is a lower bound."
+        )
+    )
+
+
+class AdminUserSpend(BaseModel):
+    user_id: str
+    email: str | None
+    spend: LlmSpend
+
+
+class LlmSpendBreakdown(BaseModel):
+    """One period of the ledger, folded three ways."""
+
+    stages: dict[str, LlmSpend] = Field(description="Every LLM stage, at zero when unused.")
+    queues: dict[str, LlmSpend] = Field(
+        description=(
+            "Queues that make LLM calls: integrate is dedup + dedup_confirm, script is "
+            "script. Voice is on no queue."
+        )
+    )
+    users: list[AdminUserSpend] = Field(
+        description="Users with spend in the period, most expensive first."
+    )
+
+
+class AdminLlmSpendResponse(BaseModel):
+    """The `llm_usage` ledger: what each stage, user and queue spent. Admins only.
+
+    One row per pipeline completion, written by the worker. Nothing is backfilled, so
+    `since` is when the first retained row landed (null if none), and rows older than
+    `retention_days` are deleted. Voice turns are not in it: the voice service has no
+    database, so its spend is the `motet.llm.tokens` metric only.
+    """
+
+    generated_at: datetime
+    since: datetime | None
+    window_days: int
+    retention_days: int
+    total: LlmSpendBreakdown = Field(description="Everything retained, since `since`.")
+    window: LlmSpendBreakdown = Field(description="The last `window_days` days.")

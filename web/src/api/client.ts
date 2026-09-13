@@ -54,6 +54,14 @@ export type AdminOverview = GetResponse<'/v1/admin/overview'>
 export type AdminWaitlist = GetResponse<'/v1/admin/waitlist'>
 export type VoiceStatus = GetResponse<'/v1/voice'>
 export type VoiceSession = PostResponse<'/v1/episodes/{episode_id}/voice-session'>
+export type LlmConfig = GetResponse<'/v1/admin/llm-config'>
+export type LlmStageConfig = LlmConfig['stages'][number]
+export type LlmSpendReport = GetResponse<'/v1/admin/llm-spend'>
+export type LlmSpend = LlmSpendReport['total']['stages'][string]
+/** Request body of `PUT /v1/admin/llm-config/{stage}`: a key left out is untouched, null clears. */
+export type LlmStageUpdate = NonNullable<
+  paths['/v1/admin/llm-config/{stage}']['put']['requestBody']
+>['content']['application/json']
 
 export class ApiError extends Error {
   constructor(
@@ -425,4 +433,10 @@ export const api = {
       `/v1/episodes/${encodeURIComponent(id)}/voice-session`,
       { spoken_through_ms: Math.max(0, Math.round(spokenThroughMs)) },
     ),
+  // Models and spend (motet#92). Admins only, like the overview. `setLlmConfig` is also
+  // refused with 409 wherever the deployment does not honour settings — production.
+  llmConfig: () => apiGet('/v1/admin/llm-config'),
+  setLlmConfig: (stage: string, body: LlmStageUpdate) =>
+    apiPutPath('/v1/admin/llm-config/{stage}', `/v1/admin/llm-config/${encodeURIComponent(stage)}`, body),
+  llmSpend: () => apiGet('/v1/admin/llm-spend'),
 }

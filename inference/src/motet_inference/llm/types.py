@@ -77,10 +77,19 @@ class LlmBudgetExhaustedError(LlmTransportError):
     (motet#24).
     """
 
-    def __init__(self, message: str, *, usage: Usage | None = None, model: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: Usage | None = None,
+        model: str = "",
+        cache_ttl: CacheTtl | None = None,
+    ) -> None:
         super().__init__(message)
         self.usage = usage
         self.model = model
+        #: :attr:`LlmResponse.cache_ttl`'s twin, for pricing the cache writes in ``usage``.
+        self.cache_ttl = cache_ttl
 
 
 class ReasoningNotAppliedError(LlmError):
@@ -227,6 +236,20 @@ class LlmRequest:
     def cache_breakpoints(self) -> int:
         return sum(1 for message in self.messages for part in message.parts if part.cache)
 
+    @property
+    def cache_ttl(self) -> CacheTtl | None:
+        """The longest TTL any breakpoint in this request asks for, or ``None`` if none.
+
+        A cache *write* is billed at the TTL's rate — at Anthropic the ``1h`` rate is 1.6
+        times the ``5m`` one — and the usage block says how many tokens were written but
+        not under which TTL. The longest is the conservative answer for a request that
+        mixed them, which nothing in the pipeline does today.
+        """
+        ttls = {part.cache.ttl for message in self.messages for part in message.parts if part.cache}
+        if not ttls:
+            return None
+        return "1h" if "1h" in ttls else "5m"
+
 
 @dataclass(frozen=True)
 class Usage:
@@ -254,6 +277,9 @@ class LlmResponse:
     usage: Usage = Usage()
     reasoning_applied: bool = False
     finish_reason: str | None = None
+    #: The request's :attr:`LlmRequest.cache_ttl`, carried across so that whoever prices
+    #: ``usage.cache_write_tokens`` knows which rate they were written at.
+    cache_ttl: CacheTtl | None = None
 
 
 @runtime_checkable

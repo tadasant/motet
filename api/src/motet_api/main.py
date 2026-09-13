@@ -15,6 +15,7 @@ the blast radius for no functional gain.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -40,7 +41,9 @@ from motet_db import (
     repo,
 )
 from motet_db import auth as auth_repo
+from motet_db import settings as settings_repo
 from motet_db import waitlist as waitlist_repo
+from motet_inference.llm import LlmConfigError, LlmStage
 from motet_inference.llm import load_config as load_llm_config
 from motet_sources import (
     GMAIL_MODIFY_SCOPE,
@@ -79,7 +82,7 @@ from motet_workers.queues import PIPELINE
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
-from . import obs
+from . import admin_llm, obs
 from .auth import (
     ALLOWED_EMAILS_ENV,
     LOGIN_SCOPES,
@@ -123,6 +126,7 @@ from .schemas import (
     AdminEpisodeCounts,
     AdminJobCounts,
     AdminJobResponse,
+    AdminLlmSpendResponse,
     AdminNewsItemCounts,
     AdminOverviewResponse,
     AdminQueueResponse,
@@ -149,6 +153,8 @@ from .schemas import (
     LabelSyncResponse,
     ListenProgressRequest,
     ListenProgressResponse,
+    LlmConfigResponse,
+    LlmStageConfigUpdate,
     LoginResponse,
     MarkListenedResponse,
     NewsItemResponse,
@@ -551,6 +557,9 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         drain_trigger=trigger.enabled,
         voice_configured=VoiceConfig.from_env().configured,
         inference_mode=config.inference_mode,
+        settings_writable=settings_repo.settings_writable(os.environ),
+        # Only where settings are writable — never in production — and cached for 30s.
+        llm_overrides_in_force=admin_llm.overrides_in_force(config.database_url, os.environ),
     )
 
 
@@ -1230,6 +1239,78 @@ def admin_waitlist(
         ],
         next_before=signups[-1].id if more else None,
     )
+
+
+# The LLM half of the operator view (motet#92): which model each stage is on and why, and
+# what the ledger says each stage, user and queue spent. Same guard, same reason — and a
+# second one on the write: `PUT` changes what every later job spends, so it is refused
+# outright wherever MOTET_SETTINGS_WRITABLE is off, which is production. The logic is in
+# `admin_llm`; these are its HTTP surface.
+
+
+def _llm_stage(value: str) -> LlmStage:
+    try:
+        return LlmStage(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"unknown LLM stage {value!r}; one of: {', '.join(s.value for s in LlmStage)}",
+        ) from None
+
+
+@app.get("/v1/admin/llm-config", response_model=LlmConfigResponse, tags=["admin"])
+def get_llm_config(conn: Conn, _admin: Admin) -> LlmConfigResponse:
+    """Every LLM stage's resolved model and effort, where each came from, and the catalogue.
+
+    Where settings are not writable the rows are neither read nor shown: the answer is the
+    environment's, which is what every job on this deployment runs.
+    """
+    return admin_llm.describe_config(admin_llm.honoured_rows(conn, os.environ), os.environ)
+
+
+@app.put(
+    "/v1/admin/llm-config/{stage}",
+    response_model=LlmConfigResponse,
+    tags=["admin"],
+    responses={
+        400: {
+            "description": "The change does not resolve: an unknown slug, or an effort "
+            "the slug does not take."
+        },
+        404: {"description": "No such LLM stage."},
+        409: {"description": "Settings are read-only on this deployment."},
+    },
+)
+def put_llm_config(
+    conn: Conn,
+    admin: Admin,
+    body: LlmStageConfigUpdate,
+    stage: Annotated[str, Path(description="An LLM stage, as `GET` lists them.")],
+) -> LlmConfigResponse:
+    """Set or clear one stage's model and effort. Applies to the next job a worker claims.
+
+    Validated before anything is written, by the same function the worker applies rows
+    through: an unknown slug, an effort the slug does not accept, or a slug outside the
+    catalogue is a 400 with the resolver's own message.
+    """
+    target = _llm_stage(stage)
+    try:
+        return admin_llm.apply_update(conn, target, body, os.environ, actor=admin.email)
+    except admin_llm.SettingsReadOnlyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+    except LlmConfigError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+
+
+@app.get("/v1/admin/llm-spend", response_model=AdminLlmSpendResponse, tags=["admin"])
+def get_llm_spend(conn: Conn, _admin: Admin) -> AdminLlmSpendResponse:
+    """What each LLM stage, user and pipeline queue spent, from the `llm_usage` ledger.
+
+    Its own route rather than a field on `/v1/admin/overview`: that one is polled every few
+    seconds for queue state, and a sum over the ledger is neither cheap enough nor fresh
+    enough to be worth re-asking at that rate.
+    """
+    return admin_llm.fold_spend(conn)
 
 
 @app.get("/v1/news-items", response_model=list[NewsItemResponse], tags=["backlog"])

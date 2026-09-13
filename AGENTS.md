@@ -856,7 +856,9 @@ it does for the stage registry.
 `MOTET_LLM_MODEL` moves every stage;
 `MOTET_LLM_MODEL_{DEDUP,DEDUP_CONFIRM,SCRIPT,VOICE}` moves one. Effort works the same way,
 defaulting per stage: dedup `low` (the volume line), dedup_confirm `medium`, script
-`high`, voice `off`.
+`high`, voice `off`. On a laptop and in staging a `settings` row from the admin screen sits
+above both, per job; production never reads one (see "Models, spend, and the settings that
+only staging honours").
 
 **A "stage" is a caller with its own cost profile, not a step in the pipeline**, which is
 what lets the voice service's conversational turn be one of them (motet#6) — and what lets
@@ -984,7 +986,9 @@ episode id, because a time series per episode is a time series per episode forev
 a stage, so the one caller that *has* an id can put a total beside it. A `ContextVar`
 rather than a parameter because a cost accumulator in the argument list would be a cost
 accumulator in the `Protocol`, which every fake would then implement for a number it does
-not have.
+not have. The third record is the `llm_usage` ledger (motet#92), fed by `usage_sink` beside
+`collect_usage` — a row per completion, because per-user spend is the one number neither of
+the other two can hold.
 
 **Recording lives in the stage adapters, not in the OpenRouter client**, because *stage* is
 what an operator splits cost by and `LlmRequest` deliberately does not carry one. The
@@ -2526,6 +2530,106 @@ the owner named), one table, one public and one admin route on the existing API,
 vendor, seam, queue mechanism, model call or resource in the private infrastructure repo
 beyond the Pages project and its DNS, which are human-owned. Deliberately not added: a
 confirmation email (a vendor), a redirect variable, and a rate limiter.
+### Models, spend, and the settings that only staging honours
+
+**Sign-off: PENDING-TADAS — this line is replaced with the owner's answer before the PR
+merges (motet#92's design session).**
+
+`GET/PUT /v1/admin/llm-config`, `GET /v1/admin/llm-spend`, migration 0015,
+`motet_db.settings`, `motet_db.llm_usage`, `motet_workers.llm_context`,
+`web/src/screens/ModelsAndSpend.tsx`. Two questions an operator asks about the LLM seam
+had no surface: *which model is dedup on, and why?* — motet#85 was an afternoon of a shell
+export winning over a `.env` line with nothing saying so — and *what is this costing, per
+stage and per user?* The metric answers the fleet and a log line answers one episode;
+nothing could be summed per user.
+
+**Three pieces of it are invariant 12's. Each is built to the design session's proposed
+default, and the sign-off line above is what says whether the owner took it:**
+
+1. **`llm_usage` is a ledger: one row per completion, appended by the worker, summed by
+   the API, never updated.** It is the only shape that yields per-user spend, because the
+   metric must not carry an id. It is also a second source of truth beside
+   `motet.llm.tokens`, and the two *will* disagree — a row the worker could not write is
+   logged and dropped, a metric batch the exporter could not ship is lost the other way.
+   Neither is the other's audit.
+2. **`settings` is runtime model configuration, and production never reads it.**
+   `MOTET_SETTINGS_WRITABLE` (parsed once, in `motet_db.settings`, fail closed) gates the
+   *read* as well as the write: unset, the API answers a `PUT` with 409 and the worker
+   loads no row at all. So a row that reached the table some other way — a restored dump,
+   a flag switched off after a save — is inert, and production resolves from the
+   environment alone. A laptop (`bin/local-env` writes the flag) and staging set it.
+3. **Where settings are honoured, "an unknown slug is a startup crash" is traded for "a
+   bad row is an ERROR and the job runs on env".** The rule survives in production intact.
+   Where rows are read, the worker reads them **once per job**, validates them with
+   `validate_overrides` — the same function the `PUT` writes through and the boot check
+   calls — and, if they do not resolve, ignores *all* of them and says so at ERROR. A
+   dropdown must never be able to stop the pipeline. Once per job rather than per
+   completion, so dedup's first pass and its second look cannot straddle a change. The
+   worker's boot log adds a line saying which rows are in force, because the `llm:` line
+   above it no longer describes every job; `/internal/health` reports
+   `settings_writable` and `llm_overrides_in_force` for the same reason. **That makes the
+   health route touch the database where settings are writable** — the one exception to
+   its answering without one, which is why the answer is cached for thirty seconds and the
+   query carries a statement timeout: the route is public and is the platform's probe.
+
+**"A row resolves" has to mean "no request built from it is refused"**, and the fresh-eyes
+review of the first draft found the hole: `validate_overrides` ran `load_config`, but the
+catalogue checks `build_request` makes per request — the output ceiling and the 1h cache
+TTL — never ran, so `dedup → openai/gpt-5.1` saved cleanly and then every paste was
+refused. `STAGES_CACHING_ONE_HOUR` now declares which stages ask for the hour, `_check_model`
+refuses a model without it for env and row alike, the dropdown offers only
+`models_for(stage)`, and two tests pin the declaration to the real prompt builders and every
+stage's ceiling to every catalogue model. **A key under `llm.` that names no current stage
+is ignored with a warning, not refused** — refusing an orphan would let one stale row
+disable every other override and block every save, with no route able to delete it.
+
+**The screen resolves against the API's environment, and only the worker's decides what a
+job runs.** They are separate service definitions, so `MOTET_SETTINGS_WRITABLE` and any
+`MOTET_LLM_*` must match on both — set on the API alone, a save answers 200 and no job ever
+reads it. The screen says so; reporting the worker's own view would be new structure.
+
+**A row is gated harder than an environment variable, deliberately.** A model row must be
+in the catalogue even where `MOTET_LLM_ALLOW_UNLISTED_MODEL` is set: that escape hatch is a
+property of a deployment, for the hour between a vendor shipping a model and this repo
+catching up, and a row outside the catalogue is a typo. `off` is offered on every stage,
+because it is legal on every catalogue model and the only pairing for one with no effort;
+the dropdown marks each stage's default so turning thinking off is visibly a departure
+from it. The `PUT` locks the table against other writers for its transaction, so two saves
+racing on one stage cannot each validate half of a pairing that together does not resolve.
+
+**Spend is priced where it is read, per model and per cache TTL, and three details are
+load-bearing:**
+
+- **A response's `model` is the served snapshot**, and `anthropic/claude-sonnet-4.6`
+  answers as `anthropic/claude-4.6-sonnet-20260217` — a shape no suffix rule recovers.
+  `ModelSpec.canonical_slug` maps it back; without it every real completion would price
+  as an unknown model.
+- **A cache write is billed at its TTL's rate**, and dedup caches for an hour (1.6× the
+  five-minute rate) while the script stage caches for five minutes. The usage block does
+  not say which, so the request's `cache_ttl` rides onto the response and into the row.
+- **A model the catalogue cannot price is counted, not treated as free**:
+  `unpriced_completions`, and the SPA shows the total as a floor.
+
+Prices and snapshots are drift-checked by `bin/check-openrouter-models` beside efforts;
+they used to be a dated comment. The aggregate reads a seven-day column and a total over
+what is retained; retention is **90 days**, swept by `prune_jobs` on the same bounded,
+autocommit, oldest-first shape as the job rows. The ledger is written **after** `_execute`'s
+transactions settle, because a completion billed inside a job that then rolled back is
+exactly the row that must not vanish with it — and a write that fails is logged, never a
+job failure. No foreign keys: a row outlives the item or episode it is about, and `user_id`
+is resolved from the subject at insert so the aggregate never joins for money.
+
+**Voice spend stays a metric.** The voice service has no database (invariant 2), so it
+installs no sink and its turns are in no ledger row — the screen says so. Queue spend maps
+`integrate` to dedup and its second look and `script` to the script stage alone; revisit
+if the script queue grows a second model call.
+
+**Rejected:** a Grafana-only spend panel over `motet.llm.tokens` (one source of truth and
+no table, but no per-user number, which is the one this was for); runtime config in
+production (it would give up the startup-crash rule where it matters most); and `costs` on
+`/v1/admin/overview`, which the prototype did — that route is polled every three seconds for
+queue state, and a sum over the ledger is neither cheap enough nor fresh enough to re-ask
+at that rate, so spend is its own route, loaded on demand.
 
 ### The vault is the seam to a credential that is not ours
 

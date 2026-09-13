@@ -1386,6 +1386,8 @@ describe('the generated contract', () => {
       drain_trigger: true,
       voice_configured: false,
       inference_mode: 'fake',
+      settings_writable: false,
+      llm_overrides_in_force: false,
     }
     expect(health.status).toBe('ok')
   })
