@@ -414,7 +414,7 @@ def check_mailbox(
         reason = (
             f"this source was re-authorized with a different Gmail account ({address}) than "
             f"the one it was connected with ({expected}), so it has been disconnected rather "
-            f"than read. Reconnect it with {expected}."
+            f"than read. Connect {expected} again from the Sources screen."
         )
         phase2.delete_source_credentials(conn, source.id)
         phase2.mark_source_disconnected(conn, source.id)

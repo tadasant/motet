@@ -2222,7 +2222,8 @@ Two things the API grew for it are decisions rather than fields:
 
 - **`sources.disconnected_at` (migration 0016) is what separates a disconnected mailbox
   from an abandoned consent**, which are otherwise the same row. The disconnect route sets
-  it only when it actually deleted a credential, so "disconnecting" a row that never held
+  it only when it actually deleted a credential — as does label sync's account check, which deletes
+  a mismatched grant before marking the source disconnected (motet#96) —, so "disconnecting" a row that never held
   one cannot turn it into a mailbox nobody may dismiss.
 - **`DELETE /v1/sources/{id}` dismisses an abandoned consent and refuses everything
   else.** The delete cascades to source items and on to the claims and highlights citing
