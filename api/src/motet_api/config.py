@@ -7,6 +7,7 @@ private repo — none of them belong in this tree.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from urllib.parse import urlsplit
 from motet_inference.mode import current_mode
 
 from .auth import CLIENT_ID_ENV, admin_emails, allowed_emails
+
+logger = logging.getLogger("motet.api.config")
 
 API_TOKEN_ENV: Final = "MOTET_API_TOKEN"
 PUBLIC_BASE_URL_ENV: Final = "MOTET_PUBLIC_BASE_URL"
@@ -254,9 +257,29 @@ def _origin(url: str) -> str:
     return f"{parsed.scheme}://{host}" + (f":{port}" if port is not None else "")
 
 
+#: What counts as on, and what counts as a deliberate off. Anything else is a typo.
+_TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
+_FALSY: Final = frozenset({"", "0", "false", "no", "off"})
+
+
 def _truthy(raw: str | None) -> bool:
-    """A deployment flag, read the way every other on/off variable here is read."""
-    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
+    """A deployment flag, with an unrecognised value logged rather than read as off.
+
+    ``MOTET_IOS_APP_LINK=enabled`` is somebody switching a feature on. Answering "off" and
+    saying nothing is how a deployment sits in the fallback for weeks — the same argument
+    the repo's other flags make by raising (``drain.resolve_job``) or warning
+    (``motet_db.settings.settings_writable``) rather than shrugging.
+    """
+    value = (raw or "").strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value not in _FALSY:
+        logger.error(
+            "%r is not a recognised on/off value (%s); reading it as off",
+            raw,
+            ", ".join(sorted(_TRUTHY | (_FALSY - {""}))),
+        )
+    return False
 
 
 def _clean(value: str | None) -> str | None:

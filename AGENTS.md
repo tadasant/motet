@@ -2559,10 +2559,10 @@ What makes this safe, and each point is pinned in `api/tests/test_native_sign_in
 ##### The handoff comes back on a verified https link where the deployment can serve one
 
 **Approved by Tadas on 2026-09-13**, in this session, as the answer to the paragraph above.
-An `applinks:` universal link is the one callback iOS will not hand to an app that has not
-proved it owns the domain, so a hostile app can no longer receive a Motet sign-in at all —
-where the deployment is set up for it. It is **off by default and degrades to the scheme**,
-because three independent facts have to line up and none of them is knowable from the code:
+An https callback is the one callback iOS will not hand to an app that has not proved it
+owns the domain, so a hostile app can no longer receive a Motet sign-in at all — where the
+deployment is set up for it. It is **off by default and degrades to the scheme**, because
+three independent facts have to line up and none of them is knowable from the code:
 
 | Fact | Set by | Absent means |
 |---|---|---|
@@ -2570,33 +2570,60 @@ because three independent facts have to line up and none of them is knowable fro
 | `MOTET_IOS_APP_ID=<TEAMID>.<bundle id>` on the web image | the private repo | the container serves no app-site-association file, so Apple verifies nothing |
 | the entitlement in the build | `MOTET_IOS_APP_DOMAIN` in the `testflight` environment | the app never asks the sheet for an https callback |
 
-**Both halves are checked, and the app's is the one that must not be skipped.** The API
-reports `callback_host` / `callback_path` from `native/start`, and the app compares that host
-against `MotetAppLinkDomain` — its *own* compiled-in domain, from the entitlement it was
-built with — before asking `ASWebAuthenticationSession` for `.https(host:path:)`. iOS refuses
-that callback outright for a domain the app is not entitled for, so an API flipped on ahead
-of a build would otherwise break sign-in rather than fall back. iOS 17.4 is where the API for
-it arrives; 17.0–17.3 take the scheme.
+**The service is `webcredentials`, not `applinks`, and that distinction is the feature.**
+An https callback to `ASWebAuthenticationSession` is *not* a universal link: it is verified
+through the shared-web-credentials service, and a session asked for one on a domain the app
+claims only under `applinks` refuses to start — "Using HTTPS callbacks requires Associated
+Domains using the webcredentials service type". Apple documents neither half of that
+clearly, and the first draft of this change got it wrong in both the entitlement and the
+served file. `applinks` is **deliberately absent** as well as insufficient: claiming
+`/app/signed-in` would route every tap on that URL anywhere on the phone into an app that
+has no handler for one. `webcredentials` claims no URL at all, so nothing about the web app
+leaves the browser.
 
-**The path is `/app/signed-in`, and the app-site-association file claims that path and no
-other.** A `*` claim would take the whole SPA out of Safari and into the app. The web
-container writes the file at start from `MOTET_IOS_APP_ID` (`web/docker-entrypoint.d/`),
-beside the `config.js` rewrite and for the same reason: one image, configured where it runs,
-and no Apple team id in this public repo. nginx serves it as `application/json` with
-`no-store`, and `bin/build-images` asserts both that an unconfigured container 404s it and
-that a configured one serves the app id and the path.
+**The app decides before the sign-in starts, and the API stores what was agreed.** This is
+the half that is easy to get wrong, because the callback is made by the *browser*, which
+knows nothing about the phone. The app sends `app_link_domain` — the host its own
+entitlement names, and only where its iOS is 17.4 or newer — to `native/start`; the API
+offers the https link only if that host is exactly its own, and records the answer on the
+pending row (`oauth_states.handoff_app_link`, migration 0021). `/v1/auth/google/callback`
+then builds the link from **that row**, never from the flag. Choosing from the flag alone
+hands an https link to a sheet watching for `motet://`, and that sheet never closes: a
+deployment that switched the flag on ahead of a build would have broken sign-in outright
+rather than falling back. `api/tests/test_native_sign_in.py` pins it from both sides.
+
+**An https callback that is refused still falls back.** The entitlement can be signed in
+and not yet in force — Apple's CDN has not fetched the file, the capability is not ticked,
+an export dropped it — and the refusal happens when the sheet *opens*, before anything has
+happened. `SettingsView` starts one fresh sign-in on the scheme rather than leaving a dead
+Settings screen; it has to be a fresh one, because the server has already committed this
+one to the https shape.
+
+**The web container writes the association file at start** from `MOTET_IOS_APP_ID`
+(`web/docker-entrypoint.d/`), beside the `config.js` rewrite and for the same reason: one
+image, configured where it runs, and no Apple team id in this public repo. nginx serves it
+as `application/json` with `no-store`, and `bin/build-images` asserts that an unconfigured
+container 404s it, that a configured one serves `webcredentials` for the app id with the
+right content type, and that it claims no `applinks`.
+
+**`MOTET_APP_BASE_URL` has to be https with no explicit port**, because
+`Callback.https(host:path:)` takes a host and a path and has nowhere to put either. A
+deployment whose origin cannot carry the link logs at ERROR and uses the scheme;
+`/internal/health` reports the resolved `ios_app_link` rather than the raw flag, so a switch
+that is set and inert does not look like one nobody set.
 
 **The SPA has a landing page at that path** (`screens/AppHandoff.tsx`), because a universal
 link is still a URL: opened where the app is not installed — a desktop browser, a phone
 without the app — it must read as something rather than as the backlog with a stray address.
 It reads nothing out of the URL, so the code in the query is never touched by script.
 
-**The entitlement is its own file.** `App/Motet/Applinks.entitlements` asks for the
+**The entitlement is its own file.** `App/Motet/WebCredentials.entitlements` asks for the
 associated domain and nothing else; `App/Motet/Motet.entitlements` asks for CarPlay, which
 Apple grants by manual review, and an ungranted entitlement fails a build to *sign*. Keeping
 them in one file would couple this to that grant. `ios/bin/testflight` enforces it: exactly
-one entitlements file may be signed in, it must be the applinks one, and the guard re-reads
-the file for a CarPlay key rather than trusting the filename.
+one entitlements file may be signed in, it must be that one, it must carry a non-empty
+domain, and the guard asks the **parsed** plist what it requests rather than grepping the
+file — whose own comment explains why it is not the CarPlay one, and so contains the word.
 
 Ticking **Associated Domains** on the App ID is invariant 9's human half, like the App ID
 itself. What no test here can tell you is whether Apple's CDN has fetched the file: the first

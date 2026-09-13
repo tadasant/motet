@@ -26,9 +26,9 @@
 # App/Motet/Motet.entitlements asks for `com.apple.developer.carplay-audio`, which Apple
 # grants by manual review, and an ungranted entitlement fails a build to *sign* rather than
 # merely lack the feature — so the script refuses to archive with it. App/Motet/
-# Applinks.entitlements is the one exception: it asks only for the associated domain the
-# https sign-in handoff comes back on, which is granted by ticking Associated Domains on the
-# App ID. It is used only when MOTET_IOS_APP_DOMAIN names a host, and the guard below
+# WebCredentials.entitlements is the one exception: it asks only for the associated domain
+# the https sign-in handoff comes back on (the `webcredentials` service, not `applinks`),
+# which is granted by ticking Associated Domains on the App ID. It is used only when MOTET_IOS_APP_DOMAIN names a host, and the guard below
 # re-reads the file to be sure it has not grown a CarPlay key since.
 #
 # `upload` reads, and never prints:
@@ -85,7 +85,7 @@ signing="${MOTET_SIGNING:-export}"
 app_link_domain="${MOTET_IOS_APP_DOMAIN:-}"
 [ -z "$app_link_domain" ] || [[ "$app_link_domain" =~ ^[A-Za-z0-9.-]+$ ]] ||
   fail "MOTET_IOS_APP_DOMAIN must be a bare host, not a URL"
-readonly APPLINKS_ENTITLEMENTS="Motet/Applinks.entitlements"
+readonly APP_LINK_ENTITLEMENTS="Motet/WebCredentials.entitlements"
 
 work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/motet-testflight-$$"
 mkdir -p "$work"
@@ -132,7 +132,7 @@ build_settings=(
 )
 if [ -n "$app_link_domain" ]; then
   build_settings+=(
-    CODE_SIGN_ENTITLEMENTS="$APPLINKS_ENTITLEMENTS"
+    CODE_SIGN_ENTITLEMENTS="$APP_LINK_ENTITLEMENTS"
     MOTET_APP_LINK_DOMAIN="$app_link_domain"
   )
 fi
@@ -147,7 +147,7 @@ case "$entitlements" in
   "")
     printf '    ok  %-44s none\n' "CODE_SIGN_ENTITLEMENTS"
     ;;
-  "$APPLINKS_ENTITLEMENTS")
+  "$APP_LINK_ENTITLEMENTS")
     # Asked of the file rather than of the setting: the whole point of the exception is
     # which entitlements the file requests, and it is edited far more often than this line.
     #
@@ -155,18 +155,30 @@ case "$entitlements" in
     # is not the CarPlay one, so it contains the word — and a grep over the raw text would
     # fail every signed build on the strength of a comment. PlistBuddy prints the structure
     # and drops comments, so what is inspected is what is requested.
-    file="App/$APPLINKS_ENTITLEMENTS"
+    file="App/$APP_LINK_ENTITLEMENTS"
     [ -f "$file" ] || fail "$file is missing"
+    # `webcredentials:` with nothing after it is not a domain, and it signs cleanly.
+    [ -n "$app_link_domain" ] ||
+      fail "$file is signed in with no MOTET_IOS_APP_DOMAIN to fill it"
     requested="$(/usr/libexec/PlistBuddy -c 'Print' "$file" 2>/dev/null)" ||
       fail "$file is not a readable plist"
-    ! printf '%s\n' "$requested" | grep -qi 'carplay' ||
-      fail "$file asks for CarPlay, which is not granted — an ungranted entitlement fails signing"
-    printf '%s\n' "$requested" | grep -q 'applinks:' ||
-      fail "$file does not ask for an associated domain"
-    printf '    ok  %-44s %s\n' "CODE_SIGN_ENTITLEMENTS" "applinks only ($app_link_domain)"
+    # `case`, not `printf | grep -q`: under pipefail a `grep -q` that exits on its first
+    # match can leave the pipeline carrying 141 from the SIGPIPE'd writer, which would read
+    # a CarPlay match as a miss — the guard failing open, which is the one direction that
+    # must not happen. Same hazard the comment above the capture describes.
+    case "$requested" in
+      *[Cc][Aa][Rr][Pp][Ll][Aa][Yy]*)
+        fail "$file asks for CarPlay, which is not granted — an ungranted entitlement fails signing"
+        ;;
+    esac
+    case "$requested" in
+      *"webcredentials:"*) ;;
+      *) fail "$file does not ask for the webcredentials service on an associated domain" ;;
+    esac
+    printf '    ok  %-44s %s\n' "CODE_SIGN_ENTITLEMENTS" "webcredentials only ($app_link_domain)"
     ;;
   *)
-    fail "CODE_SIGN_ENTITLEMENTS is '$entitlements' — only $APPLINKS_ENTITLEMENTS may be signed in"
+    fail "CODE_SIGN_ENTITLEMENTS is '$entitlements' — only $APP_LINK_ENTITLEMENTS may be signed in"
     ;;
 esac
 if [ "$mode" = upload ] && [ -z "$app_link_domain" ]; then

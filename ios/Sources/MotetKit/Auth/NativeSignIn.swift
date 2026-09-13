@@ -42,11 +42,17 @@ public enum NativeSignIn {
     /// The one-time code out of the link the web app navigated to.
     ///
     /// Two shapes are the API's: `motet://signed-in?code=…`, and — where the deployment
-    /// serves an app-site-association file — `https://<web app>/app/signed-in?code=…`, which
-    /// only an app entitled for that host can be handed.
-    public static func handoffCode(from url: URL) throws -> String {
+    /// serves an app-site-association file naming this app — `https://<host>/app/signed-in?
+    /// code=…`, which only an app entitled for that host can be handed.
+    ///
+    /// `appLinkHost` is the host this sign-in asked for, and the https shape is refused
+    /// without it. In practice the system hands back only the host the session named, so
+    /// this is defence in depth — but it is a public entry point, and the custom-scheme arm
+    /// has always checked its host.
+    public static func handoffCode(from url: URL, appLinkHost: String? = nil) throws -> String {
         let isCustomScheme = url.scheme == callbackScheme && url.host == handoffHost
         let isAppLink = url.scheme == "https" && url.path == handoffPath
+            && appLinkHost != nil && url.host == appLinkHost
         guard isCustomScheme || isAppLink,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { throw Failure.notAHandoff }

@@ -62,6 +62,24 @@ describe('SignInCallback', () => {
     expect(handOff).toHaveBeenCalledWith(link)
   })
 
+  it('refuses an https handoff on another origin', async () => {
+    // The widened guard's own risk: `/app/signed-in` is only ours on our own origin, and a
+    // handoff_url naming somebody else's is not a link this deployment ever builds.
+    answerCallbackWith({
+      token: null,
+      email: 'owner@motet.test',
+      expires_at: null,
+      handoff_url: 'https://evil.example/app/signed-in?code=one-time',
+    })
+    const handOff = vi.fn()
+
+    render(<SignInCallback callback={GRANTED} onSignedIn={vi.fn()} onDone={() => {}} handOff={handOff} />)
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Continue to the Motet app' })).toBeNull()
+    expect(handOff).not.toHaveBeenCalled()
+  })
+
   it('refuses a handoff link that is not the API’s motet:// link', async () => {
     answerCallbackWith({ token: null, email: 'owner@motet.test', expires_at: null, handoff_url: 'javascript:alert(1)' })
     const handOff = vi.fn()

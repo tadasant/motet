@@ -286,10 +286,23 @@ agreement shows up there as a 403. A wrong team id is only caught at export.
 back on a verified https link"). `MOTET_IOS_APP_DOMAIN` here signs the entitlement into the
 build; `MOTET_IOS_APP_ID` on the web image makes the container serve the app-site-association
 file; `MOTET_IOS_APP_LINK=1` on the API makes it hand back the https link. Any of them
-missing falls back to `motet://signed-in`, which still works. **Deploy the API and the web
-image before the build that expects them** — the app compares the API's host against its own
-entitlement and falls back on a mismatch, so the order is safe either way, but a build that
-never sees the file is a build that silently never uses the stronger callback.
+missing falls back to `motet://signed-in`, which still works, and the order they are set in
+is safe: the app declares what it can receive at the start of every sign-in and the API
+agrees or falls back, so no combination leaves a sheet waiting for a link nobody sends.
+
+**What the signed build asks for is `webcredentials`, not `applinks`** — an https callback
+to `ASWebAuthenticationSession` is verified through shared web credentials rather than as a
+universal link. The App ID capability is still called Associated Domains, so step 2 above is
+unchanged.
+
+**Verify the first signed build by hand.** With the default `MOTET_SIGNING=export` the
+archive is unsigned and the entitlement is materialised by Apple at export, so nothing in
+this repo can prove it survived. `codesign -d --entitlements :- Motet.app` on the exported
+build is the check. It is worth doing once: the app reads `MotetAppLinkDomain` out of its
+Info.plist to decide it is entitled, and that key is set from a build setting entirely
+independently of whether the entitlement was signed in — though a build that is wrong about
+this now falls back to the scheme rather than failing, because a refused https callback is
+retried on the scheme.
 
 **The app icon is the brand mark** from the Polyphony restyle
 ([#115](https://github.com/tadasant/motet/pull/115)),

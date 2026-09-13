@@ -54,8 +54,8 @@ COPY web/docker-entrypoint.d/10-motet-config.sh /docker-entrypoint.d/10-motet-co
 RUN chmod +x /docker-entrypoint.d/10-motet-config.sh
 
 # Writes /.well-known/apple-app-site-association from MOTET_IOS_APP_ID, or removes it.
-COPY web/docker-entrypoint.d/20-motet-applinks.sh /docker-entrypoint.d/20-motet-applinks.sh
-RUN chmod +x /docker-entrypoint.d/20-motet-applinks.sh
+COPY web/docker-entrypoint.d/20-motet-app-site-association.sh /docker-entrypoint.d/20-motet-app-site-association.sh
+RUN chmod +x /docker-entrypoint.d/20-motet-app-site-association.sh
 
 COPY --from=build /app/web/dist /usr/share/nginx/html
 

@@ -65,6 +65,15 @@ class HealthResponse(BaseModel):
             "has tried."
         )
     )
+    ios_app_link: bool = Field(
+        description=(
+            "Whether this deployment hands the iOS app its sign-in back on an https link on "
+            "the web app's own host, rather than on the 'motet://' scheme. Reported for "
+            "'login_configured's reason: a flag that is set but cannot take effect — a "
+            "non-https or ported MOTET_APP_BASE_URL — looks exactly like one nobody set, "
+            "and the fallback it lands on is silent by design."
+        )
+    )
     vault_backend: str = Field(
         description=(
             "Which credential vault this process resolved: 'kms' or 'local'. 'local' in a "
@@ -1046,6 +1055,18 @@ class StartNativeLoginRequest(BaseModel):
             "verifier stays in the app and is presented only when the handoff is redeemed."
         ),
     )
+    app_link_domain: str | None = Field(
+        default=None,
+        max_length=253,
+        description=(
+            "The host this build may receive an https sign-in handoff on — the associated "
+            "domain its entitlement names — or null where it can only receive "
+            "callback_scheme. Sent rather than inferred because only the app knows whether "
+            "its build carries the entitlement and whether its iOS is new enough to wait "
+            "for an https callback; an https handoff to an app watching for the scheme "
+            "would leave the sign-in sheet open forever."
+        ),
+    )
 
 
 class StartNativeLoginResponse(BaseModel):
@@ -1066,9 +1087,10 @@ class StartNativeLoginResponse(BaseModel):
     callback_host: str | None = Field(
         default=None,
         description=(
-            "Set when this deployment's web app serves an Apple app-site-association file: "
-            "the host of an https handoff link, which only the app holding the matching "
-            "associated-domains entitlement can receive. Absent means use callback_scheme."
+            "Set when the handoff will come back on an https link rather than on "
+            "callback_scheme: the host of that link. Only ever the host the caller asked "
+            "for in app_link_domain, and only when this deployment serves an Apple "
+            "app-site-association file naming the app. Absent means use callback_scheme."
         ),
     )
     callback_path: str | None = Field(

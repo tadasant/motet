@@ -108,7 +108,7 @@ from .auth import (
     new_nonce,
 )
 from .auth import PROVIDER as GOOGLE_PROVIDER
-from .config import APP_BASE_URL_ENV, CALLBACK_PATH, Settings
+from .config import APP_BASE_URL_ENV, CALLBACK_PATH, IOS_APP_LINK_ENV, Settings
 from .connectors import (
     ConnectorInputError,
     connector_response,
@@ -604,6 +604,9 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         errors_configured=current.errors_configured,
         authenticated=config.authenticated,
         login_configured=config.login_configured,
+        # The resolved answer, not the raw flag: a set flag that cannot take effect is the
+        # misconfiguration this field exists to make visible.
+        ios_app_link=_app_link_origin(config) is not None,
         vault_backend=vault.backend,
         vault_ready=vault.ready,
         # Not the job's resource name: that is a project id and a region, which is
@@ -710,23 +713,54 @@ def start_login(body: StartLoginRequest, conn: Conn, config: Config) -> StartLog
 NATIVE_CALLBACK_SCHEME: Final = "motet"
 NATIVE_HANDOFF_URI: Final = f"{NATIVE_CALLBACK_SCHEME}://signed-in"
 
-#: The web app path an https handoff lands on, when MOTET_IOS_APP_LINK says the web app
-#: serves an app-site-association file naming it. Apple only lets a sheet wait for such a
-#: link if the app carries the associated-domains entitlement for that host, which is what
-#: makes it unclaimable by another app — the custom scheme's one weakness.
+#: The web app path an https handoff lands on, when this deployment and the calling app
+#: both support one. Apple only lets a sign-in sheet wait for an https callback on a host
+#: the app holds a `webcredentials` associated-domains entitlement for, which is what makes
+#: it unclaimable by another app — the custom scheme's one weakness.
 NATIVE_HANDOFF_PATH: Final = "/app/signed-in"
 
 
-def _native_handoff_url(config: Settings, code: str) -> str:
+def _app_link_origin(config: Settings) -> str | None:
+    """This deployment's web origin, when it can carry an https sign-in handoff.
+
+    ``https`` and no explicit port, both of which are properties of
+    ``ASWebAuthenticationSession.Callback.https(host:path:)`` rather than preferences: it
+    takes a host and a path and has nowhere to put a scheme or a port, so a sheet opened
+    against ``http://localhost:5173`` would wait for a URL the browser never visits. A
+    deployment that is not set up for this gets the scheme, which always works.
+    """
+    origins = config.cors_origins
+    if not config.ios_app_link or not origins:
+        return None
+    origin = origins[0]
+    split = urlsplit(origin)
+    if split.scheme != "https" or split.port is not None or not split.hostname:
+        logger.error(
+            "%s is set but %s is %r, which cannot carry an https sign-in handoff "
+            "(https and no explicit port); the iOS app will use the custom scheme",
+            IOS_APP_LINK_ENV,
+            APP_BASE_URL_ENV,
+            origin,
+        )
+        return None
+    return origin
+
+
+def _native_handoff_url(config: Settings, code: str, *, app_link: bool) -> str:
     """The link the sign-in sheet is watching for, with this code on it.
+
+    ``app_link`` is what the *app* asked for at ``native/start``, read back off the pending
+    row — never re-derived from this deployment's flag alone. The browser making this
+    callback cannot know the app's iOS version or whether its build carries the entitlement,
+    so a link chosen here from the flag would be a link the sheet is not watching for.
 
     Built only from this deployment's own configured origin and the literals above; nothing
     a caller sent ever reaches it.
     """
     query = urlencode({"code": code})
-    origins = config.cors_origins
-    if config.ios_app_link and origins:
-        return f"{origins[0]}{NATIVE_HANDOFF_PATH}?{query}"
+    origin = _app_link_origin(config) if app_link else None
+    if origin is not None:
+        return f"{origin}{NATIVE_HANDOFF_PATH}?{query}"
     return f"{NATIVE_HANDOFF_URI}?{query}"
 
 
@@ -767,6 +801,15 @@ def start_native_login(
     auth_repo.purge_expired_sessions(conn)
     auth_repo.purge_expired_handoffs(conn)
 
+    # Both halves have to agree, and this is where they do. The app names the host its
+    # entitlement covers; this deployment offers one only if it serves the association file
+    # for exactly that host. Anything else — flag off, a different host, an app that cannot
+    # take an https callback at all — is the custom scheme, on both sides.
+    app_link_origin = _app_link_origin(config)
+    app_link_host = urlsplit(app_link_origin).hostname if app_link_origin else None
+    if app_link_host is not None and body.app_link_domain != app_link_host:
+        app_link_host = None
+
     verifier, challenge = new_pkce_pair()
     state = new_login_state()
     nonce = new_nonce()
@@ -781,6 +824,7 @@ def start_native_login(
         scopes=LOGIN_SCOPES,
         nonce=nonce,
         handoff_challenge=body.code_challenge,
+        handoff_app_link=app_link_host is not None,
     )
 
     try:
@@ -790,12 +834,11 @@ def start_native_login(
     except IdentityError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
-    host = urlsplit(origins[0]).hostname if config.ios_app_link else None
     return StartNativeLoginResponse(
         authorization_url=url,
         callback_scheme=NATIVE_CALLBACK_SCHEME,
-        callback_host=host,
-        callback_path=NATIVE_HANDOFF_PATH if host else None,
+        callback_host=app_link_host,
+        callback_path=NATIVE_HANDOFF_PATH if app_link_host else None,
     )
 
 
@@ -876,7 +919,12 @@ def complete_login(body: CompleteLoginRequest, conn: Conn, config: Config) -> Lo
             code_challenge=handoff_challenge,
         )
         logger.info("handed a sign-in for %s back to the iOS app", identity.email)
-        return LoginResponse(email=identity.email, handoff_url=_native_handoff_url(config, code))
+        return LoginResponse(
+            email=identity.email,
+            handoff_url=_native_handoff_url(
+                config, code, app_link=bool(pending.get("handoff_app_link"))
+            ),
+        )
 
     token = auth_repo.new_session_token()
     session = auth_repo.create_session(

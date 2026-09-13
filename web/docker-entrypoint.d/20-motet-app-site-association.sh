@@ -8,6 +8,14 @@
 # That is what stops any other app on the phone from receiving a Motet sign-in, which a
 # custom URL scheme cannot do.
 #
+# THE SERVICE IS `webcredentials`, NOT `applinks`. An https callback to
+# `ASWebAuthenticationSession` is not a universal link — it is verified through the
+# shared-web-credentials service, and a session asked for one on a domain the app claims
+# only under `applinks` refuses to start. `applinks` is also deliberately absent: claiming
+# `/app/signed-in` would route every tap on that URL, anywhere on the phone, into an app
+# that has no handler for it. `webcredentials` claims no URL at all, so nothing about this
+# web app leaves the browser.
+#
 # It is written here rather than committed for `config.js`'s reason, twice over: the file
 # names the Apple team id, and this repo is public. MOTET_IOS_APP_ID is
 # `<TEAMID>.<bundle id>`, set by the service definition in the private infrastructure repo.
@@ -43,15 +51,10 @@ esac
 
 mkdir -p "$WELL_KNOWN"
 
-# One path, the handoff's. Apple reads `applinks` for universal links and for the https
-# callback an ASWebAuthenticationSession waits on; nothing else about this host is claimed,
-# so opening any other Motet URL still opens the browser.
 cat > "$AASA" <<JSON
 {
-  "applinks": {
-    "details": [
-      { "appIDs": ["${APP_ID}"], "components": [{ "/": "/app/signed-in", "comment": "iOS sign-in handoff" }] }
-    ]
+  "webcredentials": {
+    "apps": ["${APP_ID}"]
   }
 }
 JSON

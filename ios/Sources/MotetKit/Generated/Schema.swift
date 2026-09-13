@@ -767,6 +767,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var drainTrigger: Bool
     public var errorsConfigured: Bool
     public var inferenceMode: String
+    public var iosAppLink: Bool
     public var llmOverridesInForce: Bool?
     public var loginConfigured: Bool
     public var mcpOauthConfigured: Bool
@@ -786,6 +787,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         drainTrigger: Bool,
         errorsConfigured: Bool,
         inferenceMode: String,
+        iosAppLink: Bool,
         llmOverridesInForce: Bool? = nil,
         loginConfigured: Bool,
         mcpOauthConfigured: Bool,
@@ -804,6 +806,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.drainTrigger = drainTrigger
         self.errorsConfigured = errorsConfigured
         self.inferenceMode = inferenceMode
+        self.iosAppLink = iosAppLink
         self.llmOverridesInForce = llmOverridesInForce
         self.loginConfigured = loginConfigured
         self.mcpOauthConfigured = mcpOauthConfigured
@@ -824,6 +827,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case drainTrigger = "drain_trigger"
         case errorsConfigured = "errors_configured"
         case inferenceMode = "inference_mode"
+        case iosAppLink = "ios_app_link"
         case llmOverridesInForce = "llm_overrides_in_force"
         case loginConfigured = "login_configured"
         case mcpOauthConfigured = "mcp_oauth_configured"
@@ -2218,13 +2222,16 @@ public struct StartLoginResponse: Codable, Hashable, Sendable {
 
 /// Begin a Google sign-in on behalf of the iOS app.
 public struct StartNativeLoginRequest: Codable, Hashable, Sendable {
+    public var appLinkDomain: String?
     public var codeChallenge: String
 
-    public init(codeChallenge: String) {
+    public init(appLinkDomain: String? = nil, codeChallenge: String) {
+        self.appLinkDomain = appLinkDomain
         self.codeChallenge = codeChallenge
     }
 
     private enum CodingKeys: String, CodingKey {
+        case appLinkDomain = "app_link_domain"
         case codeChallenge = "code_challenge"
     }
 }

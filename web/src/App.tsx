@@ -322,7 +322,7 @@ export default function App() {
   // The iOS app's https handoff link. Held apart from the shell and the door for the same
   // reason /oauth/callback is: the sheet is watching for this path, and a browser that gets
   // here instead needs one sentence rather than a section.
-  const appHandoff = path.replace(/\/+$/, '') === HANDOFF_PATH
+  const appHandoff = path === HANDOFF_PATH
   const inShell = !callback && !appHandoff && Boolean(token || unlocked)
 
   // `/`, an unknown path and a trailing slash render a section; the address then says which

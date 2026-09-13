@@ -8,8 +8,20 @@
 // It deliberately shows nothing about the sign-in and reads nothing out of the URL. The
 // code in the query is single-use, expires in two minutes, and is worthless without the
 // verifier that never left the app — there is nothing for this page to do with it.
+//
+// It does take the code out of the address, because this is the one path where the link
+// reaches a *server*: the query lands in an access log, and rides along as `Referer` on
+// every subresource this page pulls. Cheap, and it costs nothing that is used.
+
+import { useEffect } from 'react'
 
 export function AppHandoff({ onDone }: { onDone: () => void }) {
+  useEffect(() => {
+    if (window.location.search) {
+      window.history.replaceState(null, '', window.location.pathname)
+    }
+  }, [])
+
   return (
     <section aria-labelledby="app-handoff-heading">
       <h1 id="app-handoff-heading">Back to the app</h1>

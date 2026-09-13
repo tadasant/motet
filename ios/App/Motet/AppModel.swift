@@ -209,26 +209,35 @@ final class AppModel: ObservableObject {
     /// Ask the server on screen — saved or only typed — to start a Google sign-in for this
     /// app. The caller opens `url` in the system sign-in sheet and hands whatever comes back
     /// to `finishSignIn`, with the same server.
-    func beginSignIn(baseURL: String) async -> StartedSignIn? {
+    func beginSignIn(baseURL: String, allowAppLink: Bool = true) async -> StartedSignIn? {
         signInMessage = nil
         guard let base = Self.server(baseURL) else {
             signInMessage = "Set the server first."
             return nil
         }
+        // iOS 17.4 is where `ASWebAuthenticationSession` learned to wait for an https
+        // callback at all; before it, and in a build carrying no entitlement, there is
+        // nothing to offer the server.
+        var appLinkDomain: String?
+        if #available(iOS 17.4, *), allowAppLink {
+            appLinkDomain = environment.credentials.appLinkDomain
+        }
         isSigningIn = true
         let pkce = PKCEPair.generate()
         do {
+            // The domain is declared *before* the sign-in starts, because the server has to
+            // commit to one shape of handoff link and the browser that later calls the
+            // callback knows nothing about this build. Nil — no entitlement, an iOS too old
+            // to wait for an https callback, or a retry after one was refused — means both
+            // sides use the scheme.
             let started = try await MotetHTTPClient(configuration: MotetConfiguration(baseURL: base))
-                .startNativeSignIn(codeChallenge: pkce.challenge)
+                .startNativeSignIn(codeChallenge: pkce.challenge, appLinkDomain: appLinkDomain)
             guard let url = URL(string: started.authorizationUrl) else {
                 throw NativeSignIn.Failure.notAHandoff
             }
-            // Both halves have to agree, and the app's is the one iOS enforces: asking the
-            // sheet for an https callback on a host this build is not entitled for is
-            // refused outright, so a deployment that turned the flag on ahead of a build
-            // falls back to the scheme rather than failing to sign in.
-            let entitled = environment.credentials.appLinkDomain
-            let host = started.callbackHost.flatMap { $0 == entitled ? $0 : nil }
+            // The server answers with a host only when it took the one that was offered, so
+            // this is agreement rather than a second decision.
+            let host = started.callbackHost.flatMap { $0 == appLinkDomain ? $0 : nil }
             return StartedSignIn(
                 url: url,
                 callbackScheme: started.callbackScheme,
@@ -244,11 +253,13 @@ final class AppModel: ObservableObject {
     }
 
     /// Redeem the handoff link the sheet returned, and keep the server and the session it buys.
-    func finishSignIn(callback: URL, pkce: PKCEPair, baseURL: String) async {
+    func finishSignIn(
+        callback: URL, pkce: PKCEPair, baseURL: String, appLinkHost: String? = nil
+    ) async {
         defer { isSigningIn = false }
         do {
             guard let base = Self.server(baseURL) else { throw NativeSignIn.Failure.notAHandoff }
-            let code = try NativeSignIn.handoffCode(from: callback)
+            let code = try NativeSignIn.handoffCode(from: callback, appLinkHost: appLinkHost)
             let session = try await MotetHTTPClient(configuration: MotetConfiguration(baseURL: base))
                 .redeemNativeSignIn(code: code, codeVerifier: pkce.verifier)
             guard let token = session.token else { throw NativeSignIn.Failure.noSession }
