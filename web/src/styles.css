@@ -254,3 +254,93 @@ label { font-weight: 600; font-size: .9rem; }
 .items li.flash { background: #fff8d6; transition: background 1s; }
 .held-table .preview-row td { padding-top: 0; }
 .step + .step { border-top: 1px dashed var(--line); margin-top: .4rem; padding-top: .4rem; }
+/* PROTOTYPE — the Sources screen as an integrations catalog (screens/sources/). Neutral
+   greys; the pills carry the only colour and they carry it as a dot, so a row of cards
+   reads as a set. */
+.sources .lead { margin: 0 0 1.25rem; color: var(--fg); }
+.integration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+@media (max-width: 640px) { .integration-grid { grid-template-columns: 1fr; } }
+.integration-card {
+  display: flex; flex-direction: column; gap: .5rem; box-sizing: border-box;
+  border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem; background: var(--bg);
+}
+.integration-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.integration-card.highlighted:not(.selected) { border-color: #999; background: var(--surface); }
+.integration-card.unavailable { color: var(--muted); background: var(--surface); }
+.integration-card.unavailable .integration-icon { opacity: .5; }
+.integration-head { display: flex; gap: .75rem; align-items: flex-start; }
+.integration-icon { flex: none; color: var(--fg); margin-top: .1rem; }
+.integration-title { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
+.integration-title h3 { margin: 0; font-size: 1.02rem; }
+.integration-desc { margin: 0; font-size: .9rem; color: var(--muted); flex: 1; }
+.integration-foot { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-top: .25rem; }
+.integration-foot .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.integration-foot button { flex: none; }
+
+/* Buttons: one primary, one danger, the rest as they were. */
+button.primary { background: var(--fg); color: var(--bg); border: 1px solid var(--fg); border-radius: 6px; }
+button.primary:disabled { opacity: .5; cursor: default; }
+button.danger { color: var(--bad); border-color: var(--bad); }
+.integration-card button, .integration-panel button:not(.linkish) { border-radius: 6px; }
+
+/* Status pills. The dot is the colour; the text stays the text colour so the pill is
+   legible without it. */
+.pill { display: inline-flex; align-items: center; gap: .4rem; font-size: .75rem; letter-spacing: .02em; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .55rem .1rem .45rem; white-space: nowrap; color: var(--fg); background: var(--bg); align-self: flex-start; }
+.pill-dot { width: .5rem; height: .5rem; border-radius: 50%; background: #bbb; flex: none; }
+.pill-connected .pill-dot { background: var(--good); }
+.pill-error .pill-dot { background: var(--bad); }
+.pill-error { border-color: var(--bad); color: var(--bad); }
+.pill-paused .pill-dot, .pill-disconnected .pill-dot { background: #999; }
+.pill-awaiting_consent .pill-dot { background: #d9a400; }
+.pill-not_connected .pill-dot { background: transparent; border: 1px solid #999; box-sizing: border-box; }
+.pill-always_on .pill-dot { background: var(--good); }
+.pill-coming_soon { color: var(--muted); border-style: dashed; }
+.pill-coming_soon .pill-dot { background: transparent; border: 1px dashed #999; box-sizing: border-box; }
+
+/* The panel under the grid: one integration in full. */
+.integration-panel { margin-top: 1rem; border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem 1.25rem; background: var(--surface); }
+.integration-panel-head { display: flex; gap: .75rem; align-items: flex-start; padding-bottom: .75rem; border-bottom: 1px solid var(--line); }
+.integration-panel-head > div { flex: 1; min-width: 0; }
+.integration-panel-head h3 { margin: 0; }
+.integration-panel-head .hint { margin: .1rem 0 0; }
+.integration-panel-head .close { color: var(--muted); }
+.integration-panel h4 { margin: 1rem 0 .35rem; font-size: .95rem; }
+
+.source-rows { list-style: none; padding: 0; margin: 0; }
+.source-rows li { padding: 0; border: 0; }
+.source-detail { padding: 1rem 0; border-bottom: 1px solid var(--line); }
+.source-detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.source-account { font-size: 1.02rem; overflow-wrap: anywhere; }
+.source-detail .notice { margin: .6rem 0 0; padding: .5rem .75rem; border-left: 3px solid #d9a400; background: #fffaf0; font-size: .9rem; }
+.row-status-disconnected .notice { border-left-color: #999; background: #f4f4f4; }
+.source-detail .error p { margin: .25rem 0; }
+.source-facts { margin: .75rem 0; column-gap: 1.25rem; }
+.source-facts dd .hint { font-size: .85rem; }
+
+/* Counts: four tiles, the one that needs the person's attention set heavier. */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: .5rem; margin: .75rem 0 .25rem; }
+.stat { display: flex; flex-direction: column; padding: .55rem .75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.stat-value { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.stat-label { font-size: .78rem; color: var(--muted); }
+.stat.zero .stat-value { color: #999; font-weight: 400; }
+.stat.emphasis { border-color: var(--fg); }
+.stat.bad .stat-value { color: var(--bad); }
+.stat-note { margin: .25rem 0 0; font-size: .8rem; }
+.waiting-hint { margin: .6rem 0 0; font-size: .95rem; }
+.waiting-hint .linkish { color: var(--accent); }
+
+.source-detail .actions { margin: .9rem 0 0; }
+.danger-zone { margin-top: .5rem; font-size: .9rem; }
+.danger-zone .linkish { color: var(--muted); }
+
+/* The connect form inside the panel. */
+.connect-gmail { padding-top: .5rem; }
+.connect-gmail h4 { margin-top: 1rem; }
+.connect-explainer { margin: 0 0 .5rem; }
+.connect-gmail form { margin-top: .5rem; }
+.connect-gmail input { background: var(--bg); }
+.connect-error p { margin: .25rem 0; }
+.redirect-note { margin-top: .75rem; font-size: .8rem; }
+.connect-another .row { justify-content: space-between; margin: .75rem 0 0; }
+.connect-another .row h4 { margin: 0; }
+.connect-another-hint { margin: .75rem 0 0; }

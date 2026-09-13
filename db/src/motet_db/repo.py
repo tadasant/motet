@@ -138,6 +138,7 @@ SELECT * FROM (
             false AS from_job,
             si.title,
             NULL::text AS message_id,
+            src.id AS source_id,
             src.kind AS source_kind,
             si.state,
             si.created_at,
@@ -180,6 +181,7 @@ SELECT * FROM (
             -- permanently on its first attempt, and that row still has to be
             -- reportable — with a title, since every caller renders one.
             COALESCE(j.payload ->> 'message_id', '(no id)') AS message_id,
+            src.id AS source_id,
             src.kind AS source_kind,
             CASE WHEN j.state = 'failed' THEN 'failed' ELSE 'pending' END AS state,
             j.created_at,
@@ -306,6 +308,7 @@ def list_ingestion(
             last_error=row["last_error"],
             created_at=row["created_at"],
             source_kind=row["source_kind"],
+            source_id=row["source_id"],
         )
         for row in rows
     ]

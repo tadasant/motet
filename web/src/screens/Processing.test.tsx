@@ -17,6 +17,7 @@ const QUEUED: IngestionItem = {
   last_error: null,
   created_at: '2026-08-25T21:55:00Z',
   source_kind: 'paste',
+  source_id: 'src_paste',
 }
 
 /** The same paste, after a worker has claimed it. Still `pending` until it succeeds. */
@@ -43,6 +44,7 @@ const FAILED_MESSAGE: IngestionItem = {
   id: 'extract:41',
   title: 'Gmail message 18f2a3b4c5',
   source_kind: 'gmail',
+  source_id: 'src_gmail',
   last_error: 'PermanentFailure: source src_gmail needs reconnecting: invalid_grant',
 }
 

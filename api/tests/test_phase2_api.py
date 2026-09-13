@@ -405,6 +405,148 @@ def test_disconnecting_forgets_the_credential_and_stops_polling(
     assert api.post(f"/v1/sources/{source_id}/poll", headers=AUTH).status_code == 409
 
 
+def test_disconnecting_records_when_so_it_is_not_an_abandoned_consent(
+    api: TestClient,
+) -> None:
+    """motet#90 gap 6: without it the two rows were identical but for `last_polled_at`."""
+    source_id = connect_gmail(api)
+    abandoned = start_consent(api)
+    assert api.delete(f"/v1/sources/{source_id}/credentials", headers=AUTH).status_code == 204
+    # Disconnecting a row that never held a credential forgets nothing, so it records
+    # nothing — otherwise it would become a "disconnected mailbox" nobody could dismiss.
+    assert api.delete(f"/v1/sources/{abandoned}/credentials", headers=AUTH).status_code == 204
+
+    listed = {source["id"]: source for source in api.get("/v1/sources", headers=AUTH).json()}
+    assert listed[source_id]["connected"] is False
+    assert listed[source_id]["disconnected_at"] is not None
+    assert listed[abandoned]["disconnected_at"] is None
+    assert api.delete(f"/v1/sources/{abandoned}", headers=AUTH).status_code == 204
+
+
+def test_a_source_reports_what_it_has_pulled_in_all_time(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    """motet#90 gap 5: per source, on every route that returns one, not per kind."""
+    source_id = connect_gmail(api)
+    other_id = connect_gmail(api)
+    items = [
+        phase2.insert_polled_source_item(
+            db,
+            user_id=repo.OWNER_USER_ID,
+            source_id_=source_id,
+            external_id=f"m{n}",
+            title="T",
+            text="B",
+        )
+        for n in range(3)
+    ]
+    db.execute("UPDATE source_items SET state = 'integrated' WHERE id = %s", (items[0],))
+    db.commit()
+
+    listed = {source["id"]: source for source in api.get("/v1/sources", headers=AUTH).json()}
+    assert (listed[source_id]["items_pulled_in"], listed[source_id]["items_integrated"]) == (3, 1)
+    assert (listed[other_id]["items_pulled_in"], listed[other_id]["items_integrated"]) == (0, 0)
+    assert listed[repo.PASTE_SOURCE_ID]["items_pulled_in"] == 0
+
+    polled = api.post(f"/v1/sources/{source_id}/poll", headers=AUTH).json()
+    assert (polled["items_pulled_in"], polled["items_integrated"]) == (3, 1)
+
+
+class TestRemovingASource:
+    """motet#90 gap 7: `DELETE /v1/sources/{id}` dismisses an abandoned consent, only.
+
+    The delete cascades to source items and to the claims and highlights citing them, so
+    every refusal here is data somebody has. Each guard is asserted through the route.
+    """
+
+    def test_an_abandoned_consent_is_removed(self, api: TestClient) -> None:
+        source_id = start_consent(api)
+        assert api.delete(f"/v1/sources/{source_id}", headers=AUTH).status_code == 204
+        ids = {source["id"] for source in api.get("/v1/sources", headers=AUTH).json()}
+        assert source_id not in ids
+
+    def test_another_users_source_is_a_404_and_survives(
+        self, api: TestClient, db: psycopg.Connection[Any]
+    ) -> None:
+        db.execute("INSERT INTO users (id) VALUES ('remove-route-other')")
+        try:
+            theirs = phase2.create_source(
+                db, user_id="remove-route-other", kind="gmail", name="Theirs"
+            )
+            phase2.set_source_active(db, theirs.id, active=False)
+            db.commit()
+
+            refused = api.delete(f"/v1/sources/{theirs.id}", headers=AUTH)
+            assert refused.status_code == 404
+            assert phase2.get_source(db, theirs.id) is not None
+        finally:
+            db.execute("DELETE FROM users WHERE id = 'remove-route-other'")
+            db.commit()
+
+    def test_a_connected_source_is_refused(self, api: TestClient) -> None:
+        source_id = connect_gmail(api)
+        refused = api.delete(f"/v1/sources/{source_id}", headers=AUTH)
+        assert refused.status_code == 409
+        assert "Disconnect it instead" in refused.json()["detail"]
+        assert source_id in {source["id"] for source in api.get("/v1/sources", headers=AUTH).json()}
+
+    def test_a_disconnected_source_is_still_refused(self, api: TestClient) -> None:
+        """No credential *now* is not "never connected": what it pulled in stays cited."""
+        source_id = connect_gmail(api)
+        api.delete(f"/v1/sources/{source_id}/credentials", headers=AUTH)
+        assert api.delete(f"/v1/sources/{source_id}", headers=AUTH).status_code == 409
+
+    def test_a_source_with_items_is_refused(
+        self, api: TestClient, db: psycopg.Connection[Any]
+    ) -> None:
+        source_id = start_consent(api)
+        phase2.insert_polled_source_item(
+            db,
+            user_id=repo.OWNER_USER_ID,
+            source_id_=source_id,
+            external_id="m",
+            title="T",
+            text="B",
+        )
+        db.commit()
+        refused = api.delete(f"/v1/sources/{source_id}", headers=AUTH)
+        assert refused.status_code == 409
+        assert "delete them" in refused.json()["detail"]
+        assert phase2.get_source(db, source_id) is not None
+
+    def test_the_paste_source_is_refused(self, api: TestClient) -> None:
+        refused = api.delete(f"/v1/sources/{repo.PASTE_SOURCE_ID}", headers=AUTH)
+        assert refused.status_code == 409
+        assert "built in" in refused.json()["detail"]
+
+    def test_an_unknown_source_is_a_404(self, api: TestClient) -> None:
+        assert api.delete("/v1/sources/src_nope", headers=AUTH).status_code == 404
+
+    def test_a_callback_after_removal_finds_nothing(self, api: TestClient) -> None:
+        """The removed row's authorization goes with it, so a late return cannot land."""
+        started = api.post(
+            "/v1/sources/connect",
+            json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+            headers=AUTH,
+        ).json()
+        api.delete(f"/v1/sources/{started['source_id']}", headers=AUTH)
+        late = api.post(
+            "/v1/sources/callback", json={"state": started["state"], "code": "c"}, headers=AUTH
+        )
+        assert late.status_code == 400
+
+
+def start_consent(api: TestClient) -> str:
+    """Begin connecting a mailbox and never come back — a cancelled consent's row."""
+    started = api.post(
+        "/v1/sources/connect",
+        json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+        headers=AUTH,
+    )
+    assert started.status_code == 201, started.text
+    return str(started.json()["source_id"])
+
+
 def test_polling_can_be_triggered_by_hand(api: TestClient) -> None:
     source_id = connect_gmail(api)
     assert api.post(f"/v1/sources/{source_id}/poll", headers=AUTH).status_code == 200
@@ -422,6 +564,8 @@ def test_the_phase_2_routes_require_authentication(api: TestClient) -> None:
         ("post", "/v1/episodes/smart", {"title": "t", "max_duration_ms": 1}),
         ("post", "/v1/episodes/ep_x/progress", {"listened_through_ms": 0}),
         ("put", "/v1/episodes/ep_x/position", {"listened_through_ms": 0}),
+        ("delete", "/v1/sources/src_x", None),
+        ("delete", "/v1/sources/src_x/credentials", None),
     ):
         response = (
             getattr(api, method)(path, json=body)

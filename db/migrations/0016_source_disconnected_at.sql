@@ -1,0 +1,18 @@
+-- When a mailbox's credential was forgotten through `DELETE /v1/sources/{id}/credentials`
+-- (motet#90, gap 6).
+--
+-- Before this, a disconnected row and an abandoned consent attempt were the same row:
+-- `connected: false, active: false, scopes: []`. `POST /v1/sources/connect` creates the
+-- source *before* the user leaves for Google, so every cancelled consent leaves one behind,
+-- and the only thing telling the two apart was `last_polled_at` being set — which a row
+-- disconnected before its first poll never had. Those are opposite facts to a person
+-- reading the Sources screen: one is "you stopped this", the other is "nothing happened".
+--
+-- It is also what makes the dismiss route (`DELETE /v1/sources/{id}`) safe to answer
+-- "yes" for: a row that once held a credential is refused, and this column is how a row
+-- that held one and gave it back is still known to have held one.
+--
+-- Nullable with no default and no backfill. A row disconnected before this migration has
+-- no recorded time, and inventing one (say, `last_polled_at`) would put a date on the
+-- screen that nobody observed. The client still falls back to `last_polled_at` for those.
+ALTER TABLE sources ADD COLUMN disconnected_at timestamptz;

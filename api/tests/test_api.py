@@ -496,6 +496,8 @@ class TestEndToEnd:
         # And by the route it came in on, which is what says whether re-pasting is a
         # repair the reader can perform. For a mailbox message it is not.
         assert failed["source_kind"] == "gmail"
+        # And which mailbox, which is what two connected mailboxes need (motet#90).
+        assert failed["source_id"] == source.id
 
     def test_processing_reports_whether_anything_is_draining_the_queue(
         self, api: TestClient, _migrated: str

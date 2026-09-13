@@ -266,6 +266,175 @@ def test_disconnecting_forgets_the_credentials(
     )
 
 
+def test_disconnecting_records_when_and_keeps_the_first_time(
+    db: psycopg.Connection[Any],
+) -> None:
+    """motet#90 gap 6: a disconnected row and an abandoned consent were the same row."""
+    source_id = gmail_source(db)
+    phase2.mark_source_disconnected(db, source_id)
+    first = phase2.get_source(db, source_id)
+    assert first is not None and first.disconnected_at is not None and not first.active
+
+    phase2.mark_source_disconnected(db, source_id)
+    again = phase2.get_source(db, source_id)
+    assert again is not None and again.disconnected_at == first.disconnected_at
+
+
+def test_source_item_counts_are_per_source_and_all_time(db: psycopg.Connection[Any]) -> None:
+    one, two, empty = gmail_source(db, "one"), gmail_source(db, "two"), gmail_source(db, "none")
+    for n in range(3):
+        phase2.insert_polled_source_item(
+            db, user_id=USER, source_id_=one, external_id=f"m{n}", title="T", text="B"
+        )
+    integrated = phase2.insert_polled_source_item(
+        db, user_id=USER, source_id_=two, external_id="m", title="T", text="B"
+    )
+    assert integrated is not None
+    db.execute("UPDATE source_items SET state = 'integrated' WHERE id = %s", (integrated,))
+
+    counts = phase2.source_item_counts(db, [one, two, empty])
+    assert counts[one] == phase2.SourceItemCounts(pulled_in=3, integrated=0)
+    assert counts[two] == phase2.SourceItemCounts(pulled_in=1, integrated=1)
+    assert empty not in counts
+    assert phase2.source_item_counts(db, []) == {}
+
+
+class TestRemoveUnusedSource:
+    """motet#90 gap 7: dismissing an abandoned consent row, and refusing everything else.
+
+    The delete cascades to source items and on to the claims and highlights that cite them,
+    so each refusal below is a case where saying yes would delete data somebody has.
+    """
+
+    def abandoned(self, db: psycopg.Connection[Any]) -> str:
+        """The row `POST /v1/sources/connect` leaves when consent is never finished."""
+        source_id = gmail_source(db)
+        phase2.set_source_active(db, source_id, active=False)
+        return source_id
+
+    def test_an_abandoned_consent_row_is_removed(self, db: psycopg.Connection[Any]) -> None:
+        source_id = self.abandoned(db)
+        phase2.start_oauth(
+            db,
+            state="st_abandoned",
+            user_id=USER,
+            provider="gmail",
+            source_id_=source_id,
+            code_verifier="v",
+            redirect_uri="https://app.example.invalid/oauth/callback",
+            scopes=["gmail.readonly"],
+        )
+        outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=source_id)
+        assert outcome is phase2.SourceRemoval.REMOVED
+        assert phase2.get_source(db, source_id) is None
+        # Its unfinished authorization goes with it, so a late callback finds nothing.
+        assert phase2.consume_oauth_state(db, "st_abandoned") is None
+
+    def test_another_users_row_is_not_found_and_survives(self, db: psycopg.Connection[Any]) -> None:
+        # A user of its own, removed afterwards: `users` is not truncated between tests,
+        # and the fixture commits, so an 'other' left behind collides with the next test
+        # that inserts one.
+        db.execute("INSERT INTO users (id) VALUES ('remove-unused-other')")
+        try:
+            theirs = phase2.create_source(
+                db, user_id="remove-unused-other", kind=SourceKind.GMAIL.value, name="G"
+            )
+            phase2.set_source_active(db, theirs.id, active=False)
+
+            outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=theirs.id)
+            assert outcome is phase2.SourceRemoval.NOT_FOUND
+            assert phase2.get_source(db, theirs.id) is not None
+        finally:
+            db.execute("DELETE FROM users WHERE id = 'remove-unused-other'")
+
+    def test_the_paste_source_is_built_in(self, db: psycopg.Connection[Any]) -> None:
+        """A fresh account's paste row has no credential and no items, and must stay."""
+        outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=repo.PASTE_SOURCE_ID)
+        assert outcome is phase2.SourceRemoval.BUILT_IN
+        assert phase2.get_source(db, repo.PASTE_SOURCE_ID) is not None
+
+    def test_a_row_holding_a_credential_is_refused(
+        self, db: psycopg.Connection[Any], key: LocalKeyManager
+    ) -> None:
+        source_id = self.abandoned(db)
+        phase2.store_source_credential(
+            db,
+            key,
+            user_id=USER,
+            source_id_=source_id,
+            provider="gmail",
+            purpose=CredentialPurpose.REFRESH.value,
+            secret="token",
+        )
+        outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=source_id)
+        assert outcome is phase2.SourceRemoval.HELD_A_CREDENTIAL
+        assert phase2.get_source(db, source_id) is not None
+
+    @pytest.mark.parametrize(
+        "evidence",
+        [
+            "UPDATE sources SET disconnected_at = now() WHERE id = %s",
+            "UPDATE sources SET last_polled_at = now() WHERE id = %s",
+            "UPDATE sources SET active = true WHERE id = %s",
+        ],
+        ids=["disconnected", "polled once", "active"],
+    )
+    def test_a_row_that_ever_held_a_credential_is_refused(
+        self, db: psycopg.Connection[Any], evidence: str
+    ) -> None:
+        """No credential *now* is not "never connected": each of these says it was."""
+        source_id = self.abandoned(db)
+        db.execute(evidence, (source_id,))
+        outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=source_id)
+        assert outcome is phase2.SourceRemoval.HELD_A_CREDENTIAL
+        assert phase2.get_source(db, source_id) is not None
+
+    def test_a_consent_being_completed_is_refused_rather_than_deadlocked(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """A callback mid-exchange holds its consumed state row; removal must not wait on it.
+
+        Waiting would deadlock once the callback's credential insert asks for the source row
+        this transaction holds. So the state row is taken NOWAIT and a held one refuses.
+        """
+        source_id = self.abandoned(db)
+        phase2.start_oauth(
+            db,
+            state="st_in_flight",
+            user_id=USER,
+            provider="gmail",
+            source_id_=source_id,
+            code_verifier="v",
+            redirect_uri="https://app.example.invalid/oauth/callback",
+            scopes=["gmail.readonly"],
+        )
+        db.commit()
+
+        callback = repo.connect(_migrated)
+        try:
+            # The callback's first statement, left uncommitted: it now holds the row.
+            assert phase2.consume_oauth_state(callback, "st_in_flight") is not None
+
+            outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=source_id)
+            assert outcome is phase2.SourceRemoval.CONSENT_IN_PROGRESS
+            # The refusal left this transaction usable, and the row where it was.
+            assert phase2.get_source(db, source_id) is not None
+            db.rollback()
+        finally:
+            callback.rollback()
+            callback.close()
+
+    def test_a_row_with_source_items_is_refused(self, db: psycopg.Connection[Any]) -> None:
+        source_id = self.abandoned(db)
+        item = phase2.insert_polled_source_item(
+            db, user_id=USER, source_id_=source_id, external_id="m", title="T", text="B"
+        )
+        outcome = phase2.remove_unused_source(db, user_id=USER, source_id_=source_id)
+        assert outcome is phase2.SourceRemoval.HAS_ITEMS
+        assert phase2.get_source(db, source_id) is not None
+        assert repo.get_source_item(db, str(item)) is not None
+
+
 def test_the_schema_refuses_a_wrong_sized_nonce(db: psycopg.Connection[Any]) -> None:
     """A CHECK rather than a convention: a 12-byte GCM nonce is not negotiable."""
     source_id = gmail_source(db)

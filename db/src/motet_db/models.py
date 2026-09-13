@@ -87,6 +87,8 @@ class IngestionStatus:
     ``source_kind`` is the ingestion route it arrived by. It is here because it decides
     what a person can *do* about a failure: a failed paste can be pasted again, and a
     failed mailbox message cannot — the poll cursor has already moved past it.
+    ``source_id`` is which source, so that two mailboxes are two sets of counts rather
+    than one shared by kind (motet#90).
     """
 
     id: str
@@ -97,6 +99,7 @@ class IngestionStatus:
     last_error: str | None
     created_at: datetime
     source_kind: str
+    source_id: str
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,10 @@ class StoredSource:
     ``config`` is the user's intent (which Gmail query to poll) and ``sync_state`` is our
     bookmark (where the last poll got to). Conflating the two would mean "change your
     Gmail query" silently re-ingested the archive.
+
+    ``disconnected_at`` is when a credential was forgotten through the disconnect route,
+    and it is what tells a disconnected mailbox apart from an abandoned consent attempt —
+    both of which otherwise have no credential and are inactive (migration 0016).
     """
 
     id: str
@@ -201,6 +208,7 @@ class StoredSource:
     last_polled_at: datetime | None
     last_error: str | None
     created_at: datetime
+    disconnected_at: datetime | None
 
 
 @dataclass(frozen=True)

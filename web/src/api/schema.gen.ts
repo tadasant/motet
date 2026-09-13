@@ -923,6 +923,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sources/{source_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Source
+         * @description Dismiss a consent attempt that never finished.
+         *
+         *     `POST /v1/sources/connect` creates the source row before the user leaves for the
+         *     provider, so every cancelled consent leaves one behind, forever. This removes such a
+         *     row and **refuses everything else with a 409**: the built-in paste source, any source
+         *     that holds or ever held a credential, and any source that has pulled an item in. Those
+         *     guards are the route, not a detail of it — deleting a source cascades to its source
+         *     items and to the claims and highlights that cite them, which is why disconnecting keeps
+         *     the row. `motet_db.phase2.remove_unused_source` holds the checks, under a row lock.
+         *
+         *     Another user's source is a 404, exactly like one that does not exist.
+         */
+        delete: operations["remove_source_v1_sources__source_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources/{source_id}/credentials": {
         parameters: {
             query?: never;
@@ -1592,6 +1622,11 @@ export interface components {
              */
             next_attempt_at: string | null;
             /**
+             * Source Id
+             * @description Which source it came from. With two mailboxes connected, 'source_kind' says only that it was a mailbox; this says which one.
+             */
+            source_id: string;
+            /**
              * Source Kind
              * @description How this arrived: 'paste' for text pasted in, 'gmail' for a polled mailbox message. It decides what a person can do about a failure — a failed paste can be pasted again, and a failed mailbox message cannot, because the poll cursor has already moved past it.
              */
@@ -2180,6 +2215,13 @@ export interface components {
         /**
          * SourceResponse
          * @description A place source items come from — pasted text, or a connected mailbox.
+         *
+         *     **Two rows with no credential mean different things, and ``disconnected_at`` is what
+         *     tells them apart.** ``POST /v1/sources/connect`` creates a row before the user leaves
+         *     for the provider, so a consent that was cancelled leaves one behind that never held a
+         *     credential. A mailbox that was disconnected held one and gave it back. Both are
+         *     ``connected: false, active: false``. A row disconnected before ``disconnected_at``
+         *     existed has it null, and its ``last_polled_at`` is the only tell.
          */
         SourceResponse: {
             /**
@@ -2198,12 +2240,27 @@ export interface components {
              */
             created_at: string;
             /**
+             * Disconnected At
+             * @description When the credential was forgotten through the disconnect route. Null for a source that is connected, was never connected, or was disconnected before this was recorded.
+             */
+            disconnected_at: string | null;
+            /**
              * First Sync Days
              * @description How many days back this source's most recent first sync reached. A first sync reads only that window, so older matching mail is not ingested. Null until a first sync has run.
              */
             first_sync_days: number | null;
             /** Id */
             id: string;
+            /**
+             * Items Integrated
+             * @description Of those, how many have been integrated into a news item, all time.
+             */
+            items_integrated: number;
+            /**
+             * Items Pulled In
+             * @description Source items this source has produced, all time, in any state.
+             */
+            items_pulled_in: number;
             /**
              * Kind
              * @description 'paste' or 'gmail'.
@@ -3561,6 +3618,37 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SourceItemResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_source_v1_sources__source_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

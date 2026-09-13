@@ -1298,6 +1298,7 @@ def _ingestion_item(item: IngestionStatus) -> IngestionItemResponse:
         last_error=item.last_error,
         created_at=item.created_at,
         source_kind=item.source_kind,
+        source_id=item.source_id,
     )
 
 
@@ -1479,26 +1480,42 @@ def list_sources(conn: Conn, user_id: User) -> list[SourceResponse]:
     is the answer, and reading it needs no key. Invariant 8 means only workers can open
     one, so a screen that had to decrypt to render would have to break the invariant.
     """
-    out = []
-    for source in repo_sources(conn, user_id):
-        credential = phase2.get_source_credential(
-            conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
-        )
-        out.append(
-            SourceResponse(
-                id=source.id,
-                kind=source.kind,
-                name=source.name,
-                active=source.active,
-                connected=credential is not None,
-                scopes=list(credential.scopes) if credential else [],
-                last_polled_at=source.last_polled_at,
-                last_error=source.last_error,
-                created_at=source.created_at,
-                **sync_facts(source),
-            )
-        )
-    return out
+    sources = repo_sources(conn, user_id)
+    counts = phase2.source_item_counts(conn, [source.id for source in sources])
+    return [_source_response(conn, source, counts.get(source.id)) for source in sources]
+
+
+def _source_response(
+    conn: psycopg.Connection[Any],
+    source: StoredSource,
+    counts: phase2.SourceItemCounts | None = None,
+) -> SourceResponse:
+    """One source as every route reports it, so the three that return one cannot disagree.
+
+    ``counts`` is passed by the list route, which asks for every source's in one query; a
+    route returning a single source leaves it out and this counts that one.
+    """
+    credential = phase2.get_source_credential(
+        conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
+    )
+    if counts is None:
+        counts = phase2.source_item_counts(conn, [source.id]).get(source.id)
+    counts = counts or phase2.SourceItemCounts()
+    return SourceResponse(
+        id=source.id,
+        kind=source.kind,
+        name=source.name,
+        active=source.active,
+        connected=credential is not None,
+        scopes=list(credential.scopes) if credential else [],
+        last_polled_at=source.last_polled_at,
+        last_error=source.last_error,
+        created_at=source.created_at,
+        disconnected_at=source.disconnected_at,
+        items_pulled_in=counts.pulled_in,
+        items_integrated=counts.integrated,
+        **sync_facts(source),
+    )
 
 
 @app.post(
@@ -1656,18 +1673,9 @@ def oauth_callback(
     enqueue_source_poll(conn, source.id)
     nudge.arm(DrainReason.SOURCE_POLL)
 
-    return SourceResponse(
-        id=source.id,
-        kind=source.kind,
-        name=source.name,
-        active=True,
-        connected=True,
-        scopes=list(scopes),
-        last_polled_at=source.last_polled_at,
-        last_error=None,
-        created_at=source.created_at,
-        **sync_facts(source),
-    )
+    connected = phase2.get_source(conn, source.id, user_id=user_id)
+    assert connected is not None, "the row was read above, in this transaction"
+    return _source_response(conn, connected)
 
 
 @app.post("/v1/sources/{source_id}/poll", response_model=SourceResponse, tags=["sources"])
@@ -1686,21 +1694,7 @@ def poll_source(
         raise HTTPException(status.HTTP_409_CONFLICT, "This source is paused or not connected yet.")
     enqueue_source_poll(conn, source.id)
     nudge.arm(DrainReason.SOURCE_POLL)
-    credential = phase2.get_source_credential(
-        conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
-    )
-    return SourceResponse(
-        id=source.id,
-        kind=source.kind,
-        name=source.name,
-        active=source.active,
-        connected=credential is not None,
-        scopes=list(credential.scopes) if credential else [],
-        last_polled_at=source.last_polled_at,
-        last_error=source.last_error,
-        created_at=source.created_at,
-        **sync_facts(source),
-    )
+    return _source_response(conn, source)
 
 
 @app.delete(
@@ -1718,8 +1712,58 @@ def disconnect_source(conn: Conn, user_id: User, source_id: Annotated[str, Path(
     source = phase2.get_source(conn, source_id, user_id=user_id)
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
-    phase2.delete_source_credentials(conn, source.id)
-    phase2.set_source_active(conn, source.id, active=False)
+    # `disconnected_at` only when a credential was actually forgotten. Disconnecting a
+    # row that never held one — an abandoned consent — must not turn it into a
+    # "disconnected" mailbox, which the dismiss route below would then refuse to remove.
+    if phase2.delete_source_credentials(conn, source.id):
+        phase2.mark_source_disconnected(conn, source.id)
+    else:
+        phase2.set_source_active(conn, source.id, active=False)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+#: Why a dismiss was refused, in words that say what to do instead.
+_REMOVAL_REFUSED: dict[phase2.SourceRemoval, str] = {
+    phase2.SourceRemoval.BUILT_IN: "Pasted text is built in and cannot be removed.",
+    phase2.SourceRemoval.HELD_A_CREDENTIAL: (
+        "This source was connected, so it is kept: what it pulled in may be cited by "
+        "episodes. Disconnect it instead. Only a consent attempt that never finished can "
+        "be removed."
+    ),
+    phase2.SourceRemoval.HAS_ITEMS: (
+        "This source has pulled items in, and removing it would delete them. Only a "
+        "consent attempt that never finished can be removed."
+    ),
+    phase2.SourceRemoval.CONSENT_IN_PROGRESS: (
+        "Consent for this source is being completed right now. Refresh in a moment: it "
+        "will either be connected or removable."
+    ),
+}
+
+
+@app.delete(
+    "/v1/sources/{source_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["sources"],
+)
+def remove_source(conn: Conn, user_id: User, source_id: Annotated[str, Path()]) -> Response:
+    """Dismiss a consent attempt that never finished.
+
+    `POST /v1/sources/connect` creates the source row before the user leaves for the
+    provider, so every cancelled consent leaves one behind, forever. This removes such a
+    row and **refuses everything else with a 409**: the built-in paste source, any source
+    that holds or ever held a credential, and any source that has pulled an item in. Those
+    guards are the route, not a detail of it — deleting a source cascades to its source
+    items and to the claims and highlights that cite them, which is why disconnecting keeps
+    the row. `motet_db.phase2.remove_unused_source` holds the checks, under a row lock.
+
+    Another user's source is a 404, exactly like one that does not exist.
+    """
+    outcome = phase2.remove_unused_source(conn, user_id=user_id, source_id_=source_id)
+    if outcome is phase2.SourceRemoval.NOT_FOUND:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
+    if outcome is not phase2.SourceRemoval.REMOVED:
+        raise HTTPException(status.HTTP_409_CONFLICT, _REMOVAL_REFUSED[outcome])
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
