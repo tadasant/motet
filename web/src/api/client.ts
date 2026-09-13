@@ -50,6 +50,8 @@ export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
 export type AdminOverview = GetResponse<'/v1/admin/overview'>
+export type VoiceStatus = GetResponse<'/v1/voice'>
+export type VoiceSession = PostResponse<'/v1/episodes/{episode_id}/voice-session'>
 
 export class ApiError extends Error {
   constructor(
@@ -362,4 +364,15 @@ export const api = {
    */
   audioUrl: (id: string, feedToken: string) =>
     `${apiBaseUrl()}/v1/episodes/${encodeURIComponent(id)}/audio?token=${encodeURIComponent(feedToken)}`,
+  // Play Live. Asked first, so an environment with no voice service shows a disabled
+  // button with a reason and never reaches for a host that does not exist (motet#93).
+  voiceStatus: () => apiGet('/v1/voice'),
+  // The API assembles the episode's context and mints the session with the voice service's
+  // start token; the browser gets back only a socket URL and the frame to open it with.
+  startVoiceSession: (id: string, spokenThroughMs: number) =>
+    apiPostPath(
+      '/v1/episodes/{episode_id}/voice-session',
+      `/v1/episodes/${encodeURIComponent(id)}/voice-session`,
+      { spoken_through_ms: Math.max(0, Math.round(spokenThroughMs)) },
+    ),
 }

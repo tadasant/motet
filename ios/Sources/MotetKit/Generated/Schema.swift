@@ -234,22 +234,35 @@ public struct AdminUserResponse: Codable, Hashable, Sendable {
 /// screen shows them side by side — that display *is* the trust surface, and a client
 /// that had to fetch the source separately to render it would sometimes not bother.
 public struct ClaimModel: Codable, Hashable, Sendable {
+    public var durationMs: Int?
     public var sourceExcerpt: String
     public var sourceTitle: String
     public var span: SourceSpanModel
+    public var startMs: Int?
     public var text: String
 
-    public init(sourceExcerpt: String, sourceTitle: String, span: SourceSpanModel, text: String) {
+    public init(
+        durationMs: Int? = nil,
+        sourceExcerpt: String,
+        sourceTitle: String,
+        span: SourceSpanModel,
+        startMs: Int? = nil,
+        text: String
+    ) {
+        self.durationMs = durationMs
         self.sourceExcerpt = sourceExcerpt
         self.sourceTitle = sourceTitle
         self.span = span
+        self.startMs = startMs
         self.text = text
     }
 
     private enum CodingKeys: String, CodingKey {
+        case durationMs = "duration_ms"
         case sourceExcerpt = "source_excerpt"
         case sourceTitle = "source_title"
         case span
+        case startMs = "start_ms"
         case text
     }
 }
@@ -503,6 +516,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var telemetryExporting: Bool
     public var vaultBackend: String
     public var vaultReady: Bool
+    public var voiceConfigured: Bool?
 
     public init(
         authenticated: Bool,
@@ -516,7 +530,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         telemetryConfigured: Bool,
         telemetryExporting: Bool,
         vaultBackend: String,
-        vaultReady: Bool
+        vaultReady: Bool,
+        voiceConfigured: Bool? = nil
     ) {
         self.authenticated = authenticated
         self.drainTrigger = drainTrigger
@@ -530,6 +545,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.telemetryExporting = telemetryExporting
         self.vaultBackend = vaultBackend
         self.vaultReady = vaultReady
+        self.voiceConfigured = voiceConfigured
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -545,6 +561,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case telemetryExporting = "telemetry_exporting"
         case vaultBackend = "vault_backend"
         case vaultReady = "vault_ready"
+        case voiceConfigured = "voice_configured"
     }
 }
 
@@ -1517,6 +1534,18 @@ public struct StartLoginResponse: Codable, Hashable, Sendable {
     }
 }
 
+public struct StartVoiceSessionRequest: Codable, Hashable, Sendable {
+    public var spokenThroughMs: Int?
+
+    public init(spokenThroughMs: Int? = nil) {
+        self.spokenThroughMs = spokenThroughMs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case spokenThroughMs = "spoken_through_ms"
+    }
+}
+
 public struct ValidationError: Codable, Hashable, Sendable {
     public var ctx: JSONValue?
     public var input: JSONValue?
@@ -1536,6 +1565,56 @@ public struct ValidationError: Codable, Hashable, Sendable {
         self.loc = loc
         self.msg = msg
         self.type = type
+    }
+}
+
+/// What a client needs to open the voice socket, and nothing about the vendor behind it.
+public struct VoiceSessionResponse: Codable, Hashable, Sendable {
+    public var arm: String
+    public var authenticateFrame: JSONValue
+    public var conversational: Bool
+    public var expiresAt: String
+    public var sessionId: String
+    public var sessionToken: String
+    public var websocketUrl: String
+
+    public init(
+        arm: String,
+        authenticateFrame: JSONValue,
+        conversational: Bool,
+        expiresAt: String,
+        sessionId: String,
+        sessionToken: String,
+        websocketUrl: String
+    ) {
+        self.arm = arm
+        self.authenticateFrame = authenticateFrame
+        self.conversational = conversational
+        self.expiresAt = expiresAt
+        self.sessionId = sessionId
+        self.sessionToken = sessionToken
+        self.websocketUrl = websocketUrl
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case arm
+        case authenticateFrame = "authenticate_frame"
+        case conversational
+        case expiresAt = "expires_at"
+        case sessionId = "session_id"
+        case sessionToken = "session_token"
+        case websocketUrl = "websocket_url"
+    }
+}
+
+/// Whether Play Live can run here — asked before a button is offered.
+public struct VoiceStatusResponse: Codable, Hashable, Sendable {
+    public var configured: Bool
+    public var reason: String?
+
+    public init(configured: Bool, reason: String? = nil) {
+        self.configured = configured
+        self.reason = reason
     }
 }
 
@@ -1648,6 +1727,11 @@ public enum MotetEndpoints {
         return HTTPEndpoint(method: "GET", path: "/v1/episodes/\(MotetPathComponent(episodeId))/transcript.vtt", query: query)
     }
 
+    /// `POST /v1/episodes/{episode_id}/voice-session` — Start Voice Session
+    public static func startVoiceSession(episodeId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/episodes/\(MotetPathComponent(episodeId))/voice-session")
+    }
+
     /// `GET /v1/feed` — Get Feed Info
     public static var getFeedInfo: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/feed")
@@ -1741,5 +1825,10 @@ public enum MotetEndpoints {
     /// `POST /v1/sources/{source_id}/poll` — Poll Source
     public static func pollSource(sourceId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/sources/\(MotetPathComponent(sourceId))/poll")
+    }
+
+    /// `GET /v1/voice` — Voice Status
+    public static var voiceStatus: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/voice")
     }
 }

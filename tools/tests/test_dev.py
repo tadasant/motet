@@ -297,6 +297,37 @@ class TestOnePortNumberReachesBothPlaces:
         ]
         assert names == ["api", "worker"]
 
+    def test_the_voice_service_is_off_unless_asked_for(self) -> None:
+        services = build_services(
+            root=Path("/repo"), api_port=DEFAULT_API_PORT, web_port=5173, poll_seconds=2
+        )
+        assert [service.name for service in services] == ["api", "worker", "web"]
+        api = next(service for service in services if service.name == "api")
+        assert "MOTET_VOICE_BASE_URL" not in api.env
+
+    def test_voice_points_the_api_at_the_voice_service_with_one_token(self) -> None:
+        """Play Live goes through the API locally exactly as deployed: URL plus start token,
+        the same token on both sides, and the socket limited to the SPA's origin."""
+        services = {
+            service.name: service
+            for service in build_services(
+                root=Path("/repo"),
+                api_port=DEFAULT_API_PORT,
+                web_port=5173,
+                poll_seconds=2,
+                voice_port=8100,
+                voice_start_token="tok",
+            )
+        }
+        voice = services["voice"]
+        assert voice.argv[voice.argv.index("--port") + 1] == "8100"
+        assert "--factory" in voice.argv
+        assert voice.ports == (8100,)
+        assert services["api"].env["MOTET_VOICE_BASE_URL"] == "http://localhost:8100"
+        assert services["api"].env["MOTET_VOICE_START_SESSION_TOKEN"] == "tok"
+        assert voice.env["MOTET_VOICE_START_SESSION_TOKEN"] == "tok"
+        assert voice.env["MOTET_VOICE_ALLOWED_ORIGINS"] == "http://localhost:5173"
+
     def test_the_port_flag_defaults_from_the_environment(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

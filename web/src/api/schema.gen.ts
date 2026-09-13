@@ -472,6 +472,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/episodes/{episode_id}/voice-session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Voice Session
+         * @description Mint a Play Live session for a rendered episode.
+         *
+         *     The context — every segment, every claim with the moment it is spoken, where the
+         *     listener's player is — is built here from the database and sent to the voice service
+         *     server-to-server with the start token. The browser gets a token scoped to that one
+         *     config, the socket to open, and the frame to open it with.
+         */
+        post: operations["start_voice_session_v1_episodes__episode_id__voice_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/feed": {
         parameters: {
             query?: never;
@@ -945,6 +970,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/voice": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Voice Status
+         * @description Whether Play Live can run in this deployment.
+         *
+         *     Asked by the SPA before it offers the button, so that an environment with no voice
+         *     service shows a disabled control with a reason — never a request to a host that does
+         *     not exist, and never a failed call in the console.
+         */
+        get: operations["voice_status_v1_voice_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1121,11 +1170,23 @@ export interface components {
          *     that had to fetch the source separately to render it would sometimes not bother.
          */
         ClaimModel: {
+            /**
+             * Duration Ms
+             * @description How long the claim is spoken for.
+             * @default 0
+             */
+            duration_ms: number;
             /** Source Excerpt */
             source_excerpt: string;
             /** Source Title */
             source_title: string;
             span: components["schemas"]["SourceSpanModel"];
+            /**
+             * Start Ms
+             * @description Where this claim is spoken in the episode audio. Apportioned from the segment's measured duration by the TTS stage, so accurate to a fraction of a second rather than to the word; zero until the episode has rendered.
+             * @default 0
+             */
+            start_ms: number;
             /** Text */
             text: string;
         };
@@ -1391,6 +1452,12 @@ export interface components {
              * @description Whether a Gmail refresh token could be sealed if one arrived. False means connecting a mailbox will fail at the last step of the consent flow, after the provider has already issued a token. Reported for the same reason as 'login_configured': the vault is only ever exercised by a human finishing a consent flow, so a broken one and an untried one look identical from outside. It does not call Cloud KMS — this route is unauthenticated, and a billed vendor call per request would be a free way to spend money.
              */
             vault_ready: boolean;
+            /**
+             * Voice Configured
+             * @description Whether Play Live can mint a voice session here: both MOTET_VOICE_BASE_URL and MOTET_VOICE_START_SESSION_TOKEN are set. False is the deployed state until a voice service exists. The voice service's address is not reported; it is topology, and this route is public.
+             * @default false
+             */
+            voice_configured: boolean;
         };
         /**
          * HeldSourceItemResponse
@@ -2229,6 +2296,14 @@ export interface components {
              */
             state: string;
         };
+        /** StartVoiceSessionRequest */
+        StartVoiceSessionRequest: {
+            /**
+             * Spoken Through Ms
+             * @description Where the listener's player is. The session's clock starts here (invariant 4: the position is ours, reported by the client's player). Omitted means the episode's own listened_through_ms.
+             */
+            spoken_through_ms?: number | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -2241,6 +2316,53 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * VoiceSessionResponse
+         * @description What a client needs to open the voice socket, and nothing about the vendor behind it.
+         */
+        VoiceSessionResponse: {
+            /**
+             * Arm
+             * @description Which arm answers. Informational; never branched on.
+             */
+            arm: string;
+            /**
+             * Authenticate Frame
+             * @description Send this, verbatim and as the first frame, once the socket opens. It carries the session config the token was signed over; the voice service checks the two match, so it must not be altered.
+             */
+            authenticate_frame: {
+                [key: string]: unknown;
+            };
+            /** Conversational */
+            conversational: boolean;
+            /** Expires At */
+            expires_at: string;
+            /** Session Id */
+            session_id: string;
+            /** Session Token */
+            session_token: string;
+            /**
+             * Websocket Url
+             * @description The socket to open, ws:// or wss://.
+             */
+            websocket_url: string;
+        };
+        /**
+         * VoiceStatusResponse
+         * @description Whether Play Live can run here — asked before a button is offered.
+         */
+        VoiceStatusResponse: {
+            /**
+             * Configured
+             * @description Whether this deployment can mint a voice session. False means no voice service is configured, and the client should not offer Play Live.
+             */
+            configured: boolean;
+            /**
+             * Reason
+             * @description Why not, as a sentence to show. Null when configured.
+             */
+            reason?: string | null;
         };
     };
     responses: never;
@@ -2845,6 +2967,50 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    start_voice_session_v1_episodes__episode_id__voice_session_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartVoiceSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceSessionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description No voice service is configured, or it would not mint a session. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -3458,6 +3624,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    voice_status_v1_voice_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceStatusResponse"];
                 };
             };
             /** @description Validation Error */

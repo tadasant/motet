@@ -33,6 +33,9 @@ START_SESSION_TOKEN_ENV: Final = "MOTET_VOICE_START_SESSION_TOKEN"
 OPENAI_KEY_ENV: Final = "OPENAI_API_KEY"
 OPENAI_REALTIME_MODEL_ENV: Final = "MOTET_VOICE_OPENAI_REALTIME_MODEL"
 EXA_KEY_ENV: Final = "EXA_API_KEY"
+#: Comma-separated browser origins allowed to open a session socket — the SPA's origin in
+#: a deployed environment. Unset allows any, which is right on a laptop.
+ALLOWED_ORIGINS_ENV: Final = "MOTET_VOICE_ALLOWED_ORIGINS"
 
 #: Long enough to survive a walk out of signal and a client reconnect; short enough that a
 #: token scraped out of a log is not a durable handle on a live session.
@@ -74,6 +77,9 @@ class VoiceSettings:
     openai_api_key_present: bool
     openai_realtime_model: str
     exa_api_key_present: bool
+    #: Lowercased ``scheme://host[:port]`` origins, compared exactly against a socket's
+    #: ``Origin`` header. Empty means unrestricted.
+    allowed_origins: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> VoiceSettings:
@@ -110,6 +116,11 @@ class VoiceSettings:
             ).strip()
             or DEFAULT_OPENAI_REALTIME_MODEL,
             exa_api_key_present=bool(_clean(environ.get(EXA_KEY_ENV))),
+            allowed_origins=frozenset(
+                origin.strip().rstrip("/").lower()
+                for origin in environ.get(ALLOWED_ORIGINS_ENV, "").split(",")
+                if origin.strip()
+            ),
         )
 
     @property
@@ -124,6 +135,7 @@ class VoiceSettings:
             f"api={'set' if self.api_base_url else 'unset'} "
             f"start_session_auth={'set' if self.start_session_token else 'OPEN'} "
             f"openai_key={'present' if self.openai_api_key_present else 'absent'} "
+            f"origins={'restricted' if self.allowed_origins else 'ANY'} "
             f"exa_key={'present' if self.exa_api_key_present else 'absent'}"
         )
 

@@ -221,8 +221,11 @@ class TestThePerSessionHalf:
         """
         voice_session = session(_FailingSynthesisArm(llm_model()))
 
-        with pytest.raises(RuntimeError):
-            asyncio.run(voice_session.respond_to_text("who led the round"))
+        # The failure reaches the client as an `error` event rather than as a closed socket:
+        # a vendor refusing one turn must not take the narration down with it.
+        events = asyncio.run(voice_session.respond_to_text("who led the round"))
+        assert [event.type for event in events] == ["error"]
+        assert getattr(events[0], "code", "") == "turn_failed"
 
         assert voice_session.spend.requests == 1
         assert voice_session.spend.entries[0].stage is LlmStage.VOICE

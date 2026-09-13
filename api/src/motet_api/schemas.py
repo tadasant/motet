@@ -12,6 +12,7 @@ details never leak into these models.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -95,6 +96,15 @@ class HealthResponse(BaseModel):
             "trigger and a working one look identical from outside. Where the job lives is "
             "deliberately not reported; it is topology, and this route is public."
         )
+    )
+    voice_configured: bool = Field(
+        default=False,
+        description=(
+            "Whether Play Live can mint a voice session here: both MOTET_VOICE_BASE_URL and "
+            "MOTET_VOICE_START_SESSION_TOKEN are set. False is the deployed state until a "
+            "voice service exists. The voice service's address is not reported; it is "
+            "topology, and this route is public."
+        ),
     )
     inference_mode: str = Field(
         description="'fake' or 'real'. 'fake' means no vendor is ever called."
@@ -523,6 +533,15 @@ class ClaimModel(BaseModel):
     span: SourceSpanModel
     source_excerpt: str
     source_title: str
+    start_ms: int = Field(
+        default=0,
+        description=(
+            "Where this claim is spoken in the episode audio. Apportioned from the "
+            "segment's measured duration by the TTS stage, so accurate to a fraction of a "
+            "second rather than to the word; zero until the episode has rendered."
+        ),
+    )
+    duration_ms: int = Field(default=0, description="How long the claim is spoken for.")
 
 
 class SegmentResponse(BaseModel):
@@ -1005,4 +1024,51 @@ class AdminOverviewResponse(BaseModel):
     )
     jobs_next_before: int | None = Field(
         description=("Pass as `before` for the next, older page; null when this page is the last.")
+    )
+
+
+# --- Play Live ------------------------------------------------------------------------
+
+
+class VoiceStatusResponse(BaseModel):
+    """Whether Play Live can run here — asked before a button is offered."""
+
+    configured: bool = Field(
+        description=(
+            "Whether this deployment can mint a voice session. False means no voice "
+            "service is configured, and the client should not offer Play Live."
+        )
+    )
+    reason: str | None = Field(
+        default=None, description="Why not, as a sentence to show. Null when configured."
+    )
+
+
+class StartVoiceSessionRequest(BaseModel):
+    spoken_through_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Where the listener's player is. The session's clock starts here (invariant 4: "
+            "the position is ours, reported by the client's player). Omitted means the "
+            "episode's own listened_through_ms."
+        ),
+    )
+
+
+class VoiceSessionResponse(BaseModel):
+    """What a client needs to open the voice socket, and nothing about the vendor behind it."""
+
+    session_id: str
+    session_token: str
+    expires_at: str
+    websocket_url: str = Field(description="The socket to open, ws:// or wss://.")
+    arm: str = Field(description="Which arm answers. Informational; never branched on.")
+    conversational: bool
+    authenticate_frame: dict[str, Any] = Field(
+        description=(
+            "Send this, verbatim and as the first frame, once the socket opens. It carries "
+            "the session config the token was signed over; the voice service checks the "
+            "two match, so it must not be altered."
+        )
     )

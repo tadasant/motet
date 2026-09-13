@@ -23,6 +23,7 @@
 import { type RefObject, useEffect, useRef, useState } from 'react'
 
 import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api } from '../api/client'
+import { Live } from './Live'
 import { formatClock, listenState, markEpisodeListened } from './listening'
 import { ago, serverNow, workerState } from './Processing'
 
@@ -149,6 +150,9 @@ export function EpisodeScreen({
           }}
         />
       )}
+      {/* Play Live: this player's episode through the voice service, interruptible by
+          voice (motet#93). Disabled, with the reason, where no voice service exists. */}
+      {playable && <Live episode={episode} player={player} />}
 
       {episode.state === 'ready' && (
         <div className="row">

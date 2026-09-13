@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 import pytest
 from motet_inference.llm import (
@@ -43,10 +44,28 @@ def test_both_arms_build_and_expose_a_turn_detector(settings: VoiceSettings) -> 
 
 
 def test_the_openai_arm_is_dormant_and_says_why(settings: VoiceSettings) -> None:
-    capabilities = build_openai_arm(settings).capabilities()
+    """Real mode with no key: nothing can open, and the arm says which credential is missing."""
+    real = replace(settings, inference_mode="real", openai_api_key_present=False)
+    capabilities = build_openai_arm(real).capabilities()
     assert not capabilities.conversational
     assert "OPENAI_API_KEY" in capabilities.dormant_reason
     assert capabilities.turn_detection == "server"
+
+
+def test_the_fake_mode_openai_arm_holds_a_fake_live_conversation(settings: VoiceSettings) -> None:
+    """Fake mode never reaches a vendor, even with a key, and still has a live channel."""
+    from motet_voice.realtime.fake_live import FakeLiveConversation  # noqa: PLC0415
+    from motet_voice.realtime.interfaces import TurnRequest  # noqa: PLC0415
+
+    keyed = replace(settings, openai_api_key_present=True)
+    arm = build_openai_arm(keyed)
+    assert arm.transport is None and arm.transport_factory is None
+    capabilities = arm.capabilities()
+    assert capabilities.conversational
+    assert capabilities.dormant_reason == ""
+    assert "fake live conversation" in capabilities.notes
+    live = arm.open_live(TurnRequest(persona_instructions="p", voice="narrator"))
+    assert isinstance(live, FakeLiveConversation)
 
 
 def test_the_dormant_openai_arm_still_replays_but_is_labelled_as_emulated(
@@ -121,9 +140,19 @@ def test_the_openai_session_update_carries_everything_and_fetches_nothing(
             tools=[{"name": "mark_read", "description": "d", "parameters": {}}],
         )
     )
-    assert "Story A funded at $12m." in payload["session"]["instructions"]
-    assert payload["session"]["turn_detection"]["type"] == "server_vad"
-    assert [tool["name"] for tool in payload["session"]["tools"]] == ["mark_read"]
+    session = payload["session"]
+    assert "Story A funded at $12m." in session["instructions"]
+    assert session["type"] == "realtime", "the GA session shape, not the beta one"
+    assert session["audio"]["input"]["turn_detection"]["type"] == "server_vad"
+    assert session["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24_000}
+    assert session["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24_000}
+    assert session["audio"]["input"]["transcription"]["model"], (
+        "without asking for a transcript the vendor never says what it heard"
+    )
+    # Our label, their id — mapped in the arm and nowhere else (invariant 1). "narrator" is
+    # not a vendor voice, and sending it as-is is a rejected session.update.
+    assert session["audio"]["output"]["voice"] != "narrator"
+    assert [tool["name"] for tool in session["tools"]] == ["mark_read"]
 
 
 def test_the_openai_client_parses_a_scripted_vendor_stream(settings: VoiceSettings) -> None:
