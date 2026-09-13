@@ -42,6 +42,7 @@ export type Claim = EpisodeSegment['claims'][number]
 export type FeedInfo = GetResponse<'/v1/feed'>
 export type SourceItem = PostResponse<'/v1/sources/paste'>
 export type Source = GetResponse<'/v1/sources'>[number]
+export type LabelSync = NonNullable<Source['label_sync']>
 export type Connection = PostResponse<'/v1/sources/connect'>
 export type HeldSourceItem = GetResponse<'/v1/source-items/held'>[number]
 export type SourceItemDetail = GetResponse<'/v1/source-items/{source_item_id}'>
@@ -346,6 +347,22 @@ export const api = {
   // that holds or ever held a credential, or has pulled an item in: the delete cascades.
   removeSource: (id: string) =>
     apiDeletePath('/v1/sources/{source_id}', `/v1/sources/${encodeURIComponent(id)}`),
+  // Label sync (motet#96). Setting labels widens nothing: a read-only mailbox answers
+  // `needs_reauthorization` until its owner goes through `reauthorizeSource`, which is the
+  // only call in this file that asks Google for more than read-only access. An empty
+  // string is sent as null, because both empty is how label sync is turned off.
+  setLabelSync: (id: string, removeLabel: string, addLabel: string) =>
+    apiPutPath(
+      '/v1/sources/{source_id}/label-sync',
+      `/v1/sources/${encodeURIComponent(id)}/label-sync`,
+      { remove_label: removeLabel || null, add_label: addLabel || null },
+    ),
+  reauthorizeSource: (id: string, redirectUri: string) =>
+    apiPostPath(
+      '/v1/sources/{source_id}/reauthorize',
+      `/v1/sources/${encodeURIComponent(id)}/reauthorize`,
+      { redirect_uri: redirectUri },
+    ),
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),

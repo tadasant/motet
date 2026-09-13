@@ -977,6 +977,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sources/{source_id}/label-sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Label Sync
+         * @description Choose the label a message leaves and the label it joins when its owner ingests it.
+         *
+         *     motet#96. Stored on the source's ``config`` — the owner's intent — and read by the
+         *     worker after each *deliberate* ingest; nothing on the poll path reads it. Both empty
+         *     turns label sync off, and off means no mailbox write of any kind.
+         *
+         *     **Setting labels widens nothing.** A mailbox connected read-only stays read-only and
+         *     reports ``needs_reauthorization``; the wider grant is a separate, explicit step —
+         *     ``POST /v1/sources/{id}/reauthorize`` — which only a source with labels set may take.
+         *     A system label that could hide mail (TRASH, SPAM, and the rest outside INBOX, UNREAD,
+         *     STARRED and IMPORTANT) is refused here, and refused again by the worker.
+         */
+        put: operations["set_label_sync_v1_sources__source_id__label_sync_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources/{source_id}/poll": {
         parameters: {
             query?: never;
@@ -994,6 +1024,39 @@ export interface paths {
          *     produces one run and one deferral rather than two overlapping fetches.
          */
         post: operations["poll_source_v1_sources__source_id__poll_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sources/{source_id}/reauthorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reauthorize Source
+         * @description Ask the owner to let this mailbox's labels be changed — the label-sync re-consent.
+         *
+         *     **The only route that ever asks Google for ``gmail.modify``, and only for a source that
+         *     has label sync set.** Connecting asks for ``gmail.readonly`` alone, so a mailbox whose
+         *     owner never turns label sync on is never shown a consent screen that mentions changing
+         *     mail, and never holds a grant that could. Refused with 409 until labels are set, so the
+         *     wider scope is always asked for *because of* a setting the owner chose.
+         *
+         *     The consent itself is the owner's click (invariant 9) and finishes on the same
+         *     ``/v1/sources/callback`` a first connect does, against the same source: the new grant
+         *     replaces the stored one, and the worker refreshes any access token minted under the old
+         *     one before it writes. The URL carries a ``login_hint`` for the address the source was
+         *     first seen to reach, and the worker refuses — and disconnects — a grant that reaches a
+         *     different one, because Google's account chooser does not stop the owner picking another.
+         */
+        post: operations["reauthorize_source_v1_sources__source_id__reauthorize_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1653,6 +1716,76 @@ export interface components {
             skipped: number;
         };
         /**
+         * LabelSyncRequest
+         * @description Set, change, or clear a mailbox's label-sync settings.
+         *
+         *     Both empty turns label sync off. Setting a label does **not** widen the grant: a mailbox
+         *     connected read-only reports ``needs_reauthorization`` until its owner re-consents.
+         */
+        LabelSyncRequest: {
+            /** Add Label */
+            add_label?: string | null;
+            /** Remove Label */
+            remove_label?: string | null;
+        };
+        /**
+         * LabelSyncResponse
+         * @description One mailbox's label-sync settings, whether they can act, and what they have done.
+         *
+         *     ``status`` is the one field a screen branches on. ``off`` — no labels set, and nothing is
+         *     ever written. ``needs_reauthorization`` — labels are set, but the mailbox was connected
+         *     read-only, so nothing is written until its owner re-consents; the write-back records
+         *     that on every deliberate ingest rather than calling Gmail. ``on`` — labels are set and
+         *     the grant carries ``gmail.modify``.
+         */
+        LabelSyncResponse: {
+            /**
+             * Add Label
+             * @description Label put on a message when it is ingested.
+             */
+            add_label: string | null;
+            /**
+             * Available Labels
+             * @description Label names read from the mailbox by its last poll, for the pickers: the user's own labels, then the system labels Motet will write (INBOX, UNREAD, STARRED, IMPORTANT). Empty until a poll has read them.
+             */
+            available_labels: string[];
+            /**
+             * Failed Items
+             * @description Ingested items whose message could not be moved, and never was since — counted from when this mailbox was last authorized, so a re-consent clears the failures it resolves.
+             */
+            failed_items: number;
+            /**
+             * Labels Read At
+             * @description When the label list was last read from the mailbox.
+             */
+            labels_read_at: string | null;
+            /**
+             * Last Error
+             * @description Why the newest of those could not be moved.
+             */
+            last_error: string | null;
+            /**
+             * Last Synced At
+             * @description The newest time a message from this mailbox was moved.
+             */
+            last_synced_at: string | null;
+            /**
+             * Modify Granted
+             * @description Whether this mailbox's grant can change labels at all. False for every mailbox that has not re-consented for label sync, which is the default.
+             */
+            modify_granted: boolean;
+            /**
+             * Remove Label
+             * @description Label taken off a message when it is ingested.
+             */
+            remove_label: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "off" | "needs_reauthorization" | "on";
+        };
+        /**
          * ListenProgressRequest
          * @description How far into an episode the listener has got.
          *
@@ -1917,6 +2050,17 @@ export interface components {
         ReadStateRequest: {
             /** Read */
             read: boolean;
+        };
+        /**
+         * ReauthorizeSourceRequest
+         * @description Ask the owner to grant a connected mailbox the scope label sync needs.
+         */
+        ReauthorizeSourceRequest: {
+            /**
+             * Redirect Uri
+             * @description Where the provider sends the user back to. See ConnectSourceRequest.
+             */
+            redirect_uri: string;
         };
         /**
          * RevokedResponse
@@ -2266,6 +2410,8 @@ export interface components {
              * @description 'paste' or 'gmail'.
              */
             kind: string;
+            /** @description Moving a message between Gmail labels when its owner ingests it (motet#96). null for any source that is not a mailbox. */
+            label_sync?: components["schemas"]["LabelSyncResponse"] | null;
             /** Last Error */
             last_error: string | null;
             /** Last Polled At */
@@ -3692,6 +3838,43 @@ export interface operations {
             };
         };
     };
+    set_label_sync_v1_sources__source_id__label_sync_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LabelSyncRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     poll_source_v1_sources__source_id__poll_post: {
         parameters: {
             query?: never;
@@ -3712,6 +3895,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reauthorize_source_v1_sources__source_id__reauthorize_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthorizeSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectSourceResponse"];
                 };
             };
             /** @description Validation Error */

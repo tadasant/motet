@@ -284,11 +284,15 @@ def drain(
                 jobs.defer(conn, job)
                 continue
 
+            after_commit: list[Any] = []
             try:
-                _run_one(conn, database_url, job, handler, stages, store, recorders)
+                _run_one(conn, database_url, job, handler, stages, store, recorders, after_commit)
             finally:
                 if job.serialize_key is not None:
                     jobs.unlock(conn, job.serialize_key)
+            # After the unlock, so a slow step — a Gmail call, motet#96 — never holds up this
+            # user's other serialized jobs, and outside the job's span and duration metric.
+            _run_after_commit(after_commit, job)
             processed += 1
 
         # Inside the `with`, because setting an attribute on an ended span is silently
@@ -507,6 +511,7 @@ def _run_one(
     stages: Any,
     store: Any,
     recorders: Any,
+    after_commit: list[Any] | None = None,
 ) -> None:
     """Run one job under a span, and record how it went as a metric.
 
@@ -526,7 +531,7 @@ def _run_one(
         # marked done is one another worker takes and runs again.
         _hold_lease(database_url, job),
     ):
-        outcome = _execute(conn, job, handler, stages, store, recorders)
+        outcome = _execute(conn, job, handler, stages, store, recorders, after_commit)
         span.set_attribute("motet.job.outcome", outcome)
         # `already_applied` is a success: the row was recovered and settled, and nothing
         # about *this* job went wrong. That a worker died is carried by the WARNING and by
@@ -546,6 +551,7 @@ def _execute(
     stages: Any,
     store: Any,
     recorders: Any,
+    after_commit: list[Any] | None = None,
 ) -> str:
     """Run one job's handler, then record the outcome in a separate transaction.
 
@@ -558,6 +564,11 @@ def _execute(
     row whose work already landed still needs *completing* — leaving it in the queue for
     the claim to keep skipping would strand it in ``running`` forever, which is the failure
     the lease reclaim exists to prevent.
+
+    What the handler appended to ``Context.after_commit`` is handed back on ``after_commit``
+    for the caller to run once it has released the job's serialization lock — which is why
+    it is an out-parameter rather than run here. A caller that passes none gets the steps
+    run here instead, after the completion commits.
     """
     if job.work_committed_attempt is not None:
         # A replay, and the one thing a handler cannot recognise from where it stands. This
@@ -634,7 +645,33 @@ def _execute(
 
     with conn.transaction():
         jobs.complete(conn, job.id)
+    if after_commit is None:
+        _run_after_commit(context.after_commit, job)
+    else:
+        after_commit.extend(context.after_commit)
     return "completed"
+
+
+def _run_after_commit(steps: list[Any], job: jobs.Job) -> None:
+    """Run what a handler asked to happen once its work had landed — motet#96.
+
+    **After ``jobs.complete``, not between the two commits.** The window between the work
+    commit and the completion is the one the work fence exists to cover, and a step here
+    can make a network call; putting it inside that window would widen the gap in which a
+    dead worker leaves a finished job ``running``. :func:`drain` runs it after releasing the
+    job's serialization lock too, so a slow step does not hold up that user's next job.
+
+    Swallowed, one step at a time: a step exists precisely because it must not be able to
+    fail the job, and one step raising must not skip the next. Each step is expected to
+    record its own outcome; this is the backstop for one that did not.
+    """
+    for step in steps:
+        try:
+            step()
+        except Exception:  # noqa: BLE001 — the job has already succeeded; keep it that way
+            logger.exception(
+                "an after-commit step for job %d on %s raised", job.id, job.queue.value
+            )
 
 
 def _record_failure(

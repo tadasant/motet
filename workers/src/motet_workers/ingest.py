@@ -28,6 +28,10 @@ and still queues integration on arrival: a person pasting is a person asking.
 * **Idempotence.** A poll that crashed after fetching and before committing re-fetches the
   same messages; ``source_items`` is unique on ``(source_id, external_id)``, so the second
   pass inserts nothing.
+* **Neither stage ever writes to the mailbox.** A poll *reads* the label catalog as well as
+  the message list, so the label-sync pickers have names to offer (motet#96), but the one
+  write the connector can make lives in :mod:`motet_workers.labels` and fires only after a
+  deliberate ingest.
 """
 
 from __future__ import annotations
@@ -39,15 +43,26 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 from motet_db import CredentialPurpose, SourceKind, phase2
+from motet_db.models import StoredSource
 from motet_sources import (
     DEFAULT_QUERY,
     GMAIL_READONLY_SCOPE,
     PROVIDER,
     ExtractionError,
+    MailClient,
     SourceAuthError,
+    SourceError,
     build_mail_client,
     build_oauth_client,
     extract_newsletter,
+)
+from motet_sources.labels import (
+    CATALOG_KEY,
+    CATALOG_MAX_AGE,
+    MAILBOX_ADDRESS_KEY,
+    MAILBOX_VERIFIED_FOR_KEY,
+    catalog_fetched_at,
+    catalog_to_sync_state,
 )
 from motet_vault import build_key_manager
 
@@ -105,8 +120,19 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
     if source.kind != SourceKind.GMAIL.value:
         raise _permanent(f"source {source_id} is a {source.kind!r} source and cannot be polled")
 
-    access_token = _access_token(context.conn, source_id=source_id, user_id=source.user_id)
+    due = mailbox_check_due(context.conn, source)
+    if due is not None:
+        access_token, stamp = mint_token(context.conn, source_id=source_id, user_id=source.user_id)
+    else:
+        access_token = _access_token(context.conn, source_id=source_id, user_id=source.user_id)
     client = build_mail_client(access_token)
+    verified: dict[str, Any] = {}
+    if due is not None:
+        mismatch, verified = check_mailbox(context.conn, source, client, stamp)
+        if mismatch is not None:
+            # Returned, not raised: raising would roll back the disconnect it just recorded.
+            logger.error("source %s: %s", source_id, mismatch)
+            return
     stored = source.sync_state.get("cursor")
     cursor = stored if isinstance(stored, str) else None
     query = source_query(source.config)
@@ -140,8 +166,19 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         cursor = page.cursor
         more = page.more
 
+    # The mailbox keys from a fresh read rather than from the snapshot this poll started with:
+    # a refresh above may have carried the check to a rotated grant, and the snapshot would
+    # write the stale stamp back and make every later poll re-check.
+    reread = phase2.get_source(context.conn, source_id)
+    mailbox_keys: dict[str, Any] = {
+        key: reread.sync_state[key]
+        for key in (MAILBOX_ADDRESS_KEY, MAILBOX_VERIFIED_FOR_KEY)
+        if reread is not None and key in reread.sync_state
+    }
     sync_state = {
         **source.sync_state,
+        **mailbox_keys,
+        **verified,
         "cursor": cursor,
         "last_sync": {
             "at": datetime.now(UTC).isoformat(),
@@ -157,6 +194,9 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         # than what the deployment would choose today.
         logger.info("source %s: first sync bounded to the last %d days", source_id, window_days)
         sync_state["first_sync_days"] = window_days
+    catalog = _read_label_catalog(client, source)
+    if catalog is not None:
+        sync_state[CATALOG_KEY] = catalog
     phase2.set_source_sync_state(context.conn, source_id, sync_state)
 
     if more:
@@ -286,10 +326,110 @@ def _sent_at(date: str) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-# --- credentials ---------------------------------------------------------------------
+def _read_label_catalog(client: MailClient, source: StoredSource) -> dict[str, Any] | None:
+    """The mailbox's labels, as ``sync_state`` caches them — or ``None`` to keep the cache.
+
+    Read only when there is no catalog or it is older than ``CATALOG_MAX_AGE``: the pickers
+    are suggestions and the write-back re-reads on a miss, so a mailbox that never turns
+    label sync on costs one extra read a day. ``gmail.readonly`` covers it. **Swallowed**,
+    because the poll's job is ingestion and a catalog is a convenience for a settings screen:
+    a poll that failed because it could not list labels would stall newsletters over a
+    dropdown.
+    """
+    fetched_at = catalog_fetched_at(source.sync_state)
+    now = datetime.now(UTC)
+    if fetched_at is not None and now - fetched_at < CATALOG_MAX_AGE:
+        return None
+    try:
+        labels = client.list_labels()
+    except Exception:  # noqa: BLE001 — see above: never fail a poll over the label list
+        logger.warning(
+            "could not list labels for source %s; keeping the cached catalog",
+            source.id,
+            exc_info=True,
+        )
+        return None
+    return catalog_to_sync_state(labels, fetched_at=now)
 
 
-def _access_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str) -> str:
+def mailbox_check_due(conn: psycopg.Connection[Any], source: StoredSource) -> str | None:
+    """The refresh grant's stamp, if this source's mailbox has not been checked for it.
+
+    ``None`` means the recorded address was checked against *this* grant and nothing needs
+    asking. Anything else is the grant's ``updated_at``, which the caller hands to
+    :func:`check_mailbox` after minting a token from that grant.
+    """
+    grant = phase2.get_source_credential(
+        conn, source_id_=source.id, purpose=CredentialPurpose.REFRESH.value
+    )
+    if grant is None or grant.updated_at is None:
+        # No grant to check. Callers reach this only for an active source, and minting a
+        # token for one with no grant refuses — a cached access token is never used when a
+        # check could be due, because `mint_token` is what a due check calls.
+        return None
+    stamp = grant_stamp(grant)
+    expected = source.sync_state.get(MAILBOX_ADDRESS_KEY)
+    if (
+        isinstance(expected, str)
+        and expected
+        and source.sync_state.get(MAILBOX_VERIFIED_FOR_KEY) == stamp
+    ):
+        return None
+    return stamp
+
+
+def check_mailbox(
+    conn: psycopg.Connection[Any], source: StoredSource, client: MailClient, stamp: str
+) -> tuple[str | None, dict[str, Any]]:
+    """Whether this token reaches the mailbox the source is — ``(mismatch, sync_state keys)``.
+
+    **A consent can hand back a different account.** Re-authorizing for label sync replaces
+    an existing source's grant (motet#96), and Google's account chooser returns whichever
+    account was picked. A source whose token silently changed mailbox would run one inbox's
+    cursor against another, pull that inbox in under the wrong source, and write labels in
+    it. So before a poll or a write uses a grant :func:`mailbox_check_due` has not seen, this
+    asks Gmail which mailbox it reaches — with a token the caller minted **from that grant**
+    (:func:`mint_token`), never a cached one, because an access token from
+    the previous grant stays valid for up to an hour and would answer for the old account.
+
+    No recorded address — a new source, or one connected before this existed — records the
+    one it sees. A different one **disconnects** the source: its credentials are the other
+    account's, so they are deleted rather than kept, the source is paused, and
+    ``last_error`` names both addresses and the repair. The mismatch is returned, not
+    raised, so a caller inside a transaction can commit the disconnect. A profile that names
+    no address raises: an unchecked grant is not one to read with.
+
+    Returns the ``sync_state`` keys to write on a match — the address, and ``stamp`` as the
+    grant it was checked for — which the poll folds into its own write and the write-back
+    merges. One profile read per consent, and nothing per poll after that.
+    """
+    address = client.mailbox_address()
+    if not address:
+        raise SourceError(
+            f"Gmail did not say which mailbox source {source.id}'s grant reaches; not reading "
+            "or writing it until it does"
+        )
+    expected = source.sync_state.get(MAILBOX_ADDRESS_KEY)
+    if isinstance(expected, str) and expected and address.casefold() != expected.casefold():
+        reason = (
+            f"this source was re-authorized with a different Gmail account ({address}) than "
+            f"the one it was connected with ({expected}), so it has been disconnected rather "
+            f"than read. Connect {expected} again from the Sources screen."
+        )
+        phase2.delete_source_credentials(conn, source.id)
+        phase2.mark_source_disconnected(conn, source.id)
+        phase2.set_source_error(conn, source.id, reason)
+        return reason, {}
+    return None, {MAILBOX_ADDRESS_KEY: address, MAILBOX_VERIFIED_FOR_KEY: stamp}
+
+
+def _access_token(
+    conn: psycopg.Connection[Any],
+    *,
+    source_id: str,
+    user_id: str,
+    required_scope: str | None = None,
+) -> str:
     """An access token for this source, refreshing it first if it is close to expiring.
 
     **This is the decrypt boundary.** :func:`~motet_vault.build_key_manager` returns the
@@ -300,6 +440,15 @@ def _access_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str
 
     Refreshing early by a fixed skew is deliberate: a token that passes the check and then
     expires midway through a forty-message poll fails after paying for half of it.
+
+    ``required_scope`` is for the one caller that needs more than the connect grant — the
+    label write-back, which needs ``gmail.modify``. An access token minted *before* a
+    label-sync re-consent carries only the old scopes and stays valid for up to an hour, so
+    a cached token that lacks the scope is refreshed rather than used: the refresh is made
+    against the new grant and comes back wider.
+
+    A due mailbox check does not come here: it calls :func:`mint_token` directly, so the
+    token it asks with is minted from the grant stored *now* and never a cached one.
     """
     manager = build_key_manager()
     now = datetime.now(UTC)
@@ -307,17 +456,47 @@ def _access_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str
     access = phase2.get_source_credential(
         conn, source_id_=source_id, purpose=CredentialPurpose.ACCESS.value
     )
-    if access is not None and not access.expired(now=now):
+    if (
+        access is not None
+        and not access.expired(now=now)
+        and (required_scope is None or required_scope in access.scopes)
+    ):
         token = phase2.load_source_credential(
             conn, manager, source_id_=source_id, purpose=CredentialPurpose.ACCESS.value
         )
         if token:
             return token
 
+    token, _stamp = mint_token(conn, source_id=source_id, user_id=user_id)
+    return token
+
+
+def mint_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str) -> tuple[str, str]:
+    """A fresh access token from the refresh grant stored now — and that grant's stamp.
+
+    **The token is stored only if the grant it was minted from is still the stored one.** A
+    refresh is a network call, and a consent can replace the grant while it is in flight —
+    a label-sync re-consent, possibly as another Google account (motet#96). Storing the
+    result anyway would cache a token for a grant that is gone, valid for an hour and
+    trusted by every later caller. So the grant's ``updated_at`` is read before the refresh
+    and again after it, and a change raises a retryable :class:`SourceError` rather than
+    storing: the retry mints from the new grant.
+
+    Returns ``(token, stamp)``, where ``stamp`` identifies the grant the token came from —
+    re-read after a rotated refresh token is stored, so a check recorded against it is not
+    made stale by the rotation itself. A rotated refresh token keeps the scopes the grant
+    was recorded with, and the access token's scopes are narrowed to them: what the OAuth
+    callback recorded as asked-for is what every later decision reads.
+    """
+    manager = build_key_manager()
+    now = datetime.now(UTC)
+    grant_row = phase2.get_source_credential(
+        conn, source_id_=source_id, purpose=CredentialPurpose.REFRESH.value
+    )
     refresh_token = phase2.load_source_credential(
         conn, manager, source_id_=source_id, purpose=CredentialPurpose.REFRESH.value
     )
-    if not refresh_token:
+    if grant_row is None or not refresh_token:
         raise _permanent(
             f"source {source_id} has no refresh credential, so it cannot be polled. "
             "The mailbox needs to be reconnected."
@@ -331,6 +510,22 @@ def _access_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str
         phase2.set_source_active(conn, source_id, active=False)
         raise _permanent(f"source {source_id} needs reconnecting: {exc}") from exc
 
+    # `lock=True` is what makes the comparison hold against a consent still in flight: an
+    # uncommitted callback has the row locked, so this waits for it and sees its stamp.
+    # The lock then lasts this caller's transaction, so a consent arriving *after* waits
+    # for the token to be stored and replaces the grant behind it — which the next check
+    # notices.
+    current = phase2.get_source_credential(
+        conn, source_id_=source_id, purpose=CredentialPurpose.REFRESH.value, lock=True
+    )
+    if current is None or current.updated_at != grant_row.updated_at:
+        raise SourceError(
+            f"source {source_id}'s grant was replaced while a token was being minted from the "
+            "previous one; not storing it, and retrying with the new grant"
+        )
+
+    recorded = grant_row.scopes or (GMAIL_READONLY_SCOPE,)
+    scopes = tuple(scope for scope in grant.scopes if scope in recorded) or recorded
     phase2.store_source_credential(
         conn,
         manager,
@@ -339,14 +534,15 @@ def _access_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str
         provider=PROVIDER,
         purpose=CredentialPurpose.ACCESS.value,
         secret=grant.access_token,
-        scopes=grant.scopes or (GMAIL_READONLY_SCOPE,),
+        scopes=scopes,
         expires_at=now + timedelta(seconds=grant.expires_in_seconds),
     )
-    # `grant.refresh_token` is deliberately NOT written back. Google issues one only at
-    # first consent and sends None on every refresh; storing that None would disconnect
-    # the mailbox an hour after it was connected, with no error anywhere.
-    if grant.refresh_token:
-        phase2.store_source_credential(
+    stamp = grant_stamp(grant_row)
+    # `grant.refresh_token` is deliberately NOT written back unless it is a new one. Google
+    # issues one only at first consent and sends None on every refresh; storing that None
+    # would disconnect the mailbox an hour after it was connected, with no error anywhere.
+    if grant.refresh_token and grant.refresh_token != refresh_token:
+        rotated = phase2.store_source_credential(
             conn,
             manager,
             user_id=user_id,
@@ -354,9 +550,22 @@ def _access_token(conn: psycopg.Connection[Any], *, source_id: str, user_id: str
             provider=PROVIDER,
             purpose=CredentialPurpose.REFRESH.value,
             secret=grant.refresh_token,
-            scopes=grant.scopes or (GMAIL_READONLY_SCOPE,),
+            scopes=recorded,
         )
-    return grant.access_token
+        rotated_stamp = grant_stamp(rotated)
+        # The same grant, rotated — so a mailbox check recorded for it still holds. Carried
+        # only if the check was recorded for exactly the grant this refresh was made from.
+        phase2.carry_source_sync_state_key(
+            conn, source_id, MAILBOX_VERIFIED_FOR_KEY, old=stamp, new=rotated_stamp
+        )
+        stamp = rotated_stamp
+    return grant.access_token, stamp
+
+
+def grant_stamp(credential: Any) -> str:
+    """Which grant a credential row is: its ``updated_at``, in UTC so every process agrees."""
+    updated_at = credential.updated_at
+    return updated_at.astimezone(UTC).isoformat() if updated_at is not None else ""
 
 
 # --- shared --------------------------------------------------------------------------

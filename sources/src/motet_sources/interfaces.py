@@ -5,11 +5,17 @@ vendor, so nothing in this repo calls it directly. A caller asks the registry fo
 :class:`MailClient` and gets either the real adapter or a deterministic fake, decided by
 ``MOTET_INFERENCE_MODE`` — the one variable, parsed in the one place.
 
-**The interface is deliberately smaller than Gmail's API.** Two operations: list what has
-arrived since a cursor, and fetch one message's raw RFC 822 bytes. Everything else —
-threading, labels, attachments, the ``format=metadata`` shortcut — is either not needed
-or is a detail of the adapter. A narrow interface is what makes the fake honest; a fake
-that had to model Gmail's history API would be a worse Gmail rather than a better test.
+**The interface is deliberately smaller than Gmail's API.** Two reads carry ingestion:
+list what has arrived since a cursor, and fetch one message's raw RFC 822 bytes. Two more
+carry the one write the connector makes (motet#96): list the mailbox's labels, and move one
+message between them. Everything else — threading, attachments, the ``format=metadata``
+shortcut — is either not needed or is a detail of the adapter. A narrow interface is what
+makes the fake honest; a fake that had to model Gmail's history API would be a worse Gmail
+rather than a better test.
+
+**The write is the exception, and it has its own scope.** :meth:`MailClient.modify_labels`
+needs ``gmail.modify``, which a mailbox grants only when its owner turns label sync on for
+it. Nothing on the ingestion path calls it — see ``motet_workers.labels``.
 
 **Fetching returns raw bytes, not a parsed message.** Parsing is
 :mod:`motet_sources.extract`, and it runs identically on real and fake input, so the
@@ -30,6 +36,22 @@ class SourceError(RuntimeError):
 
 class SourceAuthError(SourceError):
     """The credential was rejected. Retrying will not help until the user reconsents."""
+
+
+class StaleReferenceError(SourceError):
+    """The provider did not recognise an id we sent — a message or a label.
+
+    Distinct from :class:`SourceError` because the repair is different: a label id cached
+    from an earlier ``list_labels`` goes stale when the user deletes and recreates the
+    label, and re-resolving the name is what fixes it, where retrying the same request
+    would fail the same way. ``target`` says which, when the provider made it knowable: a
+    message that is gone is not fixed by re-reading the labels.
+    """
+
+    def __init__(self, message: str, *, target: str = "unknown") -> None:
+        super().__init__(message)
+        #: ``"message"``, ``"label"``, or ``"unknown"``.
+        self.target = target
 
 
 @dataclass(frozen=True)
@@ -74,9 +96,25 @@ class RawMessage:
     raw: bytes
 
 
+@dataclass(frozen=True)
+class Label:
+    """One label in a mailbox, as the provider names it.
+
+    ``id`` is what a modify request carries and ``name`` is what a person types; they are
+    the same string for Gmail's system labels (``INBOX``) and unrelated for a user's own
+    (``Label_12`` / ``Newsletters``). ``system`` says which, because only a handful of
+    system labels are safe to move a message into or out of.
+    """
+
+    id: str
+    name: str
+    system: bool = False
+
+
 @runtime_checkable
 class MailClient(Protocol):
-    """List and fetch newsletter messages from one connected mailbox."""
+    """List and fetch newsletter messages from one connected mailbox — and, when its owner
+    has asked for it, move one between labels."""
 
     def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
         """One page of what matches ``query`` since ``cursor``, oldest first.
@@ -92,6 +130,29 @@ class MailClient(Protocol):
 
     def fetch_message(self, message_id: str) -> RawMessage: ...
 
+    def list_labels(self) -> tuple[Label, ...]:
+        """Every label in the mailbox. A read, and ``gmail.readonly`` is enough for it."""
+        ...
+
+    def mailbox_address(self) -> str | None:
+        """The address of the mailbox this token reaches. A read; readonly covers it.
+
+        What lets a re-consent be checked against the mailbox a source already is: Google's
+        account chooser will happily hand back a *different* account's grant, and a source
+        whose token silently changed mailbox would read one inbox under another's cursor.
+        """
+        ...
+
+    def modify_labels(self, message_id: str, *, add: Sequence[str], remove: Sequence[str]) -> None:
+        """Add and remove label **ids** on one message. Needs ``gmail.modify``.
+
+        Idempotent by nature — adding a label a message already carries, or removing one it
+        does not, is a no-op — so a retried call converges rather than compounding. Raises
+        :class:`StaleReferenceError` when the message or a label id is unknown, and
+        :class:`SourceAuthError` when the grant does not carry the scope.
+        """
+        ...
+
 
 @runtime_checkable
 class OAuthClient(Protocol):
@@ -104,7 +165,13 @@ class OAuthClient(Protocol):
     """
 
     def authorization_url(
-        self, *, redirect_uri: str, state: str, code_challenge: str, scopes: Sequence[str]
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        code_challenge: str,
+        scopes: Sequence[str],
+        login_hint: str | None = None,
     ) -> str: ...
 
     def exchange_code(self, *, code: str, redirect_uri: str, code_verifier: str) -> TokenGrant: ...

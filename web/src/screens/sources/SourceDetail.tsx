@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react'
 
 import { ApiError, type ProcessingStatus, type Source, api } from '../../api/client'
+import { LabelSync } from '../LabelSync'
 import { workerState } from '../Processing'
 import { DEFAULT_QUERY } from './ConnectGmail'
 import { StatusPill } from './IntegrationCard'
@@ -281,6 +282,13 @@ export function SourceDetail({
             </span>
           )}
         </div>
+      )}
+
+      {/* Label sync (motet#96) — settings, and the one consent that asks for more than
+          read-only access. It hands back the updated source; re-fetching everything keeps
+          this panel's derived counts in step rather than patching one row. */}
+      {isPollable(source) && source.connected && source.label_sync && (
+        <LabelSync source={source} onChange={() => void onRefresh()} />
       )}
 
       {isPollable(source) && source.connected && (

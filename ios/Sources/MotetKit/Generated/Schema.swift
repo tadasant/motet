@@ -752,6 +752,78 @@ public struct IntegrateResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// Set, change, or clear a mailbox's label-sync settings.
+///
+/// Both empty turns label sync off. Setting a label does **not** widen the grant: a mailbox
+/// connected read-only reports ``needs_reauthorization`` until its owner re-consents.
+public struct LabelSyncRequest: Codable, Hashable, Sendable {
+    public var addLabel: String?
+    public var removeLabel: String?
+
+    public init(addLabel: String? = nil, removeLabel: String? = nil) {
+        self.addLabel = addLabel
+        self.removeLabel = removeLabel
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case addLabel = "add_label"
+        case removeLabel = "remove_label"
+    }
+}
+
+/// One mailbox's label-sync settings, whether they can act, and what they have done.
+///
+/// ``status`` is the one field a screen branches on. ``off`` — no labels set, and nothing is
+/// ever written. ``needs_reauthorization`` — labels are set, but the mailbox was connected
+/// read-only, so nothing is written until its owner re-consents; the write-back records
+/// that on every deliberate ingest rather than calling Gmail. ``on`` — labels are set and
+/// the grant carries ``gmail.modify``.
+public struct LabelSyncResponse: Codable, Hashable, Sendable {
+    public var addLabel: String?
+    public var availableLabels: [String]
+    public var failedItems: Int
+    public var labelsReadAt: Date?
+    public var lastError: String?
+    public var lastSyncedAt: Date?
+    public var modifyGranted: Bool
+    public var removeLabel: String?
+    public var status: String
+
+    public init(
+        addLabel: String? = nil,
+        availableLabels: [String],
+        failedItems: Int,
+        labelsReadAt: Date? = nil,
+        lastError: String? = nil,
+        lastSyncedAt: Date? = nil,
+        modifyGranted: Bool,
+        removeLabel: String? = nil,
+        status: String
+    ) {
+        self.addLabel = addLabel
+        self.availableLabels = availableLabels
+        self.failedItems = failedItems
+        self.labelsReadAt = labelsReadAt
+        self.lastError = lastError
+        self.lastSyncedAt = lastSyncedAt
+        self.modifyGranted = modifyGranted
+        self.removeLabel = removeLabel
+        self.status = status
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case addLabel = "add_label"
+        case availableLabels = "available_labels"
+        case failedItems = "failed_items"
+        case labelsReadAt = "labels_read_at"
+        case lastError = "last_error"
+        case lastSyncedAt = "last_synced_at"
+        case modifyGranted = "modify_granted"
+        case removeLabel = "remove_label"
+        case status
+    }
+}
+
 /// How far into an episode the listener has got.
 ///
 /// Invariant 4: we own playback position, so this is a *report* from a client that we
@@ -1050,6 +1122,19 @@ public struct ReadStateRequest: Codable, Hashable, Sendable {
 
     public init(read: Bool) {
         self.read = read
+    }
+}
+
+/// Ask the owner to grant a connected mailbox the scope label sync needs.
+public struct ReauthorizeSourceRequest: Codable, Hashable, Sendable {
+    public var redirectUri: String
+
+    public init(redirectUri: String) {
+        self.redirectUri = redirectUri
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case redirectUri = "redirect_uri"
     }
 }
 
@@ -1424,6 +1509,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
     public var itemsIntegrated: Int
     public var itemsPulledIn: Int
     public var kind: String
+    public var labelSync: LabelSyncResponse?
     public var lastError: String?
     public var lastPolledAt: Date?
     public var lastSync: SourceSyncResult?
@@ -1441,6 +1527,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         itemsIntegrated: Int,
         itemsPulledIn: Int,
         kind: String,
+        labelSync: LabelSyncResponse? = nil,
         lastError: String? = nil,
         lastPolledAt: Date? = nil,
         lastSync: SourceSyncResult? = nil,
@@ -1457,6 +1544,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         self.itemsIntegrated = itemsIntegrated
         self.itemsPulledIn = itemsPulledIn
         self.kind = kind
+        self.labelSync = labelSync
         self.lastError = lastError
         self.lastPolledAt = lastPolledAt
         self.lastSync = lastSync
@@ -1475,6 +1563,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         case itemsIntegrated = "items_integrated"
         case itemsPulledIn = "items_pulled_in"
         case kind
+        case labelSync = "label_sync"
         case lastError = "last_error"
         case lastPolledAt = "last_polled_at"
         case lastSync = "last_sync"
@@ -1850,9 +1939,19 @@ public enum MotetEndpoints {
         return HTTPEndpoint(method: "DELETE", path: "/v1/sources/\(MotetPathComponent(sourceId))/credentials")
     }
 
+    /// `PUT /v1/sources/{source_id}/label-sync` — Set Label Sync
+    public static func setLabelSync(sourceId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "PUT", path: "/v1/sources/\(MotetPathComponent(sourceId))/label-sync")
+    }
+
     /// `POST /v1/sources/{source_id}/poll` — Poll Source
     public static func pollSource(sourceId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/sources/\(MotetPathComponent(sourceId))/poll")
+    }
+
+    /// `POST /v1/sources/{source_id}/reauthorize` — Reauthorize Source
+    public static func reauthorizeSource(sourceId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/sources/\(MotetPathComponent(sourceId))/reauthorize")
     }
 
     /// `GET /v1/voice` — Voice Status

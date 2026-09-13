@@ -159,6 +159,9 @@ label { font-weight: 600; font-size: .9rem; }
 .badge.failed { color: var(--bad); border-color: var(--bad); }
 .badge.integrated { color: var(--good); border-color: var(--good); }
 /* The reason, monospaced: it is a vendor error string, and it is read to be copied. */
+.label-sync { border-top: 1px dashed var(--line); margin-top: .75rem; padding-top: .75rem; }
+.label-sync .stalled { margin-bottom: .75rem; }
+.label-sync .stalled p { margin-top: 0; }
 .reason { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; background: #f6f6f6; border-left: 3px solid var(--line); padding: .4rem .6rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
 .ingestion.failed .reason { border-left-color: var(--bad); }
 
