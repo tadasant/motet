@@ -209,6 +209,10 @@ class Caller:
     #: When this browser has to sign in again. ``None`` for the shared token, which does
     #: not expire — rotating it is a deploy.
     expires_at: datetime | None = None
+    #: The MCP client this session was issued to, when it is an MCP client's OAuth access
+    #: token rather than a browser's (motet#111). Such a grant acts as the person who approved
+    #: it, and is never an operator: see :func:`is_admin`.
+    mcp_client_id: str | None = None
 
 
 def require_caller(
@@ -276,6 +280,7 @@ def require_caller(
             email=session.email,
             session_id=session.id,
             expires_at=session.expires_at,
+            mcp_client_id=session.mcp_client_id,
         )
 
     raise HTTPException(
@@ -315,6 +320,12 @@ def is_admin(caller: Caller, config: Settings) -> bool:
     """
     if caller.how != "session" or caller.email is None:
         return False
+    # **An MCP client's grant is never an operator**, whoever approved it (motet#111). The
+    # consent screen asks a person to let an agent act as them in their own account; reading
+    # every user's data is not what they were asked about, and a delegated token is exactly
+    # the credential that should not carry it. The operator view needs a browser session.
+    if caller.mcp_client_id is not None:
+        return False
     return is_allowed(caller.email, config.admin_emails)
 
 
@@ -341,6 +352,10 @@ def require_admin(
         detail = (
             "The admin view needs a signed-in session, and this deployment has no sign-in "
             "lock (MOTET_API_TOKEN is unset), so nobody is an admin."
+        )
+    elif caller.mcp_client_id is not None:
+        detail = (
+            "The admin view needs a signed-in browser session; an MCP client's grant is not one."
         )
     elif caller.how == "token":
         detail = "The admin view needs a signed-in session; the shared API token is not one."

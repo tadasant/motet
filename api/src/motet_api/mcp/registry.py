@@ -15,7 +15,9 @@ a decision about its MCP counterpart is a red run.
 and nothing else, so a request body cannot widen what a connection may call. With none named
 a connection gets ``DEFAULT_GROUPS``. ``admin`` is in ``OPT_IN_GROUPS`` and is never on the
 default surface. Every group also has a ``<group>_readonly`` variant that drops its write
-tools, which is what a caller that should only look (the voice service, later) is given.
+tools. A variant is the connection's own choice of what to list and call, not a limit on
+its credential: a token that could name ``admin`` still can. A caller that must not write
+needs a credential that cannot, which is motet#120's question.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ DEFAULT_GROUPS: tuple[str, ...] = (
     "backlog",
     "ingestion",
     "sources",
+    "connectors",
     "episodes",
     "feed",
     "highlights",
@@ -118,6 +121,22 @@ ALL_TOOLS: tuple[ToolDef, ...] = (
         (("DELETE", "/v1/sources/{source_id}"),),
         destructive=True,
     ),
+    # connectors
+    ToolDef("list_connectors", "connectors", False, (("GET", "/v1/connectors"),)),
+    ToolDef("create_connector", "connectors", True, (("POST", "/v1/connectors"),)),
+    ToolDef(
+        "delete_connector",
+        "connectors",
+        True,
+        (("DELETE", "/v1/connectors/{connector_id}"),),
+        destructive=True,
+    ),
+    ToolDef(
+        "authorize_connector",
+        "connectors",
+        True,
+        (("POST", "/v1/connectors/{connector_id}/authorize"),),
+    ),
     # episodes
     ToolDef("list_episodes", "episodes", False, (("GET", "/v1/episodes"),)),
     ToolDef("create_episode", "episodes", True, (("POST", "/v1/episodes"),)),
@@ -195,6 +214,11 @@ EXCLUDED: dict[Operation, str] = {
         "The browser redirect leg of a mailbox consent: only /oauth/callback calls it, with a "
         "single-use code Google handed to a browser. connect_source and reauthorize_source "
         "return the consent URL; the click is the human step (invariant 9)."
+    ),
+    ("POST", "/v1/connectors/oauth/callback"): (
+        "The redirect leg of a remote MCP server's consent: the SPA posts the server's code "
+        "here, spending a single-use state. authorize_connector returns the consent URL; "
+        "the approval is the human step (invariant 9)."
     ),
     ("POST", "/v1/auth/google/start"): (
         "Signing in is a browser flow an agent cannot complete (Google refuses an automated "

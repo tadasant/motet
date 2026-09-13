@@ -32,6 +32,13 @@ def _limit(limit: int | None) -> int:
     return limit
 
 
+def _before(before: int | None) -> int | None:
+    """The route's ``Query(ge=1)`` on the page cursor, which a direct call does not run."""
+    if before is not None and before < 1:
+        raise ToolError("422: before must be at least 1.")
+    return before
+
+
 def logout_everywhere() -> RevokedResponse:
     """Revoke every signed-in session and every MCP client grant, including this connection's.
 
@@ -62,7 +69,7 @@ def get_admin_overview(
             conn=c.conn,
             _admin=require_admin(caller=c.caller, config=c.config),
             user_id=user_id,
-            before=before,
+            before=_before(before),
             limit=_limit(limit),
         )
 
@@ -82,7 +89,7 @@ def list_waitlist(
         return routes.admin_waitlist(
             conn=c.conn,
             _admin=require_admin(caller=c.caller, config=c.config),
-            before=before,
+            before=_before(before),
             limit=_limit(limit),
         )
 

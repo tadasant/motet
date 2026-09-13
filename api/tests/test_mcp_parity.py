@@ -189,7 +189,7 @@ def listed(groups: str | None) -> list[Any]:
 
 
 def test_tools_list_advertises_a_name_description_and_object_schema_for_every_tool() -> None:
-    tools = listed("backlog,ingestion,sources,episodes,feed,highlights,ops,admin")
+    tools = listed(",".join((*DEFAULT_GROUPS, *OPT_IN_GROUPS)))
     assert {tool.name for tool in tools} == {t.name for t in ALL_TOOLS}
     for tool in tools:
         assert tool.description and len(tool.description) > 40, tool.name

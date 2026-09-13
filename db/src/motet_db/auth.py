@@ -233,7 +233,13 @@ def session_for_token(conn: psycopg.Connection[Any], token: str) -> AuthSession 
 
 
 def delete_session(conn: psycopg.Connection[Any], session_id: str) -> bool:
-    """Revoke one session. True when a row went away."""
+    """Revoke one session. True when a row went away.
+
+    When the session is an MCP client's access token, the refresh token issued beside it goes
+    too (motet#111): otherwise `/v1/auth/logout` on that token would revoke it for as long as
+    it took the client to mint the next one.
+    """
+    conn.execute("DELETE FROM mcp_oauth_refresh_tokens WHERE session_id = %s", (session_id,))
     return bool(conn.execute("DELETE FROM auth_sessions WHERE id = %s", (session_id,)).rowcount)
 
 

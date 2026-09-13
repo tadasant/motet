@@ -258,7 +258,7 @@ Nudge = Annotated[DrainNudge, Depends(drain_nudge)]
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(target: FastAPI) -> AsyncIterator[None]:
     """Refuse to serve at all rather than serve a request we cannot fulfil.
 
     An unknown model slug or a nonsense effort stops the process here, where Cloud Run
@@ -339,7 +339,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         # The MCP transport's task group. Without it the first /mcp request fails with
         # "Task group is not initialized" — the step every mounted MCP server forgets.
-        async with MCP.running():
+        async with target.state.mcp.running():
             yield
     finally:
         # Cloud Run stops a revision with SIGTERM, and the OTel SDK's own `atexit` hook
@@ -369,6 +369,10 @@ app = FastAPI(
 # modules call this module's handlers, so a static import would make `main` and the tools
 # one import cycle, and a type checker resolves a cycle in whatever order it likes.
 MCP: Any = importlib.import_module("motet_api.mcp.server").mount(app.router.routes)
+# The lifespan runs the mount that belongs to *its* app, not whatever `MCP` names now: a
+# reload of this module re-runs it in the same globals, so `MCP` would name a new mount
+# while an app built before the reload kept routing to the old one, which never starts.
+app.state.mcp = MCP
 
 
 def configure_cors(target: FastAPI, config: Settings) -> None:

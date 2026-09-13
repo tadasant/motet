@@ -1,5 +1,8 @@
 """Motet as the OAuth authorization server for its own ``/mcp`` (motet#111, pick C2).
 
+Not to be confused with ``motet_sources.mcp_oauth`` (motet#102), which is the opposite
+direction: Motet as a *client* of somebody else's MCP server.
+
 **Why Motet is the issuer.** Per-user auth needs something to issue tokens a client can
 obtain on its own, and Google cannot be that: its access tokens are not audience-bound to
 Motet, and it offers no dynamic client registration, so a generic MCP client could not even
@@ -35,7 +38,9 @@ them the OAuth endpoints answer 404, ``/mcp`` still takes the ``/v1`` bearer, an
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import re
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -52,6 +57,7 @@ from mcp.server.auth.provider import (
     AuthorizeError,
     IdentityAssertionParams,
     RefreshToken,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -90,6 +96,44 @@ MCP_PATH: Final = "/mcp"
 MCP_STATE_PREFIX: Final = "mcp."
 
 PROTECTED_RESOURCE_PATH: Final = "/.well-known/oauth-protected-resource" + MCP_PATH
+
+#: Schemes that run or render in the browser's own origin rather than hand off to a client.
+REFUSED_REDIRECT_SCHEMES: Final = frozenset(
+    {"javascript", "data", "vbscript", "file", "blob", "about"}
+)
+
+#: What one unauthenticated registration may store. A client needs a handful of redirect URIs
+#: and a name; anything larger is a table-filling request rather than a client.
+MAX_REDIRECT_URIS: Final = 10
+MAX_CLIENT_METADATA_BYTES: Final = 8_000
+
+
+def redirect_uri_allowed(uri: str) -> bool:
+    """Whether Motet will ever send a browser to this MCP client redirect URI.
+
+    **Registration is unauthenticated, and the SPA navigates to this URI with the code in it**,
+    so a ``javascript:`` or ``data:`` URI would be a stranger's script running on the SPA's
+    origin, where the session token lives, whichever consent button was pressed. Allowed:
+    ``https``; ``http`` on a loopback address, RFC 8252's native-app redirect; and a
+    private-use scheme such as ``vscode:``. Checked at registration and again when the code
+    is minted, because a row stored before this check existed is still a row.
+
+    Keep in step with ``isSafeClientRedirect`` in ``web/src/oauth.ts``.
+    """
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    if not scheme or scheme in REFUSED_REDIRECT_SCHEMES:
+        return False
+    if scheme == "https":
+        return bool(parts.hostname)
+    if scheme == "http":
+        return parts.hostname in ("localhost", "127.0.0.1", "::1")
+    return re.fullmatch(r"[a-z][a-z0-9+.\-]*", scheme) is not None
+
+
 AUTHORIZATION_SERVER_PATH: Final = "/.well-known/oauth-authorization-server"
 
 
@@ -118,7 +162,9 @@ def oauth_setup(config: Settings) -> OAuthSetup | None:
             "authorization server's issuer must be https (RFC 8414)"
         )
         return None
-    if parts.query or parts.fragment:
+    # The endpoints are served at the root, so an issuer with a path would advertise
+    # `{issuer}/authorize` at an address nothing answers.
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
         return None
     return OAuthSetup(
         issuer=issuer,
@@ -207,13 +253,31 @@ class MotetOAuthProvider:
         return None if info is None else OAuthClientInformationFull.model_validate(info)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        uris = [str(uri) for uri in client_info.redirect_uris or []]
+        if not uris or len(uris) > MAX_REDIRECT_URIS:
+            raise RegistrationError(
+                "invalid_redirect_uri", f"Register between 1 and {MAX_REDIRECT_URIS} redirect URIs."
+            )
+        if not all(redirect_uri_allowed(uri) for uri in uris):
+            raise RegistrationError(
+                "invalid_redirect_uri",
+                "A redirect URI must be https, http on a loopback address, "
+                "or a private-use scheme.",
+            )
+        stored = client_info.model_dump(mode="json", exclude_none=True)
+        if len(json.dumps(stored)) > MAX_CLIENT_METADATA_BYTES:
+            raise RegistrationError(
+                "invalid_client_metadata",
+                f"Client metadata is limited to {MAX_CLIENT_METADATA_BYTES} bytes.",
+            )
+
         def work(conn: psycopg.Connection[Any]) -> None:
             # Registration is unauthenticated, so it is also where the table is bounded.
             mcp_oauth.purge_unused_clients(conn)
             mcp_oauth.register_client(
                 conn,
                 client_id=client_info.client_id or "",
-                client_info=client_info.model_dump(mode="json", exclude_none=True),
+                client_info=stored,
             )
 
         await _db(work)
@@ -485,6 +549,13 @@ def complete_authorization(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "The MCP client that asked is no longer registered. Start again from the client.",
+        )
+
+    if not redirect_uri_allowed(request["redirect_uri"]):
+        # A client registered before registration checked this. Nothing is minted for it.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The MCP client that asked registered a redirect Motet will not send a browser to.",
         )
 
     authorization_code = auth_repo.new_session_token()

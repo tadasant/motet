@@ -1,5 +1,8 @@
 """The rows behind Motet's OAuth authorization server for MCP clients (motet#111).
 
+Motet as the *issuer*. ``motet_sources.mcp_oauth`` (motet#102) is the other direction:
+Motet as a client of a remote MCP server, whose state lives on ``connectors``.
+
 **Per-user auth for ``/mcp`` was Tadas's pick** ("C2", 2026-09-13): an MCP client does not
 hold ``MOTET_API_TOKEN``, it registers itself, sends its user through a Google sign-in, and
 gets a grant of its own. What that grant *is* is the design, and it is deliberately small:

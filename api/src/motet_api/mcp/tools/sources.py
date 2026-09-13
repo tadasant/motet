@@ -26,7 +26,7 @@ _REDIRECT = Field(
 )
 
 
-def _consent_redirect(config: Settings, given: str | None) -> str:
+def consent_redirect(config: Settings, given: str | None) -> str:
     if given:
         return given
     if config.app_base_url:
@@ -68,7 +68,7 @@ def connect_source(
             body=ConnectSourceRequest(
                 name=name,
                 query=query,
-                redirect_uri=_consent_redirect(c.config, redirect_uri),
+                redirect_uri=consent_redirect(c.config, redirect_uri),
             ),
             conn=c.conn,
             user_id=c.user_id,
@@ -131,7 +131,7 @@ def reauthorize_source(
 
     def call(c: RouteCall) -> ConnectSourceResponse:
         return routes.reauthorize_source(
-            body=ReauthorizeSourceRequest(redirect_uri=_consent_redirect(c.config, redirect_uri)),
+            body=ReauthorizeSourceRequest(redirect_uri=consent_redirect(c.config, redirect_uri)),
             conn=c.conn,
             user_id=c.user_id,
             source_id=source_id,

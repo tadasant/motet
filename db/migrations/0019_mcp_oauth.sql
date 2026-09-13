@@ -79,3 +79,14 @@ CREATE INDEX mcp_oauth_refresh_tokens_expiry_idx ON mcp_oauth_refresh_tokens (ex
 -- and so deleting a client's registration takes its live tokens with it.
 ALTER TABLE auth_sessions
     ADD COLUMN mcp_client_id text REFERENCES mcp_oauth_clients (client_id) ON DELETE CASCADE;
+
+-- --- what the unused-client sweep and revocation look up by ---------------------------------
+
+-- Registration is unauthenticated and sweeps unused clients as it goes, so the sweep's three
+-- `NOT EXISTS` probes must not be scans; and revoking one access token deletes the refresh
+-- token issued beside it by `session_id`.
+CREATE INDEX mcp_oauth_codes_client_idx ON mcp_oauth_codes (client_id);
+CREATE INDEX mcp_oauth_refresh_tokens_client_idx ON mcp_oauth_refresh_tokens (client_id);
+CREATE INDEX mcp_oauth_refresh_tokens_session_idx ON mcp_oauth_refresh_tokens (session_id);
+CREATE INDEX auth_sessions_mcp_client_idx ON auth_sessions (mcp_client_id)
+    WHERE mcp_client_id IS NOT NULL;

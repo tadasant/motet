@@ -139,3 +139,30 @@ describe('McpAuthorizeCallback', () => {
     expect(navigate).not.toHaveBeenCalled()
   })
 })
+
+describe('McpAuthorizeCallback with a hostile client', () => {
+  it('offers no button when the client registered a redirect that would run script here', async () => {
+    // A stranger can register any client; `location.assign` on a `javascript:` URI would run
+    // their script on this origin whichever button the person pressed.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          ...AUTHORIZATION,
+          redirect_url: 'javascript:alert(document.domain)//?code=mcp_code_1',
+          deny_url: 'javascript:alert(document.domain)//?error=access_denied',
+        }),
+      })) as unknown as typeof fetch,
+    )
+    const navigate = vi.fn()
+    render(<McpAuthorizeCallback callback={GRANTED} onDone={() => {}} navigate={navigate} />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('will not open')
+    expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull()
+    expect(navigate).not.toHaveBeenCalled()
+  })
+})

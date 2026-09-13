@@ -10,10 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from . import admin, backlog, episodes, feed, highlights, ingestion, ops, sources
+from . import admin, backlog, connectors, episodes, feed, highlights, ingestion, ops, sources
 
 IMPLEMENTATIONS: dict[str, Callable[..., Any]] = {
     fn.__name__: fn
-    for module in (backlog, ingestion, sources, episodes, feed, highlights, ops, admin)
+    for module in (backlog, ingestion, sources, connectors, episodes, feed, highlights, ops, admin)
     for fn in module.TOOLS
 }

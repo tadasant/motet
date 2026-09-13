@@ -2533,7 +2533,7 @@ the check in front of it the part to get right.
 
 ### Motet is an MCP server, and the route table is what keeps it at parity
 
-`api/src/motet_api/mcp/`, `/mcp` on `motet-api`, migration 0018,
+`api/src/motet_api/mcp/`, `/mcp` on `motet-api`, migration 0019,
 `web/src/screens/McpAuthorizeCallback.tsx`. **Decided by Tadas, 2026-09-13, on motet#111.**
 The issue laid out the options and recommended one of each. The implementing session put them
 to him as a one-line list (the design comment on the issue), and he answered in Zimmer session
@@ -2634,7 +2634,7 @@ human's.
 **What this adds, read against invariant 12:** a second contract on the existing API (`/mcp`
 and the authorization server's endpoints), one SDK on `motet-api` only (`mcp>=2.2,<3`, and
 `bin/build-images` asserts it is in the image), three tables and two columns used for exactly one
-thing each (migration 0018), and one route. No deployable, datastore, queue mechanism, stage or
+thing each (migration 0019), and one route. No deployable, datastore, queue mechanism, stage or
 model call.
 
 ### The landing page is a static site Cloudflare builds, and its one write is the waitlist

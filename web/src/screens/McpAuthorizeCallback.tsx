@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, type McpAuthorization, api } from '../api/client'
-import { type OAuthCallback as Callback, beginConsent } from '../oauth'
+import { type OAuthCallback as Callback, beginConsent, isSafeClientRedirect } from '../oauth'
 
 type Status =
   | { kind: 'busy' }
@@ -64,7 +64,18 @@ export function McpAuthorizeCallback({
 
     api
       .completeMcpAuthorization(callback.state, callback.code)
-      .then((authorization) => setStatus({ kind: 'done', authorization }))
+      .then((authorization) =>
+        isSafeClientRedirect(authorization.redirect_url) &&
+        isSafeClientRedirect(authorization.deny_url)
+          ? setStatus({ kind: 'done', authorization })
+          : setStatus({
+              kind: 'error',
+              // Never offer a button that would navigate there: see isSafeClientRedirect.
+              message:
+                `${authorization.client_name} asked to be sent back to an address Motet will ` +
+                'not open, so it was not connected and nothing was sent to it.',
+            }),
+      )
       .catch((err) =>
         setStatus({
           kind: 'error',
@@ -109,9 +120,10 @@ export function McpAuthorizeCallback({
             {status.authorization.email}.
           </p>
           <p className="hint">
-            Allowing it sends you back to {status.authorization.redirect_host}, and the agent can
-            then read your backlog, make episodes and change settings, as you. Nothing is sent to
-            it until you choose.
+            Allowing it sends you back to {status.authorization.redirect_host}. The agent can then
+            do what you can do in Motet, as you: read your backlog, make episodes (which spends
+            money), connect sources and change settings. It never gets the operator view. Nothing
+            is sent to it until you choose.
           </p>
           <div className="row">
             <button

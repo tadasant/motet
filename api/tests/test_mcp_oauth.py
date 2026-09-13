@@ -20,8 +20,9 @@ import pytest
 from fastapi.testclient import TestClient
 from mcp.shared.inbound import CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY
 from motet_api import app
-from motet_api.auth import ALLOWED_EMAILS_ENV, FAKE_EMAIL
+from motet_api.auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV, FAKE_EMAIL
 from motet_api.deps import reset_store
+from motet_db import mcp_oauth
 
 TOKEN = "test-api-token"
 HOST = "api.motet.test"
@@ -304,4 +305,113 @@ class TestTheGrantAfterwards:
         response = api.post("/v1/auth/logout-all", headers={"Authorization": f"Bearer {TOKEN}"})
         assert response.status_code == 200
         assert whoami(api, tokens["access_token"]).status_code == 401
+        assert refresh(api, client_id, tokens["refresh_token"]).status_code == 400
+
+
+class TestHostileClients:
+    """Registration is unauthenticated, so every field of it is a stranger's input."""
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "javascript:alert(document.domain)//",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "http://attacker.example/callback",
+        ],
+    )
+    def test_a_redirect_that_is_not_a_client_is_refused_at_registration(
+        self, api: TestClient, uri: str
+    ) -> None:
+        response = api.post(
+            "/register",
+            json={
+                "client_name": "Claude Desktop",
+                "redirect_uris": [uri],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_redirect_uri"
+
+    @pytest.mark.parametrize(
+        "uri", ["https://client.example/cb", "http://127.0.0.1:9000/cb", "vscode://pub.ext/cb"]
+    )
+    def test_https_loopback_and_a_desktop_scheme_register(self, api: TestClient, uri: str) -> None:
+        response = api.post(
+            "/register", json={"redirect_uris": [uri], "token_endpoint_auth_method": "none"}
+        )
+        assert response.status_code == 201, response.text
+
+    def test_registration_is_bounded(self, api: TestClient) -> None:
+        too_many = [f"https://client.example/cb{i}" for i in range(11)]
+        many = api.post(
+            "/register", json={"redirect_uris": too_many, "token_endpoint_auth_method": "none"}
+        )
+        assert many.status_code == 400 and many.json()["error"] == "invalid_redirect_uri"
+        huge = api.post(
+            "/register",
+            json={
+                "client_name": "x" * 9000,
+                "redirect_uris": [CLIENT_REDIRECT],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        assert huge.status_code == 400 and huge.json()["error"] == "invalid_client_metadata"
+
+    def test_a_client_stored_before_the_check_gets_no_code(
+        self, api: TestClient, db: psycopg.Connection[Any]
+    ) -> None:
+        hostile = "javascript:alert(document.domain)//"
+        mcp_oauth.register_client(
+            db,
+            client_id="stored-before",
+            client_info={
+                "client_id": "stored-before",
+                "redirect_uris": [hostile],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+            },
+        )
+        db.commit()
+        spa_code, state, _ = authorize(api, "stored-before", redirect_uri=hostile)
+        refused = api.post("/v1/auth/mcp/callback", json={"state": state, "code": spa_code})
+        assert refused.status_code == 400
+        assert db.execute("SELECT count(*) AS n FROM mcp_oauth_codes").fetchone()["n"] == 0
+
+    def test_an_issuer_with_a_path_is_not_configured(
+        self, api: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MOTET_PUBLIC_BASE_URL", f"{ISSUER}/api")
+        assert api.get("/.well-known/oauth-authorization-server").status_code == 404
+
+
+class TestWhatAGrantCanReach:
+    def test_a_grant_is_never_an_operator_even_when_its_approver_is(
+        self, api: TestClient, db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(ADMIN_EMAILS_ENV, FAKE_EMAIL)
+        _, tokens = grant(api)
+        as_grant = {"Authorization": f"Bearer {tokens['access_token']}"}
+        refused = api.get("/v1/admin/overview", headers=as_grant)
+        assert refused.status_code == 403
+        assert "MCP client" in refused.json()["detail"]
+        assert api.get("/v1/auth/session", headers=as_grant).json()["admin"] is False
+        # The same person in a browser is still the operator.
+        from motet_db import auth as auth_repo
+        from motet_db import repo
+
+        browser = auth_repo.new_session_token()
+        auth_repo.create_session(db, user_id=repo.OWNER_USER_ID, email=FAKE_EMAIL, token=browser)
+        db.commit()
+        as_browser = {"Authorization": f"Bearer {browser}"}
+        assert api.get("/v1/admin/overview", headers=as_browser).status_code == 200
+
+    def test_logging_out_the_access_token_takes_its_refresh_token_too(
+        self, api: TestClient
+    ) -> None:
+        client_id, tokens = grant(api)
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+        assert api.post("/v1/auth/logout", headers=headers).status_code == 204
         assert refresh(api, client_id, tokens["refresh_token"]).status_code == 400
