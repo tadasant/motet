@@ -652,3 +652,95 @@ class RevokedResponse(BaseModel):
     revoked: int = Field(
         description="Sessions destroyed, including the caller's own if it had one."
     )
+
+
+# --- admin overview ------------------------------------------------------------------
+
+
+class AdminSourceItemCounts(BaseModel):
+    pending: int
+    integrated: int
+    failed: int
+
+
+class AdminNewsItemCounts(BaseModel):
+    unread: int
+    read: int
+
+
+class AdminEpisodeCounts(BaseModel):
+    pending: int
+    scripting: int
+    rendering: int
+    ready: int
+    failed: int
+
+
+class AdminJobCounts(BaseModel):
+    ready: int
+    running: int
+    done: int
+    failed: int
+
+
+class AdminUserResponse(BaseModel):
+    """One user's counts per state, across every table that carries a `user_id`."""
+
+    user_id: str
+    email: str | None
+    source_items: AdminSourceItemCounts
+    news_items: AdminNewsItemCounts
+    episodes: AdminEpisodeCounts
+    jobs: AdminJobCounts
+
+
+class AdminQueueResponse(BaseModel):
+    """One queue's counts per job state, plus the two liveness facts an operator wants."""
+
+    queue: str
+    ready: int
+    running: int
+    done: int
+    failed: int
+    oldest_ready_age_s: float | None = Field(
+        description="Seconds since the oldest `ready` job on this queue was created; null if none."
+    )
+    last_heartbeat_at: datetime | None = Field(
+        description="When a worker last drained this queue; null if none ever has."
+    )
+
+
+class AdminJobResponse(BaseModel):
+    """One job row, with its payload resolved to a user and a domain subject."""
+
+    id: int
+    queue: str
+    state: str
+    attempts: int
+    user_id: str | None = Field(
+        description=(
+            "The user the job's subject belongs to, resolved from the payload; null if "
+            "unresolvable."
+        )
+    )
+    subject: str | None = Field(
+        description="The domain id the job is about: a source item, an episode, or a source."
+    )
+    last_error: str | None
+    run_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    locked_at: datetime | None
+
+
+class AdminOverviewResponse(BaseModel):
+    """The whole deployment at a glance, across every user.
+
+    Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
+    for. Every user and every pipeline queue is present, at zero when empty.
+    """
+
+    generated_at: datetime
+    users: list[AdminUserResponse]
+    queues: list[AdminQueueResponse]
+    jobs: list[AdminJobResponse] = Field(description="The newest 200 jobs, any state.")

@@ -32,6 +32,7 @@ import {
   setToken,
 } from './api/client'
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
+import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
 import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
 import { OAuthCallback } from './screens/OAuthCallback'
@@ -54,7 +55,26 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'sources', label: 'Sources' },
 ]
 
+// PROTOTYPE: /admin is a second path, handled the way /oauth/callback is.
+const ADMIN = globalThis.window?.location.pathname === '/admin'
+
 export default function App() {
+  if (ADMIN) return <AdminApp />
+  return <MainApp />
+}
+
+function AdminApp() {
+  return (
+    <main className="wide">
+      <header>
+        <h1>Motet</h1>
+      </header>
+      <Admin />
+    </main>
+  )
+}
+
+function MainApp() {
   const [tab, setTab] = useState<Tab>('paste')
   const [items, setItems] = useState<NewsItem[]>([])
   // What has been pasted and is not a news item yet. Held here rather than in the backlog
