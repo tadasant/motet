@@ -552,7 +552,7 @@ def test_the_extract_index_covers_the_open_job_lookup(db: psycopg.Connection[Any
 def test_the_poll_pre_check_uses_an_index_over_every_extract_job_state(
     db: psycopg.Connection[Any],
 ) -> None:
-    """Migration 0012's index is the one ``phase2.unqueued_message_ids`` uses.
+    """Migration 0013's index is the one ``phase2.unqueued_message_ids`` uses.
 
     The pre-check has to see ``done`` extract jobs too — a message extraction skipped has no
     source item, only a finished job — so 0008's open-jobs index cannot serve it, and without

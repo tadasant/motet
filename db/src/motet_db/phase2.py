@@ -388,7 +388,7 @@ def source_item_exists(conn: psycopg.Connection[Any], *, source_id_: str, extern
 
 
 #: The poll's pre-check, hoisted so a test can ``EXPLAIN`` the statement that actually runs.
-#: The job half is served by migration 0012's ``jobs_extract_message_idx``; the source-item
+#: The job half is served by migration 0013's ``jobs_extract_message_idx``; the source-item
 #: half by the ``(source_id, external_id)`` unique index.
 UNQUEUED_MESSAGE_IDS_SQL = """
     SELECT m.id
