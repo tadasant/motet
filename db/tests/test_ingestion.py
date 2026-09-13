@@ -549,6 +549,28 @@ def test_the_extract_index_covers_the_open_job_lookup(db: psycopg.Connection[Any
     assert any("jobs_extract_open_idx" in str(row) for row in plan), plan
 
 
+def test_the_poll_pre_check_uses_an_index_over_every_extract_job_state(
+    db: psycopg.Connection[Any],
+) -> None:
+    """Migration 0012's index is the one ``phase2.unqueued_message_ids`` uses.
+
+    The pre-check has to see ``done`` extract jobs too — a message extraction skipped has no
+    source item, only a finished job — so 0008's open-jobs index cannot serve it, and without
+    one of its own this is a sequential scan of ``jobs`` on every page of every poll.
+    ``EXPLAIN`` runs the hoisted statement itself, not a transcription of it.
+    """
+    source_id = gmail_source(db)
+    enqueue_extract(db, source_id, "hhh", state="done")
+    db.execute("SET enable_seqscan = off")
+    plan = db.execute(
+        f"EXPLAIN {phase2.UNQUEUED_MESSAGE_IDS_SQL}", (["hhh", "iii"], source_id, source_id)
+    ).fetchall()
+    assert any("jobs_extract_message_idx" in str(row) for row in plan), plan
+    assert phase2.unqueued_message_ids(db, source_id_=source_id, external_ids=["hhh", "iii"]) == [
+        "iii"
+    ], "a done job still counts as handed on"
+
+
 class TestWorkerHeartbeats:
     """Is anything draining the queue? — the fact motet#38 turned on.
 

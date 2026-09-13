@@ -387,6 +387,25 @@ def source_item_exists(conn: psycopg.Connection[Any], *, source_id_: str, extern
     return row is not None
 
 
+#: The poll's pre-check, hoisted so a test can ``EXPLAIN`` the statement that actually runs.
+#: The job half is served by migration 0012's ``jobs_extract_message_idx``; the source-item
+#: half by the ``(source_id, external_id)`` unique index.
+UNQUEUED_MESSAGE_IDS_SQL = """
+    SELECT m.id
+    FROM unnest(%s::text[]) WITH ORDINALITY AS m(id, n)
+    WHERE NOT EXISTS (
+            SELECT 1 FROM source_items s WHERE s.source_id = %s AND s.external_id = m.id
+          )
+      AND NOT EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.queue = 'extract'
+              AND j.payload ->> 'source_id' = %s
+              AND j.payload ->> 'message_id' = m.id
+          )
+    ORDER BY m.n
+"""
+
+
 def unqueued_message_ids(
     conn: psycopg.Connection[Any], *, source_id_: str, external_ids: Sequence[str]
 ) -> list[str]:
@@ -406,24 +425,7 @@ def unqueued_message_ids(
     """
     if not external_ids:
         return []
-    rows = _all(
-        conn,
-        """
-        SELECT m.id
-        FROM unnest(%s::text[]) WITH ORDINALITY AS m(id, n)
-        WHERE NOT EXISTS (
-                SELECT 1 FROM source_items s WHERE s.source_id = %s AND s.external_id = m.id
-              )
-          AND NOT EXISTS (
-                SELECT 1 FROM jobs j
-                WHERE j.queue = 'extract'
-                  AND j.payload ->> 'source_id' = %s
-                  AND j.payload ->> 'message_id' = m.id
-              )
-        ORDER BY m.n
-        """,
-        (list(external_ids), source_id_, source_id_),
-    )
+    rows = _all(conn, UNQUEUED_MESSAGE_IDS_SQL, (list(external_ids), source_id_, source_id_))
     out: list[str] = []
     for row in rows:
         if row["id"] not in out:
