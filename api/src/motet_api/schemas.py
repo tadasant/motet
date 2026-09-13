@@ -644,6 +644,13 @@ class SessionResponse(BaseModel):
     login_configured: bool = Field(
         description="Whether this deployment can complete a Google sign-in at all."
     )
+    admin: bool = Field(
+        description=(
+            "Whether this caller may read /v1/admin/*: a signed-in session whose address is "
+            "on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open "
+            "deployment, and for everybody when MOTET_ADMIN_EMAILS is unset."
+        )
+    )
 
 
 class RevokedResponse(BaseModel):
@@ -734,13 +741,22 @@ class AdminJobResponse(BaseModel):
 
 
 class AdminOverviewResponse(BaseModel):
-    """The whole deployment at a glance, across every user.
+    """The whole deployment at a glance, across every user. Admins only.
 
-    Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
-    for. Every user and every pipeline queue is present, at zero when empty.
+    Aggregates are always for everyone; only `jobs` is paged, and filtered when a
+    `user_id` is asked for. Every user and every pipeline queue is present, at zero when
+    empty.
     """
 
     generated_at: datetime
     users: list[AdminUserResponse]
     queues: list[AdminQueueResponse]
-    jobs: list[AdminJobResponse] = Field(description="The newest 200 jobs, any state.")
+    jobs: list[AdminJobResponse] = Field(
+        description=(
+            "One page of jobs in any state, newest first (by id). `limit` long at most; "
+            "`user_id` narrows it to jobs resolved to that user."
+        )
+    )
+    jobs_next_before: int | None = Field(
+        description=("Pass as `before` for the next, older page; null when this page is the last.")
+    )

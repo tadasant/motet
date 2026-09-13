@@ -39,6 +39,7 @@ export type Connection = PostResponse<'/v1/sources/connect'>
 export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
+export type AdminOverview = GetResponse<'/v1/admin/overview'>
 
 export class ApiError extends Error {
   constructor(
@@ -297,4 +298,14 @@ export const api = {
       '/v1/episodes/{episode_id}/listened',
       `/v1/episodes/${encodeURIComponent(id)}/listened`,
     ),
+  // The operator view, across every user. Admins only: the API answers 403 to anybody
+  // else, and the SPA only links to it when `/v1/auth/session` says `admin`. `before` is
+  // the previous page's `jobs_next_before`; the aggregates ignore both options.
+  adminOverview: (options: { userId?: string | null; before?: number | null } = {}) => {
+    const query = new URLSearchParams()
+    if (options.userId) query.set('user_id', options.userId)
+    if (options.before) query.set('before', String(options.before))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return apiGetPath('/v1/admin/overview', `/v1/admin/overview${suffix}`)
+  },
 }

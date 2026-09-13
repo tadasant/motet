@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
 import type {
+  AdminOverview,
   Episode,
   HealthResponse,
   IngestionItem,
@@ -74,6 +75,7 @@ const SESSION: SessionInfo = {
   email: 'owner@motet.test',
   expires_at: '2026-09-23T00:00:00Z',
   login_configured: true,
+  admin: false,
 }
 
 const GMAIL_SOURCE: Source = {
@@ -905,6 +907,114 @@ describe('signing out', () => {
 
     await screen.findByRole('heading', { name: 'Paste in' })
     expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull()
+  })
+})
+
+describe('the admin view', () => {
+  const ADMIN_SESSION: SessionInfo = { ...SESSION, email: 'operator@motet.test', admin: true }
+
+  const job = (id: number): AdminOverview['jobs'][number] => ({
+    id,
+    queue: 'integrate',
+    state: 'failed',
+    attempts: 5,
+    user_id: 'motet-owner',
+    subject: `si_${id}`,
+    last_error: 'upstream timed out',
+    run_at: '2026-09-13T00:00:00Z',
+    created_at: '2026-09-13T00:00:00Z',
+    updated_at: '2026-09-13T00:00:00Z',
+    locked_at: null,
+  })
+
+  const OVERVIEW: AdminOverview = {
+    generated_at: '2026-09-13T00:00:00Z',
+    queues: [
+      {
+        queue: 'integrate',
+        ready: 3,
+        running: 1,
+        done: 40,
+        failed: 2,
+        oldest_ready_age_s: 12,
+        last_heartbeat_at: '2026-09-13T00:00:00Z',
+      },
+    ],
+    users: [
+      {
+        user_id: 'motet-owner',
+        email: null,
+        source_items: { pending: 3, integrated: 40, failed: 2 },
+        news_items: { unread: 12, read: 20 },
+        episodes: { pending: 0, scripting: 0, rendering: 0, ready: 1, failed: 0 },
+        jobs: { ready: 3, running: 1, done: 40, failed: 2 },
+      },
+    ],
+    jobs: [job(9), job(8)],
+    jobs_next_before: 8,
+  }
+
+  const overviewCalls = (calls: { url: string }[]) =>
+    calls.filter((call) => call.url.includes('/v1/admin/overview'))
+
+  it('links to the admin view only for a caller the server says is an admin', async () => {
+    mockApi({ '/v1/auth/session': ADMIN_SESSION })
+    const { unmount } = render(<App />)
+    const link = await screen.findByRole('link', { name: 'Admin' })
+    expect(link.getAttribute('href')).toBe('/admin')
+    unmount()
+
+    mockApi()
+    render(<App />)
+    await screen.findByText('owner@motet.test', { exact: false })
+    expect(screen.queryByRole('link', { name: 'Admin' })).toBeNull()
+  })
+
+  it('refuses a signed-in non-admin at /admin without asking for anybody’s data', async () => {
+    window.history.replaceState({}, '', '/admin')
+    const calls = mockApi({ '/v1/admin/overview': OVERVIEW })
+    render(<App />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('is not an admin')
+    expect(overviewCalls(calls)).toEqual([])
+  })
+
+  it('refuses the shared API token at /admin, which belongs to no person', async () => {
+    window.history.replaceState({}, '', '/admin')
+    const calls = mockApi({
+      '/v1/auth/session': { ...SESSION, how: 'token', email: null, expires_at: null },
+      '/v1/admin/overview': OVERVIEW,
+    })
+    render(<App />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('shared API token')
+    expect(overviewCalls(calls)).toEqual([])
+  })
+
+  it('renders the overview for an admin and pages through older jobs', async () => {
+    window.history.replaceState({}, '', '/admin')
+    const calls = mockApi({ '/v1/auth/session': ADMIN_SESSION, '/v1/admin/overview': OVERVIEW })
+    render(<App />)
+
+    expect(await screen.findByText('si_9')).toBeDefined()
+    expect(screen.getAllByText('upstream timed out', { selector: 'td' })).toHaveLength(2)
+    expect(overviewCalls(calls)[0]?.url).toMatch(/\/v1\/admin\/overview$/)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Older jobs' }))
+    await waitFor(() =>
+      expect(overviewCalls(calls).at(-1)?.url).toMatch(/\/v1\/admin\/overview\?before=8$/),
+    )
+  })
+
+  it('scopes the jobs to a user on the server when a user row is clicked', async () => {
+    window.history.replaceState({}, '', '/admin')
+    const calls = mockApi({ '/v1/auth/session': ADMIN_SESSION, '/v1/admin/overview': OVERVIEW })
+    render(<App />)
+
+    fireEvent.click(await screen.findByText('motet-owner', { selector: 'strong' }))
+    await waitFor(() =>
+      expect(overviewCalls(calls).at(-1)?.url).toMatch(/\?user_id=motet-owner$/),
+    )
   })
 })
 

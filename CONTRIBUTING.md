@@ -172,7 +172,12 @@ network. Without the allowlist, "Sign in with Google" answers 503 saying so — 
 deny everybody, deliberately.
 
 You do not *need* it: with `MOTET_API_TOKEN` unset the API is open, `/v1/auth/session`
-reports `how: "open"`, and the SPA skips the sign-in screen and just works. Reach the SPA
+reports `how: "open"`, and the SPA skips the sign-in screen and just works.
+
+**The admin view at `/admin` is the exception: it always needs a signed-in session.** It
+reads every user's data, so an open deployment and the shared API token are both refused
+(403). Set any `MOTET_API_TOKEN`, add `MOTET_ADMIN_EMAILS=owner@motet.test` beside the
+allowlist above, and sign in; an "Admin" link then appears next to Sign out. Reach the SPA
 at `localhost` rather than `127.0.0.1` if you are testing either OAuth flow — Google
 matches a redirect URI as an exact string, and only one of those two is registered.
 

@@ -1038,9 +1038,18 @@ def admin_overview_queues(
 
 
 def admin_overview_jobs(
-    conn: psycopg.Connection[Any], *, user_id: str | None = None, limit: int = 200
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str | None = None,
+    before: int | None = None,
+    limit: int = 200,
 ) -> list[AdminJob]:
-    """The newest ``limit`` jobs in any state, each resolved to a user and a subject.
+    """Up to ``limit`` jobs in any state, newest first, each resolved to a user and a subject.
+
+    A keyset page on ``id``: ``before`` is the last id of the previous page, and only
+    smaller ids come back. ``id`` rather than ``created_at`` because it is unique — a
+    cursor on a timestamp two jobs share would skip one of them — and because a sequence
+    orders rows the way they were enqueued anyway.
 
     ``user_id`` filters on the *resolved* user, so a job whose payload points at a
     deleted row (and so resolves to nobody) is only ever listed unfiltered.
@@ -1049,11 +1058,12 @@ def admin_overview_jobs(
         conn,
         f"""
         SELECT * FROM ({_ADMIN_JOBS_SQL}) resolved
-        WHERE %(user_id)s::text IS NULL OR user_id = %(user_id)s
-        ORDER BY created_at DESC, id DESC
+        WHERE (%(user_id)s::text IS NULL OR user_id = %(user_id)s)
+          AND (%(before)s::bigint IS NULL OR id < %(before)s)
+        ORDER BY id DESC
         LIMIT %(limit)s
         """,
-        {"user_id": user_id, "limit": limit},
+        {"user_id": user_id, "before": before, "limit": limit},
     )
     return [
         AdminJob(

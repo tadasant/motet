@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from motet_inference.mode import current_mode
 
-from .auth import CLIENT_ID_ENV, allowed_emails
+from .auth import CLIENT_ID_ENV, admin_emails, allowed_emails
 
 API_TOKEN_ENV: Final = "MOTET_API_TOKEN"
 PUBLIC_BASE_URL_ENV: Final = "MOTET_PUBLIC_BASE_URL"
@@ -65,6 +65,9 @@ class Settings:
     #: only cares about the CORS policy, say — must land on "nobody signs in" rather than
     #: forcing every such caller to remember to say so.
     allowed_emails: frozenset[str] = frozenset()
+    #: Who may open the operator view, ``/v1/admin/*``. Empty means nobody — see
+    #: `motet_db.allowlist`. Defaulted closed for the same reason as the field above.
+    admin_emails: frozenset[str] = frozenset()
     #: Present only so that "is sign-in actually wired" is answerable. The secret half is
     #: never read here: the API resolves it when it completes a sign-in, not at startup.
     google_client_id: str | None = None
@@ -83,6 +86,7 @@ class Settings:
             ),
             feed_author=_clean(os.environ.get(FEED_AUTHOR_ENV)) or DEFAULT_FEED_AUTHOR,
             allowed_emails=allowed_emails(os.environ),
+            admin_emails=admin_emails(os.environ),
             google_client_id=_clean(os.environ.get(CLIENT_ID_ENV)),
         )
 

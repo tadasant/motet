@@ -126,23 +126,32 @@ components:
       title: AdminNewsItemCounts
       type: object
     AdminOverviewResponse:
-      description: 'The whole deployment at a glance, across every user.
+      description: 'The whole deployment at a glance, across every user. Admins only.
 
 
-        Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
+        Aggregates are always for everyone; only `jobs` is paged, and filtered when a
 
-        for. Every user and every pipeline queue is present, at zero when empty.'
+        `user_id` is asked for. Every user and every pipeline queue is present, at zero when
+
+        empty.'
       properties:
         generated_at:
           format: date-time
           title: Generated At
           type: string
         jobs:
-          description: The newest 200 jobs, any state.
+          description: One page of jobs in any state, newest first (by id). `limit` long at most; `user_id`
+            narrows it to jobs resolved to that user.
           items:
             $ref: '#/components/schemas/AdminJobResponse'
           title: Jobs
           type: array
+        jobs_next_before:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Pass as `before` for the next, older page; null when this page is the last.
+          title: Jobs Next Before
         queues:
           items:
             $ref: '#/components/schemas/AdminQueueResponse'
@@ -158,6 +167,7 @@ components:
       - users
       - queues
       - jobs
+      - jobs_next_before
       title: AdminOverviewResponse
       type: object
     AdminQueueResponse:
@@ -1070,6 +1080,12 @@ components:
         \ token too, which is what lets the SPA show \"signed in as\n\u2026\" or \"using an API token\"\
         \ without guessing from what it has in storage."
       properties:
+        admin:
+          description: 'Whether this caller may read /v1/admin/*: a signed-in session whose address is
+            on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open deployment, and
+            for everybody when MOTET_ADMIN_EMAILS is unset.'
+          title: Admin
+          type: boolean
         email:
           anyOf:
           - type: string
@@ -1093,6 +1109,7 @@ components:
       required:
       - how
       - login_configured
+      - admin
       title: SessionResponse
       type: object
     SmartRuleModel:
@@ -1350,26 +1367,50 @@ paths:
       - ops
   /v1/admin/overview:
     get:
-      description: 'The whole deployment at a glance, across every user.
-
-
-        Deployment state rather than user state, like ``/v1/processing``: the caller''s own
-
-        ``user_id`` is ignored, and the route takes it only to sit behind the same lock as
-
-        everything else under ``/v1``. The optional ``user_id`` query filters the job list;
-
-        the per-user and per-queue aggregates are always for everyone.'
+      description: "The whole deployment at a glance, across every user. Admins only.\n\nDeployment state\
+        \ rather than user state, like ``/v1/processing``: the caller's own\naccount plays no part in\
+        \ the answer. ``user_id``, ``before`` and ``limit`` shape the\njob list only; the per-user and\
+        \ per-queue aggregates are always for everyone.\n\n**The job list is a page, newest first, keyed\
+        \ on the job id.** A keyset cursor rather\nthan an offset because the list is polled while workers\
+        \ insert at its head: an offset\nwould shift under a reader every poll, and ``id < before`` does\
+        \ not. Rather than a time\nwindow because a window does not bound the response \u2014 one Gmail\
+        \ backfill puts a\nthousand rows into the last hour."
       operationId: admin_overview_v1_admin_overview_get
       parameters:
-      - in: query
+      - description: Only list jobs whose subject resolves to this user.
+        in: query
         name: user_id
         required: false
         schema:
           anyOf:
           - type: string
           - type: 'null'
+          description: Only list jobs whose subject resolves to this user.
           title: User Id
+      - description: "Only list jobs with an id below this one \u2014 the previous page's `jobs_next_before`.\
+          \ Omit for the newest page."
+        in: query
+        name: before
+        required: false
+        schema:
+          anyOf:
+          - minimum: 1
+            type: integer
+          - type: 'null'
+          description: "Only list jobs with an id below this one \u2014 the previous page's `jobs_next_before`.\
+            \ Omit for the newest page."
+          title: Before
+      - description: How many jobs to list.
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 200
+          description: How many jobs to list.
+          maximum: 500
+          minimum: 1
+          title: Limit
+          type: integer
       - in: header
         name: authorization
         required: false

@@ -55,21 +55,57 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'sources', label: 'Sources' },
 ]
 
-// PROTOTYPE: /admin is a second path, handled the way /oauth/callback is.
-const ADMIN = globalThis.window?.location.pathname === '/admin'
+// /admin is a second path, read once the way /oauth/callback is. The app shell (motet#88)
+// replaces both this and the tab strip with a section per URL.
+const ADMIN_PATH = '/admin'
 
 export default function App() {
-  if (ADMIN) return <AdminApp />
+  // Read in an initializer rather than at import, so the answer is the address the page
+  // was loaded at — and so a test can navigate before it renders.
+  const [admin] = useState(() => window.location.pathname === ADMIN_PATH)
+  if (admin) return <AdminApp />
   return <MainApp />
 }
 
+/**
+ * The operator view, shown only to a caller the server says is an admin.
+ *
+ * The session is asked *before* the overview, so somebody who is not an admin gets a
+ * sentence rather than a failed request for every user's data. That is presentation: the
+ * API refuses `/v1/admin/*` to them regardless of what this renders.
+ */
 function AdminApp() {
+  // undefined until the server has answered; null when it says nobody.
+  const [who, setWho] = useState<SessionInfo | null | undefined>(undefined)
+  useEffect(() => {
+    api
+      .session()
+      .then(setWho)
+      .catch(() => setWho(null))
+  }, [])
+
   return (
     <main className="wide">
       <header>
         <h1>Motet</h1>
       </header>
-      <Admin />
+      {who === undefined ? (
+        <p className="hint">Checking whether this account is an admin…</p>
+      ) : who?.admin ? (
+        <Admin />
+      ) : (
+        <section aria-labelledby="admin-heading">
+          <h2 id="admin-heading">Admin</h2>
+          <p role="alert">
+            {who === null
+              ? 'Sign in first — the admin view needs a signed-in account.'
+              : who.how === 'session'
+                ? `${who.email ?? 'This account'} is not an admin on this deployment.`
+                : 'The admin view needs a signed-in Google account; the shared API token is not one.'}
+          </p>
+          <a href="/">← app</a>
+        </section>
+      )}
     </main>
   )
 }
@@ -281,6 +317,14 @@ function MainApp() {
             <button type="button" onClick={signOut}>
               Sign out
             </button>
+            {/* Only for a caller the server says is an admin, so nobody is offered a
+                screen the API would refuse them. */}
+            {who.admin && (
+              <>
+                {' '}
+                <a href={ADMIN_PATH}>Admin</a>
+              </>
+            )}
           </p>
         )}
         {/* Hidden during the callback, and before there is anything to navigate: there is

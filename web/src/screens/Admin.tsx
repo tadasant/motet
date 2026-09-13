@@ -1,68 +1,19 @@
-// PROTOTYPE — the /admin view. Cross-user queue and pipeline visibility for an operator.
+// The /admin view: cross-user queue and pipeline visibility for an operator.
 //
 // Rendered when the page is loaded at /admin (see App.tsx), the same "one path, no router"
-// trick oauth.ts uses. No RBAC yet: it talks to GET /v1/admin/overview with whatever
-// credential the SPA already holds.
+// trick oauth.ts uses, and only once `/v1/auth/session` has said this caller is an admin.
+// That check is presentation; the control is server-side — every /v1/admin route answers
+// 403 to anyone not on MOTET_ADMIN_EMAILS, whatever this file renders.
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { apiBaseUrl, getToken } from '../api/client'
-
-// Hand-typed against the contract; swap for the generated schema type once the route is
-// in schema.gen.ts.
-type Counts = Record<string, number>
-type AdminUser = {
-  user_id: string
-  email: string | null
-  source_items: Counts
-  news_items: Counts
-  episodes: Counts
-  jobs: Counts
-}
-type AdminQueue = {
-  queue: string
-  ready: number
-  running: number
-  done: number
-  failed: number
-  oldest_ready_age_s: number | null
-  last_heartbeat_at: string | null
-}
-type AdminJob = {
-  id: number
-  queue: string
-  state: string
-  attempts: number
-  user_id: string | null
-  subject: string | null
-  last_error: string | null
-  run_at: string
-  created_at: string
-  updated_at: string
-  locked_at: string | null
-}
-type Overview = {
-  generated_at: string
-  users: AdminUser[]
-  queues: AdminQueue[]
-  jobs: AdminJob[]
-}
+import { type AdminOverview, ApiError, api } from '../api/client'
 
 const POLL_MS = 3_000
-const SOURCE_STATES = ['pending', 'integrated', 'failed']
-const NEWS_STATES = ['unread', 'read']
-const EPISODE_STATES = ['pending', 'scripting', 'rendering', 'ready', 'failed']
-const JOB_STATES = ['ready', 'running', 'done', 'failed']
-
-async function fetchOverview(userId: string | null): Promise<Overview> {
-  const query = userId ? `?user_id=${encodeURIComponent(userId)}` : ''
-  const token = getToken()
-  const response = await fetch(`${apiBaseUrl()}/v1/admin/overview${query}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
-  if (!response.ok) throw new Error(`GET /v1/admin/overview → ${response.status}`)
-  return (await response.json()) as Overview
-}
+const SOURCE_STATES = ['pending', 'integrated', 'failed'] as const
+const NEWS_STATES = ['unread', 'read'] as const
+const EPISODE_STATES = ['pending', 'scripting', 'rendering', 'ready', 'failed'] as const
+const JOB_STATES = ['ready', 'running', 'done', 'failed'] as const
 
 function ago(iso: string | null): string {
   if (!iso) return '—'
@@ -87,21 +38,39 @@ function Cell({ n, state }: { n: number | undefined; state: string }) {
 }
 
 export function Admin() {
-  const [data, setData] = useState<Overview | null>(null)
+  const [data, setData] = useState<AdminOverview | null>(null)
   const [error, setError] = useState('')
   const [selectedUser, setSelectedUser] = useState<string | null>(null)
   const [queueFilter, setQueueFilter] = useState<string | null>(null)
   const [stateFilter, setStateFilter] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
+  // Which page of jobs is on screen: null for the newest, otherwise the cursor that
+  // fetched it. Held while polling, so reading an older page is not yanked back to the
+  // head every three seconds.
+  const [before, setBefore] = useState<number | null>(null)
+
+  const scopeToUser = (userId: string | null) => {
+    setSelectedUser(userId)
+    // A cursor from one user's list means nothing in another's.
+    setBefore(null)
+  }
 
   const refresh = useCallback(() => {
-    fetchOverview(selectedUser)
+    api
+      .adminOverview({ userId: selectedUser, before })
       .then((next) => {
         setData(next)
         setError('')
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-  }, [selectedUser])
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err))
+        // Refused, not failing: asking again every three seconds will not change the
+        // answer, and a session that lost admin mid-view should not hammer the API.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          setPaused(true)
+        }
+      })
+  }, [selectedUser, before])
 
   useEffect(() => {
     refresh()
@@ -159,7 +128,7 @@ export function Admin() {
             >
               <td>{q.queue}</td>
               {JOB_STATES.map((s) => (
-                <Cell key={s} n={q[s as keyof AdminQueue] as number} state={s} />
+                <Cell key={s} n={q[s]} state={s} />
               ))}
               <td className={q.oldest_ready_age_s !== null && q.oldest_ready_age_s > 120 ? 'bad' : ''}>
                 {seconds(q.oldest_ready_age_s)}
@@ -201,7 +170,7 @@ export function Admin() {
             <tr
               key={u.user_id}
               className={selectedUser === u.user_id ? 'selected' : ''}
-              onClick={() => setSelectedUser(selectedUser === u.user_id ? null : u.user_id)}
+              onClick={() => scopeToUser(selectedUser === u.user_id ? null : u.user_id)}
             >
               <td>
                 <strong>{u.user_id}</strong>
@@ -229,7 +198,19 @@ export function Admin() {
           Jobs{selectedUser && <> · {selectedUser}</>}
           {queueFilter && <> · {queueFilter}</>}
         </h3>
-        <span className="hint">{jobs.length} shown</span>
+        <span className="hint">
+          {jobs.length} shown of {data?.jobs.length ?? 0} on this page
+        </span>
+        <button type="button" disabled={before === null} onClick={() => setBefore(null)}>
+          Newest
+        </button>
+        <button
+          type="button"
+          disabled={!data?.jobs_next_before}
+          onClick={() => setBefore(data?.jobs_next_before ?? null)}
+        >
+          Older jobs
+        </button>
         <select value={stateFilter ?? ''} onChange={(e) => setStateFilter(e.target.value || null)}>
           <option value="">all states</option>
           {JOB_STATES.map((s) => (
@@ -243,7 +224,7 @@ export function Admin() {
             type="button"
             className="linkish"
             onClick={() => {
-              setSelectedUser(null)
+              scopeToUser(null)
               setQueueFilter(null)
               setStateFilter(null)
             }}
@@ -277,7 +258,7 @@ export function Admin() {
               <td className="num">{job.attempts}</td>
               <td>
                 {job.user_id ? (
-                  <button type="button" className="linkish" onClick={() => setSelectedUser(job.user_id)}>
+                  <button type="button" className="linkish" onClick={() => scopeToUser(job.user_id)}>
                     {job.user_id}
                   </button>
                 ) : (

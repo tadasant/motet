@@ -67,12 +67,17 @@ export interface paths {
         };
         /**
          * Admin Overview
-         * @description The whole deployment at a glance, across every user.
+         * @description The whole deployment at a glance, across every user. Admins only.
          *
          *     Deployment state rather than user state, like ``/v1/processing``: the caller's own
-         *     ``user_id`` is ignored, and the route takes it only to sit behind the same lock as
-         *     everything else under ``/v1``. The optional ``user_id`` query filters the job list;
-         *     the per-user and per-queue aggregates are always for everyone.
+         *     account plays no part in the answer. ``user_id``, ``before`` and ``limit`` shape the
+         *     job list only; the per-user and per-queue aggregates are always for everyone.
+         *
+         *     **The job list is a page, newest first, keyed on the job id.** A keyset cursor rather
+         *     than an offset because the list is polled while workers insert at its head: an offset
+         *     would shift under a reader every poll, and ``id < before`` does not. Rather than a time
+         *     window because a window does not bound the response — one Gmail backfill puts a
+         *     thousand rows into the last hour.
          */
         get: operations["admin_overview_v1_admin_overview_get"];
         put?: never;
@@ -917,10 +922,11 @@ export interface components {
         };
         /**
          * AdminOverviewResponse
-         * @description The whole deployment at a glance, across every user.
+         * @description The whole deployment at a glance, across every user. Admins only.
          *
-         *     Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
-         *     for. Every user and every pipeline queue is present, at zero when empty.
+         *     Aggregates are always for everyone; only `jobs` is paged, and filtered when a
+         *     `user_id` is asked for. Every user and every pipeline queue is present, at zero when
+         *     empty.
          */
         AdminOverviewResponse: {
             /**
@@ -930,9 +936,14 @@ export interface components {
             generated_at: string;
             /**
              * Jobs
-             * @description The newest 200 jobs, any state.
+             * @description One page of jobs in any state, newest first (by id). `limit` long at most; `user_id` narrows it to jobs resolved to that user.
              */
             jobs: components["schemas"]["AdminJobResponse"][];
+            /**
+             * Jobs Next Before
+             * @description Pass as `before` for the next, older page; null when this page is the last.
+             */
+            jobs_next_before: number | null;
             /** Queues */
             queues: components["schemas"]["AdminQueueResponse"][];
             /** Users */
@@ -1572,6 +1583,11 @@ export interface components {
          *     …" or "using an API token" without guessing from what it has in storage.
          */
         SessionResponse: {
+            /**
+             * Admin
+             * @description Whether this caller may read /v1/admin/*: a signed-in session whose address is on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open deployment, and for everybody when MOTET_ADMIN_EMAILS is unset.
+             */
+            admin: boolean;
             /** Email */
             email?: string | null;
             /** Expires At */
@@ -1788,7 +1804,12 @@ export interface operations {
     admin_overview_v1_admin_overview_get: {
         parameters: {
             query?: {
+                /** @description Only list jobs whose subject resolves to this user. */
                 user_id?: string | null;
+                /** @description Only list jobs with an id below this one — the previous page's `jobs_next_before`. Omit for the newest page. */
+                before?: number | null;
+                /** @description How many jobs to list. */
+                limit?: number;
             };
             header?: {
                 authorization?: string | null;

@@ -102,24 +102,28 @@ public struct AdminNewsItemCounts: Codable, Hashable, Sendable {
     }
 }
 
-/// The whole deployment at a glance, across every user.
+/// The whole deployment at a glance, across every user. Admins only.
 ///
-/// Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
-/// for. Every user and every pipeline queue is present, at zero when empty.
+/// Aggregates are always for everyone; only `jobs` is paged, and filtered when a
+/// `user_id` is asked for. Every user and every pipeline queue is present, at zero when
+/// empty.
 public struct AdminOverviewResponse: Codable, Hashable, Sendable {
     public var generatedAt: Date
     public var jobs: [AdminJobResponse]
+    public var jobsNextBefore: Int?
     public var queues: [AdminQueueResponse]
     public var users: [AdminUserResponse]
 
     public init(
         generatedAt: Date,
         jobs: [AdminJobResponse],
+        jobsNextBefore: Int? = nil,
         queues: [AdminQueueResponse],
         users: [AdminUserResponse]
     ) {
         self.generatedAt = generatedAt
         self.jobs = jobs
+        self.jobsNextBefore = jobsNextBefore
         self.queues = queues
         self.users = users
     }
@@ -127,6 +131,7 @@ public struct AdminOverviewResponse: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
         case jobs
+        case jobsNextBefore = "jobs_next_before"
         case queues
         case users
     }
@@ -928,12 +933,20 @@ public struct SegmentResponse: Codable, Hashable, Sendable {
 /// Answers for the shared API token too, which is what lets the SPA show "signed in as
 /// …" or "using an API token" without guessing from what it has in storage.
 public struct SessionResponse: Codable, Hashable, Sendable {
+    public var admin: Bool
     public var email: String?
     public var expiresAt: Date?
     public var how: String
     public var loginConfigured: Bool
 
-    public init(email: String? = nil, expiresAt: Date? = nil, how: String, loginConfigured: Bool) {
+    public init(
+        admin: Bool,
+        email: String? = nil,
+        expiresAt: Date? = nil,
+        how: String,
+        loginConfigured: Bool
+    ) {
+        self.admin = admin
         self.email = email
         self.expiresAt = expiresAt
         self.how = how
@@ -941,6 +954,7 @@ public struct SessionResponse: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case admin
         case email
         case expiresAt = "expires_at"
         case how
@@ -1131,9 +1145,11 @@ public enum MotetEndpoints {
     }
 
     /// `GET /v1/admin/overview` — Admin Overview
-    public static func adminOverview(userId: String? = nil) -> HTTPEndpoint {
+    public static func adminOverview(userId: String? = nil, before: Int? = nil, limit: Int? = nil) -> HTTPEndpoint {
         var query: [String: String] = [:]
         if let userId { query["user_id"] = String(describing: userId) }
+        if let before { query["before"] = String(describing: before) }
+        if let limit { query["limit"] = String(describing: limit) }
         return HTTPEndpoint(method: "GET", path: "/v1/admin/overview", query: query)
     }
 
