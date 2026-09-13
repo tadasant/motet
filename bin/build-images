@@ -160,6 +160,21 @@ smoke_api() {
     *) echo "smoke: the image cannot trigger a worker drain — google-auth is missing" >&2
        return 1 ;;
   esac
+  # The MCP server at /mcp (motet#111): the `mcp` SDK has to be in the *image*, and the
+  # app registers its tools at import, so a health answer at all means it imported. The
+  # count is asserted too, because a mount that registered nothing would still boot, and
+  # the SDK is imported explicitly so the failure names the missing package.
+  case "$body" in
+    *'"mcp_tools":0,'* | *'"mcp_tools":0}'*)
+      echo "smoke: the API image serves /mcp with no tools registered" >&2; return 1 ;;
+    *'"mcp_tools":'*) ;;
+    *) echo "smoke: ${API_HEALTH_PATH} does not report mcp_tools" >&2; return 1 ;;
+  esac
+  if ! docker run --rm --entrypoint python "motet-api:${TAG}" -c 'import mcp.server'; then
+    echo "smoke: the API image cannot serve /mcp — the mcp SDK is missing" >&2
+    return 1
+  fi
+  echo "    the mcp SDK is in the image, and /mcp registers its tools"
   # Non-empty AND equal to the SHA this run built. Non-empty alone would pass on a null
   # the JSON encoder wrote as the string "null", and on a field that reported some other
   # constant — neither of which answers the question the field exists for.

@@ -50,6 +50,23 @@ export function isConnectorState(state: string): boolean {
 }
 
 /**
+ * The fourth flow on this path: an MCP client's authorization (motet#111).
+ *
+ * **This tab did not start it.** The client sent the person to the API's `/authorize`,
+ * which sent them to Google, so there is no remembered state in sessionStorage to compare
+ * with — the API's single-use state row is the only check, and the screen does not call
+ * `takeState` for it. Same dot, same reason as the sign-in prefix above.
+ *
+ * Keep in step with `MCP_STATE_PREFIX` in `motet_api.mcp.oauth`.
+ */
+const MCP_STATE_PREFIX = 'mcp.'
+
+/** Whether a callback's `state` belongs to an MCP client's authorization. */
+export function isMcpState(state: string): boolean {
+  return state.startsWith(MCP_STATE_PREFIX)
+}
+
+/**
  * Where Google sends the user back to.
  *
  * Derived from the origin rather than configured, which is what makes one bundle serve

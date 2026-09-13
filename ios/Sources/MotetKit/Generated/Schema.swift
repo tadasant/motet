@@ -769,6 +769,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var inferenceMode: String
     public var llmOverridesInForce: Bool?
     public var loginConfigured: Bool
+    public var mcpOauthConfigured: Bool
+    public var mcpTools: Int
     public var revision: String?
     public var service: String
     public var settingsWritable: Bool
@@ -786,6 +788,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         inferenceMode: String,
         llmOverridesInForce: Bool? = nil,
         loginConfigured: Bool,
+        mcpOauthConfigured: Bool,
+        mcpTools: Int,
         revision: String? = nil,
         service: String,
         settingsWritable: Bool,
@@ -802,6 +806,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.inferenceMode = inferenceMode
         self.llmOverridesInForce = llmOverridesInForce
         self.loginConfigured = loginConfigured
+        self.mcpOauthConfigured = mcpOauthConfigured
+        self.mcpTools = mcpTools
         self.revision = revision
         self.service = service
         self.settingsWritable = settingsWritable
@@ -820,6 +826,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case inferenceMode = "inference_mode"
         case llmOverridesInForce = "llm_overrides_in_force"
         case loginConfigured = "login_configured"
+        case mcpOauthConfigured = "mcp_oauth_configured"
+        case mcpTools = "mcp_tools"
         case revision
         case service
         case settingsWritable = "settings_writable"
@@ -1397,6 +1405,41 @@ public struct MarkListenedResponse: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case episodeId = "episode_id"
         case newsItemsMarkedRead = "news_items_marked_read"
+    }
+}
+
+/// An MCP client's authorization, verified by Google sign-in and waiting for a person's yes.
+///
+/// motet#111. The code is already minted and bound to the client, but it reaches the client
+/// only if the SPA navigates to ``redirect_url``, which it does after the person has seen
+/// ``client_name`` and ``redirect_host`` and pressed Allow. ``deny_url`` tells the client no.
+public struct McpAuthorizationResponse: Codable, Hashable, Sendable {
+    public var clientName: String
+    public var denyUrl: String
+    public var email: String
+    public var redirectHost: String
+    public var redirectUrl: String
+
+    public init(
+        clientName: String,
+        denyUrl: String,
+        email: String,
+        redirectHost: String,
+        redirectUrl: String
+    ) {
+        self.clientName = clientName
+        self.denyUrl = denyUrl
+        self.email = email
+        self.redirectHost = redirectHost
+        self.redirectUrl = redirectUrl
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case clientName = "client_name"
+        case denyUrl = "deny_url"
+        case email
+        case redirectHost = "redirect_host"
+        case redirectUrl = "redirect_url"
     }
 }
 
@@ -2308,6 +2351,11 @@ public enum MotetEndpoints {
     /// `POST /v1/auth/logout-all` — Logout Everywhere
     public static var logoutEverywhere: HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/auth/logout-all")
+    }
+
+    /// `POST /v1/auth/mcp/callback` — Complete Mcp Authorization
+    public static var completeMcpAuthorization: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/mcp/callback")
     }
 
     /// `GET /v1/auth/session` — Current Session

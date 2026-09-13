@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   forgetCallbackUrl,
   isLoginState,
+  isMcpState,
   readCallback,
   redirectUri,
   stateMatches,
@@ -41,6 +42,21 @@ describe('isLoginState', () => {
     // emits only [A-Za-z0-9_-], so a mailbox state can never look like a sign-in one.
     expect(isLoginState('login_abc')).toBe(false)
     expect(isLoginState('loginabc')).toBe(false)
+  })
+})
+
+describe('isMcpState', () => {
+  it("tells an MCP client's authorization from a sign-in and a mailbox", () => {
+    // The third flow on the one path. Its prefix lives in `motet_api.mcp.oauth` too.
+    expect(isMcpState('mcp.abc123')).toBe(true)
+    expect(isMcpState('login.abc123')).toBe(false)
+    expect(isMcpState('abc123')).toBe(false)
+  })
+
+  it('uses a marker the API cannot mint by accident', () => {
+    expect(isMcpState('mcp_abc')).toBe(false)
+    expect(isMcpState('mcpabc')).toBe(false)
+    expect(isLoginState('mcp.abc123')).toBe(false)
   })
 })
 

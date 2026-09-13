@@ -1096,6 +1096,31 @@ describe('signing in', () => {
   })
 })
 
+describe("the /oauth/callback landing, for an MCP client's authorization", () => {
+  it('sends an mcp. state to its own route, and to neither of the others', async () => {
+    // A state spent at the wrong route is burnt, and the person starts again at the agent.
+    const calls = mockApi({
+      '/v1/auth/mcp/callback': {
+        client_name: 'Claude Desktop',
+        redirect_host: 'claude.example',
+        email: 'owner@motet.test',
+        redirect_url: 'https://claude.example/callback?code=c1&state=s1',
+        deny_url: 'https://claude.example/callback?error=access_denied&state=s1',
+      },
+    })
+    window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=mcp.st_1')
+
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: 'Allow' })).toBeDefined()
+    expect(screen.queryByRole('navigation', { name: 'Screens' })).toBeNull()
+    const callback = calls.find((call) => call.url.includes('/v1/auth/mcp/callback'))
+    expect(callback?.body).toEqual({ state: 'mcp.st_1', code: 'abc123' })
+    expect(calls.find((call) => call.url.includes('/v1/auth/google/callback'))).toBeUndefined()
+    expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
+  })
+})
+
 describe('the /oauth/callback landing, for a sign-in', () => {
   it('exchanges the code and puts the session token in the slot the API token used', async () => {
     // The property that keeps every other call site unchanged: a session token is just a
@@ -1428,6 +1453,8 @@ describe('the generated contract', () => {
       vault_ready: true,
       drain_trigger: true,
       voice_configured: false,
+      mcp_oauth_configured: false,
+      mcp_tools: 0,
       inference_mode: 'fake',
       settings_writable: false,
       llm_overrides_in_force: false,

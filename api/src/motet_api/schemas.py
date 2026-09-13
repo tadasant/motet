@@ -126,6 +126,19 @@ class HealthResponse(BaseModel):
             "model are not reported here — that is the admin screen's."
         )
     )
+    mcp_tools: int = Field(
+        description=(
+            "How many tools the MCP server at /mcp registers. Zero would mean the mount is "
+            "there and serves nothing."
+        )
+    )
+    mcp_oauth_configured: bool = Field(
+        description=(
+            "Whether MCP clients can authorize themselves with OAuth (motet#111). False means "
+            "/mcp takes only the API's bearer: MOTET_PUBLIC_BASE_URL, MOTET_APP_BASE_URL or "
+            "sign-in is not configured."
+        )
+    )
 
 
 class PasteRequest(BaseModel):
@@ -1448,3 +1461,18 @@ class ConnectorOAuthCallbackRequest(BaseModel):
     iss: str | None = Field(
         default=None, description="RFC 9207 issuer identifier, when the server sent one."
     )
+
+
+class McpAuthorizationResponse(BaseModel):
+    """An MCP client's authorization, verified by Google sign-in and waiting for a person's yes.
+
+    motet#111. The code is already minted and bound to the client, but it reaches the client
+    only if the SPA navigates to ``redirect_url``, which it does after the person has seen
+    ``client_name`` and ``redirect_host`` and pressed Allow. ``deny_url`` tells the client no.
+    """
+
+    client_name: str = Field(description="What the MCP client registered itself as.")
+    redirect_host: str = Field(description="Where approving sends the grant: the client's host.")
+    email: str = Field(description="The allowlisted account the client will act as.")
+    redirect_url: str = Field(description="Approve: the client's redirect URI with the code.")
+    deny_url: str = Field(description="Refuse: the client's redirect URI with access_denied.")

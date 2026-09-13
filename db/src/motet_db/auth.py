@@ -56,6 +56,9 @@ class AuthSession:
     created_at: datetime
     last_seen_at: datetime
     expires_at: datetime
+    #: The MCP client this session was issued to as an access token (motet#111), or
+    #: ``None`` for a signed-in browser and the staging mint.
+    mcp_client_id: str | None = None
 
 
 def token_digest(token: str) -> str:
@@ -88,6 +91,7 @@ def create_session(
     email: str,
     token: str,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    mcp_client_id: str | None = None,
 ) -> AuthSession:
     """Record a session for a token the caller has already minted.
 
@@ -101,6 +105,7 @@ def create_session(
         email=email,
         token_sha256=token_digest(token),
         ttl_seconds=ttl_seconds,
+        mcp_client_id=mcp_client_id,
     )
 
 
@@ -111,6 +116,7 @@ def create_session_for_digest(
     email: str,
     token_sha256: str,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    mcp_client_id: str | None = None,
 ) -> AuthSession:
     """Record a session from its digest alone, for a caller that never held the plaintext.
 
@@ -136,11 +142,11 @@ def create_session_for_digest(
     row = _one(
         conn,
         """
-        INSERT INTO auth_sessions (id, user_id, token_sha256, email, expires_at)
-        VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s))
-        RETURNING id, user_id, email, created_at, last_seen_at, expires_at
+        INSERT INTO auth_sessions (id, user_id, token_sha256, email, expires_at, mcp_client_id)
+        VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s), %s)
+        RETURNING id, user_id, email, created_at, last_seen_at, expires_at, mcp_client_id
         """,
-        (new_id("sess"), user_id, token_sha256, email, ttl_seconds),
+        (new_id("sess"), user_id, token_sha256, email, ttl_seconds, mcp_client_id),
     )
     _backfill_user_email(conn, user_id=user_id, email=email)
     return _session(row)
@@ -207,7 +213,7 @@ def session_for_token(conn: psycopg.Connection[Any], token: str) -> AuthSession 
     row = _maybe_one(
         conn,
         """
-        SELECT id, user_id, email, created_at, last_seen_at, expires_at
+        SELECT id, user_id, email, created_at, last_seen_at, expires_at, mcp_client_id
         FROM auth_sessions
         WHERE token_sha256 = %s AND expires_at > now()
         """,
@@ -232,7 +238,13 @@ def delete_session(conn: psycopg.Connection[Any], session_id: str) -> bool:
 
 
 def delete_sessions_for_user(conn: psycopg.Connection[Any], user_id: str) -> int:
-    """Revoke every session for a user — the answer to a stolen laptop."""
+    """Revoke every session for a user — the answer to a stolen laptop.
+
+    An MCP client's refresh tokens go too (motet#111): a refresh token mints the next
+    session, so revoking the sessions and leaving it would revoke nothing for longer than
+    an access token's hour. Counted as sessions only, which is what the route reports.
+    """
+    conn.execute("DELETE FROM mcp_oauth_refresh_tokens WHERE user_id = %s", (user_id,))
     return conn.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,)).rowcount
 
 
@@ -249,4 +261,5 @@ def _session(row: dict[str, Any]) -> AuthSession:
         created_at=row["created_at"],
         last_seen_at=row["last_seen_at"],
         expires_at=row["expires_at"],
+        mcp_client_id=row.get("mcp_client_id"),
     )

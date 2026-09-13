@@ -26,6 +26,7 @@ from typing import Any
 
 import psycopg
 from motet_vault import DekWrapper, KeyManager, SealedSecret, aad, open_sealed, seal
+from psycopg.types.json import Jsonb
 
 from .ids import highlight_id, new_id, source_id
 from .models import (
@@ -521,6 +522,7 @@ def start_oauth(
     connector_id_: str | None = None,
     oauth_client: dict[str, Any] | None = None,
     ttl_seconds: int = 600,
+    mcp_request: dict[str, Any] | None = None,
 ) -> None:
     """Record an in-flight authorization so its callback can be believed.
 
@@ -535,6 +537,10 @@ def start_oauth(
     foreign key to ``sources`` (migration 0018). ``oauth_client`` is what that flow's
     discovery and registration produced, held here until consent completes so the connector
     itself is not touched by an authorization nobody finishes.
+
+    ``mcp_request`` is an MCP client's own authorization request, for a sign-in that is
+    authorizing one (motet#111): it has to survive the round trip through Google to be
+    honoured after it. ``None`` on every other flow.
     """
     import json  # noqa: PLC0415
 
@@ -542,8 +548,8 @@ def start_oauth(
         """
         INSERT INTO oauth_states
             (state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-             nonce, connector_id, oauth_client, expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+             nonce, connector_id, oauth_client, mcp_request, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
                 now() + make_interval(secs => %s))
         """,
         (
@@ -557,6 +563,7 @@ def start_oauth(
             nonce,
             connector_id_,
             json.dumps(oauth_client) if oauth_client is not None else None,
+            None if mcp_request is None else Jsonb(mcp_request),
             ttl_seconds,
         ),
     )
@@ -575,7 +582,7 @@ def consume_oauth_state(conn: psycopg.Connection[Any], state: str) -> dict[str, 
         DELETE FROM oauth_states
         WHERE state = %s AND expires_at > now()
         RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-                  nonce, connector_id, oauth_client
+                  nonce, connector_id, oauth_client, mcp_request
         """,
         (state,),
     )
