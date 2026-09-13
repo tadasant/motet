@@ -85,7 +85,7 @@ export function Processing({
   if (unavailable) {
     return (
       <section className="processing" aria-labelledby="processing-heading">
-        <h3 id="processing-heading">Processing</h3>
+        <h2 id="processing-heading">Processing</h2>
         <p className="hint">
           Could not check what is still being processed. The backlog below is current;
           anything mid-ingestion is not shown.
@@ -104,7 +104,7 @@ export function Processing({
 
   return (
     <section className="processing" aria-labelledby="processing-heading">
-      <h3 id="processing-heading">Processing</h3>
+      <h2 id="processing-heading">Processing</h2>
       <p className="hint">{summarise(items)}</p>
       {/* Above the list, once, rather than repeated under every queued item: it is one
           fact about the deployment and it is the reason none of them is moving. */}

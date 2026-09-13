@@ -1,22 +1,29 @@
-// A tab strip, and no router.
+// An app shell, and still no router.
 //
 // The SPA is the eyes-on backlog surface, not the product — "SPA work still running after
 // a week" is a named tripwire in AGENTS.md. A handful of screens do not need a routing
 // library, a state manager, or a design system, and adding one would be the first step
 // toward building a product instead of a factory.
 //
-// OAuth is the one thing that forces a path on us, because Google redirects to a URL
-// rather than back into a running app. It is handled by reading `location` once at boot
-// (see oauth.ts) and rendering the callback instead of the tabs — a few lines, against a
-// dependency that would then be available for every future "shouldn't this be a route?".
-// Two flows come back on that one path — signing in, and connecting a mailbox — and the
-// `state` says which, because it is the only thing that survives the round trip.
+// The shell is a sidebar and a top bar (`shell/`), and the URL says which section is open
+// — `/backlog`, `/episodes`, `/sources`, `/paste`, `/admin` — through a ~40-line
+// `pushState`/`popstate` hook (`shell/useLocation.ts`) rather than a router. A reload
+// keeps its place, which a tab held in component state never did, and that is the
+// realistic thing to do while a multi-minute pipeline runs. Which section a path means is
+// `shell/sections.tsx`; every screen renders unchanged inside the content area.
+//
+// OAuth is the one path that was always forced on us, because Google redirects to a URL
+// rather than back into a running app. It is handled exactly as before: `location` is
+// read once at boot (see oauth.ts) and the callback renders instead of the app, with no
+// sidebar. Two flows come back on that one path — signing in, and connecting a mailbox —
+// and the `state` says which, because it is the only thing that survives the round trip.
 //
 // **A browser holding no token sees the door and nothing else.** That is the whole point
 // of Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN"
-// is now a button. The disclosure stays, because the shared token still works and is
-// still the answer when there is no Google account to hand — it has just stopped being
-// the thing a human is expected to type into a phone.
+// is now a button. The disclosure stays — on the door, and in the account menu once
+// inside — because the shared token still works and is still the answer when there is no
+// Google account to hand; it has just stopped being the thing a human is expected to
+// type into a phone.
 
 import { useCallback, useEffect, useState } from 'react'
 
@@ -40,91 +47,23 @@ import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
 import { SignInCallback } from './screens/SignInCallback'
 import { Sources } from './screens/Sources'
-
-type Tab = 'paste' | 'backlog' | 'episode' | 'sources'
+import { Popover, Shell } from './shell/Shell'
+import { SECTIONS, sectionFor } from './shell/sections'
+import { usePath } from './shell/useLocation'
 
 // How often the backlog re-asks while an item is still being processed. Short enough that
 // a paste which integrates in seconds is seen to integrate, and it only runs while
 // something is pending.
 const POLL_MS = 3_000
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'paste', label: 'Paste in' },
-  { id: 'backlog', label: 'Backlog' },
-  { id: 'episode', label: 'Episode' },
-  { id: 'sources', label: 'Sources' },
-]
-
-// /admin is a second path, read once the way /oauth/callback is. The app shell (motet#88)
-// replaces both this and the tab strip with a section per URL.
-const ADMIN_PATH = '/admin'
-
 export default function App() {
-  // Read in an initializer rather than at import, so the answer is the address the page
-  // was loaded at — and so a test can navigate before it renders.
-  const [admin] = useState(() => window.location.pathname === ADMIN_PATH)
-  if (admin) return <AdminApp />
-  return <MainApp />
-}
-
-/**
- * The operator view, shown only to a caller the server says is an admin.
- *
- * The session is asked *before* the overview, so somebody who is not an admin gets a
- * sentence rather than a failed request for every user's data. That is presentation: the
- * API refuses `/v1/admin/*` to them regardless of what this renders.
- */
-function AdminApp() {
-  // undefined until the server has answered; null when it says nobody.
-  const [who, setWho] = useState<SessionInfo | null | undefined>(undefined)
-  // Why the question could not be answered, when that was not a 401. "Sign in" is the
-  // wrong advice to an admin whose API is down.
-  const [sessionError, setSessionError] = useState('')
-  useEffect(() => {
-    api
-      .session()
-      .then(setWho)
-      .catch((err: unknown) => {
-        setWho(null)
-        if (!(err instanceof ApiError && err.status === 401)) {
-          setSessionError(err instanceof Error ? err.message : String(err))
-        }
-      })
-  }, [])
-
-  return (
-    <main className="wide">
-      <header>
-        <h1>Motet</h1>
-      </header>
-      {who === undefined ? (
-        <p className="hint">Checking whether this account is an admin…</p>
-      ) : who?.admin ? (
-        <Admin />
-      ) : (
-        <section aria-labelledby="admin-heading">
-          <h2 id="admin-heading">Admin</h2>
-          <p role="alert">
-            {who === null
-              ? sessionError || 'Sign in first — the admin view needs a signed-in account.'
-              : who.how === 'session'
-                ? `${who.email ?? 'This account'} is not an admin on this deployment.`
-                : who.how === 'token'
-                  ? 'The admin view needs a signed-in Google account; the shared API token is not one.'
-                  : 'The admin view needs a signed-in Google account, and this deployment has no sign-in lock at all.'}
-          </p>
-          <a href="/">← app</a>
-        </section>
-      )}
-    </main>
-  )
-}
-
-function MainApp() {
-  const [tab, setTab] = useState<Tab>('paste')
+  // The path is state, and the section is a function of it. Read in an initializer like
+  // the callback below; changed only through `navigate` and the back button.
+  const [path, navigate] = usePath()
+  const section = sectionFor(path)
   const [items, setItems] = useState<NewsItem[]>([])
   // What has been pasted and is not a news item yet. Held here rather than in the backlog
-  // screen because the tab strip labels it too: the person who needs to see it is on the
+  // screen because the sidebar counts it too: the person who needs to see it is on the
   // *paste* screen, having just pasted, and would otherwise have no reason to go looking.
   const [ingestion, setIngestion] = useState<IngestionItem[]>([])
   // Whether the last attempt to ask actually got an answer. Kept apart from an empty list
@@ -157,6 +96,15 @@ function MainApp() {
   // Who the *server* says this browser is, or null when it says nobody. Best-effort: an
   // older API with no /v1/auth answers 404 and this stays null.
   const [who, setWho] = useState<SessionInfo | null>(null)
+  // The token that answer was given for. `who` survives a token change until the next
+  // answer lands, so "has the server answered *for this token*" is the question the admin
+  // section needs — "checking" and "not an admin" are different sentences, and an admin
+  // answer given to the previous token is not one about this one.
+  const [whoFor, setWhoFor] = useState<string | null>(null)
+  const whoKnown = whoFor === token
+  // Why the question could not be answered, when that was not a 401. "Sign in" is the
+  // wrong advice to an admin whose API is down.
+  const [sessionError, setSessionError] = useState('')
   // A deployment with MOTET_API_TOKEN unset has no lock on it at all — the documented
   // local setup. Showing a sign-in door in front of an API that is already answering
   // would be a dead end, and clicking the button there 503s because a laptop has no
@@ -216,8 +164,8 @@ function MainApp() {
           const known = new Set(list.map((entry) => entry.id))
           return [...current.filter((entry) => !known.has(entry.id)), ...list]
         })
-        // `current ?? list[0]` and never a plain assignment: this runs after a tab has
-        // possibly already been opened from the backlog, and the newest episode is a
+        // `current ?? list[0]` and never a plain assignment: this runs after an episode may
+        // already have been opened from the backlog, and the newest episode is a
         // starting point rather than an override.
         setEpisode((current) => current ?? list[0] ?? null)
         setEpisodesUnavailable(false)
@@ -272,23 +220,62 @@ function MainApp() {
   //
   // A 401 clears the token as well as `who`. A session expires after 30 days and can be
   // revoked from another device, and without this the SPA would keep a dead string in
-  // storage, show a tab strip whose every screen 401s, and offer no way back to the door
+  // storage, show a sidebar whose every screen 401s, and offer no way back to the door
   // except realising that emptying the *API token* field is what signs you out.
+  //
+  // An answer for a token that has since changed is dropped rather than applied: it is
+  // about a credential this browser no longer holds.
   useEffect(() => {
+    let current = true
     api
       .session()
-      .then(setWho)
-      .catch((err) => {
-        setWho(null)
-        if (err instanceof ApiError && err.status === 401 && token) saveToken('')
+      .then((next) => {
+        if (!current) return
+        setWho(next)
+        setSessionError('')
       })
+      .catch((err: unknown) => {
+        if (!current) return
+        setWho(null)
+        const refused = err instanceof ApiError && err.status === 401
+        setSessionError(refused ? '' : err instanceof Error ? err.message : String(err))
+        if (refused && token) saveToken('')
+      })
+      .finally(() => {
+        if (current) setWhoFor(token)
+      })
+    return () => {
+      current = false
+    }
   }, [token, saveToken])
+
+  // The shell is on screen: not the callback, and not the door.
+  const inShell = !callback && Boolean(token || unlocked)
+
+  // `/`, an unknown path and a trailing slash render a section; the address then says which
+  // too, so the sidebar, the address bar and a reload all agree. `replace`, because the
+  // path the browser arrived on was never a place of its own and Back should not return to
+  // it. Not on the door or the callback: the callback's address is `forgetCallbackUrl`'s,
+  // and a deep link held behind the door survives a pasted token (a Google sign-in comes
+  // back through the callback, and lands on HOME).
+  useEffect(() => {
+    if (inShell && window.location.pathname !== section.path) {
+      navigate(section.path, { replace: true })
+    }
+  }, [inShell, navigate, path, section.path])
+
+  // Every history entry says which section it is, so the Back button's list is readable.
+  useEffect(() => {
+    document.title = inShell ? `${section.label} · Motet` : 'Motet'
+  }, [inShell, section.label])
 
   const finishCallback = () => {
     setCallback(null)
     // Back to where the flow started from: a mailbox connection belongs on Sources, and a
-    // sign-in belongs at the front of the app the person was trying to reach.
-    setTab(signingIn ? 'paste' : 'sources')
+    // sign-in belongs at the front of the app the person was trying to reach. `replace`,
+    // because `forgetCallbackUrl` has already swapped the callback's entry for `/`, and a
+    // second entry would put a spent code's page one Back away.
+    navigate(signingIn ? '/' : '/sources', { replace: true })
   }
 
   const openEpisode = (next: Episode) => {
@@ -296,7 +283,7 @@ function MainApp() {
     // In front, and de-duplicated: the backlog's button makes a *new* episode, so this is
     // normally an id the list has never seen.
     setEpisodes((list) => [next, ...list.filter((entry) => entry.id !== next.id)])
-    setTab('episode')
+    navigate('/episodes')
   }
 
   // The polling episode screen reports every state change. The list has to hear it too,
@@ -315,117 +302,174 @@ function MainApp() {
     setWho(null)
   }
 
-  return (
-    <main>
-      <header>
-        <h1>Motet</h1>
-        {/* The address alone, not "signed in as …": the button beside it already says
-            what state this is, and the callback screen is the place that spells it out. */}
-        {who?.email && (
-          <p className="hint">
-            {who.email}{' '}
-            <button type="button" onClick={signOut}>
-              Sign out
-            </button>
-            {/* Only for a caller the server says is an admin, so nobody is offered a
-                screen the API would refuse them. */}
-            {who.admin && (
-              <>
-                {' '}
-                <a href={ADMIN_PATH}>Admin</a>
-              </>
-            )}
-          </p>
-        )}
-        {/* Hidden during the callback, and before there is anything to navigate: there is
-            one thing to do on either screen, and the screen offers it. */}
-        {!callback && (token || unlocked) && (
-          <nav aria-label="Screens">
-            {TABS.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                aria-current={tab === entry.id ? 'page' : undefined}
-                onClick={() => setTab(entry.id)}
-              >
-                {entry.label}
-                {entry.id === 'backlog' && unsettled > 0 && (
-                  <span className={`tab-count${anyFailed ? ' failed' : ''}`}>{unsettled}</span>
-                )}
-              </button>
-            ))}
-          </nav>
-        )}
-      </header>
+  // The API token disclosure: on the door inline, because SignIn points at it; inside the
+  // app, in the account menu.
+  const tokenField = <TokenField token={token} onSave={saveToken} />
 
-      <details className="token">
-        <summary>API token</summary>
-        <p className="hint">
-          One shared token for the single Phase 1 account — the same one the RSS feed and
-          any script use. Signing in with Google puts a session token in this same slot,
-          so this field is the fallback rather than the way in. Stored in this browser
-          only. (Connecting a mailbox under Sources is a different thing again: that is
-          Google&rsquo;s consent, and its token never comes back here.)
-        </p>
+  const errorLine = error && (
+    <p className="error" role="alert">
+      {error}
+    </p>
+  )
+
+  // The callback and the door render without the sidebar: there is one thing to do on
+  // either screen, and the screen offers it. Nothing to navigate to yet, either.
+  if (!inShell) {
+    return (
+      <div className="door">
+        <header className="door-bar">
+          <h1 className="brand">Motet</h1>
+        </header>
+        <main className="door-main">
+          {errorLine}
+          {callback && signingIn ? (
+            <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
+          ) : callback ? (
+            <OAuthCallback callback={callback} onDone={finishCallback} />
+          ) : (
+            <>
+              {tokenField}
+              <SignIn />
+            </>
+          )}
+        </main>
+      </div>
+    )
+  }
+
+  // The address alone as the button, not "signed in as …": the menu it opens says what
+  // state this is. With no address — the shared token, or an open deployment — the button
+  // says "Account" and the menu says which.
+  const account = (
+    <Popover label={who?.email ?? 'Account'}>
+      {who?.email ? (
+        <>
+          <p className="hint">Signed in with Google.</p>
+          <button type="button" onClick={signOut}>
+            Sign out
+          </button>
+        </>
+      ) : who?.how === 'token' ? (
+        <p className="hint">Using the shared API token.</p>
+      ) : unlocked ? (
+        <p className="hint">This deployment has no lock on it. Everything answers.</p>
+      ) : null}
+      {tokenField}
+    </Popover>
+  )
+
+  // The Admin item only for a caller the server says is an admin, so nobody is offered a
+  // screen the API would refuse them. The path itself is still a section: typed by
+  // anybody else, it says why rather than asking for everybody's data.
+  const isAdmin = whoKnown && who?.admin === true
+  const offered = SECTIONS.filter((entry) => entry.id !== 'admin' || isAdmin)
+
+  return (
+    <Shell
+      section={section}
+      sections={offered}
+      onNavigate={navigate}
+      badge={{ count: unsettled, failed: anyFailed }}
+      account={account}
+    >
+      {errorLine}
+      {section.id === 'paste' && <PasteIn onIngested={refresh} />}
+      {section.id === 'backlog' && (
+        <Backlog
+          items={items}
+          ingestion={ingestion}
+          ingestionUnavailable={ingestionUnavailable}
+          processing={processing}
+          onChanged={refresh}
+          onOpenEpisode={openEpisode}
+        />
+      )}
+      {section.id === 'episodes' &&
+        (episode ? (
+          <EpisodeScreen
+            episode={episode}
+            episodes={episodes}
+            processing={processing}
+            onEpisodeChanged={episodeChanged}
+            onSelectEpisode={setEpisode}
+            onBacklogChanged={refresh}
+          />
+        ) : (
+          <section aria-label="Episode">
+            <p className="hint">
+              {!episodesLoaded
+                ? 'Looking for your episodes…'
+                : episodesUnavailable
+                  ? 'Could not load your episodes. This is not the same as having none.'
+                  : 'Make one from the backlog.'}
+            </p>
+          </section>
+        ))}
+      {section.id === 'sources' && <Sources />}
+      {section.id === 'admin' &&
+        (isAdmin ? (
+          <Admin />
+        ) : (
+          // Asked of the session before the overview, so somebody who is not an admin
+          // gets a sentence rather than a failed request for every user's data. That is
+          // presentation: the API refuses `/v1/admin/*` to them regardless.
+          <section aria-label="Admin">
+            {!whoKnown ? (
+              <p className="hint">Checking whether this account is an admin…</p>
+            ) : (
+              <p role="alert">
+                {who === null
+                  ? sessionError || 'Sign in first — the admin view needs a signed-in account.'
+                  : who.how === 'session'
+                    ? `${who.email ?? 'This account'} is not an admin on this deployment.`
+                    : who.how === 'token'
+                      ? 'The admin view needs a signed-in Google account; the shared API token is not one.'
+                      : 'The admin view needs a signed-in Google account, and this deployment has no sign-in lock at all.'}
+              </p>
+            )}
+          </section>
+        ))}
+    </Shell>
+  )
+}
+
+/**
+ * The API token field. One shared token for the single Phase 1 account, the same one the
+ * RSS feed and any script use; signing in with Google puts a session token in this same
+ * slot, so this field is the fallback rather than the way in.
+ *
+ * **Saved on submit, not on every keystroke.** The door and the shell are different trees,
+ * so a field that saved as it was typed swapped the door for the app on the first
+ * character and threw the half-typed token away with the door — and every partial token
+ * it did save was a `/v1/auth/session` call answered 401.
+ */
+function TokenField({ token, onSave }: { token: string; onSave: (value: string) => void }) {
+  const [draft, setDraft] = useState(token)
+  return (
+    <details className="token">
+      <summary>API token</summary>
+      <p className="hint">
+        One shared token for the single Phase 1 account — the same one the RSS feed and
+        any script use. Signing in with Google puts a session token in this same slot,
+        so this field is the fallback rather than the way in. Stored in this browser
+        only. (Connecting a mailbox under Sources is a different thing again: that is
+        Google&rsquo;s consent, and its token never comes back here.)
+      </p>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          onSave(draft.trim())
+        }}
+      >
         <input
           aria-label="API token"
           type="password"
-          value={token}
-          onChange={(e) => saveToken(e.target.value)}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
           placeholder="MOTET_API_TOKEN"
         />
-      </details>
-
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {callback && signingIn ? (
-        <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
-      ) : callback ? (
-        <OAuthCallback callback={callback} onDone={finishCallback} />
-      ) : !token && !unlocked ? (
-        <SignIn />
-      ) : (
-        <>
-          {tab === 'paste' && <PasteIn onIngested={refresh} />}
-          {tab === 'backlog' && (
-            <Backlog
-              items={items}
-              ingestion={ingestion}
-              ingestionUnavailable={ingestionUnavailable}
-              processing={processing}
-              onChanged={refresh}
-              onOpenEpisode={openEpisode}
-            />
-          )}
-          {tab === 'episode' &&
-            (episode ? (
-              <EpisodeScreen
-                episode={episode}
-                episodes={episodes}
-                processing={processing}
-                onEpisodeChanged={episodeChanged}
-                onSelectEpisode={setEpisode}
-                onBacklogChanged={refresh}
-              />
-            ) : (
-              <section aria-labelledby="episode-heading">
-                <h2 id="episode-heading">Episode</h2>
-                <p className="hint">
-                  {!episodesLoaded
-                    ? 'Looking for your episodes…'
-                    : episodesUnavailable
-                      ? 'Could not load your episodes. This is not the same as having none.'
-                      : 'Make one from the backlog.'}
-                </p>
-              </section>
-            ))}
-          {tab === 'sources' && <Sources />}
-        </>
-      )}
-    </main>
+        <button type="submit">Use this token</button>
+      </form>
+    </details>
   )
 }

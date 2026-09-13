@@ -187,20 +187,20 @@ afterEach(() => {
 })
 
 describe('App', () => {
-  it('shows the three Phase 1 screens and starts on paste-in', async () => {
+  it('shows every section and starts on the backlog', async () => {
     mockApi()
     render(<App />)
-    for (const label of ['Paste in', 'Backlog', 'Episode']) {
-      expect(screen.getByRole('button', { name: label })).toBeDefined()
+    for (const label of ['Backlog', 'Episodes', 'Sources', 'Paste in']) {
+      expect(screen.getByRole('link', { name: label })).toBeDefined()
     }
-    expect(await screen.findByRole('heading', { name: 'Paste in' })).toBeDefined()
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
   })
 
   it('sends the bearer token it was given', async () => {
     window.localStorage.setItem('motet.apiToken', 'shhh')
     mockApi()
     render(<App />)
-    await screen.findByRole('heading', { name: 'Paste in' })
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
     const fetchMock = vi.mocked(fetch)
     const [, init] = fetchMock.mock.calls[0]!
     expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer shhh' })
@@ -209,7 +209,8 @@ describe('App', () => {
   it('posts pasted text to the ingestion route', async () => {
     const calls = mockApi({ '/v1/sources/paste': { id: 'si_9', title: 'T', state: 'pending' } })
     render(<App />)
-    await screen.findByRole('heading', { name: 'Paste in' })
+    fireEvent.click(screen.getByRole('link', { name: 'Paste in' }))
+    await screen.findByRole('heading', { name: 'Paste in', level: 1 })
 
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A title' } })
     fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Some newsletter.' } })
@@ -226,7 +227,7 @@ describe('App', () => {
       '/v1/news-items/ni_1/read': { ...NEWS_ITEM, read: true },
     })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
 
     expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
     fireEvent.click(screen.getByRole('button', { name: 'Mark read' }))
@@ -242,7 +243,7 @@ describe('App', () => {
     // and then there was nowhere at all it could be seen again.
     mockApi({ '/v1/ingestion': [QUEUED] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+    fireEvent.click(screen.getByRole('link', { name: /Backlog/ }))
 
     expect(await screen.findByRole('heading', { name: 'Processing' })).toBeDefined()
     expect(screen.getByText('Newsletter I just pasted')).toBeDefined()
@@ -271,7 +272,7 @@ describe('App', () => {
       ],
     })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+    fireEvent.click(screen.getByRole('link', { name: /Backlog/ }))
 
     await screen.findByRole('heading', { name: 'Processing' })
     // An item on its fourth attempt and an item nobody will ever try again are not the
@@ -293,7 +294,7 @@ describe('App', () => {
     // must not be reported as "nothing is being processed", which is a different claim.
     mockApi({ '/v1/ingestion': undefined })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: /Backlog/ }))
+    fireEvent.click(screen.getByRole('link', { name: /Backlog/ }))
 
     expect(await screen.findByText('Acme raises $20M Series A')).toBeDefined()
     expect(screen.getByText(/Could not check what is still being processed/)).toBeDefined()
@@ -306,7 +307,7 @@ describe('App', () => {
     try {
       const calls = mockApi({ '/v1/ingestion': [QUEUED] })
       render(<App />)
-      await screen.findByRole('heading', { name: 'Paste in' })
+      await screen.findByRole('heading', { name: 'Backlog', level: 1 })
       const before = calls.filter((call) => call.url.includes('/v1/ingestion')).length
 
       await vi.advanceTimersByTimeAsync(7_000)
@@ -326,7 +327,7 @@ describe('App', () => {
     }
   })
 
-  it('counts only what is unsettled on the tab', async () => {
+  it('counts only what is unsettled on the sidebar', async () => {
     // A badge stuck at 3 for the ten minutes after everything landed means nothing.
     mockApi({
       '/v1/ingestion': [
@@ -336,28 +337,30 @@ describe('App', () => {
     })
     render(<App />)
 
-    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
+    expect(await screen.findByRole('link', { name: 'Backlog 1' })).toBeDefined()
   })
 
-  it('counts what is in flight on the tab, so it is visible from the paste screen', async () => {
+  it('counts what is in flight on the sidebar, so it is visible from the paste screen', async () => {
     mockApi({ '/v1/ingestion': [QUEUED] })
+    window.history.replaceState({}, '', '/paste')
     render(<App />)
 
     // Still on Paste in: someone who has just pasted has no reason to go to the backlog
     // unless something there tells them to.
-    await screen.findByRole('heading', { name: 'Paste in' })
-    expect(await screen.findByRole('button', { name: 'Backlog 1' })).toBeDefined()
+    await screen.findByRole('heading', { name: 'Paste in', level: 1 })
+    expect(await screen.findByRole('link', { name: 'Backlog 1' })).toBeDefined()
   })
 
   it('creates an episode from the backlog and opens it', async () => {
     const calls = mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
 
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
 
-    expect(await screen.findByRole('heading', { name: 'Episode' })).toBeDefined()
+    expect(await screen.findByRole('region', { name: 'Episode' })).toBeDefined()
+    expect(window.location.pathname).toBe('/episodes')
     const created = calls.find((call) => call.method === 'POST' && call.url.endsWith('/v1/episodes'))
     expect(created?.body).toMatchObject({ max_duration_ms: 20 * 60_000 })
   })
@@ -369,7 +372,7 @@ describe('App', () => {
     // backlog visit, no "Make an episode", straight to the tab.
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
 
     expect(await screen.findByText(/Morning briefing/)).toBeDefined()
     expect(screen.queryByText('Make one from the backlog.')).toBeNull()
@@ -378,7 +381,7 @@ describe('App', () => {
   it('says so when there is genuinely no episode, and not before it has looked', async () => {
     mockApi({ 'GET /v1/episodes': [] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
 
     expect(await screen.findByText('Make one from the backlog.')).toBeDefined()
   })
@@ -389,7 +392,7 @@ describe('App', () => {
     // is exactly the disappearance motet#44 is about.
     mockApi({ 'GET /v1/episodes': undefined, '/v1/episodes': undefined })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
 
     expect(await screen.findByText(/Could not load your episodes/)).toBeDefined()
     expect(screen.queryByText('Make one from the backlog.')).toBeNull()
@@ -403,7 +406,7 @@ describe('App', () => {
     const pending = { ...EPISODE, state: 'rendering', segments: [] }
     const calls = mockApi({ 'GET /v1/episodes': [pending], '/v1/episodes': pending })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
     await screen.findByText(/Working…/)
 
     const before = calls.filter((call) => call.url.startsWith('/v1/processing')).length
@@ -420,7 +423,7 @@ describe('App', () => {
     const older = { ...EPISODE, id: 'ep_0', title: 'Yesterday briefing' }
     mockApi({ 'GET /v1/episodes': [EPISODE, older] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Episode' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Episodes' }))
     await screen.findByText(/Morning briefing/)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Yesterday briefing' }))
@@ -432,10 +435,10 @@ describe('App', () => {
   it('shows every claim beside the source span it cites', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
-    await screen.findByRole('heading', { name: 'Episode' })
+    await screen.findByRole('region', { name: 'Episode' })
 
     // Invariant 3, as a user can see it: the spoken sentence and the verbatim source text
     // it is answerable to, in the same row.
@@ -449,7 +452,7 @@ describe('App', () => {
   it('offers the private feed URL rather than an in-page player', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Backlog' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Backlog' }))
     await screen.findByText('Acme raises $20M Series A')
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
 
@@ -460,11 +463,210 @@ describe('App', () => {
   })
 })
 
+// One URL per section, so every screen is reachable, a reload keeps its place, and Back
+// does what a browser user expects. Forty lines of pushState, not a router.
+describe('the app shell', () => {
+  it('puts the section in the address bar, so a reload keeps its place', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+    const before = window.history.length
+
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
+
+    expect(window.location.pathname).toBe('/sources')
+    // A history entry per section visited, so Back goes back a section.
+    expect(window.history.length).toBe(before + 1)
+    expect(await screen.findByRole('heading', { name: 'Sources', level: 1 })).toBeDefined()
+    expect(screen.getByRole('link', { name: 'Sources' }).getAttribute('aria-current')).toBe('page')
+    expect(screen.getByRole('link', { name: 'Backlog' }).getAttribute('aria-current')).toBeNull()
+    // So the back button's list of entries says which section each one is.
+    expect(document.title).toBe('Sources · Motet')
+  })
+
+  it('follows the back button', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
+    await screen.findByRole('heading', { name: 'Sources', level: 1 })
+
+    window.history.back()
+
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
+    expect(window.location.pathname).toBe('/backlog')
+  })
+
+  it('lands on the section the address bar names', async () => {
+    mockApi()
+    window.history.replaceState({}, '', '/episodes')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Episodes', level: 1 })).toBeDefined()
+    expect(await screen.findByText(/Morning briefing/)).toBeDefined()
+    expect(window.location.pathname).toBe('/episodes')
+  })
+
+  it('reads a trailing slash as the same place', async () => {
+    mockApi()
+    window.history.replaceState({}, '', '/sources/')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Sources', level: 1 })).toBeDefined()
+    expect(screen.getByRole('link', { name: 'Sources' }).getAttribute('aria-current')).toBe('page')
+    await waitFor(() => expect(window.location.pathname).toBe('/sources'))
+  })
+
+  it('lands / on the backlog, and says so in the address bar without a history entry', async () => {
+    mockApi()
+    window.history.replaceState({}, '', '/')
+    const before = window.history.length
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
+    await waitFor(() => expect(window.location.pathname).toBe('/backlog'))
+    expect(window.history.length).toBe(before)
+  })
+
+  it('lands an unknown path on the backlog rather than a 404', async () => {
+    mockApi()
+    window.history.replaceState({}, '', '/no/such/place')
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
+    await waitFor(() => expect(window.location.pathname).toBe('/backlog'))
+  })
+
+  it('leaves a modified click to the browser, because the items are real links', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+
+    const link = screen.getByRole('link', { name: 'Sources' })
+    expect(link.getAttribute('href')).toBe('/sources')
+    // Listening on window, after React's root listener has had its turn: what matters is
+    // whether the app claimed the click. The listener then cancels it itself, because
+    // jsdom cannot perform the navigation the browser would.
+    let claimedByApp: boolean | undefined
+    const observe = (event: MouseEvent) => {
+      claimedByApp = event.defaultPrevented
+      event.preventDefault()
+    }
+    window.addEventListener('click', observe)
+    try {
+      fireEvent.click(link, { ctrlKey: true })
+    } finally {
+      window.removeEventListener('click', observe)
+    }
+
+    expect(claimedByApp).toBe(false)
+    expect(window.location.pathname).toBe('/backlog')
+    expect(screen.getByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
+  })
+
+  it('mounts the admin screen inside the shell, titled once', async () => {
+    mockApi({ '/v1/auth/session': { ...SESSION, admin: true }, '/v1/admin/overview': undefined })
+    window.history.replaceState({}, '', '/admin')
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Admin', level: 1 })).toBeDefined()
+    expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
+    expect((await screen.findByRole('link', { name: 'Admin' })).getAttribute('aria-current')).toBe(
+      'page',
+    )
+    expect(await screen.findByRole('button', { name: 'Pause polling' })).toBeDefined()
+    expect(screen.getByRole('region', { name: 'Admin' })).toBeDefined()
+    // The page-era toolbar is gone — its title is the top bar's and its way out is the
+    // sidebar — and what only this screen has, its own poll, stays.
+    expect(screen.getAllByRole('heading', { name: 'Admin' })).toHaveLength(1)
+    expect(screen.queryByRole('link', { name: /app/ })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Pause polling' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Refresh now' })).toBeDefined()
+    // Its tables are wide, and that is the section's layout rather than the screen's.
+    expect(document.querySelector('main')?.className).toBe('wide')
+  })
+
+  it('gives every other section the reading width', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+    expect(document.querySelector('main')?.className).toBe('reading')
+  })
+
+  it('titles each screen once, in the top bar', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByText('Acme raises $20M Series A')
+    expect(screen.getAllByRole('heading', { name: 'Backlog' })).toHaveLength(1)
+    expect(screen.getByRole('region', { name: 'Backlog' })).toBeDefined()
+  })
+
+  it('keeps a deep link held behind the door, and opens it once there is a way in', async () => {
+    window.localStorage.clear()
+    mockApi()
+    window.history.replaceState({}, '', '/episodes')
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
+    expect(window.location.pathname).toBe('/episodes')
+
+    fireEvent.change(screen.getByLabelText('API token'), { target: { value: 'test-token' } })
+    // Typing is not yet a way in: the door stays up, with the field, until it is submitted.
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeDefined()
+    expect(window.localStorage.getItem('motet.apiToken')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Use this token' }))
+
+    expect(await screen.findByRole('heading', { name: 'Episodes', level: 1 })).toBeDefined()
+    expect(window.localStorage.getItem('motet.apiToken')).toBe('test-token')
+    expect(window.location.pathname).toBe('/episodes')
+  })
+
+  it('opens the menu from a button in the collapsed layout, and closes it on navigating', async () => {
+    mockApi()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+
+    const menu = screen.getByRole('button', { name: 'Menu' })
+    expect(menu.getAttribute('aria-controls')).toBe('sidebar-nav')
+    expect(document.getElementById('sidebar-nav')).toBe(screen.getByRole('navigation', { name: 'Screens' }))
+    expect(menu.getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(menu)
+    expect(menu.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
+    expect(menu.getAttribute('aria-expanded')).toBe('false')
+
+    // And on a change of section the sidebar did not make: the back button.
+    fireEvent.click(menu)
+    expect(menu.getAttribute('aria-expanded')).toBe('true')
+    window.history.back()
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+    expect(menu.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('closes the account menu on Escape and puts focus back on its button', async () => {
+    mockApi()
+    render(<App />)
+    const account = await screen.findByRole('button', { name: /owner@motet.test/ })
+
+    fireEvent.click(account)
+    expect(account.getAttribute('aria-expanded')).toBe('true')
+    const panel = document.getElementById(account.getAttribute('aria-controls')!)
+    expect(panel?.textContent).toContain('Sign out')
+    screen.getByLabelText('API token').focus()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(account.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull()
+    expect(document.activeElement).toBe(account)
+  })
+})
+
 describe('connecting a mailbox', () => {
   it('lists sources and reads a pending one as waiting, not as failed', async () => {
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
 
     expect(await screen.findByText('Gmail')).toBeDefined()
     expect(screen.getByText(/gmail . waiting for consent/)).toBeDefined()
@@ -483,7 +685,7 @@ describe('connecting a mailbox', () => {
     }
     mockApi({ '/v1/sources': [connected] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
 
     expect(await screen.findByText(/gmail . connected/)).toBeDefined()
     expect(screen.getByText(/^Last polled .* . gmail.readonly$/)).toBeDefined()
@@ -495,7 +697,7 @@ describe('connecting a mailbox', () => {
     // abandoned OAuth attempt, directly under copy saying pasting in needs nothing.
     mockApi({ '/v1/sources': [PASTE_SOURCE] })
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
 
     expect(await screen.findByText('Pasted text')).toBeDefined()
     expect(screen.getByText(/paste . ready/)).toBeDefined()
@@ -512,7 +714,7 @@ describe('connecting a mailbox', () => {
     // button for one would be a promise the backend refuses to keep.
     mockApi()
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sources' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
     await screen.findByText('Gmail')
 
     expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeDefined()
@@ -686,10 +888,29 @@ describe('the /oauth/callback landing', () => {
     render(<App />)
     await screen.findByText(/is connected/)
 
+    const before = window.history.length
+
     fireEvent.click(screen.getByRole('button', { name: 'Back to Motet' }))
 
-    expect(await screen.findByRole('heading', { name: 'Sources' })).toBeDefined()
+    expect(await screen.findByRole('heading', { name: 'Sources', level: 1 })).toBeDefined()
     expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
+    // Handed over with `replace`: the callback's own history entry now *is* Sources, so
+    // Back cannot return to a page holding a spent code.
+    expect(window.location.pathname).toBe('/sources')
+    expect(window.location.search).toBe('')
+    expect(window.history.length).toBe(before)
+  })
+
+  it('renders without the shell while it is on screen', async () => {
+    mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true, active: true } })
+    window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_1')
+    render(<App />)
+
+    await screen.findByText(/is connected/)
+    expect(screen.queryByRole('navigation', { name: 'Screens' })).toBeNull()
+    // And the shell does not rewrite the address underneath it: `forgetCallbackUrl` owns
+    // this path until the person chooses to leave it.
+    expect(window.location.pathname).toBe('/')
   })
 })
 
@@ -814,6 +1035,32 @@ describe('the /oauth/callback landing, for a sign-in', () => {
     expect(window.location.pathname).toBe('/')
   })
 
+  it('hands a finished sign-in to the front of the app, without a history entry for the code', async () => {
+    window.localStorage.clear()
+    mockApi({
+      '/v1/auth/google/callback': {
+        token: 'sess_abc',
+        email: 'owner@motet.test',
+        expires_at: '2026-09-23T00:00:00Z',
+      },
+    })
+    window.sessionStorage.setItem('motet.oauthState', 'login.st_1')
+    window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=login.st_1')
+    const before = window.history.length
+    render(<App />)
+    await screen.findByText(/Signed in as owner@motet.test/)
+    expect(screen.queryByRole('navigation', { name: 'Screens' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Motet' }))
+
+    // `/`, which is the Backlog, and which the shell then names in the address bar — all
+    // by `replace`, so the entry the code arrived on is gone rather than one Back away.
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
+    await waitFor(() => expect(window.location.pathname).toBe('/backlog'))
+    expect(window.location.search).toBe('')
+    expect(window.history.length).toBe(before)
+  })
+
   it('reads a refused sign-in as an answer, not as a crash', async () => {
     const calls = mockApi()
     window.history.replaceState({}, '', '/oauth/callback?error=access_denied&state=login.st_1')
@@ -881,7 +1128,7 @@ describe('a session that stops working', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Paste in' })).toBeDefined()
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
     expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
   })
 })
@@ -890,7 +1137,8 @@ describe('signing out', () => {
   it('says who is signed in and revokes the session', async () => {
     const calls = mockApi({ '/v1/auth/logout': {} })
     render(<App />)
-    await screen.findByRole('button', { name: 'Sign out' })
+    // The address is the account button in the top bar; the menu behind it holds Sign out.
+    fireEvent.click(await screen.findByRole('button', { name: /owner@motet.test/ }))
     expect(screen.getByText(/owner@motet.test/)).toBeDefined()
 
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
@@ -905,7 +1153,10 @@ describe('signing out', () => {
     mockApi({ '/v1/auth/session': { how: 'token', email: null, expires_at: null, login_configured: true } })
     render(<App />)
 
-    await screen.findByRole('heading', { name: 'Paste in' })
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+    // Opened, so that the assertion is about the menu's contents and not about it being shut.
+    fireEvent.click(screen.getByRole('button', { name: 'Account' }))
+    expect(screen.getByText('Using the shared API token.')).toBeDefined()
     expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull()
   })
 })
@@ -976,6 +1227,27 @@ describe('the admin view', () => {
     render(<App />)
 
     expect((await screen.findByRole('alert')).textContent).toContain('is not an admin')
+    expect(overviewCalls(calls)).toEqual([])
+    // Still a section of the shell, and still at its own address — just not one the
+    // sidebar offers to this caller.
+    expect(screen.getByRole('heading', { name: 'Admin', level: 1 })).toBeDefined()
+    expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
+    expect(screen.queryByRole('link', { name: 'Admin' })).toBeNull()
+    expect(window.location.pathname).toBe('/admin')
+  })
+
+  it('says it is checking, not that the caller is refused, until the session answers', async () => {
+    window.history.replaceState({}, '', '/admin')
+    const calls = mockApi({ '/v1/admin/overview': OVERVIEW })
+    const answered = vi.mocked(fetch).getMockImplementation()!
+    // The session question never comes back; everything else is answered as usual.
+    vi.mocked(fetch).mockImplementation((input, init) =>
+      String(input).includes('/v1/auth/session') ? new Promise(() => undefined) : answered(input, init),
+    )
+    render(<App />)
+
+    expect(await screen.findByText('Checking whether this account is an admin…')).toBeDefined()
+    expect(screen.queryByRole('alert')).toBeNull()
     expect(overviewCalls(calls)).toEqual([])
   })
 

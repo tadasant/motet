@@ -1,6 +1,11 @@
 /* Plain on purpose. Brand identity is Phase 3 — with one user it reduces zero risk, and
    an hour spent on colour here is an hour not spent on the factory. This is legibility
-   and nothing else. */
+   and nothing else.
+
+   The top of this file is the app shell — a sidebar, a top bar and a content area — in
+   neutral greys and one accent variable, so the active item and the badge have *a*
+   colour. Structure only; the colour and type decisions are still deferred. Everything
+   below the shell block is the screens' own styling. */
 
 :root {
   --fg: #1a1a1a;
@@ -8,19 +13,107 @@
   --line: #ddd;
   --bad: #a11;
   --good: #161;
+  /* The shell's palette: three greys and one accent. */
+  --bg: #fff;
+  --surface: #f7f7f8;
+  --hover: #ececee;
+  --accent: #2f5fd0;
+  --accent-soft: #e8eefb;
+  --sidebar-w: 14rem;
+  --topbar-h: 3.25rem;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, sans-serif;
   line-height: 1.5;
   color: var(--fg);
 }
 
-body { margin: 0; }
-main { max-width: 62rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
-header { border-bottom: 1px solid var(--line); margin-bottom: 1.5rem; }
+body { margin: 0; background: var(--bg); }
 h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
 h2 { font-size: 1.15rem; }
 h3 { font-size: 1rem; margin-bottom: .25rem; }
-nav { display: flex; gap: .5rem; padding-bottom: .75rem; flex-wrap: wrap; }
-nav button[aria-current="page"] { font-weight: 700; text-decoration: underline; }
+
+/* ---- App shell ------------------------------------------------------------------- */
+
+.shell { display: flex; min-height: 100vh; }
+
+/* The sidebar: fixed on the left at desktop width, a bar across the top below it. */
+.sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-w); box-sizing: border-box;
+  display: flex; flex-direction: column;
+  background: var(--surface); border-right: 1px solid var(--line);
+}
+.brand-row { display: flex; align-items: center; justify-content: space-between; height: var(--topbar-h); padding: 0 1rem; box-sizing: border-box; }
+.brand { font-weight: 700; font-size: 1.05rem; letter-spacing: .01em; color: var(--fg); text-decoration: none; }
+.menu-button { display: none; background: none; border: 1px solid var(--line); border-radius: 6px; padding: .25rem .4rem; line-height: 0; color: var(--fg); }
+
+.sidebar nav { display: flex; flex-direction: column; flex: 1; padding: .5rem .5rem 1rem; gap: 0; }
+.nav-group { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+/* The bottom group: separated, and pushed to the foot of the sidebar. */
+.nav-group.system { margin-top: auto; padding-top: .5rem; border-top: 1px solid var(--line); }
+.nav-group a {
+  display: flex; align-items: center; gap: .6rem; padding: .45rem .65rem; border-radius: 6px;
+  color: var(--fg); text-decoration: none; font-size: .95rem;
+}
+.nav-group a:hover { background: var(--hover); }
+.nav-group a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.nav-group .icon { flex: none; opacity: .8; }
+.nav-label { flex: 1; }
+
+/* The frame beside the sidebar: a top bar, then the content. */
+.frame { flex: 1; min-width: 0; margin-left: var(--sidebar-w); display: flex; flex-direction: column; }
+.topbar {
+  position: sticky; top: 0; z-index: 5; height: var(--topbar-h); box-sizing: border-box;
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0 1.5rem; background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.page-title { font-size: 1.05rem; font-weight: 600; margin: 0; }
+.topbar-right { display: flex; align-items: center; gap: .75rem; }
+
+/* The content area. Its width is the open section's `layout` (shell/sections.tsx): a
+   reading column, or `wide` for a screen made of tables, whose tables then scroll inside
+   the content area rather than the page. A screen's title is the top bar's h1, so no
+   screen repeats it. */
+main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.5rem 4rem; box-sizing: border-box; }
+.frame > main.wide { max-width: 90rem; overflow-x: auto; }
+/* The top bar's h1 is the page, so a screen's own headings start at h2 — sized as the
+   subheadings they are rather than as the page titles h2 was sized for. */
+.frame > main h2 { font-size: 1rem; margin-bottom: .25rem; }
+
+/* The account menu, right end of the top bar. */
+.popover-root { position: relative; }
+.popover-button { display: flex; align-items: center; gap: .35rem; background: none; border: 1px solid var(--line); border-radius: 999px; padding: .25rem .75rem; font-size: .9rem; max-width: 18rem; }
+.popover-button > .chevron { flex: none; opacity: .6; }
+.popover-button[aria-expanded="true"] { background: var(--hover); }
+.popover {
+  position: absolute; right: 0; top: calc(100% + .4rem); z-index: 10; width: 22rem; max-width: calc(100vw - 2rem);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: .75rem 1rem;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .08);
+}
+.popover .hint { margin: 0 0 .5rem; }
+.popover .token { margin: .75rem 0 0; padding-top: .75rem; border-top: 1px solid var(--line); }
+.popover .token summary { font-size: .9rem; cursor: pointer; }
+
+/* The door and the OAuth callback: no sidebar, one thing to do. */
+.door { min-height: 100vh; display: flex; flex-direction: column; }
+.door-bar .brand { margin: 0; }
+.door-bar { height: var(--topbar-h); display: flex; align-items: center; padding: 0 1.5rem; border-bottom: 1px solid var(--line); background: var(--surface); }
+.door-main { max-width: 34rem; width: 100%; margin: 3rem auto; padding: 0 1.5rem; box-sizing: border-box; }
+.door-main .token { margin-bottom: 1.5rem; }
+.door-main .token summary { font-size: .9rem; color: var(--muted); cursor: pointer; }
+
+/* Below ~800px the sidebar is a bar across the top and the nav is behind a menu button. */
+@media (max-width: 800px) {
+  .shell { flex-direction: column; }
+  .sidebar { position: sticky; top: 0; z-index: 6; width: auto; bottom: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .menu-button { display: inline-flex; }
+  .sidebar nav { display: none; padding: .25rem .5rem .75rem; }
+  .sidebar.open nav { display: flex; }
+  .nav-group.system { margin-top: .25rem; }
+  .frame { margin-left: 0; }
+  .topbar { position: static; padding: 0 1rem; }
+  main { padding: 1rem 1rem 3rem; }
+}
+
+/* ---- Screens ---------------------------------------------------------------------- */
 
 button { font: inherit; padding: .35rem .7rem; cursor: pointer; }
 input, textarea { font: inherit; padding: .4rem; width: 100%; box-sizing: border-box; }
@@ -57,7 +150,7 @@ label { font-weight: 600; font-size: .9rem; }
 .stalled { border-left: 3px solid var(--bad); background: #fdf6f6; padding: .5rem .75rem; margin: .5rem 0 0; font-size: .9rem; }
 /* A button that reads as a link, for choosing between things rather than doing one. */
 .linkish { background: none; border: 0; padding: 0; color: var(--fg); text-decoration: underline; }
-.processing h3 { margin-top: 0; }
+.processing h2 { margin-top: 0; }
 .processing .items li:first-child { border-top: none; }
 .badge { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .5rem; white-space: nowrap; }
 .badge.failed { color: var(--bad); border-color: var(--bad); }
@@ -69,10 +162,8 @@ label { font-weight: 600; font-size: .9rem; }
 .tab-count { margin-left: .35rem; font-size: .75rem; border-radius: 999px; border: 1px solid var(--line); padding: 0 .35rem; }
 .tab-count.failed { color: var(--bad); border-color: var(--bad); }
 
-/* PROTOTYPE: /admin */
-main.wide { max-width: 90rem; }
-.admin-bar { justify-content: flex-start; }
-.admin-bar h2 { margin: 0; }
+/* The Admin screen. */
+.admin-bar { justify-content: flex-start; margin-top: 0; }
 .grid { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: .9rem; }
 .grid th { text-align: left; font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--line); padding: .35rem .5rem; }
 .grid th.sub { font-size: .7rem; border-bottom: 2px solid var(--line); }

@@ -66,9 +66,7 @@ export function Backlog({
   }
 
   return (
-    <section aria-labelledby="backlog-heading">
-      <h2 id="backlog-heading">Backlog</h2>
-
+    <section aria-label="Backlog">
       {/* Above the backlog rather than below it: the question "where did the thing I just
           pasted go" is asked immediately after pasting, and an answer under a long list of
           older stories is an answer nobody scrolls to. It renders nothing when there is

@@ -1,7 +1,7 @@
 // The /admin view: cross-user queue and pipeline visibility for an operator.
 //
-// Rendered when the page is loaded at /admin (see App.tsx), the same "one path, no router"
-// trick oauth.ts uses, and only once `/v1/auth/session` has said this caller is an admin.
+// A section of the app shell at /admin (shell/sections.tsx), with a wide layout because it
+// is tables, rendered only once `/v1/auth/session` has said this caller is an admin.
 // That check is presentation; the control is server-side — every /v1/admin route answers
 // 403 to anyone not on MOTET_ADMIN_EMAILS, whatever this file renders.
 
@@ -94,9 +94,10 @@ export function Admin() {
   const failed = data?.queues.reduce((sum, q) => sum + q.failed, 0) ?? 0
 
   return (
-    <div className="admin">
+    <section className="admin" aria-label="Admin">
+      {/* The title is the shell's top bar and the way out is its sidebar. What is left of
+          the page-era toolbar is what only this screen has: its own poll. */}
       <div className="row admin-bar">
-        <h2>Admin</h2>
         <span className="hint">
           {open} open · <span className={failed ? 'error' : ''}>{failed} failed</span> · refreshed{' '}
           {data ? ago(data.generated_at) : '—'}
@@ -107,13 +108,10 @@ export function Admin() {
         <button type="button" onClick={refresh}>
           Refresh now
         </button>
-        <a href="/" className="hint">
-          ← app
-        </a>
       </div>
       {error && <p className="error">{error}</p>}
 
-      <h3>Queues</h3>
+      <h2>Queues</h2>
       <table className="grid">
         <thead>
           <tr>
@@ -155,7 +153,7 @@ export function Admin() {
         </tbody>
       </table>
 
-      <h3>Users</h3>
+      <h2>Users</h2>
       <table className="grid">
         <thead>
           <tr>
@@ -202,10 +200,10 @@ export function Admin() {
       </table>
 
       <div className="row">
-        <h3>
+        <h2>
           Jobs{selectedUser && <> · {selectedUser}</>}
           {queueFilter && <> · {queueFilter}</>}
-        </h3>
+        </h2>
         <span className="hint">
           {jobs.length} shown of {data?.jobs.length ?? 0} on this page
         </span>
@@ -296,6 +294,6 @@ export function Admin() {
           )}
         </tbody>
       </table>
-    </div>
+    </section>
   )
 }

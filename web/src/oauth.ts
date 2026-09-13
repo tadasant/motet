@@ -1,14 +1,15 @@
 // The callback path, and the three things that have to survive a round trip to Google.
 //
-// **This is the whole of the SPA's routing**, and it is deliberately not a router.
-// App.tsx says "three screens, one tab strip, no router" — adding a routing library to
-// serve one path that the user is on for about two seconds would be the first step
-// toward building a product instead of a factory (a named tripwire in AGENTS.md). So the
-// path is read once at boot, and the rest of the app never thinks about the URL again.
+// **It is read once at boot, and apart from the shell.** The shell keeps the section in
+// the path (`shell/useLocation.ts`), but that is one string in React state, not a router,
+// and it never sees this path: App.tsx renders the callback instead of the shell, and
+// finishing hands over to a section with `replace`, so Back does not return to a spent
+// code. Keeping the two apart is what lets the section URLs change without touching the
+// one path that is registered on the OAuth client.
 //
 // web/nginx.conf's history fallback (`try_files $uri $uri/ /index.html`) is what makes
 // that work in the deployed image: /oauth/callback is not a file, so nginx serves the
-// bundle and the bundle reads the path.
+// bundle and the bundle reads the path. Every section path works the same way.
 
 const CALLBACK_PATH = '/oauth/callback'
 
