@@ -270,8 +270,8 @@ Before it spends ten minutes archiving, the workflow checks that the variables a
 that the key can see the app record (`app_store_connect.py preflight`). A pending
 agreement shows up there as a 403. A wrong team id is only caught at export.
 
-**The app icon is a placeholder**: four lines converging on parchment, generated so that an
-upload is not refused for lacking one. The brand restyle
-([#110](https://github.com/tadasant/motet/issues/110)) replaces
-`App/Motet/Assets.xcassets/AppIcon.appiconset/AppIcon.png`. It must stay 1024×1024 with no
-alpha channel, or App Store Connect rejects the upload.
+**The app icon is the brand mark** from the Polyphony restyle
+([#115](https://github.com/tadasant/motet/pull/115)),
+`App/Motet/Assets.xcassets/AppIcon.appiconset/AppIcon.png`. Whoever replaces it must keep it
+1024×1024 with no alpha channel, or App Store Connect rejects the upload. `testflight check`
+catches a missing icon, but not an alpha channel.
