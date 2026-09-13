@@ -33,7 +33,7 @@ function stamp(iso: string | null | undefined): string {
 }
 
 const STATUS_COPY: Record<string, string> = {
-  held: 'Not processed yet — held. Nothing has been spent on this item; pick it above and press Ingest now.',
+  held: 'Not processed yet — waiting for you. Nothing has been spent on this item; select it under Waiting for you and press Ingest.',
   queued: 'Queued. An integrate job is waiting for a worker.',
   running: 'Running. A worker holds the integrate job now.',
   done: 'Done. Dedup read the extracted text against the current window of news items and wrote the result below.',
@@ -69,7 +69,7 @@ export function SourceItemDetail({
 }: {
   id: string
   onClose: () => void
-  /** Scroll to / highlight a news item in the Processed list, when the list is on screen. */
+  /** Scroll to / highlight a news item in the backlog, when the list is on screen. */
   onJumpToNewsItem?: ((newsItemId: string) => void) | undefined
 }) {
   const [data, setData] = useState<SourceItemDetailData | null>(null)
@@ -98,7 +98,7 @@ export function SourceItemDetail({
         <p className="error" role="alert">
           {error}
         </p>
-        <button type="button" className="linkish hint" onClick={onClose}>
+        <button type="button" className="linkish hint close" onClick={onClose} aria-label="Close">
           close
         </button>
       </div>
@@ -113,11 +113,11 @@ export function SourceItemDetail({
     <div className="lifecycle">
       <div className="row lifecycle-head">
         <strong>{data.title || '(untitled)'}</strong>
-        <span className="hint">{data.id}</span>
-        <button type="button" className="linkish hint" onClick={onClose}>
+        <button type="button" className="linkish hint close" onClick={onClose} aria-label="Close">
           close
         </button>
       </div>
+      <p className="hint mono lifecycle-id">{data.id}</p>
 
       <Stage
         number={1}
@@ -237,7 +237,7 @@ export function SourceItemDetail({
                     className="linkish"
                     onClick={() => onJumpToNewsItem(item.id)}
                   >
-                    show in Processed list
+                    Show in backlog
                   </button>
                 ) : (
                   <span className="hint mono">{item.id}</span>
