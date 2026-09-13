@@ -22,7 +22,9 @@ probe on a full-length hash leaks nothing a timing measurement can use.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import re
 import secrets
 from dataclasses import dataclass
@@ -257,6 +259,89 @@ def delete_sessions_for_user(conn: psycopg.Connection[Any], user_id: str) -> int
 def purge_expired_sessions(conn: psycopg.Connection[Any]) -> int:
     """Sweep lapsed rows. Housekeeping only: expiry is already enforced on read."""
     return conn.execute("DELETE FROM auth_sessions WHERE expires_at <= now()").rowcount
+
+
+# --- handing a sign-in back to the iOS app (migration 0019) ----------------------------
+
+#: How long a verified sign-in waits for the app that started it.
+#:
+#: Short, because the only thing between the callback and the redeem is the in-app browser
+#: navigating to a `motet://` link and the app making one request. Anything longer is a
+#: window in which a code read off that link is worth trying.
+HANDOFF_TTL_SECONDS: int = 120
+
+
+@dataclass(frozen=True)
+class AuthHandoff:
+    """A verified, allowlisted sign-in, waiting to be collected by the app that started it."""
+
+    user_id: str
+    email: str
+    code_challenge: str
+
+
+def pkce_challenge(verifier: str) -> str:
+    """RFC 7636's S256 transform: base64url(SHA-256(verifier)), unpadded."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def verifier_matches(verifier: str, challenge: str) -> bool:
+    """Whether a verifier is the one a stored challenge was made from. Constant-time."""
+    return hmac.compare_digest(pkce_challenge(verifier), challenge)
+
+
+def create_handoff(
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str,
+    email: str,
+    code: str,
+    code_challenge: str,
+    ttl_seconds: int = HANDOFF_TTL_SECONDS,
+) -> None:
+    """Record a sign-in for the app to redeem. Only the code's hash is kept.
+
+    **Like :func:`create_session_for_digest`, this does not check the allowlist.** The
+    callback that calls it already has, and :func:`take_handoff`'s caller checks it again
+    before minting anything, so an address removed in the two minutes between gets nothing.
+    """
+    conn.execute(
+        """
+        INSERT INTO auth_handoffs (code_sha256, user_id, email, code_challenge, expires_at)
+        VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s))
+        """,
+        (token_digest(code), user_id, email, code_challenge, ttl_seconds),
+    )
+
+
+def take_handoff(conn: psycopg.Connection[Any], code: str) -> AuthHandoff | None:
+    """Consume a handoff, exactly once — the same ``DELETE ... RETURNING`` as a state.
+
+    Exactly once *per committed transaction*: a caller that raises after this rolls the delete
+    back, which is what lets a refused redeem leave the code for the app holding the verifier.
+    """
+    if not code:
+        return None
+    row = _maybe_one(
+        conn,
+        """
+        DELETE FROM auth_handoffs
+        WHERE code_sha256 = %s AND expires_at > now()
+        RETURNING user_id, email, code_challenge
+        """,
+        (token_digest(code),),
+    )
+    if row is None:
+        return None
+    return AuthHandoff(
+        user_id=row["user_id"], email=row["email"], code_challenge=row["code_challenge"]
+    )
+
+
+def purge_expired_handoffs(conn: psycopg.Connection[Any]) -> int:
+    """Sweep handoffs nobody collected — the app was closed mid-sign-in."""
+    return conn.execute("DELETE FROM auth_handoffs WHERE expires_at <= now()").rowcount
 
 
 def _session(row: dict[str, Any]) -> AuthSession:

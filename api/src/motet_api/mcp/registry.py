@@ -232,6 +232,15 @@ EXCLUDED: dict[Operation, str] = {
         "here on the way back to the client. It is how an MCP connection gets a token, so it "
         "cannot be something that connection calls."
     ),
+    ("POST", "/v1/auth/native/start"): (
+        "Starts the iOS app's sign-in through the web sign-in (motet#121): it hands a phone "
+        "that holds no credential a Google URL to open. An MCP connection is already "
+        "authenticated, and signing a phone in is not something an agent does for a person."
+    ),
+    ("POST", "/v1/auth/native/redeem"): (
+        "The iOS app collecting its own sign-in with the PKCE verifier only it holds; same "
+        "reason as /v1/auth/native/start, and a tool could not hold that verifier anyway."
+    ),
     ("POST", "/v1/auth/logout"): (
         "Revokes the credential the call arrived on, which would end the MCP connection that "
         "made it. logout_everywhere (admin) is the revocation an agent may need."

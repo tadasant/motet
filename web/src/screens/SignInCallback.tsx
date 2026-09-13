@@ -12,11 +12,22 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, api } from '../api/client'
-import { type OAuthCallback as Callback, stateMatches, takeState } from '../oauth'
+import { type OAuthCallback as Callback, beginConsent, stateMatches, takeState } from '../oauth'
+
+/**
+ * Whether a handoff link is the API's `motet://signed-in?code=…` and nothing else. The API
+ * builds it from literals, so this refuses nothing real; it is here so that no value in that
+ * field could ever run as script in this origin, where the web session token lives.
+ */
+export function isHandoffUrl(url: string): boolean {
+  return url.startsWith('motet://signed-in?')
+}
 
 type Status =
   | { kind: 'busy' }
   | { kind: 'done'; email: string }
+  /** Verified, and waiting for the person to hand it to the iOS app. Nothing was stored. */
+  | { kind: 'handoff'; email: string; url: string }
   | { kind: 'error'; message: string }
 
 /**
@@ -36,11 +47,14 @@ export function SignInCallback({
   callback,
   onSignedIn,
   onDone,
+  handOff = beginConsent,
 }: {
   callback: Callback
   /** Hands the session token up to the app, which stores it and stops showing the door. */
   onSignedIn: (token: string) => void
   onDone: () => void
+  /** Follows the iOS app's handoff link. Overridden only by tests: jsdom cannot navigate. */
+  handOff?: (url: string) => void
 }) {
   const [status, setStatus] = useState<Status>({ kind: 'busy' })
   // StrictMode runs an effect twice on mount, and an authorization code is single-use:
@@ -74,6 +88,23 @@ export function SignInCallback({
     api
       .completeLogin(callback.state, callback.code)
       .then((session) => {
+        if (session.handoff_url) {
+          // A sign-in started by an iOS app, finishing in its sign-in sheet. Nothing is
+          // stored here: the link carries a one-time code back to that app. It is not
+          // followed until the person confirms, because *any* app on the phone can start
+          // such a sign-in and wait for the link, and the confirmation is the one moment a
+          // person can notice they did not just tap Sign in in Motet.
+          if (!isHandoffUrl(session.handoff_url)) {
+            setStatus({ kind: 'error', message: 'The sign-in finished with a link this page will not follow.' })
+            return
+          }
+          setStatus({ kind: 'handoff', email: session.email, url: session.handoff_url })
+          return
+        }
+        if (!session.token) {
+          setStatus({ kind: 'error', message: 'The sign-in finished without a session. Try again.' })
+          return
+        }
         // Stored before anything is rendered about it: this is the credential every
         // later request carries, and a success message with no token behind it would be
         // a lie the next screen would then contradict.
@@ -88,7 +119,7 @@ export function SignInCallback({
           message: err instanceof ApiError ? err.message : String(err),
         }),
       )
-  }, [callback, onSignedIn])
+  }, [callback, onSignedIn, handOff])
 
   return (
     <section aria-labelledby="signin-callback-heading">
@@ -104,6 +135,23 @@ export function SignInCallback({
         <p className="hint" role="status">
           Finishing up — checking who you are.
         </p>
+      )}
+      {callback.kind === 'granted' && status.kind === 'handoff' && (
+        <>
+          <p className="ok" role="status">
+            Signed in as {status.email}. Hand this sign-in to the Motet app on this phone?
+          </p>
+          <p className="hint">
+            Only continue if you just tapped Sign in with Google in the Motet app. If you did not,
+            close this page: another app may be asking for your account.
+          </p>
+          <div className="row">
+            <button type="button" className="btn-primary" onClick={() => handOff(status.url)}>
+              Continue to the Motet app
+            </button>
+          </div>
+          <p className="hint">If nothing happens, go back to the Motet app and sign in from there.</p>
+        </>
       )}
       {callback.kind === 'granted' && status.kind === 'done' && (
         <p className="ok" role="status">

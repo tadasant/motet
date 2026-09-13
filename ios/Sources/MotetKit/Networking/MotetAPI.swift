@@ -100,6 +100,32 @@ public struct MotetHTTPClient: MotetAPI {
         return url
     }
 
+    // MARK: - Signing in
+
+    /// Begin the web sign-in on this app's behalf (see `NativeSignIn`). Unauthenticated:
+    /// it is how an app that holds nothing gets something.
+    public func startNativeSignIn(codeChallenge: String) async throws -> StartNativeLoginResponse {
+        try await send(
+            MotetEndpoints.startNativeLogin,
+            body: StartNativeLoginRequest(codeChallenge: codeChallenge),
+            as: StartNativeLoginResponse.self
+        )
+    }
+
+    /// Trade the handoff link's code, and the verifier only this app holds, for a session.
+    public func redeemNativeSignIn(code: String, codeVerifier: String) async throws -> LoginResponse {
+        try await send(
+            MotetEndpoints.redeemNativeLogin,
+            body: RedeemNativeLoginRequest(code: code, codeVerifier: codeVerifier),
+            as: LoginResponse.self
+        )
+    }
+
+    /// Revoke this app's session on the server. A no-op for the shared API token.
+    public func signOut() async throws {
+        _ = try await perform(MotetEndpoints.logout, body: Optional<Never>.none)
+    }
+
     // MARK: - Plumbing
 
     private func send<Response: Decodable>(

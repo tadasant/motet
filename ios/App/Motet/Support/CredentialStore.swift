@@ -18,8 +18,27 @@ import Security
 @MainActor
 final class CredentialStore {
     private let baseURLKey = "motet.baseURL"
+    /// Which Google account the stored token is a session for. Not a secret, so not in the
+    /// Keychain; nil when the token was pasted rather than signed in for.
+    private let signedInEmailKey = "motet.signedInEmail"
     private let tokenAccount = "motet.api-token"
     private let service = "com.getmotet.app"
+
+    var signedInEmail: String? {
+        UserDefaults.standard.string(forKey: signedInEmailKey)
+    }
+
+    /// Keep a session from signing in. It takes the token's slot: a session is a bearer
+    /// token like the API token, so nothing that sends requests knows the difference.
+    func saveSession(token: String, email: String) {
+        writeToken(token)
+        UserDefaults.standard.set(email, forKey: signedInEmailKey)
+    }
+
+    func clearSession() {
+        writeToken("")
+        UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+    }
 
     func configuration() -> MotetConfiguration {
         MotetConfiguration(baseURL: storedBaseURL() ?? Self.buildDefaultBaseURL, apiToken: readToken())
@@ -44,6 +63,10 @@ final class CredentialStore {
 
     func save(baseURL: String, apiToken: String) {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if URL(string: trimmed) != (storedBaseURL() ?? Self.buildDefaultBaseURL) {
+            // A session belongs to one server; pointed at another, "signed in as" would be false.
+            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+        }
         // Settings shows the build's default, so saving it unchanged must not pin it: a later
         // build pointed somewhere else would otherwise be ignored on this phone forever.
         if trimmed == Self.buildDefaultBaseURL?.absoluteString {
@@ -51,7 +74,12 @@ final class CredentialStore {
         } else {
             UserDefaults.standard.set(trimmed, forKey: baseURLKey)
         }
-        writeToken(apiToken.trimmingCharacters(in: .whitespacesAndNewlines))
+        let token = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token != readToken() {
+            // A pasted token is not the session the recorded address belongs to.
+            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+        }
+        writeToken(token)
     }
 
     private func readToken() -> String? {
