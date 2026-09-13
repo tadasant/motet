@@ -1,0 +1,74 @@
+name: Notify tadasant-internal that main moved
+
+# Motet's staging and production deploy whatever commit the private infrastructure repo pins,
+# so merging here deploys nothing on its own. This tells that repo `main` advanced, and it
+# answers by opening a PR that bumps the pin. It also polls on a schedule, so this dispatch
+# only makes the bump PROMPT: a run that skips or is refused costs minutes of latency, never
+# a deploy. AGENTS.md, "Runner policy", records it.
+#
+# THE TOKEN MUST NEVER REACH A PULL REQUEST, so three things fence it:
+#
+#   1. `push` to `main` is the only trigger. There is no `pull_request`, no
+#      `pull_request_target`, no `workflow_run` and no `workflow_dispatch`, so no PR — from a
+#      fork or from a branch — can start this workflow, and no workflow that a PR does start
+#      references the secret.
+#   2. The job refuses any ref but `main` and any repository but this one, so a fork that
+#      enables Actions and pushes its own `main` runs nothing (it would have no secret anyway).
+#   3. It runs on a GitHub-hosted, ephemeral runner with no checkout, never the self-hosted
+#      pool, and hands the token to curl on stdin rather than in argv, where anything on a
+#      shared machine that can run `ps` could read it.
+#
+# It is its own workflow rather than a job after `all-checks-pass` in ci.yml deliberately.
+# Waiting for main's CI would not be a gate — the receiving side's schedule bumps the pin
+# regardless — so it would only add CI's ten minutes to every bump. And a job in ci.yml
+# would put the secret into a file that `pull_request` events run, leaving an `if:` as the
+# only thing between a PR and the token; here there is no such file.
+#
+# INERT UNTIL `GH_MOTET_SYNC_TOKEN_TADASANT_INTERNAL` EXISTS, and a warning — never a
+# failure — when the API refuses the call. A notification must not turn main red.
+
+on:
+  push:
+    branches: [main]
+
+# The job needs nothing from GITHUB_TOKEN; its only credential is the dispatch token.
+permissions: {}
+
+# Serialized, never cancelled: dispatches for two quick merges arrive in merge order, and
+# the newest SHA is the last word the receiving side hears.
+concurrency:
+  group: notify-deploy-pin
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'tadasant/motet' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Dispatch motet-main-updated to tadasant-internal
+        env:
+          DISPATCH_TOKEN: ${{ secrets.GH_MOTET_SYNC_TOKEN_TADASANT_INTERNAL }}
+          DISPATCH_URL: https://api.github.com/repos/tadasant/tadasant-internal/dispatches
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "GH_MOTET_SYNC_TOKEN_TADASANT_INTERNAL not set; skipping cross-repo dispatch."
+            exit 0
+          fi
+          out="${RUNNER_TEMP:-/tmp}/dispatch.out"
+          body=$(printf '{"event_type":"motet-main-updated","client_payload":{"sha":"%s"}}' "$GITHUB_SHA")
+          # `|| true` keeps `set -e` from ending the step on a transport failure, which curl
+          # reports as HTTP 000 and the branch below turns into a warning.
+          code=$(printf 'header = "Authorization: Bearer %s"\n' "$DISPATCH_TOKEN" \
+            | curl -sS --max-time 30 -K - -o "$out" -w '%{http_code}' -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -d "$body" "$DISPATCH_URL") || true
+          if [ "$code" = "204" ]; then
+            echo "Dispatched motet-main-updated (sha ${GITHUB_SHA})."
+          else
+            echo "::warning::repository_dispatch returned HTTP ${code:-000}; tadasant-internal picks up ${GITHUB_SHA} on its own schedule."
+            cat "$out" 2>/dev/null || true
+          fi
