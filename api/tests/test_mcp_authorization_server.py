@@ -318,6 +318,9 @@ class TestHostileClients:
             "data:text/html,<script>alert(1)</script>",
             "vbscript:msgbox(1)",
             "http://attacker.example/callback",
+            # The consent screen would name claude.ai as where the grant goes.
+            "https://claude.ai@attacker.example/callback",
+            "https://claude.ai:pw@attacker.example/callback",
         ],
     )
     def test_a_redirect_that_is_not_a_client_is_refused_at_registration(

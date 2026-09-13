@@ -19,6 +19,12 @@ describe('isSafeClientRedirect', () => {
     expect(isSafeClientRedirect('blob:https://app.example/1')).toBe(false)
   })
 
+  it('refuses a username or password, which would disguise where the grant goes', () => {
+    expect(isSafeClientRedirect('https://claude.ai@attacker.example/cb')).toBe(false)
+    expect(isSafeClientRedirect('https://claude.ai:x@attacker.example/cb')).toBe(false)
+    expect(isSafeClientRedirect('http://localhost@attacker.example/cb')).toBe(false)
+  })
+
   it('refuses plain http off loopback, and anything that is not a URL', () => {
     expect(isSafeClientRedirect('http://attacker.example/cb')).toBe(false)
     expect(isSafeClientRedirect('not a url')).toBe(false)

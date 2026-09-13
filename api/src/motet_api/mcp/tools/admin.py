@@ -134,6 +134,11 @@ def set_llm_config(
     Changing a model changes what inference costs.
     """
 
+    if clear and (model is not None or effort is not None):
+        raise ToolError("422: Pass clear, or model and effort, not both.")
+    if not clear and model is None and effort is None:
+        raise ToolError("422: Pass model, effort, or clear; nothing was asked to change.")
+
     def call(c: RouteCall) -> LlmConfigResponse:
         fields: dict[str, str | None] = (
             {"model": None, "effort": None}

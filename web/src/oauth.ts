@@ -92,6 +92,8 @@ export function isSafeClientRedirect(url: string): boolean {
   }
   const scheme = parsed.protocol.toLowerCase()
   if (REFUSED_REDIRECT_SCHEMES.has(scheme)) return false
+  // `https://claude.ai@attacker.example/cb` goes to attacker.example and reads as claude.ai.
+  if (parsed.username || parsed.password) return false
   if (scheme === 'https:') return true
   if (scheme === 'http:') return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
   return /^[a-z][a-z0-9+.-]*:$/.test(scheme)

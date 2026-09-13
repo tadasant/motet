@@ -118,14 +118,19 @@ def redirect_uri_allowed(uri: str) -> bool:
     private-use scheme such as ``vscode:``. Checked at registration and again when the code
     is minted, because a row stored before this check existed is still a row.
 
+    **A username or password is refused too**, because the consent screen names where the
+    grant goes: ``https://claude.ai@attacker.example/cb`` is a redirect to
+    ``attacker.example`` that reads as ``claude.ai``.
+
     Keep in step with ``isSafeClientRedirect`` in ``web/src/oauth.ts``.
     """
     try:
         parts = urlsplit(uri)
+        credentials = parts.username is not None or parts.password is not None
     except ValueError:
         return False
     scheme = parts.scheme.lower()
-    if not scheme or scheme in REFUSED_REDIRECT_SCHEMES:
+    if not scheme or scheme in REFUSED_REDIRECT_SCHEMES or credentials:
         return False
     if scheme == "https":
         return bool(parts.hostname)
@@ -496,6 +501,19 @@ def oauth_routes() -> list[Route]:
     return [Route(path, endpoint=_OAuthEndpoint(path), methods=m) for path, m in methods.items()]
 
 
+def _redirect_host(uri: str) -> str:
+    """What the consent screen names as where the grant goes: the host and port, never ``netloc``.
+
+    ``netloc`` carries any user-info, which is exactly the part that can make one host read as
+    another. Registration refuses user-info already; this is the second half of that, for a
+    screen whose whole job is to be believed.
+    """
+    parts = urlsplit(uri)
+    if not parts.hostname:
+        return uri
+    return f"{parts.hostname}:{parts.port}" if parts.port else parts.hostname
+
+
 def complete_authorization(
     conn: psycopg.Connection[Any], config: Settings, *, state: str, code: str
 ) -> McpAuthorizationResponse:
@@ -574,7 +592,7 @@ def complete_authorization(
     redirect_uri = request["redirect_uri"]
     return McpAuthorizationResponse(
         client_name=str(client.get("client_name") or request["client_id"]),
-        redirect_host=urlsplit(redirect_uri).netloc or redirect_uri,
+        redirect_host=_redirect_host(redirect_uri),
         email=identity.email,
         redirect_url=construct_redirect_uri(
             redirect_uri, code=authorization_code, state=request["state"]

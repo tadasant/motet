@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from ...deps import dek_wrapper
@@ -54,22 +55,20 @@ def create_connector(
         list[str] | None,
         Field(description="mcp: the sites this server is used for. Omit for all."),
     ] = None,
-    acknowledge_risk: Annotated[
-        bool,
-        Field(
-            description=(
-                "mcp: required, and only the owner can give it. The agent this server is "
-                "handed to also reads untrusted web pages, which can steer it into using it."
-            )
-        ),
-    ] = False,
 ) -> ConnectorResponse:
-    """Add a site or a remote MCP server for agentic enrichment to use.
+    """Add a site for agentic enrichment to fetch articles from.
 
-    A site needs only its domain. An MCP server is refused unless `acknowledge_risk` is true,
-    which is the owner's decision to make, not an agent's, and it starts in `needs_auth`:
-    nothing about it works until `authorize_connector` and a person's consent.
+    A site needs only its domain. A remote MCP server (`kind='mcp'`) is always refused here:
+    adding one needs the owner to acknowledge its risk on the Credentials screen, and no
+    MCP client can give that acknowledgement on the owner's behalf.
     """
+    if kind == "mcp":
+        # The route's `acknowledge_risk` is the control, and a tool argument is not a person
+        # reading the warning: an agent that reads untrusted pages could tick it itself.
+        raise ToolError(
+            "403: An MCP server connector is added on the Credentials screen, where a person "
+            "acknowledges its risk. An MCP client cannot acknowledge it for them."
+        )
 
     def call(c: RouteCall) -> ConnectorResponse:
         return routes.create_connector(
@@ -81,7 +80,6 @@ def create_connector(
                 password=password,
                 url=url,
                 domains=domains or [],
-                acknowledge_risk=acknowledge_risk,
             ),
             conn=c.conn,
             user_id=c.user_id,

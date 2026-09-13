@@ -283,6 +283,89 @@ class TestWhatAConnectionSees:
         assert as_session["how"] == "session" and as_session["email"] == ADMIN_EMAIL
 
 
+# --- the guards a tool re-adds --------------------------------------------------------------
+
+
+class TestTheGuardsAToolReAdds:
+    """What a route gets from FastAPI or from a person, and a direct call has to say itself."""
+
+    def test_a_site_connector_round_trips_and_an_mcp_server_is_never_added_by_a_client(
+        self, env: None, db: psycopg.Connection[Any]
+    ) -> None:
+        async def work(client: Client) -> tuple[Any, Any, Any, Any]:
+            refused = await client.call_tool(
+                "create_connector", {"kind": "mcp", "url": "https://mcp.example/mcp"}
+            )
+            added = await client.call_tool(
+                "create_connector", {"kind": "site", "domain": "https://www.example.com/x"}
+            )
+            listed = await client.call_tool("list_connectors", {})
+            connector_id = (added.structured_content or {}).get("id", "")
+            deleted = await client.call_tool("delete_connector", {"connector_id": connector_id})
+            return refused, added, listed, deleted
+
+        refused, added, listed, deleted = with_client(BEARER, "", work)
+        assert refused.is_error and "403: " in text(refused)
+        assert "acknowledge_risk" not in text(refused)
+        count = db.execute("SELECT count(*) AS n FROM connectors WHERE kind = 'mcp'").fetchone()
+        assert count is not None and count["n"] == 0
+        assert not added.is_error, text(added)
+        assert added.structured_content["domain"] == "example.com"
+        assert [c["id"] for c in listed.structured_content["result"]] == [
+            added.structured_content["id"]
+        ]
+        assert not deleted.is_error, text(deleted)
+
+    def test_the_query_bounds_a_route_declares_are_checked_by_the_tool(
+        self, env: None, db: psycopg.Connection[Any]
+    ) -> None:
+        async def work(client: Client) -> list[Any]:
+            return [
+                await client.call_tool("get_admin_overview", {"limit": 0}),
+                await client.call_tool("get_admin_overview", {"limit": 501}),
+                await client.call_tool("list_waitlist", {"before": 0}),
+                await client.call_tool("list_waitlist", {"limit": 5}),
+            ]
+
+        *bounds, page = with_client(session_for(db, ADMIN_EMAIL), "?tool_groups=admin", work)
+        for refused in bounds:
+            assert refused.is_error and "422: " in text(refused), text(refused)
+        assert not page.is_error, text(page)
+
+    def test_llm_config_reads_and_spend_answer_an_admin(
+        self, env: None, db: psycopg.Connection[Any]
+    ) -> None:
+        async def work(client: Client) -> list[Any]:
+            return [
+                await client.call_tool("get_llm_config", {}),
+                await client.call_tool("get_llm_spend", {}),
+            ]
+
+        for result in with_client(session_for(db, ADMIN_EMAIL), "?tool_groups=admin", work):
+            assert not result.is_error, text(result)
+
+    def test_set_llm_config_refuses_an_ambiguous_or_empty_call_and_a_read_only_deployment(
+        self, env: None, db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MOTET_SETTINGS_WRITABLE", raising=False)
+
+        async def work(client: Client) -> list[Any]:
+            return [
+                await client.call_tool(
+                    "set_llm_config", {"stage": "dedup", "clear": True, "effort": "low"}
+                ),
+                await client.call_tool("set_llm_config", {"stage": "dedup"}),
+                await client.call_tool("set_llm_config", {"stage": "dedup", "effort": "low"}),
+            ]
+
+        both, empty, unwritable = with_client(
+            session_for(db, ADMIN_EMAIL), "?tool_groups=admin", work
+        )
+        assert both.is_error and "422: " in text(both)
+        assert empty.is_error and "422: " in text(empty)
+        assert unwritable.is_error and "409: " in text(unwritable), text(unwritable)
+
+
 # --- stateless --------------------------------------------------------------------------------
 
 

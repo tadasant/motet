@@ -2594,8 +2594,16 @@ token in constant time, else a session row with the allowlist re-checked. The fe
 refused — a URL in a podcast app must not be the whole API. Groups come from `?tool_groups=` in
 the query string and never the body, an unknown group is a 400 rather than a quietly smaller
 surface, every group has a `<group>_readonly` variant, and an admin tool still answers only a
-caller its route's guard would. `motet.mcp.tool_calls{tool,outcome}` counts every call, and
-`/internal/health` reports `mcp_tools`.
+caller its route's guard would. That makes the admin group reachable only with a signed-in
+browser's session token: the shared token is never an admin and neither is an MCP grant (below).
+`motet.mcp.tool_calls{tool,outcome}` counts every call, and `/internal/health` reports
+`mcp_tools`.
+
+**A guard that is a person reading something is not a tool argument.** `POST /v1/connectors`
+refuses an MCP-server row without `acknowledge_risk`, and that checkbox exists because the agent
+the server is handed to reads untrusted pages. An MCP client is exactly such an agent, so
+`create_connector` refuses `kind="mcp"` outright rather than passing the flag through; sites
+still go through it. A future route whose control is "a person saw this" gets the same treatment.
 
 #### C2: Motet is its own OAuth issuer, and Google only says who is at the keyboard
 
@@ -2620,7 +2628,15 @@ own handlers, behind a provider backed by Postgres.
   person has seen which client is asking, where the grant will go and which account it acts as,
   and pressed Allow. Registration is unauthenticated by design, so without that step a link to
   `/authorize` with anyone's registered client would complete silently for somebody already
-  signed in to Google.
+  signed in to Google. So a redirect URI carrying a username or password is refused on both
+  sides, and the screen names the host rather than `netloc`: `https://claude.ai@attacker.example`
+  would otherwise read as claude.ai. The client's name is its own claim and proves nothing.
+- **Scopes limit nothing.** A client's requested scopes are stored and echoed, and an access
+  token is a session row, so it reaches all of `/v1` as well as `/mcp`. What bounds a grant is
+  that it is never an operator and that the allowlist decides who may approve one.
+- **Registration is bounded per row, not in count**: ten redirect URIs and 8 KB each, with
+  clients unused for a day swept on the next registration. There is no rate limit, for the
+  waitlist's reason: nowhere to keep one that is not a new mechanism.
 - **Dormant until configured.** It needs `MOTET_PUBLIC_BASE_URL` (the issuer),
   `MOTET_APP_BASE_URL` and a working sign-in. Without them the OAuth endpoints are 404s,
   `/mcp` takes only the bearer, and `/internal/health` says `mcp_oauth_configured: false`.
