@@ -36,6 +36,7 @@ export type FeedInfo = GetResponse<'/v1/feed'>
 export type SourceItem = PostResponse<'/v1/sources/paste'>
 export type Source = GetResponse<'/v1/sources'>[number]
 export type Connection = PostResponse<'/v1/sources/connect'>
+export type HeldSourceItem = GetResponse<'/v1/source-items/held'>[number]
 export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
@@ -242,6 +243,16 @@ export async function apiPostPath<P extends keyof paths>(
   return parse<PostResponse<P>>(response, 'POST', url)
 }
 
+/**
+ * A DELETE whose success is 204 and therefore has no body to parse, against a path that
+ * carries an id — `apiPostNoContent`'s shape and `apiPostPath`'s typing, for the one
+ * route in the contract that is a DELETE.
+ */
+export async function apiDeletePath<P extends keyof paths>(_template: P, url: string): Promise<void> {
+  const response = await send(`${apiBaseUrl()}${url}`, { method: 'DELETE', headers: headers() })
+  if (!response.ok) throw await refuse(response, 'DELETE', url)
+}
+
 export const api = {
   health: () => apiGet('/internal/health'),
   // Signing in. `startLogin` and `completeLogin` are the only two calls in this file that
@@ -281,6 +292,20 @@ export const api = {
     }),
   completeOAuth: (state: string, code: string) =>
     apiPost('/v1/sources/callback', { state, code }),
+  // "Sync now". Enqueues a poll and answers with the source as it stands — it does not
+  // fetch, so `last_polled_at` in the answer is the *previous* poll's; a caller that wants
+  // to know the sync ran watches `sources()` for that field to move.
+  pollSource: (id: string) =>
+    apiPostPath('/v1/sources/{source_id}/poll', `/v1/sources/${encodeURIComponent(id)}/poll`),
+  // Forget a mailbox's credential and stop polling it. The source row and everything it
+  // pulled in survive — the API says why: claims cite those source items.
+  disconnectSource: (id: string) =>
+    apiDeletePath(
+      '/v1/sources/{source_id}/credentials',
+      `/v1/sources/${encodeURIComponent(id)}/credentials`,
+    ),
+  // What a connected source has pulled in and is holding for an explicit "ingest now".
+  heldSourceItems: () => apiGet('/v1/source-items/held'),
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),

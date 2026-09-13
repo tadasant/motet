@@ -1,0 +1,446 @@
+// The Sources screen as an integrations catalog.
+//
+// The 'connecting a mailbox' tests that used to live in App.test.tsx are here, rewritten
+// for the catalog: what each card's pill says for a connected, unconnected and
+// coming-soon integration, that Connect still starts consent through the API exactly as
+// before, and that an unfinished consent reads as "you cancelled" rather than as a fault.
+
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { HeldSourceItem, IngestionItem, ProcessingStatus, Source } from '../api/client'
+import { Sources } from './Sources'
+import { CATALOG } from './sources/catalog'
+import {
+  cardStatus,
+  countsFor,
+  explainOAuthError,
+  relativeTime,
+  rowStatus,
+} from './sources/status'
+
+const NOW = new Date('2026-09-13T00:00:00Z').getTime()
+
+/** The built-in source, exactly as `GET /v1/sources` reports it: active, never connected. */
+const PASTE_SOURCE: Source = {
+  id: 'src_paste',
+  kind: 'paste',
+  name: 'Pasted text',
+  active: true,
+  connected: false,
+  scopes: [],
+  last_polled_at: null,
+  last_error: null,
+  created_at: '2026-08-24T00:00:00Z',
+}
+
+/** The row `POST /v1/sources/connect` creates before the user leaves for Google. */
+const PENDING_GMAIL: Source = {
+  id: 'src_1',
+  kind: 'gmail',
+  name: 'Gmail',
+  active: false,
+  connected: false,
+  scopes: [],
+  last_polled_at: null,
+  last_error: null,
+  created_at: '2026-09-12T23:00:00Z',
+}
+
+const CONNECTED_GMAIL: Source = {
+  id: 'src_2',
+  kind: 'gmail',
+  name: 'Gmail (owner@motet.test)',
+  active: true,
+  connected: true,
+  scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+  last_polled_at: '2026-09-12T23:30:00Z',
+  last_error: null,
+  created_at: '2026-09-10T00:00:00Z',
+}
+
+const HELD: HeldSourceItem[] = [
+  {
+    id: 'si_h1',
+    title: 'A newsletter',
+    source_id: 'src_2',
+    source_kind: 'gmail',
+    source_name: CONNECTED_GMAIL.name,
+    received_at: '2026-09-12T23:31:00Z',
+    chars: 2000,
+    preview: 'A newsletter about things.',
+  },
+  {
+    id: 'si_h2',
+    title: 'Another',
+    source_id: 'src_2',
+    source_kind: 'gmail',
+    source_name: CONNECTED_GMAIL.name,
+    received_at: '2026-09-12T23:32:00Z',
+    chars: 900,
+    preview: 'Another one.',
+  },
+]
+
+const ingestionItem = (overrides: Partial<IngestionItem>): IngestionItem => ({
+  id: 'si_x',
+  title: 'x',
+  state: 'pending',
+  attempts: 0,
+  max_attempts: 5,
+  next_attempt_at: null,
+  last_error: null,
+  created_at: '2026-09-12T23:40:00Z',
+  source_kind: 'gmail',
+  ...overrides,
+})
+
+const PROCESSING: ProcessingStatus = {
+  now: '2026-09-13T00:00:00Z',
+  worker_last_seen_at: '2026-09-12T23:59:50Z',
+  queues: [],
+  readiness: [],
+}
+
+/**
+ * Route a fake fetch by URL. A key may carry a method (`'POST /v1/sources/src_2/poll'`)
+ * and those match first and exactly; the rest match by prefix, longest first.
+ */
+function mockApi(overrides: Record<string, unknown> = {}) {
+  const calls: { url: string; method: string; body: unknown }[] = []
+  const routes: Record<string, unknown> = {
+    '/v1/sources': [PASTE_SOURCE, PENDING_GMAIL],
+    '/v1/source-items/held': [],
+    '/v1/ingestion': [],
+    '/v1/processing': PROCESSING,
+    ...overrides,
+  }
+  for (const [route, value] of Object.entries(routes)) {
+    if (value === undefined) delete routes[route]
+  }
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+    const names = Object.keys(routes)
+    const key =
+      names.filter((route) => route.includes(' ')).find((route) => `${method} ${url}` === route) ??
+      names
+        .filter((route) => !route.includes(' '))
+        .sort((a, b) => b.length - a.length)
+        .find((route) => url.startsWith(route))
+    const value = key === undefined ? undefined : routes[key]
+    if (value instanceof Error) {
+      throw value
+    }
+    if (typeof value === 'object' && value !== null && 'status' in value && 'detail' in value) {
+      const failure = value as { status: number; detail: string }
+      return {
+        ok: false,
+        status: failure.status,
+        statusText: 'Error',
+        json: async () => ({ detail: failure.detail }),
+      } as Response
+    }
+    return {
+      ok: key !== undefined,
+      status: key === undefined ? 404 : value === null ? 204 : 200,
+      statusText: 'OK',
+      json: async () => (key === undefined ? { detail: 'not found' } : value),
+    } as Response
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return calls
+}
+
+const card = (name: string) => screen.getByRole('article', { name: new RegExp(`^${name}:`) })
+
+beforeEach(() => {
+  window.localStorage.clear()
+  window.sessionStorage.clear()
+  window.localStorage.setItem('motet.apiToken', 'test-token')
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  window.history.replaceState({}, '', '/')
+})
+
+describe('the catalog', () => {
+  it('shows every integration with the right pill, and offers a button only where the API can keep the promise', async () => {
+    mockApi({ '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('article', { name: /^Gmail:/ })
+
+    expect(card('Gmail').getAttribute('aria-label')).toBe('Gmail: Connected')
+    expect(card('Paste').getAttribute('aria-label')).toBe('Paste: Always on')
+    expect(card('X bookmarks').getAttribute('aria-label')).toBe('X bookmarks: Coming soon')
+    expect(card('RSS').getAttribute('aria-label')).toBe('RSS: Coming soon')
+
+    // A connected Gmail is managed, not connected again.
+    expect(within(card('Gmail')).getByRole('button', { name: /Manage|Close/ })).toBeDefined()
+    // The API answers 400 for any other provider: no "Connect X", only a disabled
+    // "Coming soon" that says why on hover.
+    expect(screen.queryByRole('button', { name: /Connect X/ })).toBeNull()
+    const x = within(card('X bookmarks')).getByRole('button', { name: 'Coming soon' })
+    expect(x.hasAttribute('disabled')).toBe(true)
+    expect(x.getAttribute('title')).toMatch(/X API tier/)
+  })
+
+  it('reads an unconnected account as not connected and points a fresh account at Gmail first', async () => {
+    mockApi({ '/v1/sources': [PASTE_SOURCE] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('article', { name: /^Gmail:/ })
+
+    expect(card('Gmail').getAttribute('aria-label')).toBe('Gmail: Not connected')
+    expect(card('Gmail').className).toContain('highlighted')
+    expect(within(card('Gmail')).getByText('Start here')).toBeDefined()
+    // The empty state opens the connect form on its own: nothing else to do here.
+    expect(screen.getByRole('form', { name: 'Connect Gmail' })).toBeDefined()
+  })
+
+  it('reads the paste source off `active`, because consent and polling do not apply to it', async () => {
+    // motet#39. `connected: false` is not a state the paste row is passing through.
+    mockApi({ '/v1/sources': [PASTE_SOURCE] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('article', { name: /^Paste:/ })
+
+    expect(card('Paste').getAttribute('aria-label')).toBe('Paste: Always on')
+    fireEvent.click(within(card('Paste')).getByRole('button', { name: 'Paste in' }))
+    expect(window.location.pathname).toBe('/paste')
+    // Nothing polls pasted text, so "Never polled" would read as a fetch that never fired.
+    expect(screen.queryByText(/Never polled/)).toBeNull()
+  })
+
+  it('opens the detail of the one connected mailbox on its own, and shows what it has pulled in', async () => {
+    mockApi({
+      '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
+      '/v1/source-items/held': HELD,
+      '/v1/ingestion': [
+        // A held item also shows up here as pending (issue 03); it must not count twice.
+        ingestionItem({ id: 'si_h1' }),
+        ingestionItem({ id: 'si_p1' }),
+        ingestionItem({ id: 'si_f1', state: 'failed', last_error: 'boom' }),
+        ingestionItem({ id: 'si_paste', source_kind: 'paste' }),
+      ],
+    })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    expect(within(detail).getByText('Gmail (owner@motet.test)')).toBeDefined()
+    expect(within(detail).getByText('30 minutes ago')).toBeDefined()
+    expect(within(detail).getByText('read-only mail')).toBeDefined()
+
+    const stats = within(detail).getByLabelText('What this source has pulled in')
+    expect(stats.textContent).toBe('2Waiting for you1Processing1Failed0Landed recently')
+    expect(within(detail).getByText('2 items waiting')).toBeDefined()
+
+    // What the API does not carry is said, not left blank.
+    expect(within(detail).getByText(/Not reported/)).toBeDefined()
+
+    fireEvent.click(within(detail).getByRole('button', { name: 'Review them in Backlog' }))
+    expect(window.location.pathname).toBe('/backlog')
+  })
+
+  it('queues a poll on Sync now and reports it synced once last_polled_at moves', async () => {
+    let polled = false
+    const later = { ...CONNECTED_GMAIL, last_polled_at: '2026-09-13T00:00:30Z' }
+    const calls = mockApi({
+      '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
+      'POST /v1/sources/src_2/poll': CONNECTED_GMAIL,
+    })
+    // After the poll is queued, the next sources fetch reports the poll having run.
+    const fetchMock = vi.mocked(fetch)
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/poll')) polled = true
+      if (polled && url.endsWith('/v1/sources') && (init?.method ?? 'GET') === 'GET') {
+        return { ok: true, status: 200, json: async () => [PASTE_SOURCE, later] } as Response
+      }
+      return original(input, init)
+    })
+
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    fireEvent.click(within(detail).getByRole('button', { name: 'Sync now' }))
+
+    expect(await within(detail).findByRole('button', { name: 'Syncing…' })).toBeDefined()
+    expect(within(detail).getByText(/Queued — a worker is running/)).toBeDefined()
+    await waitFor(
+      () => expect(calls.find((c) => c.method === 'POST' && c.url.endsWith('/v1/sources/src_2/poll'))).toBeDefined(),
+    )
+    // The watcher re-fetches every two seconds; the fixture answers with the moved stamp.
+    expect(await within(detail).findByText(/^Synced /, {}, { timeout: 4_000 })).toBeDefined()
+    expect(within(detail).getByRole('button', { name: 'Sync now' })).toBeDefined()
+  })
+
+  it('disconnects only after a confirmation, through the credentials route', async () => {
+    const calls = mockApi({
+      '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
+      'DELETE /v1/sources/src_2/credentials': null,
+    })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+
+    fireEvent.click(within(detail).getByRole('button', { name: 'Disconnect' }))
+    expect(calls.find((c) => c.method === 'DELETE')).toBeUndefined()
+    expect(within(detail).getByText(/what it pulled in stays/)).toBeDefined()
+
+    fireEvent.click(within(detail).getByRole('button', { name: 'Yes, disconnect' }))
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === 'DELETE')?.url).toMatch(/\/v1\/sources\/src_2\/credentials$/),
+    )
+  })
+})
+
+describe('connecting a mailbox', () => {
+  it('starts consent with the redirect URI this origin will come back on', async () => {
+    const calls = mockApi({
+      '/v1/sources/connect': {
+        source_id: 'src_2',
+        authorization_url: 'https://accounts.google.test/o/oauth2/v2/auth?client_id=x',
+        state: 'st_1',
+      },
+    })
+    const navigate = vi.fn()
+    render(<Sources navigate={navigate} now={NOW} />)
+    await screen.findByRole('form', { name: 'Connect Gmail' })
+
+    fireEvent.change(screen.getByLabelText('Gmail search (optional)'), {
+      target: { value: 'from:newsletter@example.test' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
+
+    await waitFor(() => expect(navigate).toHaveBeenCalled())
+    const connect = calls.find((call) => call.url.includes('/v1/sources/connect'))
+    expect(connect?.method).toBe('POST')
+    expect(connect?.body).toEqual({
+      provider: 'gmail',
+      name: 'Gmail',
+      query: 'from:newsletter@example.test',
+      // Registered on the OAuth client, and matched by Google as an exact string.
+      redirect_uri: `${window.location.origin}/oauth/callback`,
+    })
+    expect(navigate).toHaveBeenCalledWith('https://accounts.google.test/o/oauth2/v2/auth?client_id=x')
+    // Remembered before the redirect: after it, nothing in this tab gets to run.
+    expect(window.sessionStorage.getItem('motet.oauthState')).toBe('st_1')
+  })
+
+  it('sends a blank query as null, which is what asks for the provider default', async () => {
+    const calls = mockApi({
+      '/v1/sources/connect': { source_id: 'src_2', authorization_url: 'https://accounts.google.test/', state: 'st_2' },
+    })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('form', { name: 'Connect Gmail' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
+
+    await waitFor(() => {
+      const connect = calls.find((call) => call.url.includes('/v1/sources/connect'))
+      expect(connect?.body).toMatchObject({ query: null })
+    })
+  })
+
+  it('explains what the flow will and will not do before the button', async () => {
+    mockApi({ '/v1/sources': [PASTE_SOURCE] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('form', { name: 'Connect Gmail' })
+
+    expect(screen.getByText(/read-only/)).toBeDefined()
+    expect(screen.getByText('Nothing is processed until you choose to ingest it')).toBeDefined()
+  })
+
+  it('says a 503 is the deployment and shows the API own message', async () => {
+    // The dormant case: real mode with no Google OAuth client provisioned. The API names
+    // the variable that is missing, which beats anything this screen could invent.
+    mockApi({ '/v1/sources/connect': { status: 503, detail: 'GOOGLE_OAUTH_CLIENT_ID is not set.' } })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('form', { name: 'Connect Gmail' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('cannot connect Gmail right now')
+    expect(alert.textContent).toContain('GOOGLE_OAUTH_CLIENT_ID is not set')
+  })
+
+  it('says what a failed fetch means instead of showing the browser string', async () => {
+    mockApi({ '/v1/sources/connect': new TypeError('Failed to fetch') })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('form', { name: 'Connect Gmail' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
+
+    const shown = await screen.findByText(/never completed/)
+    expect(shown.textContent).toContain('/v1/sources/connect')
+  })
+
+  it('reads an unfinished consent as "you cancelled", not as a broken source', async () => {
+    // The row `connect` creates before the redirect is what an access_denied leaves
+    // behind: no credential ever arrived. It is an abandoned attempt, and the API reports
+    // nothing else about it, so the screen has to say so where the row is shown.
+    mockApi({ '/v1/sources': [PASTE_SOURCE, PENDING_GMAIL] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('article', { name: /^Gmail:/ })
+
+    expect(card('Gmail').getAttribute('aria-label')).toBe('Gmail: Awaiting consent')
+    const detail = screen.getByRole('region', { name: 'Gmail details' })
+    const notice = within(detail).getByRole('status')
+    expect(notice.textContent).toMatch(/you cancelled on Google’s page/i)
+    expect(notice.textContent).toMatch(/Nothing was connected/)
+    expect(within(detail).queryByRole('alert')).toBeNull()
+    // And the form is right there to try again.
+    expect(within(detail).getByRole('form', { name: 'Connect Gmail' })).toBeDefined()
+    // A pending row is a mailbox, so "never polled" is news about it.
+    expect(within(detail).getByText('Never polled')).toBeDefined()
+  })
+})
+
+describe('the pure half', () => {
+  it('reads each row status off the fields that apply to its kind', () => {
+    expect(rowStatus(PASTE_SOURCE)).toBe('ready')
+    expect(rowStatus({ ...PASTE_SOURCE, active: false })).toBe('paused')
+    expect(rowStatus(PENDING_GMAIL)).toBe('awaiting_consent')
+    expect(rowStatus(CONNECTED_GMAIL)).toBe('connected')
+    expect(rowStatus({ ...CONNECTED_GMAIL, active: false })).toBe('paused')
+    expect(rowStatus({ ...CONNECTED_GMAIL, last_error: 'token revoked' })).toBe('error')
+    // Disconnected and abandoned are both `connected: false`; having polled is the tell.
+    expect(rowStatus({ ...CONNECTED_GMAIL, connected: false, active: false, scopes: [] })).toBe('disconnected')
+  })
+
+  it('folds rows into one card pill, attention first', () => {
+    const gmail = CATALOG.find((entry) => entry.id === 'gmail')!
+    expect(cardStatus(gmail, [])).toBe('not_connected')
+    expect(cardStatus(gmail, [PENDING_GMAIL])).toBe('awaiting_consent')
+    // One working mailbox and one cancelled consent is a connected Gmail.
+    expect(cardStatus(gmail, [PENDING_GMAIL, CONNECTED_GMAIL])).toBe('connected')
+    expect(cardStatus(gmail, [CONNECTED_GMAIL, { ...CONNECTED_GMAIL, id: 'src_3', last_error: 'x' }])).toBe('error')
+    expect(cardStatus(CATALOG.find((entry) => entry.id === 'x')!, [])).toBe('coming_soon')
+  })
+
+  it('counts held by row and the rest by kind, and says when the kind is shared', () => {
+    const second = { ...CONNECTED_GMAIL, id: 'src_3' }
+    const counts = countsFor(
+      CONNECTED_GMAIL,
+      HELD,
+      [ingestionItem({ id: 'si_h1' }), ingestionItem({ id: 'si_p1' }), ingestionItem({ id: 'si_i', state: 'integrated' })],
+      [PASTE_SOURCE, CONNECTED_GMAIL, second],
+    )
+    expect(counts).toEqual({ held: 2, processing: 1, failed: 0, integrated: 1, byKind: true })
+    expect(countsFor(second, HELD, [], [PASTE_SOURCE, CONNECTED_GMAIL, second]).held).toBe(0)
+  })
+
+  it('gives access_denied the same reading as the callback page', () => {
+    expect(explainOAuthError('access_denied')).toMatch(/cancelled/)
+    expect(explainOAuthError('access_denied')).not.toMatch(/error|fail/i)
+    expect(explainOAuthError('invalid_scope', 'bad scope')).toBe('Google refused this: invalid_scope — bad scope')
+  })
+
+  it('renders relative times against the clock it is given', () => {
+    expect(relativeTime('2026-09-12T23:59:50Z', NOW)).toBe('just now')
+    expect(relativeTime('2026-09-12T23:30:00Z', NOW)).toBe('30 minutes ago')
+    expect(relativeTime('2026-09-12T20:00:00Z', NOW)).toBe('4 hours ago')
+    expect(relativeTime('2026-09-10T00:00:00Z', NOW)).toBe('3 days ago')
+  })
+})
