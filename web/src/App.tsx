@@ -230,11 +230,15 @@ export default function App() {
   // it would open a render that finished long ago, and judged on a later refresh it would
   // pull the screen out from under somebody.
   useEffect(() => {
-    if (landed.current || section.id !== 'episodes' || !episodesLoaded) return
+    // Not on a failed first answer either: an empty list says nothing about what is being
+    // made, and spending the rule on it would mean it never applies once a refresh lands.
+    if (landed.current || section.id !== 'episodes' || !episodesLoaded || episodesUnavailable) {
+      return
+    }
     landed.current = true
     const making = [...episodes].sort(newestFirst).find((entry) => IN_PROGRESS.has(entry.state))
     if (making) setOpenEpisodeId((current) => current ?? making.id)
-  }, [episodes, episodesLoaded, section.id])
+  }, [episodes, episodesLoaded, episodesUnavailable, section.id])
 
   // Take the code out of the address bar as soon as it has been read into state. A reload
   // would otherwise re-POST a code the API has already consumed and report a flow that
