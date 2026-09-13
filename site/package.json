@@ -1,0 +1,14 @@
+{
+  "name": "motet-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The getmotet.com landing page. Built by Cloudflare Pages; no dependencies.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test"
+  }
+}

@@ -266,6 +266,62 @@ components:
       - jobs
       title: AdminUserResponse
       type: object
+    AdminWaitlistResponse:
+      description: The landing page's waitlist, newest first. Admins only.
+      properties:
+        next_before:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Pass as `before` for the next, older page; null when this page is the last.
+          title: Next Before
+        signups:
+          items:
+            $ref: '#/components/schemas/AdminWaitlistSignupResponse'
+          title: Signups
+          type: array
+        total:
+          description: Every address on the list, not only this page.
+          title: Total
+          type: integer
+      required:
+      - total
+      - signups
+      - next_before
+      title: AdminWaitlistResponse
+      type: object
+    AdminWaitlistSignupResponse:
+      description: One address on the waitlist.
+      properties:
+        created_at:
+          description: When this address first joined.
+          format: date-time
+          title: Created At
+          type: string
+        email:
+          description: As submitted, trimmed and lowercased.
+          title: Email
+          type: string
+        id:
+          title: Id
+          type: integer
+        last_submitted_at:
+          description: When it was most recently submitted.
+          format: date-time
+          title: Last Submitted At
+          type: string
+        submissions:
+          description: How many times it has been submitted.
+          title: Submissions
+          type: integer
+      required:
+      - id
+      - email
+      - created_at
+      - last_submitted_at
+      - submissions
+      title: AdminWaitlistSignupResponse
+      type: object
     ClaimModel:
       description: "A reported assertion beside the span it came from (invariant 3).\n\n``text`` is what\
         \ gets spoken and may paraphrase; ``source_excerpt`` is the source text\nthe span actually covers,\
@@ -2058,6 +2114,22 @@ components:
       - configured
       title: VoiceStatusResponse
       type: object
+    WaitlistJoinResponse:
+      description: 'The landing page''s waitlist form was accepted.
+
+
+        The same answer whether the address is new or already listed, so the route cannot be
+
+        used to learn who is on the list.'
+      properties:
+        status:
+          const: joined
+          title: Status
+          type: string
+      required:
+      - status
+      title: WaitlistJoinResponse
+      type: object
 info:
   description: 'Motet turns a reading backlog into an interactive podcast.
 
@@ -2191,6 +2263,59 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Admin Overview
+      tags:
+      - admin
+  /v1/admin/waitlist:
+    get:
+      description: Everyone who asked to join from the landing page, newest first. Admins only.
+      operationId: admin_waitlist_v1_admin_waitlist_get
+      parameters:
+      - description: "Only list signups with an id below this one \u2014 the previous page's `next_before`.\
+          \ Omit for the newest page."
+        in: query
+        name: before
+        required: false
+        schema:
+          anyOf:
+          - minimum: 1
+            type: integer
+          - type: 'null'
+          description: "Only list signups with an id below this one \u2014 the previous page's `next_before`.\
+            \ Omit for the newest page."
+          title: Before
+      - description: How many signups to list.
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 200
+          description: How many signups to list.
+          maximum: 500
+          minimum: 1
+          title: Limit
+          type: integer
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminWaitlistResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Admin Waitlist
       tags:
       - admin
   /v1/auth/google/callback:
@@ -3706,3 +3831,49 @@ paths:
       summary: Voice Status
       tags:
       - voice
+  /v1/waitlist:
+    post:
+      description: 'Put an address on the landing page''s waitlist. Public; no credential.
+
+
+        Sent as a form, so that the landing page''s request is a CORS simple request and needs
+
+        no preflight. Answers JSON when the caller''s ``Accept`` asks for it and a small HTML
+
+        page otherwise, which is what a form posted without JavaScript lands on. A new
+
+        address, a known one and a submission that filled the honeypot all get the same 200.'
+      operationId: join_waitlist_v1_waitlist_post
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              properties:
+                email:
+                  format: email
+                  maxLength: 254
+                  type: string
+                website:
+                  description: Leave empty. A form that fills it is treated as a bot.
+                  type: string
+              required:
+              - email
+              type: object
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WaitlistJoinResponse'
+            text/html: {}
+          description: Successful Response
+        '413':
+          description: The body is larger than a waitlist form.
+        '415':
+          description: The body is not `application/x-www-form-urlencoded`.
+        '422':
+          description: The address is not plausibly an email address.
+      summary: Join the waitlist
+      tags:
+      - waitlist

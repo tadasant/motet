@@ -51,6 +51,7 @@ export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
 export type AdminOverview = GetResponse<'/v1/admin/overview'>
+export type AdminWaitlist = GetResponse<'/v1/admin/waitlist'>
 export type VoiceStatus = GetResponse<'/v1/voice'>
 export type VoiceSession = PostResponse<'/v1/episodes/{episode_id}/voice-session'>
 
@@ -386,6 +387,12 @@ export const api = {
     if (options.before) query.set('before', String(options.before))
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return apiGetPath('/v1/admin/overview', `/v1/admin/overview${suffix}`)
+  },
+  // Everyone who joined the waitlist from the landing page, newest first. Admins only, like
+  // the overview; `before` is the previous page's `next_before`.
+  adminWaitlist: (options: { before?: number | null } = {}) => {
+    const suffix = options.before ? `?before=${options.before}` : ''
+    return apiGetPath('/v1/admin/waitlist', `/v1/admin/waitlist${suffix}`)
   },
   // How far the listener has got: the position resource a syncing player writes, which
   // is the same handler as `POST …/progress` under the name AGENTS.md gives new callers.

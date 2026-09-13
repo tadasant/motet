@@ -1,0 +1,12 @@
+# Cloudflare Pages response headers (https://developers.cloudflare.com/pages/configuration/headers/).
+#
+# The policy is narrow because the page is: its own stylesheet, script and icon, the two
+# webfonts from Google Fonts, and one cross-origin request — the waitlist form, to the Motet
+# API. %%MOTET_API_ORIGIN%% is filled in by build.mjs, so a preview build's policy allows its
+# own API and nothing else. No inline script and no inline style attribute is used anywhere,
+# which is what lets script-src and style-src stay 'self'.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src %%MOTET_API_ORIGIN%%; form-action %%MOTET_API_ORIGIN%%; base-uri 'self'; object-src 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()

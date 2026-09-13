@@ -1168,3 +1168,33 @@ class VoiceSessionResponse(BaseModel):
             "two match, so it must not be altered."
         )
     )
+
+
+class WaitlistJoinResponse(BaseModel):
+    """The landing page's waitlist form was accepted.
+
+    The same answer whether the address is new or already listed, so the route cannot be
+    used to learn who is on the list.
+    """
+
+    status: Literal["joined"]
+
+
+class AdminWaitlistSignupResponse(BaseModel):
+    """One address on the waitlist."""
+
+    id: int
+    email: str = Field(description="As submitted, trimmed and lowercased.")
+    created_at: datetime = Field(description="When this address first joined.")
+    last_submitted_at: datetime = Field(description="When it was most recently submitted.")
+    submissions: int = Field(description="How many times it has been submitted.")
+
+
+class AdminWaitlistResponse(BaseModel):
+    """The landing page's waitlist, newest first. Admins only."""
+
+    total: int = Field(description="Every address on the list, not only this page.")
+    signups: list[AdminWaitlistSignupResponse]
+    next_before: int | None = Field(
+        description="Pass as `before` for the next, older page; null when this page is the last."
+    )

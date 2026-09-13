@@ -82,4 +82,12 @@ npm --prefix web test
 step "Build the SPA"
 npm --prefix web run build
 
+# The getmotet.com landing page. Cloudflare Pages builds `site/` from the repository on its
+# own (see AGENTS.md, "The landing page"), so this is the check that a merge to main will
+# build there: the same `npm run build`, plus the build script's own tests. No `npm ci` —
+# the site has no dependencies, which is the brand's rule and not an accident.
+step "Build the landing site"
+npm --prefix site run build
+npm --prefix site test
+
 printf '\n\033[1;32mAll checks passed.\033[0m\n'

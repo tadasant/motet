@@ -88,6 +88,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/waitlist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Admin Waitlist
+         * @description Everyone who asked to join from the landing page, newest first. Admins only.
+         */
+        get: operations["admin_waitlist_v1_admin_waitlist_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/google/callback": {
         parameters: {
             query?: never;
@@ -1087,6 +1107,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/waitlist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Join the waitlist
+         * @description Put an address on the landing page's waitlist. Public; no credential.
+         *
+         *     Sent as a form, so that the landing page's request is a CORS simple request and needs
+         *     no preflight. Answers JSON when the caller's ``Accept`` asks for it and a small HTML
+         *     page otherwise, which is what a form posted without JavaScript lands on. A new
+         *     address, a known one and a submission that filled the honeypot all get the same 200.
+         */
+        post: operations["join_waitlist_v1_waitlist_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1252,6 +1297,54 @@ export interface components {
             source_items: components["schemas"]["AdminSourceItemCounts"];
             /** User Id */
             user_id: string;
+        };
+        /**
+         * AdminWaitlistResponse
+         * @description The landing page's waitlist, newest first. Admins only.
+         */
+        AdminWaitlistResponse: {
+            /**
+             * Next Before
+             * @description Pass as `before` for the next, older page; null when this page is the last.
+             */
+            next_before: number | null;
+            /** Signups */
+            signups: components["schemas"]["AdminWaitlistSignupResponse"][];
+            /**
+             * Total
+             * @description Every address on the list, not only this page.
+             */
+            total: number;
+        };
+        /**
+         * AdminWaitlistSignupResponse
+         * @description One address on the waitlist.
+         */
+        AdminWaitlistSignupResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             * @description When this address first joined.
+             */
+            created_at: string;
+            /**
+             * Email
+             * @description As submitted, trimmed and lowercased.
+             */
+            email: string;
+            /** Id */
+            id: number;
+            /**
+             * Last Submitted At
+             * Format: date-time
+             * @description When it was most recently submitted.
+             */
+            last_submitted_at: string;
+            /**
+             * Submissions
+             * @description How many times it has been submitted.
+             */
+            submissions: number;
         };
         /**
          * ClaimModel
@@ -2567,6 +2660,20 @@ export interface components {
              */
             reason?: string | null;
         };
+        /**
+         * WaitlistJoinResponse
+         * @description The landing page's waitlist form was accepted.
+         *
+         *     The same answer whether the address is new or already listed, so the route cannot be
+         *     used to learn who is on the list.
+         */
+        WaitlistJoinResponse: {
+            /**
+             * Status
+             * @constant
+             */
+            status: "joined";
+        };
     };
     responses: never;
     parameters: never;
@@ -2653,6 +2760,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminOverviewResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_waitlist_v1_admin_waitlist_get: {
+        parameters: {
+            query?: {
+                /** @description Only list signups with an id below this one — the previous page's `next_before`. Omit for the newest page. */
+                before?: number | null;
+                /** @description How many signups to list. */
+                limit?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminWaitlistResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3973,6 +4116,57 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    join_waitlist_v1_waitlist_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": {
+                    /** Format: email */
+                    email: string;
+                    /** @description Leave empty. A form that fills it is treated as a bot. */
+                    website?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WaitlistJoinResponse"];
+                    "text/html": unknown;
+                };
+            };
+            /** @description The body is larger than a waitlist form. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The body is not `application/x-www-form-urlencoded`. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The address is not plausibly an email address. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

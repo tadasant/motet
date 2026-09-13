@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { type AdminOverview, ApiError, api } from '../api/client'
+import { AdminWaitlist } from './AdminWaitlist'
 
 const POLL_MS = 3_000
 const SOURCE_STATES = ['held', 'pending', 'integrated', 'failed', 'dismissed'] as const
@@ -198,6 +199,8 @@ export function Admin() {
           ))}
         </tbody>
       </table>
+
+      <AdminWaitlist />
 
       <div className="row">
         <h2>

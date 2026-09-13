@@ -227,6 +227,50 @@ public struct AdminUserResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// The landing page's waitlist, newest first. Admins only.
+public struct AdminWaitlistResponse: Codable, Hashable, Sendable {
+    public var nextBefore: Int?
+    public var signups: [AdminWaitlistSignupResponse]
+    public var total: Int
+
+    public init(nextBefore: Int? = nil, signups: [AdminWaitlistSignupResponse], total: Int) {
+        self.nextBefore = nextBefore
+        self.signups = signups
+        self.total = total
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case nextBefore = "next_before"
+        case signups
+        case total
+    }
+}
+
+/// One address on the waitlist.
+public struct AdminWaitlistSignupResponse: Codable, Hashable, Sendable {
+    public var createdAt: Date
+    public var email: String
+    public var id: Int
+    public var lastSubmittedAt: Date
+    public var submissions: Int
+
+    public init(createdAt: Date, email: String, id: Int, lastSubmittedAt: Date, submissions: Int) {
+        self.createdAt = createdAt
+        self.email = email
+        self.id = id
+        self.lastSubmittedAt = lastSubmittedAt
+        self.submissions = submissions
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case createdAt = "created_at"
+        case email
+        case id
+        case lastSubmittedAt = "last_submitted_at"
+        case submissions
+    }
+}
+
 /// A reported assertion beside the span it came from (invariant 3).
 ///
 /// ``text`` is what gets spoken and may paraphrase; ``source_excerpt`` is the source text
@@ -1730,6 +1774,18 @@ public struct VoiceStatusResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// The landing page's waitlist form was accepted.
+///
+/// The same answer whether the address is new or already listed, so the route cannot be
+/// used to learn who is on the list.
+public struct WaitlistJoinResponse: Codable, Hashable, Sendable {
+    public var status: String
+
+    public init(status: String) {
+        self.status = status
+    }
+}
+
 // MARK: - Endpoints
 
 /// Every operation in the contract, as a method, a path, and its query.
@@ -1756,6 +1812,14 @@ public enum MotetEndpoints {
         if let before { query["before"] = String(describing: before) }
         if let limit { query["limit"] = String(describing: limit) }
         return HTTPEndpoint(method: "GET", path: "/v1/admin/overview", query: query)
+    }
+
+    /// `GET /v1/admin/waitlist` — Admin Waitlist
+    public static func adminWaitlist(before: Int? = nil, limit: Int? = nil) -> HTTPEndpoint {
+        var query: [String: String] = [:]
+        if let before { query["before"] = String(describing: before) }
+        if let limit { query["limit"] = String(describing: limit) }
+        return HTTPEndpoint(method: "GET", path: "/v1/admin/waitlist", query: query)
     }
 
     /// `POST /v1/auth/google/callback` — Complete Login
@@ -1957,5 +2021,10 @@ public enum MotetEndpoints {
     /// `GET /v1/voice` — Voice Status
     public static var voiceStatus: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/voice")
+    }
+
+    /// `POST /v1/waitlist` — Join the waitlist
+    public static var joinTheWaitlist: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/waitlist")
     }
 }
