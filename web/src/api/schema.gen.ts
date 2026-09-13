@@ -2052,7 +2052,7 @@ export interface components {
             stages: components["schemas"]["LlmStageConfigResponse"][];
             /**
              * Writable
-             * @description Whether this deployment honours `settings` rows at all. False — production — means the environment is the whole configuration, no row is read, and a PUT is refused with 409.
+             * @description Whether this deployment honours `settings` rows at all. False — production — means the environment is the whole configuration, no row is read, and a PUT is refused with 409. Resolved against the API's own environment: the worker reads the same variable from its own, and the two must agree.
              */
             writable: boolean;
             /**
@@ -2186,6 +2186,11 @@ export interface components {
              * @description `settings`, `stage_env`, `global_env` or `default`.
              */
             model_source: string;
+            /**
+             * Models
+             * @description The catalogue slugs this stage may be set to — narrower than `models` on the response where the stage's requests need something a model lacks (dedup caches for an hour).
+             */
+            models: string[];
             /** Setting Effort */
             setting_effort: string | null;
             /** Setting Model */

@@ -2534,8 +2534,8 @@ export winning over a `.env` line with nothing saying so — and *what is this c
 stage and per user?* The metric answers the fleet and a log line answers one episode;
 nothing could be summed per user.
 
-**Three pieces of it are invariant 12's, and each is decided as the design session
-decided it:**
+**Three pieces of it are invariant 12's. Each is built to the design session's proposed
+default, and the sign-off line above is what says whether the owner took it:**
 
 1. **`llm_usage` is a ledger: one row per completion, appended by the worker, summed by
    the API, never updated.** It is the only shape that yields per-user spend, because the
@@ -2558,7 +2558,26 @@ decided it:**
    completion, so dedup's first pass and its second look cannot straddle a change. The
    worker's boot log adds a line saying which rows are in force, because the `llm:` line
    above it no longer describes every job; `/internal/health` reports
-   `settings_writable` and `llm_overrides_in_force` for the same reason.
+   `settings_writable` and `llm_overrides_in_force` for the same reason. **That makes the
+   health route touch the database where settings are writable** — the one exception to
+   its answering without one, which is why the answer is cached for thirty seconds and the
+   query carries a statement timeout: the route is public and is the platform's probe.
+
+**"A row resolves" has to mean "no request built from it is refused"**, and the fresh-eyes
+review of the first draft found the hole: `validate_overrides` ran `load_config`, but the
+catalogue checks `build_request` makes per request — the output ceiling and the 1h cache
+TTL — never ran, so `dedup → openai/gpt-5.1` saved cleanly and then every paste was
+refused. `STAGES_CACHING_ONE_HOUR` now declares which stages ask for the hour, `_check_model`
+refuses a model without it for env and row alike, the dropdown offers only
+`models_for(stage)`, and two tests pin the declaration to the real prompt builders and every
+stage's ceiling to every catalogue model. **A key under `llm.` that names no current stage
+is ignored with a warning, not refused** — refusing an orphan would let one stale row
+disable every other override and block every save, with no route able to delete it.
+
+**The screen resolves against the API's environment, and only the worker's decides what a
+job runs.** They are separate service definitions, so `MOTET_SETTINGS_WRITABLE` and any
+`MOTET_LLM_*` must match on both — set on the API alone, a save answers 200 and no job ever
+reads it. The screen says so; reporting the worker's own view would be new structure.
 
 **A row is gated harder than an environment variable, deliberately.** A model row must be
 in the catalogue even where `MOTET_LLM_ALLOW_UNLISTED_MODEL` is set: that escape hatch is a

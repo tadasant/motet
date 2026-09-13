@@ -43,6 +43,7 @@ PRUNE_SQL: Final = """
         WHERE occurred_at < now() - make_interval(secs => %s::int)
         ORDER BY occurred_at
         LIMIT %s
+        FOR UPDATE SKIP LOCKED
     )
 """
 

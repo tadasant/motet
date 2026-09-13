@@ -206,7 +206,8 @@ def usage_sink(sink: UsageSink) -> Iterator[None]:
 
     **The sink is called last, after the metric and the log line, and it may not raise.**
     Last so that a sink with a bug cannot cost the two signals that already existed; and an
-    exception out of it is caught and logged here rather than propagated, because it would
+    exception out of it is caught and logged where the sink is called rather than
+    propagated, because it would
     otherwise surface inside a stage adapter as if the *completion* had failed — and a
     stage that retried on that would bill the call a second time to record it once.
     """

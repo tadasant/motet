@@ -157,6 +157,25 @@ class TestSettingsPerJob:
         assert job == {"state": "done"}
         assert "do not resolve" in caplog.text
 
+    def test_a_settings_table_that_cannot_be_read_costs_nothing_but_a_line(
+        self,
+        db: psycopg.Connection[Any],
+        _migrated: str,
+        writable: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unreadable(*_: Any, **__: Any) -> dict[str, str]:
+            raise psycopg.OperationalError("permission denied for table settings")
+
+        monkeypatch.setattr(settings_repo, "load", unreadable)
+        client = FakeLlmClient(responses={"": UNRELATED})
+        _paste(db)
+        assert drain(Queue.INTEGRATE, _migrated, stages=_stages(client)) == 1
+        assert client.calls[-1].model == DEFAULT_MODEL
+        assert db.execute("SELECT state FROM jobs WHERE queue = 'integrate'").fetchone() == {
+            "state": "done"
+        }
+
 
 class TestRetention:
     def test_the_sweep_deletes_only_rows_past_the_window(
@@ -176,6 +195,19 @@ class TestRetention:
         prune_jobs(_migrated)
 
         assert db.execute("SELECT count(*) AS n FROM llm_usage").fetchone() == {"n": 1}
+
+    def test_a_failed_ledger_sweep_does_not_relabel_the_jobs_sweep(
+        self, _migrated: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def broken(*_: Any, **__: Any) -> llm_usage.Pruned:
+            raise psycopg.errors.InsufficientPrivilege("permission denied for table llm_usage")
+
+        monkeypatch.setattr(llm_usage, "prune", broken)
+        with caplog.at_level(logging.INFO, logger="motet.worker"):
+            pruned = prune_jobs(_migrated)
+        assert set(pruned.deleted) == {"done", "failed"}  # the jobs half still ran
+        assert "could not prune llm_usage rows" in caplog.text
+        assert "could not prune terminal job rows" not in caplog.text
 
     def test_prune_refuses_a_connection_inside_a_transaction(
         self, db: psycopg.Connection[Any]

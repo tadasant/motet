@@ -91,6 +91,7 @@ export function ModelsAndSpend() {
   const [config, setConfig] = useState<LlmConfig | null>(null)
   const [spend, setSpend] = useState<LlmSpendReport | null>(null)
   const [error, setError] = useState('')
+  const [spendError, setSpendError] = useState('')
   const [saving, setSaving] = useState<string | null>(null)
 
   const load = useCallback(() => {
@@ -103,8 +104,11 @@ export function ModelsAndSpend() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
     api
       .llmSpend()
-      .then(setSpend)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .then((next) => {
+        setSpend(next)
+        setSpendError('')
+      })
+      .catch((err: unknown) => setSpendError(err instanceof Error ? err.message : String(err)))
   }, [])
 
   useEffect(load, [load])
@@ -140,6 +144,12 @@ export function ModelsAndSpend() {
           Refresh spend
         </button>
       </div>
+      {config && writable && (
+        <p className="hint">
+          Shown as the API resolves it. The worker reads the same variables from its own environment, so{' '}
+          <code>{config.writable_env}</code> and any <code>MOTET_LLM_*</code> must match on both.
+        </p>
+      )}
       {config && !writable && (
         <p className="hint">
           Read-only on this deployment: <code>{config.writable_env}</code> is off, so the environment is the whole
@@ -148,6 +158,7 @@ export function ModelsAndSpend() {
       )}
       {config?.settings_error && <p className="error">Stored settings are not being applied: {config.settings_error}</p>}
       {error && <p className="error">{error}</p>}
+      {spendError && <p className="error">{spendError}</p>}
 
       <table className="grid models">
         <thead>
@@ -166,7 +177,10 @@ export function ModelsAndSpend() {
             const spec = config.models.find((m) => m.slug === cfg.model)
             const efforts = spec?.efforts ?? []
             const overridden = cfg.setting_model !== null || cfg.setting_effort !== null
-            const busy = saving === cfg.stage || !writable
+            // Every control waits on any save: a response replaces the whole config.
+            const busy = saving !== null || !writable
+            // An unlisted model set through the environment is shown rather than masked.
+            const choices = cfg.models.includes(cfg.model) ? cfg.models : [cfg.model, ...cfg.models]
             const week = spend?.window.stages[cfg.stage]
             return (
               <tr key={cfg.stage} className={overridden ? 'overridden' : ''}>
@@ -181,15 +195,17 @@ export function ModelsAndSpend() {
                     onChange={(e) => {
                       const next = config.models.find((m) => m.slug === e.target.value)
                       const body: LlmStageUpdate = { model: e.target.value }
-                      // A slug with no selectable effort pairs only with `off`; send both so
-                      // the server does not have to refuse the pairing.
+                      // A slug with no selectable effort pairs only with `off`, and one that
+                      // does not take the current effort gets the effort row cleared, so the
+                      // server is not asked to refuse a pairing the screen could avoid.
                       if (next && next.efforts.length === 0 && cfg.effort !== 'off') body.effort = 'off'
+                      else if (next && cfg.effort !== 'off' && !next.efforts.includes(cfg.effort)) body.effort = null
                       update(cfg.stage, body)
                     }}
                   >
-                    {config.models.map((m) => (
-                      <option key={m.slug} value={m.slug}>
-                        {short(m.slug)}
+                    {choices.map((slug) => (
+                      <option key={slug} value={slug}>
+                        {short(slug)}
                       </option>
                     ))}
                   </select>
@@ -218,7 +234,7 @@ export function ModelsAndSpend() {
                     <button
                       type="button"
                       className="linkish"
-                      disabled={saving === cfg.stage}
+                      disabled={saving !== null}
                       onClick={() => update(cfg.stage, { model: null, effort: null })}
                     >
                       reset

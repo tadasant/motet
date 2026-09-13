@@ -550,7 +550,7 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         voice_configured=VoiceConfig.from_env().configured,
         inference_mode=config.inference_mode,
         settings_writable=settings_repo.settings_writable(os.environ),
-        # One short query, and only where settings are writable — never in production.
+        # Only where settings are writable — never in production — and cached for 30s.
         llm_overrides_in_force=admin_llm.overrides_in_force(config.database_url, os.environ),
     )
 
@@ -1273,7 +1273,7 @@ def get_llm_config(conn: Conn, _admin: Admin) -> LlmConfigResponse:
 )
 def put_llm_config(
     conn: Conn,
-    _admin: Admin,
+    admin: Admin,
     body: LlmStageConfigUpdate,
     stage: Annotated[str, Path(description="An LLM stage, as `GET` lists them.")],
 ) -> LlmConfigResponse:
@@ -1285,7 +1285,7 @@ def put_llm_config(
     """
     target = _llm_stage(stage)
     try:
-        return admin_llm.apply_update(conn, target, body, os.environ)
+        return admin_llm.apply_update(conn, target, body, os.environ, actor=admin.email)
     except admin_llm.SettingsReadOnlyError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
     except LlmConfigError as exc:

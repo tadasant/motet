@@ -1257,6 +1257,13 @@ class LlmStageConfigResponse(BaseModel):
     stage_env_effort: str | None
     global_env_effort: str | None
     default_effort: str
+    models: list[str] = Field(
+        description=(
+            "The catalogue slugs this stage may be set to — narrower than `models` on the "
+            "response where the stage's requests need something a model lacks (dedup "
+            "caches for an hour)."
+        )
+    )
 
 
 class LlmConfigResponse(BaseModel):
@@ -1274,7 +1281,8 @@ class LlmConfigResponse(BaseModel):
         description=(
             "Whether this deployment honours `settings` rows at all. False — production — "
             "means the environment is the whole configuration, no row is read, and a PUT "
-            "is refused with 409."
+            "is refused with 409. Resolved against the API's own environment: the worker "
+            "reads the same variable from its own, and the two must agree."
         )
     )
     writable_env: str = Field(description="The variable that decides `writable`.")

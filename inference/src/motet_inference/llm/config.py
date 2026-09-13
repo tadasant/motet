@@ -332,6 +332,25 @@ class ConfigSource(StrEnum):
     DEFAULT = "default"
 
 
+#: Stages whose requests put a ``1h`` cache breakpoint on their prefix. Dedup does: its
+#: window of news items is reused across a whole ingestion run, which is what the longer
+#: TTL's higher write price buys. A model that cannot honour it would have every such
+#: request refused by ``registry._check_against_catalogue`` — so the pairing is refused
+#: here, at startup for an environment variable and on write for a ``settings`` row,
+#: rather than on every job. ``inference/tests/test_llm_settings.py`` builds each stage's
+#: real request and fails if this set and the prompt builders disagree.
+STAGES_CACHING_ONE_HOUR: Final[frozenset[LlmStage]] = frozenset({LlmStage.DEDUP})
+
+
+def models_for(stage: LlmStage) -> list[str]:
+    """The catalogue slugs ``stage`` may be pointed at — what the admin dropdown offers."""
+    return [
+        slug
+        for slug, spec in KNOWN_MODELS.items()
+        if spec.supports_cache_ttl_1h or stage not in STAGES_CACHING_ONE_HOUR
+    ]
+
+
 @dataclass(frozen=True)
 class StageConfig:
     """The resolved model and thinking depth for one stage, and where each came from."""
@@ -604,6 +623,12 @@ def _check_model(
             "Run bin/check-openrouter-models to verify a slug against OpenRouter's live "
             f"list and add it, or set {ALLOW_UNLISTED_ENV}=true to skip this check."
         )
+    if stage in STAGES_CACHING_ONE_HOUR and not spec.supports_cache_ttl_1h:
+        raise LlmConfigError(
+            f"{model_source} sets stage {stage.value!r} to {model!r}, which does not "
+            f"support the 1h cache TTL every {stage.value} request asks for, so each one "
+            "would be refused. Choose a model that supports it."
+        )
     if effort is not None and not spec.efforts:
         raise LlmConfigError(
             f"stage {stage.value!r} asks for reasoning effort {effort!r} on {model!r}, "
@@ -616,6 +641,9 @@ def _check_model(
             f"stage {stage.value!r} asks for effort {effort!r} on {model!r}, which "
             f"supports only: {', '.join(spec.efforts)}."
         )
+
+
+_orphans_warned: set[str] = set()
 
 
 def validate_overrides(
@@ -632,17 +660,21 @@ def validate_overrides(
     :data:`KNOWN_MODELS` even when ``MOTET_LLM_ALLOW_UNLISTED_MODEL`` is set. That escape
     hatch is for the hour between a vendor shipping a model and this file catching up, and
     it is a property of a *deployment*; a row outside the catalogue is a typo, and a
-    ``settings`` row is never the way around the catalogue. A key under ``llm.`` that
-    names no stage and no axis is refused for the same reason — nothing would read it.
+    ``settings`` row is never the way around the catalogue.
+
+    **A key under ``llm.`` that names no current stage is ignored, not refused**, with a
+    warning the first time it is seen. It is what a stage removed from :class:`LlmStage`
+    leaves behind — or a newer API image beside an older worker — and refusing it would
+    let one orphan row disable every other override *and* block every save, with no route
+    left that could delete it.
     """
     known_keys = {key for stage in LlmStage for key in (stage.model_setting, stage.effort_setting)}
+    for key in sorted(settings.keys() - known_keys):
+        if key.startswith(SETTING_PREFIX) and key not in _orphans_warned:
+            _orphans_warned.add(key)
+            logger.warning("settings key %r names no LLM stage and is ignored", key)
+    settings = {key: value for key, value in settings.items() if key in known_keys}
     for key, value in settings.items():
-        if not key.startswith(SETTING_PREFIX):
-            continue
-        if key not in known_keys:
-            raise LlmConfigError(
-                f"settings key {key!r} names no LLM stage; known: {', '.join(sorted(known_keys))}"
-            )
         if key.startswith(MODEL_SETTING_PREFIX) and value.strip() not in KNOWN_MODELS:
             raise LlmConfigError(
                 f"settings key {key!r} is {value!r}, which is not in the model catalogue — "

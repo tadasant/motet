@@ -56,7 +56,6 @@ export type VoiceStatus = GetResponse<'/v1/voice'>
 export type VoiceSession = PostResponse<'/v1/episodes/{episode_id}/voice-session'>
 export type LlmConfig = GetResponse<'/v1/admin/llm-config'>
 export type LlmStageConfig = LlmConfig['stages'][number]
-export type LlmModel = LlmConfig['models'][number]
 export type LlmSpendReport = GetResponse<'/v1/admin/llm-spend'>
 export type LlmSpend = LlmSpendReport['total']['stages'][string]
 /** Request body of `PUT /v1/admin/llm-config/{stage}`: a key left out is untouched, null clears. */

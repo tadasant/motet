@@ -16,7 +16,7 @@ from typing import Any
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from motet_api import app
+from motet_api import admin_llm, app
 from motet_api.auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV
 from motet_api.deps import reset_store
 from motet_db import auth as auth_repo
@@ -47,9 +47,11 @@ def api(
     monkeypatch.setenv(ADMIN_EMAILS_ENV, ADMIN_EMAIL)
     monkeypatch.delenv(settings_repo.SETTINGS_WRITABLE_ENV, raising=False)
     reset_store()
+    admin_llm.reset_overrides_cache()
     with TestClient(app) as started:
         yield started
     reset_store()
+    admin_llm.reset_overrides_cache()
 
 
 def session_for(db: psycopg.Connection[Any], email: str) -> dict[str, str]:
@@ -106,6 +108,9 @@ class TestReadingTheConfig:
         assert script["default_effort"] == "high"
         haiku = next(m for m in body["models"] if m["slug"] == HAIKU)
         assert haiku["efforts"] == [] and haiku["cache_write_1h_usd_per_mtok"] == 2.0
+        # Dedup caches for an hour, so its dropdown leaves out the model that cannot.
+        dedup = next(s for s in body["stages"] if s["stage"] == "dedup")
+        assert "openai/gpt-5.1" not in dedup["models"] and "openai/gpt-5.1" in script["models"]
 
     def test_where_settings_are_off_a_stored_row_is_neither_applied_nor_shown(
         self, api: Any, db: psycopg.Connection[Any], as_admin: dict[str, str]
@@ -165,6 +170,9 @@ class TestWritingTheConfig:
             ({"model": "anthropic/claude-sonnet-9"}, "not in the model catalogue"),
             ({"model": HAIKU}, "no selectable effort"),  # dedup's default effort is `low`
             ({"effort": "turbo"}, "is not one of"),
+            # Every dedup request caches for an hour; gpt-5.1 cannot, so saving this
+            # would have failed every paste (the fresh-eyes review's critical finding).
+            ({"model": "openai/gpt-5.1"}, "1h cache TTL"),
         ],
     )
     def test_a_change_that_does_not_resolve_is_a_400_and_writes_nothing(
@@ -295,6 +303,19 @@ class TestHealth:
         assert api.get("/internal/health").json()["llm_overrides_in_force"] is False
         settings_repo.put(db, "llm.model.script", OPUS)
         db.commit()
+        # The answer is cached, so a public route cannot be made to open a connection per
+        # request; a save through the API resets it, a row written behind its back waits.
+        assert api.get("/internal/health").json()["llm_overrides_in_force"] is False
+        admin_llm.reset_overrides_cache()
         body = api.get("/internal/health").json()
         assert body["settings_writable"] is True
         assert body["llm_overrides_in_force"] is True
+
+
+def test_health_says_it_could_not_ask_rather_than_no(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A table that cannot be read is ``None`` — not the same answer as "no override"."""
+    monkeypatch.setenv(settings_repo.SETTINGS_WRITABLE_ENV, "1")
+    admin_llm.reset_overrides_cache()
+    unreachable = "postgresql://nobody:nothing@127.0.0.1:1/none"
+    assert admin_llm.overrides_in_force(unreachable, {"MOTET_SETTINGS_WRITABLE": "1"}) is None
+    admin_llm.reset_overrides_cache()

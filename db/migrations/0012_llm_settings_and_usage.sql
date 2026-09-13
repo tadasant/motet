@@ -1,7 +1,7 @@
 -- Two tables for the admin screen's "Models & spend" block (motet#92). Both are
--- invariant-12 items — a new datastore role and a table used as a ledger — and AGENTS.md
--- records the owner's sign-off in "Models, spend, and the settings that only staging
--- honours".
+-- invariant-12 items — a new datastore role and a table used as a ledger — and the
+-- decision about them is recorded in AGENTS.md, "Models, spend, and the settings that
+-- only staging honours".
 --
 -- `settings` is one string per key. The keys read today are `llm.model.<stage>` and
 -- `llm.effort.<stage>` (`motet_inference.llm.config`), which sit *above* the environment:

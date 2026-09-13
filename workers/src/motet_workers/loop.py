@@ -149,6 +149,14 @@ _ledger_pruned = _meter.create_counter(
     description="LLM spend-ledger rows deleted by the retention sweep.",
 )
 
+#: Ledger sweeps that failed. Its own series rather than an outcome on the one below: a
+#: failure here must not relabel a jobs sweep that worked, and vice versa.
+_ledger_prune_failures = _meter.create_counter(
+    "motet.llm_usage.prune_failures",
+    unit="{sweep}",
+    description="Retention sweeps of the LLM spend ledger that failed.",
+)
+
 #: Whether the sweep ran, and whether it worked. The row count above cannot answer either.
 #:
 #: **A swallowed failure records no rows, which on the counter above is indistinguishable
@@ -384,7 +392,7 @@ def prune_jobs(database_url: str) -> jobs.Pruned:
         with repo.connect(database_url) as conn:
             conn.autocommit = True
             pruned = jobs.prune(conn)
-            ledger = llm_usage.prune(conn)
+            ledger = _prune_ledger(conn)
     except Exception:  # noqa: BLE001 — a sweep must never be able to stop a worker
         # At ERROR, and on its own counter, because a swallowed failure records no rows and
         # is therefore invisible on `_jobs_pruned` — identical to a sweep that found nothing.
@@ -397,14 +405,15 @@ def prune_jobs(database_url: str) -> jobs.Pruned:
     _prune_sweeps.add(1, {"motet.prune.outcome": "ok"})
     for state, count in pruned.deleted.items():
         _jobs_pruned.add(count, {"motet.job.state": state})
-    _ledger_pruned.add(ledger.deleted)
     logger.info(
-        "pruned %d terminal job row(s): %s; and %d llm_usage row(s)",
+        "pruned %d terminal job row(s): %s",
         pruned.total,
         ", ".join(f"{count} {state}" for state, count in sorted(pruned.deleted.items())),
-        ledger.deleted,
     )
-    if pruned.capped or ledger.capped:
+    if ledger is not None:
+        _ledger_pruned.add(ledger.deleted)
+        logger.info("pruned %d llm_usage row(s)", ledger.deleted)
+    if pruned.capped or (ledger is not None and ledger.capped):
         # Not an error — the next sweep continues, and a backlog built up before this
         # existed drains over a few of them. Said out loud because a cap reached every
         # hour forever is the table growing faster than this removes it, and the counter
@@ -414,6 +423,16 @@ def prune_jobs(database_url: str) -> jobs.Pruned:
             "probably past their window and the next sweep will take them"
         )
     return pruned
+
+
+def _prune_ledger(conn: psycopg.Connection[Any]) -> llm_usage.Pruned | None:
+    """The ledger's half of the sweep, failing on its own so the jobs half still counts."""
+    try:
+        return llm_usage.prune(conn)
+    except Exception:  # noqa: BLE001 — same reasoning as the jobs sweep above
+        _ledger_prune_failures.add(1)
+        logger.exception("could not prune llm_usage rows; will try again")
+        return None
 
 
 @contextlib.contextmanager

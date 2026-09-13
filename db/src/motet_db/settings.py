@@ -83,11 +83,3 @@ def put(conn: psycopg.Connection[Any], key: str, value: str | None) -> None:
         """,
         (key, value),
     )
-
-
-def count(conn: psycopg.Connection[Any], prefix: str) -> int:
-    """How many rows under ``prefix`` exist — what ``/internal/health`` asks."""
-    row = conn.execute(
-        "SELECT count(*) AS n FROM settings WHERE starts_with(key, %s)", (prefix,)
-    ).fetchone()
-    return int(row["n"]) if row is not None else 0

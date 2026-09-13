@@ -13,11 +13,17 @@ import json
 
 import pytest
 from motet_inference.accounting import StageUsage, record_usage, usage_sink
-from motet_inference.adapters import ClaudeIntegrator
+from motet_inference.adapters import (
+    CONFIRM_MAX_TOKENS,
+    INTEGRATE_MAX_TOKENS,
+    SCRIPT_MAX_TOKENS,
+    ClaudeIntegrator,
+)
 from motet_inference.llm import (
     ALLOW_UNLISTED_ENV,
     DEFAULT_MODEL,
     KNOWN_MODELS,
+    STAGES_CACHING_ONE_HOUR,
     CacheControl,
     ConfigSource,
     FakeLlmClient,
@@ -31,11 +37,13 @@ from motet_inference.llm import (
     find_model,
     llm_overrides,
     load_config,
+    models_for,
     usage_cost_usd,
     validate_overrides,
 )
 from motet_inference.llm.check_models import PRICE_FIELDS, drift
-from motet_inference.types import SourceItem
+from motet_inference.prompts import integrate_messages, script_messages, second_look_messages
+from motet_inference.types import NewsItem, SourceItem
 
 OPUS = "anthropic/claude-opus-5"
 HAIKU = "anthropic/claude-haiku-4.5"
@@ -106,9 +114,26 @@ class TestASettingsRowIsGatedHarderThanEnv:
         with pytest.raises(LlmConfigError, match="llm.effort.script"):
             validate_overrides({"llm.effort.script": "turbo"}, MODE)
 
-    def test_a_key_that_names_no_stage_is_refused(self) -> None:
-        with pytest.raises(LlmConfigError, match="names no LLM stage"):
-            validate_overrides({"llm.model.grounding": DEFAULT_MODEL}, MODE)
+    def test_a_key_that_names_no_stage_is_ignored_rather_than_poisoning_the_rest(
+        self,
+    ) -> None:
+        """What a removed stage leaves behind. Refusing it would disable every other row and
+        block every save, with no route that could delete it."""
+        config = validate_overrides(
+            {"llm.model.grounding": "vendor/withdrawn", "llm.model.script": OPUS}, MODE
+        )
+        assert config.for_stage(LlmStage.SCRIPT).model == OPUS
+
+    def test_a_model_that_cannot_cache_for_an_hour_is_refused_for_dedup(self) -> None:
+        """Every dedup request asks for a 1h cache TTL; gpt-5.1 has none, so the pairing
+        would have every paste refused at request time. Refused for env and row alike."""
+        with pytest.raises(LlmConfigError, match="1h cache TTL"):
+            validate_overrides({"llm.model.dedup": "openai/gpt-5.1"}, MODE)
+        with pytest.raises(LlmConfigError, match="MOTET_LLM_MODEL_DEDUP"):
+            load_config({**MODE, "MOTET_LLM_MODEL_DEDUP": "openai/gpt-5.1"})
+        validate_overrides({"llm.model.script": "openai/gpt-5.1"}, MODE)
+        assert "openai/gpt-5.1" not in models_for(LlmStage.DEDUP)
+        assert "openai/gpt-5.1" in models_for(LlmStage.SCRIPT)
 
     def test_keys_outside_the_llm_namespace_are_not_its_business(self) -> None:
         validate_overrides({"other.thing": "x"}, MODE)
@@ -228,3 +253,27 @@ class TestDriftCheck:
         notes = drift(KNOWN_MODELS[DEFAULT_MODEL], live)
         assert any(note.startswith("output_usd_per_mtok 10 -> 12") for note in notes), notes
         assert any("canonical slug" in note for note in notes), notes
+
+
+class TestAValidRowCannotProduceARefusedRequest:
+    """``validate_overrides`` is only a gate if it covers every check ``build_request``
+    makes. The two request-shaped checks are the cache TTL and the output ceiling; these
+    pin both to what the stages really send, so a new breakpoint or a bigger ceiling
+    cannot quietly reopen "a saved dropdown fails every job"."""
+
+    ITEM = SourceItem(id="si_1", title="Acme", text="Acme raises $20M.")
+    STORY = NewsItem(id="ni_1", title="Acme", summary="Acme raised.", source_item_ids=("si_1",))
+
+    def test_the_one_hour_stages_are_the_ones_whose_prompts_cache_for_an_hour(self) -> None:
+        built = {
+            LlmStage.DEDUP: integrate_messages(self.ITEM, [self.STORY]),
+            LlmStage.DEDUP_CONFIRM: second_look_messages(self.ITEM, self.STORY),
+            LlmStage.SCRIPT: script_messages([self.STORY], {"si_1": self.ITEM}),
+        }
+        for stage, messages in built.items():
+            request = LlmRequest(model=DEFAULT_MODEL, messages=messages, max_output_tokens=1)
+            assert (request.cache_ttl == "1h") == (stage in STAGES_CACHING_ONE_HOUR), stage
+
+    def test_every_stage_ceiling_fits_every_catalogue_model(self) -> None:
+        smallest = min(spec.max_output_tokens for spec in KNOWN_MODELS.values())
+        assert max(INTEGRATE_MAX_TOKENS, CONFIRM_MAX_TOKENS, SCRIPT_MAX_TOKENS) <= smallest

@@ -22,13 +22,16 @@ added or removed upstream appears or disappears on its own.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 
 import psycopg
-from motet_db import llm_usage, repo
+import psycopg.rows
+from motet_db import llm_usage
 from motet_db import settings as settings_repo
 from motet_inference.llm import (
     DEFAULT_EFFORTS,
@@ -44,6 +47,7 @@ from motet_inference.llm import (
     LlmStage,
     Usage,
     load_config,
+    models_for,
     usage_cost_usd,
     validate_overrides,
 )
@@ -132,6 +136,7 @@ def describe_config(rows: Mapping[str, str], environ: Mapping[str, str]) -> LlmC
                 stage_env_effort=_env(environ, stage.effort_env),
                 global_env_effort=_env(environ, EFFORT_ENV),
                 default_effort=_effort_word(DEFAULT_EFFORTS[stage]),
+                models=models_for(stage),
             )
         )
     return LlmConfigResponse(
@@ -163,6 +168,8 @@ def apply_update(
     stage: LlmStage,
     body: LlmStageConfigUpdate,
     environ: Mapping[str, str],
+    *,
+    actor: str | None,
 ) -> LlmConfigResponse:
     """Set or clear one stage's rows, validated before anything is written.
 
@@ -194,10 +201,14 @@ def apply_update(
     validate_overrides(candidate, environ)
     for key, value in changes.items():
         settings_repo.put(conn, key, value)
+    reset_overrides_cache()
     if changes:
+        # WARNING, and naming who: this changes what every later job spends, and the row
+        # itself records when but not by whom.
         logger.warning(
-            "llm settings changed for %s: %s — applies to the next job a worker claims",
+            "llm settings changed for %s by %s: %s — applies to the next job a worker claims",
             stage.value,
+            actor or "<unknown>",
             ", ".join(
                 f"{key}={value if value is not None else '<cleared>'}"
                 for key, value in changes.items()
@@ -206,19 +217,51 @@ def apply_update(
     return describe_config(candidate, environ)
 
 
+#: How long ``/internal/health`` reuses its answer. The route is unauthenticated and is
+#: the platform's probe, so where settings are writable it must not be able to open a
+#: database connection per request — for anyone who asks, as often as they ask.
+OVERRIDES_CACHE_SECONDS: Final = 30.0
+
+_overrides_cache: tuple[float, bool | None] | None = None
+_overrides_lock = threading.Lock()
+
+
 def overrides_in_force(database_url: str | None, environ: Mapping[str, str]) -> bool | None:
     """Whether a worker in this deployment would apply any row right now.
 
     For ``/internal/health``: ``False`` without touching the database where the switch is
-    off — every production request — and otherwise one short query. ``None`` when that
-    query could not be asked, which is not the same answer as "no".
+    off — every production request. Otherwise one short, time-limited query, reused for
+    :data:`OVERRIDES_CACHE_SECONDS`. ``None`` when that query could not be asked, which is
+    not the same answer as "no".
     """
+    global _overrides_cache
     if not settings_repo.settings_writable(environ):
         return False
     if not database_url:
         return None
+    with _overrides_lock:
+        cached = _overrides_cache
+        if cached is not None and time.monotonic() < cached[0]:
+            return cached[1]
+        answer = _read_overrides_in_force(database_url, environ)
+        _overrides_cache = (time.monotonic() + OVERRIDES_CACHE_SECONDS, answer)
+        return answer
+
+
+def reset_overrides_cache() -> None:
+    """Forget the cached health answer. For tests, and after a save in this process."""
+    global _overrides_cache
+    _overrides_cache = None
+
+
+def _read_overrides_in_force(database_url: str, environ: Mapping[str, str]) -> bool | None:
     try:
-        with repo.connect(database_url, connect_timeout=3) as conn:
+        with psycopg.connect(
+            database_url,
+            connect_timeout=3,
+            options="-c statement_timeout=2000",
+            row_factory=psycopg.rows.dict_row,
+        ) as conn:
             rows = settings_repo.load(conn, SETTING_PREFIX)
     except psycopg.Error:
         logger.warning("could not read the settings table for /internal/health", exc_info=True)

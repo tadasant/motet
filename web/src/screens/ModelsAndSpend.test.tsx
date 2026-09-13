@@ -21,6 +21,7 @@ const stage = (name: string, overrides: Partial<LlmStageConfig> = {}): LlmStageC
   stage_env_effort: null,
   global_env_effort: null,
   default_effort: 'low',
+  models: [SONNET, HAIKU],
   ...overrides,
 })
 
