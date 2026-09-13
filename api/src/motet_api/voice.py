@@ -160,15 +160,23 @@ class HttpVoiceStarter:
             raise VoiceUnavailableError(
                 f"The voice service refused the session ({response.status_code})."
             )
-        body = response.json()
-        return StartedVoiceSession(
-            session_id=str(body["session_id"]),
-            session_token=str(body["session_token"]),
-            expires_at=str(body["expires_at"]),
-            websocket_url=websocket_url(self._base_url, str(body["websocket_path"])),
-            arm=str(body.get("arm", "")),
-            conversational=bool(body.get("conversational", False)),
-        )
+        try:
+            body = response.json()
+            return StartedVoiceSession(
+                session_id=str(body["session_id"]),
+                session_token=str(body["session_token"]),
+                expires_at=str(body["expires_at"]),
+                websocket_url=websocket_url(self._base_url, str(body["websocket_path"])),
+                arm=str(body.get("arm", "")),
+                conversational=bool(body.get("conversational", False)),
+            )
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            # A 201 this client cannot read is the voice service being wrong, not the API:
+            # the same 503 as a refusal, never an unhandled 500.
+            logger.warning("voice StartSession answered unreadably: %r", exc)
+            raise VoiceUnavailableError(
+                "The voice service answered with something unreadable."
+            ) from exc
 
 
 def websocket_url(base_url: str, path: str) -> str:

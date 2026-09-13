@@ -277,7 +277,10 @@ class VoiceSession:
         dead = self.live
         if dead is None or not dead.failed or not isinstance(self.arm, LiveArm):
             return None
-        if self.live_failure_reason in _NOT_REOPENABLE or self._live_reopens >= MAX_LIVE_REOPENS:
+        reason = dead.failure_reason or self.live_failure_reason
+        if reason:
+            self.live_failure_reason = reason
+        if reason in _NOT_REOPENABLE or self._live_reopens >= MAX_LIVE_REOPENS:
             return None
         self._live_reopens += 1
         with contextlib.suppress(Exception):
@@ -293,7 +296,9 @@ class VoiceSession:
             dead.failed,
         )
         await self.start_live()
-        return self._live_channel()
+        if (reopened := self._live_channel()) is not None:
+            reopened.adopt_preroll(dead)
+        return reopened
 
     async def _on_live(
         self, call: Awaitable[list[SessionEvent] | None], *, what: str
@@ -324,7 +329,9 @@ class VoiceSession:
             )
             if live is not None:
                 live.failed = live.failed or str(exc)
+                live.failure_reason = live.failure_reason or reason
                 live.active = False
+                live.reply_owed = False
             self.live_failure_reason = reason
             self.live_failure_message = str(exc)
             code = "turn_failed" if what == "asking" else "live_unavailable"
@@ -333,11 +340,13 @@ class VoiceSession:
                 if self.text_arm is not None
                 else " No arm in this process can answer a typed question without it."
             )
+            # The reason code, never the exception text: a vendor's error can name its own
+            # host, and the client speaks our contract (invariant 1). The log has the rest.
             return [
                 ErrorEvent(
                     at_ms=self.clock.spoken_through_ms,
                     code=code,
-                    message=f"the live conversation ended ({reason}): {exc}.{fallback}",
+                    message=f"the live conversation ended ({reason}).{fallback}",
                 )
             ]
 
@@ -724,6 +733,7 @@ class VoiceSession:
             state="ready",
             detail=detail,
             reason=reason,
+            live=self.live is not None,
         )
 
     def summary(self) -> dict[str, Any]:

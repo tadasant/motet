@@ -102,6 +102,12 @@ TOKEN_KINDS: Final = ("input_text", "input_audio", "input_cached", "output_text"
 PREROLL_MS: Final = 600
 _PREROLL_BYTES: Final = PREROLL_MS * 32
 
+#: How long the floor stays open to the vendor after a barge-in that nobody follows with
+#: speech. A barge-in can be noise — a door, a passing voice — and without a bound the mic
+#: would stream to a billed socket until the listener pressed something. Long enough to
+#: compose a spoken question, or to start typing one (a typed question cancels the guard).
+LISTEN_TIMEOUT_SECONDS: Final = 30.0
+
 
 @dataclass
 class LiveBridge:
@@ -115,9 +121,15 @@ class LiveBridge:
     outbox: asyncio.Queue[SessionEvent]
     history: list[dict[str, str]]
     #: Forwarding listener audio to the provider right now. **This flag is the spend
-    #: gate**: true from a barge-in (or a typed question) until the reply ends, and false
-    #: otherwise — so narration coming out of the speaker is never billed as audio tokens.
+    #: gate**: true from a barge-in until the reply ends (or narration resumes, or nobody
+    #: speaks for :data:`LISTEN_TIMEOUT_SECONDS`), and false otherwise — so narration coming
+    #: out of the speaker is never billed as audio tokens. A *typed* question does not open
+    #: it: the question arrives as text, and nothing needs the mic.
     active: bool = False
+    #: A reply is expected on this channel — after a barge-in, a typed question, or a tool
+    #: result the model has yet to answer. Separate from :attr:`active` because a typed
+    #: question owes a reply without opening the mic.
+    reply_owed: bool = False
     #: Vendor-detected utterances and completed replies, for the summary.
     speech_starts: int = 0
     replies: int = 0
@@ -151,7 +163,15 @@ class LiveBridge:
     #: Where each reply's transcript sits in :attr:`history`, for a cut that arrives after
     #: the transcript did.
     _history_at: dict[str, int] = field(default_factory=dict, init=False)
+    #: A tool result has been sent and the model owes its follow-up response. The
+    #: provider's own ``response.done`` for the calling response arrives *after* the tool
+    #: has already run, so the conversation's pending-call count cannot say this.
+    _awaiting_follow_up: bool = field(default=False, init=False)
+    _listen_guard: asyncio.Task[None] | None = field(default=None, init=False)
     failed: str = field(default="", init=False)
+    #: The short vendor-neutral code for why the channel died, for the session's reopen
+    #: decision — ``insufficient_quota`` mid-session is as final as it is at open.
+    failure_reason: str = field(default="", init=False)
 
     @classmethod
     def open(
@@ -212,7 +232,9 @@ class LiveBridge:
         self._preroll.clear()
         self._preroll_bytes = 0
         self.active = True
+        self.reply_owed = True
         self._reply_started = False
+        self._arm_listen_guard()
         if preroll:
             self._last_forwarded_at = time.monotonic()
             await self.conversation.append_audio(preroll)
@@ -221,6 +243,7 @@ class LiveBridge:
                 at_ms=self.clock.spoken_through_ms,
                 state="listening",
                 detail="live — speak your question",
+                live=True,
             )
         ]
 
@@ -232,20 +255,62 @@ class LiveBridge:
         in flight keeps talking over the briefing. So the reply is cancelled, unanswered
         audio is discarded, and forwarding stops.
         """
-        if not self.active:
+        if not (self.active or self.reply_owed):
             return
         self.active = False
+        self.reply_owed = False
+        self._awaiting_follow_up = False
+        self._cancel_listen_guard()
         if self._reply_started:
             # Cut off by the resume rather than by speech, and just as unheard past here.
             self._reply_started = False
             await self._cut_reply(time.monotonic())
         await self.conversation.cancel_response()
 
+    def adopt_preroll(self, other: LiveBridge) -> None:
+        """Carry a dead channel's pre-roll into its replacement, so a barge-in that reopens
+        the channel still hands the vendor the first word."""
+        self._preroll = deque(other._preroll)
+        self._preroll_bytes = other._preroll_bytes
+
+    def _arm_listen_guard(self) -> None:
+        self._cancel_listen_guard()
+        self._listen_guard = asyncio.create_task(self._close_floor_if_silent(self.speech_starts))
+
+    def _cancel_listen_guard(self) -> None:
+        if self._listen_guard is not None and not self._listen_guard.done():
+            self._listen_guard.cancel()
+        self._listen_guard = None
+
+    async def _close_floor_if_silent(self, starts_at_engage: int) -> None:
+        """Close a floor nobody spoke into — see :data:`LISTEN_TIMEOUT_SECONDS`."""
+        await asyncio.sleep(LISTEN_TIMEOUT_SECONDS)
+        if not self.active or self.speech_starts != starts_at_engage or self._reply_started:
+            return
+        logger.info(
+            "live floor closed for session %s: nothing was said within %.0f s of the barge-in",
+            self.session_id,
+            LISTEN_TIMEOUT_SECONDS,
+        )
+        self._listen_guard = None  # this task; do not cancel it from inside
+        try:
+            await self.disengage()
+        except Exception as exc:  # noqa: BLE001 — the reader reports a dead channel
+            logger.warning("closing a silent floor failed for session %s: %s", self.session_id, exc)
+        self.outbox.put_nowait(
+            SessionStateEvent(
+                at_ms=self.clock.spoken_through_ms, state="ready", detail="nothing heard"
+            )
+        )
+
     async def ask(self, text: str, position_notes: str) -> list[SessionEvent]:
         """A typed question on the live channel — the fallback the client keeps."""
         await self.conversation.add_context(position_notes)
         await self.conversation.add_user_text(text)
-        self.active = True
+        # A reply is owed; the mic is not opened for it. Typing also means the listener is
+        # not silent, so the guard on a spoken floor stands down.
+        self.reply_owed = True
+        self._cancel_listen_guard()
         self._reply_started = False
         self._speech_stopped_at = time.monotonic()
         self.history.append({"role": "user", "text": text})
@@ -261,21 +326,31 @@ class LiveBridge:
             raise
         except Exception as exc:  # noqa: BLE001 — a dead reader must say so on the wire
             logger.exception("live conversation reader failed for session %s", self.session_id)
-            self.failed = str(exc)
-            self.active = False
-            self.outbox.put_nowait(
-                ErrorEvent(
-                    at_ms=self.clock.spoken_through_ms,
-                    code="live_unavailable",
-                    message=f"the live conversation ended: {exc}. Typed questions still work.",
-                )
-            )
+            self._end(str(exc), failure_reason(exc))
         else:
             # The provider closed its side. Anything the client asks from here on falls
             # back to the turn-shaped path; say so once rather than per frame.
             if not self.failed:
-                self.failed = "provider closed the conversation"
-            self.active = False
+                self._end("provider closed the conversation", "connection_closed")
+
+    def _end(self, failed: str, reason: str) -> None:
+        """The channel is gone: close the gate and tell the client once, by code.
+
+        The vendor's own exception text stays in the log — it can name the provider's host,
+        and the client wire speaks our contract, not the vendor's (invariant 1).
+        """
+        self.failed = failed
+        self.failure_reason = reason
+        self.active = False
+        self.reply_owed = False
+        self._cancel_listen_guard()
+        self.outbox.put_nowait(
+            ErrorEvent(
+                at_ms=self.clock.spoken_through_ms,
+                code="live_unavailable",
+                message=f"the live conversation ended ({reason}). Typed questions still work.",
+            )
+        )
 
     async def _handle(self, event: object) -> None:
         now = time.monotonic()
@@ -289,6 +364,7 @@ class LiveBridge:
             # already opened the floor for, and counting it would double every barge-in.
             self.speech_starts += 1
             self._listener_talking = True
+            self._cancel_listen_guard()
             if self._reply_started:
                 # Talking over the reply. The provider cuts the response off on its own
                 # side; the client has to drop what it has queued, and `listening` is the
@@ -314,7 +390,7 @@ class LiveBridge:
             return
 
         if isinstance(event, AssistantAudio):
-            if not self.active:
+            if not self.reply_owed:
                 # A reply the session already cancelled (narration resumed) can still have
                 # chunks in flight from the vendor. Nobody is listening for it.
                 return
@@ -351,6 +427,9 @@ class LiveBridge:
 
         if isinstance(event, ToolCallRequested):
             call = event.call
+            # The answer to this call is a *second* response, and the first one's
+            # `response.done` is still to come — it must not end the turn (see TurnDone).
+            self._awaiting_follow_up = True
             self.outbox.put_nowait(
                 ToolCallEvent(
                     at_ms=at_ms, call_id=call.call_id, name=call.name, arguments=call.arguments
@@ -372,18 +451,23 @@ class LiveBridge:
             return
 
         if isinstance(event, TurnDone):
-            outcome = (
-                "tool" if event.pending_tools else "cancelled" if event.cancelled else "completed"
-            )
+            calling = event.pending_tools or self._awaiting_follow_up
+            outcome = "tool" if calling else "cancelled" if event.cancelled else "completed"
             self._record_usage(event.usage, outcome=outcome)
-            if event.pending_tools:
+            if calling and not event.cancelled:
+                # The response that asked for a tool is done; the one that answers it has
+                # been requested and is what ends the turn. Its audio must still play.
+                self._awaiting_follow_up = False
                 return
-            if event.cancelled or self._listener_talking or not self.active:
+            self._awaiting_follow_up = False
+            if event.cancelled or self._listener_talking or not self.reply_owed:
                 # Cut off by the listener, or a new utterance is already under way: the
                 # floor is still theirs and the reply that follows will end the turn.
                 return
             self.replies += 1
             self.active = False
+            self.reply_owed = False
+            self._cancel_listen_guard()
             self._reply_started = False
             self.outbox.put_nowait(
                 SessionStateEvent(at_ms=at_ms, state="ready", detail="reply complete")
@@ -391,13 +475,20 @@ class LiveBridge:
             return
 
         if isinstance(event, ProviderError):
+            # The vendor's code and prose go to the log; the client gets ours (invariant 1).
             logger.warning(
                 "live provider error for session %s: code=%s %s",
                 self.session_id,
                 event.code,
                 event.message,
             )
-            self.outbox.put_nowait(ErrorEvent(at_ms=at_ms, code=event.code, message=event.message))
+            self.outbox.put_nowait(
+                ErrorEvent(
+                    at_ms=at_ms,
+                    code="provider_error",
+                    message="the voice provider reported an error; ask again or resume",
+                )
+            )
             return
 
     async def _cut_reply(self, now: float) -> None:
@@ -502,6 +593,7 @@ class LiveBridge:
         }
 
     async def aclose(self) -> None:
+        self._cancel_listen_guard()
         if self._reader is not None and not self._reader.done():
             self._reader.cancel()
             await asyncio.gather(self._reader, return_exceptions=True)

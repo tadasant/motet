@@ -337,3 +337,89 @@ def test_the_app_builds_the_composed_arm_behind_a_live_arm(settings: VoiceSettin
 def test_an_assistant_turn_is_untouched_by_the_reason_plumbing() -> None:
     """Guard: the value type the text arm returns did not grow a field by accident."""
     assert AssistantTurn(text="x").audio is None
+
+
+# ------------------------------------------------------------- reopening (PR review)
+
+
+class _Channel:
+    """A live conversation that records what it was sent and never says anything."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    async def start(self) -> None:
+        self.calls.append(("start", None))
+
+    async def append_audio(self, pcm: bytes) -> None:
+        self.calls.append(("append", len(pcm)))
+
+    async def add_context(self, text: str) -> None:
+        self.calls.append(("context", None))
+
+    async def add_user_text(self, text: str) -> None:
+        self.calls.append(("user", text))
+
+    async def tool_output(self, call_id: str, output: Mapping[str, Any]) -> None:
+        self.calls.append(("tool", call_id))
+
+    async def truncate(self, item_id: str, audio_end_ms: int) -> None:
+        self.calls.append(("truncate", item_id))
+
+    async def cancel_response(self) -> None:
+        self.calls.append(("cancel", None))
+
+    async def events(self) -> AsyncIterator[Any]:
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    async def aclose(self) -> None:
+        self.calls.append(("close", None))
+
+
+def _reopenable_session(channels: list[_Channel]) -> VoiceSession:
+    from motet_voice.realtime import OpenAiRealtimeArm  # noqa: PLC0415
+
+    def factory(_request: TurnRequest) -> _Channel:
+        channels.append(_Channel())
+        return channels[-1]
+
+    arm = OpenAiRealtimeArm(model="test", conversation_factory=factory)
+    return VoiceSession.create(
+        session_id="vs_reopen", config=CONFIG, arm=arm, tools=ToolRegistry({})
+    )
+
+
+def test_a_channel_reopened_at_a_barge_in_carries_the_pre_roll() -> None:
+    channels: list[_Channel] = []
+    session = _reopenable_session(channels)
+
+    async def run() -> None:
+        await session.start_live()
+        assert session.live is not None
+        session.live.remember(bytes(3_200 * 3))
+        session.live.failed = "socket dropped"
+        session.live.failure_reason = "connection_closed"
+        await session.client_barge_in()
+
+    asyncio.run(run())
+    assert len(channels) == 2
+    assert session.summary()["live_reopens"] == 1
+    assert ("append", 9_600) in channels[1].calls, "the first word was lost to the reopen"
+
+
+def test_a_channel_that_died_for_want_of_credit_is_not_reopened() -> None:
+    channels: list[_Channel] = []
+    session = _reopenable_session(channels)
+
+    async def run() -> None:
+        await session.start_live()
+        assert session.live is not None
+        session.live.failed = "insufficient_quota.credit_balance_exhausted"
+        session.live.failure_reason = "insufficient_quota"
+        await session.client_barge_in()
+
+    asyncio.run(run())
+    assert len(channels) == 1
+    assert session.summary()["live_reopens"] == 0
+    assert session.summary()["live_failure_reason"] == "insufficient_quota"

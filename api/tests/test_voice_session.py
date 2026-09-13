@@ -296,3 +296,27 @@ def test_claims_carry_their_timings_on_the_episode(api: TestClient, _migrated: s
 )
 def test_websocket_url(base: str, expected: str) -> None:
     assert websocket_url(base, "/v1/x") == expected
+
+
+def test_minting_needs_the_api_token(api: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    voice = VoiceBehindHttp()
+    _configure(api, monkeypatch, voice)
+    assert api.post("/v1/episodes/ep_x/voice-session", json={}).status_code == 401
+    assert voice.requests == []
+
+
+def test_an_unreadable_answer_from_the_voice_service_is_a_503_not_a_500(
+    api: TestClient, _migrated: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def garbled(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, content=b"<html>not json</html>")
+
+    monkeypatch.setenv(VOICE_BASE_URL_ENV, VOICE_BASE)
+    monkeypatch.setenv(VOICE_START_TOKEN_ENV, START_TOKEN)
+    app.dependency_overrides[voice_starter] = lambda: HttpVoiceStarter(
+        VOICE_BASE, START_TOKEN, transport=httpx.MockTransport(garbled)
+    )
+    episode = rendered_episode(api, _migrated)
+    minted = api.post(f"/v1/episodes/{episode['id']}/voice-session", json={}, headers=AUTH)
+    assert minted.status_code == 503
+    assert minted.json()["detail"] == "The voice service answered with something unreadable."

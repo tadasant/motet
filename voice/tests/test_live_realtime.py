@@ -223,6 +223,7 @@ def test_spoken_question_streams_back_a_spoken_reply(settings: VoiceSettings) ->
         "state": "listening",
         "detail": "live — speak your question",
         "reason": None,
+        "live": True,
     }
 
     kinds = [(e["type"], e.get("state") or e.get("speaker")) for e in events]
@@ -242,6 +243,7 @@ def test_spoken_question_streams_back_a_spoken_reply(settings: VoiceSettings) ->
         "state": "ready",
         "detail": "reply complete",
         "reason": None,
+        "live": None,
     }
     assert {e["type"] for e in events} <= CONTRACT_EVENT_TYPES, (
         "the client saw a vendor event type (invariant 1)"
@@ -564,3 +566,176 @@ def test_never_mind_during_a_reply_cancels_it_and_records_it_as_cut() -> None:
         assert bridge.replies == 0
 
     asyncio.run(scenario())
+
+
+# ------------------------------------------------------------- found by the PR review
+
+
+class _ToolTurnTransport:
+    """A vendor that asks for a tool, reports that response done, and only answers — in a
+    second response — once the tool's output arrives. The order the real vendor uses."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+    def say(self, *events: dict[str, Any]) -> None:
+        for event in events:
+            self._queue.put_nowait(event)
+
+    async def send(self, event: Mapping[str, Any]) -> None:
+        self.sent.append(dict(event))
+        item = event.get("item") or {}
+        if (
+            event["type"] == "conversation.item.create"
+            and item.get("type") == "function_call_output"
+        ):
+            self.say(
+                {"type": "response.created"},
+                {
+                    "type": "response.output_audio.delta",
+                    "item_id": "answer",
+                    "delta": base64.b64encode(REPLY_CHUNK).decode(),
+                },
+                {
+                    "type": "response.output_audio_transcript.done",
+                    "item_id": "answer",
+                    "transcript": "Marked it read.",
+                },
+                {"type": "response.done", "response": {"status": "completed"}},
+            )
+
+    async def events(self) -> AsyncIterator[dict[str, Any]]:
+        while (event := await self._queue.get()) is not None:
+            yield event
+
+    async def aclose(self) -> None:
+        self._queue.put_nowait(None)
+
+
+def test_a_tool_calls_answer_is_still_played_after_the_tool_runs() -> None:
+    """The calling response's `response.done` arrives after the tool ran; it must not end
+    the turn, or the answer — billed — is dropped and narration resumes over it."""
+
+    async def scenario() -> list[Any]:
+        transport = _ToolTurnTransport()
+        conversation = OpenAiLiveConversation(
+            transport=transport, session_update={"type": "session.update"}
+        )
+        bridge = _bridge(conversation)  # type: ignore[arg-type]
+        await bridge.start()
+        await bridge.engage("")
+        transport.say(
+            {"type": "response.created"},
+            {
+                "type": "response.function_call_arguments.done",
+                "call_id": "c1",
+                "name": "mark_read",
+                "arguments": '{"news_item_id": "ni_1"}',
+            },
+            {"type": "response.done", "response": {"status": "completed"}},
+        )
+        events: list[Any] = []
+        while True:
+            event = await asyncio.wait_for(bridge.outbox.get(), timeout=2)
+            events.append(event.model_dump())
+            if event.type == "session_state" and event.model_dump()["state"] == "ready":
+                break
+        assert bridge.replies == 1 and not bridge.active and not bridge.reply_owed
+        await bridge.aclose()
+        return events
+
+    events = asyncio.run(scenario())
+    kinds = [e["type"] for e in events]
+    assert kinds[:2] == ["tool_call", "tool_result"]
+    assert "audio_chunk" in kinds, "the tool's answer was dropped"
+    assert kinds.index("audio_chunk") < len(kinds) - 1
+    assert events[-1]["detail"] == "reply complete"
+
+
+def test_resume_with_nothing_said_does_not_cancel_a_response_that_does_not_exist() -> None:
+    """`response.cancel` with nothing in flight is answered by the vendor with an error; the
+    common "never mind" right after a barge-in must only clear the buffer."""
+    transport = _ToolTurnTransport()
+    live = OpenAiLiveConversation(transport=transport, session_update={"type": "session.update"})
+
+    async def scenario() -> None:
+        await live.cancel_response()
+        assert [s["type"] for s in transport.sent] == ["input_audio_buffer.clear"]
+        live._translate({"type": "response.created"})
+        await live.cancel_response()
+        assert [s["type"] for s in transport.sent][-2:] == [
+            "response.cancel",
+            "input_audio_buffer.clear",
+        ]
+        live._translate({"type": "response.done", "response": {"status": "cancelled"}})
+        await live.cancel_response()
+        assert [s["type"] for s in transport.sent][-1] == "input_audio_buffer.clear"
+        assert [s["type"] for s in transport.sent].count("response.cancel") == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_typed_question_owes_a_reply_without_opening_the_mic() -> None:
+    async def scenario() -> None:
+        conversation = _Recording()
+        bridge = _bridge(conversation)
+        await bridge.ask("who led?", "")
+        assert bridge.reply_owed and not bridge.active
+        await bridge.forward(b"\x01\x02" * 800)
+        assert not [c for c in conversation.calls if c[0] == "append"], (
+            "narration from the mic was billed for a typed question"
+        )
+        await bridge._handle(AssistantAudio(pcm=REPLY_CHUNK, sample_rate=24_000, item_id="t"))
+        await bridge._handle(TurnDone())
+        states = []
+        while not bridge.outbox.empty():
+            event = bridge.outbox.get_nowait()
+            if event.type == "session_state":
+                states.append(event.model_dump()["state"])
+        assert states == ["speaking", "ready"]
+
+    asyncio.run(scenario())
+
+
+def test_a_barge_in_nobody_speaks_into_closes_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from motet_voice import live as live_module  # noqa: PLC0415
+
+    monkeypatch.setattr(live_module, "LISTEN_TIMEOUT_SECONDS", 0.05)
+
+    async def scenario() -> None:
+        conversation = _Recording()
+        bridge = _bridge(conversation)
+        await bridge.engage("")
+        await asyncio.sleep(0.15)
+        assert not bridge.active and not bridge.reply_owed
+        assert ("cancel", None) in conversation.calls
+        last = None
+        while not bridge.outbox.empty():
+            last = bridge.outbox.get_nowait().model_dump()
+        assert last is not None and last["state"] == "ready" and last["detail"] == "nothing heard"
+
+        # And speech inside the window keeps it open.
+        bridge2 = _bridge(_Recording())
+        await bridge2.engage("")
+        await bridge2._handle(SpeechStarted(audio_start_ms=100))
+        await asyncio.sleep(0.15)
+        assert bridge2.active
+        await bridge2.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_a_vendor_error_reaches_the_client_as_our_code_not_the_vendors() -> None:
+    from motet_voice.realtime import ProviderError  # noqa: PLC0415
+
+    async def scenario() -> dict[str, Any]:
+        bridge = _bridge(_Recording())
+        await bridge._handle(
+            ProviderError(message="Cancellation failed: no active response", code="response_x")
+        )
+        return bridge.outbox.get_nowait().model_dump()
+
+    event = asyncio.run(scenario())
+    assert event["code"] == "provider_error"
+    assert "response_x" not in event["message"] and "Cancellation" not in event["message"]

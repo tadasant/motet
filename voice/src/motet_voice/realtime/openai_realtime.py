@@ -606,6 +606,10 @@ class OpenAiLiveConversation:
         self._session_update = dict(session_update)
         self._history = list(history)
         self._pending_tools = 0
+        #: A response has been created and not yet reported done. `response.cancel` with
+        #: nothing in flight is answered with an error event, and "never mind" right after a
+        #: barge-in — before a word was said — is the common case of it.
+        self._response_in_flight = False
 
     async def start(self) -> None:
         await self._transport.send(self._session_update)
@@ -660,6 +664,7 @@ class OpenAiLiveConversation:
                 },
             }
         )
+        self._response_in_flight = True
         await self._transport.send({"type": "response.create"})
 
     async def tool_output(self, call_id: str, output: Mapping[str, Any]) -> None:
@@ -674,6 +679,7 @@ class OpenAiLiveConversation:
             }
         )
         self._pending_tools = max(0, self._pending_tools - 1)
+        self._response_in_flight = True
         await self._transport.send({"type": "response.create"})
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
@@ -689,9 +695,12 @@ class OpenAiLiveConversation:
         )
 
     async def cancel_response(self) -> None:
-        # Both, in this order: the reply stops, and audio already appended but not yet
-        # answered is thrown away rather than committed into a question nobody is asking.
-        await self._transport.send({"type": "response.cancel"})
+        # In this order: the reply stops — only if there is one, see `_response_in_flight` —
+        # and audio already appended but not yet answered is thrown away rather than
+        # committed into a question nobody is asking.
+        if self._response_in_flight:
+            self._response_in_flight = False
+            await self._transport.send({"type": "response.cancel"})
         await self._transport.send({"type": "input_audio_buffer.clear"})
 
     async def events(self) -> AsyncIterator[LiveEvent]:
@@ -703,6 +712,9 @@ class OpenAiLiveConversation:
 
     def _translate(self, event: Mapping[str, Any]) -> LiveEvent | None:
         kind = str(event.get("type", ""))
+        if kind == "response.created":
+            self._response_in_flight = True
+            return None
         if kind == "input_audio_buffer.speech_started":
             return SpeechStarted(audio_start_ms=_as_int(event.get("audio_start_ms")))
         if kind == "input_audio_buffer.speech_stopped":
@@ -734,6 +746,7 @@ class OpenAiLiveConversation:
                 )
             )
         if kind == "response.done":
+            self._response_in_flight = False
             raw_response = event.get("response")
             response: dict[str, Any] = raw_response if isinstance(raw_response, dict) else {}
             usage = response.get("usage")

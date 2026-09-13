@@ -1864,7 +1864,11 @@ who calls it anyway. Turning it on is configuration, listed in the PR.
   spend gate, since realtime audio is billed per token in and out. `narration_resumed`
   (and a paused player's `narration_paused`, which is *not* a barge-in) are the contract
   frames that close it: "never mind, resume" cancels the reply and stops forwarding rather
-  than billing the briefing. `motet.voice.realtime.tokens{arm,kind}` and
+  than billing the briefing. A floor nobody speaks into closes itself after 30 seconds, and
+  a *typed* question owes a reply without opening the mic at all. **A tool call's answer is
+  a second response**: the first one's `response.done` arrives after the tool has already
+  run, so it must not end the turn — that was the one bug the PR review found that shipped
+  billed audio nobody could hear. `motet.voice.realtime.tokens{arm,kind}` and
   `motet.voice.realtime.replies{arm,outcome}` are the cost as metrics (invariant 11);
   `input_audio` growing while replies do not is the gate leaking.
 - **A reply the listener talked over is truncated, not recorded as spoken** — in the

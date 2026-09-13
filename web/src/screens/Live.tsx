@@ -28,7 +28,9 @@ type SessionEvent =
   // `reason` rides on the first `ready` of a session whose arm offers a live channel that did
   // not open: a short code (`insufficient_quota`, `arm_dormant`, …) so "no credits" and "no
   // key" are two different sentences. Absent or null everywhere else.
-  | { type: 'session_state'; at_ms: number; state: 'ready' | 'listening' | 'speaking' | 'closed'; detail: string | null; reason?: string | null }
+  // `live` says whether a speech-to-speech channel is open behind this state (on the first
+  // `ready`, and on the `listening` a reopened channel engages with); absent means it says nothing.
+  | { type: 'session_state'; at_ms: number; state: 'ready' | 'listening' | 'speaking' | 'closed'; detail: string | null; reason?: string | null; live?: boolean | null }
   | { type: 'transcript'; at_ms: number; speaker: 'user' | 'assistant'; text: string; final: boolean }
   | { type: 'audio_chunk'; at_ms: number; pcm_base64: string; sample_rate: number; duration_ms: number; format?: string }
   | { type: 'tool_call'; at_ms: number; call_id: string; name: string; arguments: Record<string, unknown> }
@@ -169,6 +171,16 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
   const nextChunkAt = useRef(0)
   const playing = useRef<AudioBufferSourceNode[]>([])
   const readySeen = useRef(false)
+  // Which Play Live this is. Stop, unmount and a new start all move it on, so a start still
+  // awaiting the mint or the mic finds out it was abandoned instead of opening a socket and
+  // starting the player after the listener left.
+  const generation = useRef(0)
+  // The drain-then-resume timer after a streamed reply, cleared by teardown and by a manual play.
+  const resumeTimer = useRef<number | null>(null)
+  const clearResumeTimer = () => {
+    if (resumeTimer.current !== null) window.clearTimeout(resumeTimer.current)
+    resumeTimer.current = null
+  }
   // `handleEvent` is bound to the socket once, in the render `start` ran in, so state it
   // reads is frozen there; the ref is what it consults, the state is what renders.
   const liveRef = useRef(false)
@@ -233,11 +245,15 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
   }
 
   const teardown = useCallback(() => {
+    generation.current += 1
+    clearResumeTimer()
     stopMic()
     flushReplyQueue()
     const socket = ws.current
     ws.current = null
-    if (socket && socket.readyState === WebSocket.OPEN) socket.close()
+    // Whatever its state: a socket still CONNECTING would otherwise open, authenticate and
+    // start narration for a session the listener already stopped.
+    if (socket && socket.readyState !== WebSocket.CLOSED && socket.readyState !== WebSocket.CLOSING) socket.close()
     void ctx.current?.close()
     ctx.current = null
     setPhaseBoth('idle')
@@ -247,7 +263,8 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
 
   const resumeNarration = () => {
     const el = player.current
-    if (!el) return
+    if (!el || !ws.current) return
+    clearResumeTimer()
     setPhaseBoth('resuming')
     // Resume from the interruption offset, deliberately not rewound: whether a couple of
     // seconds of rewind makes the cut sentence easier to follow is an open question for
@@ -304,7 +321,7 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
           if (!readySeen.current) {
             // The first `ready` opens the session; narration starts.
             readySeen.current = true
-            const opened = Boolean(event.detail?.startsWith('live conversation open'))
+            const opened = event.live ?? Boolean(event.detail?.startsWith('live conversation open'))
             setLiveMode(opened)
             // A live arm whose channel did not open says why in `reason`; a plain composed
             // arm sends neither the prefix nor a reason and this stays null.
@@ -316,12 +333,15 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
             // audio drain, then narration picks up where it stopped.
             const audio = ctx.current
             const remaining = audio ? Math.max(0, nextChunkAt.current - audio.currentTime) : 0
-            setTimeout(() => resumeNarration(), Math.round(remaining * 1000) + 150)
+            clearResumeTimer()
+            resumeTimer.current = window.setTimeout(() => resumeNarration(), Math.round(remaining * 1000) + 150)
           }
         } else if (event.state === 'listening') {
           // Either the service just engaged the live channel, or the listener talked over a
           // reply and the service cut it off — drop whatever is queued and listen.
           flushReplyQueue()
+          // A channel reopened mid-session says so here; the heard transcript shows again.
+          if (typeof event.live === 'boolean') setLiveMode(event.live)
           setPhaseBoth('listening')
           if (event.detail && event.detail !== 'live — speak your question') push({ kind: 'event', text: event.detail })
         } else if (event.state === 'speaking') {
@@ -374,6 +394,12 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
           setLiveMode(false)
           setLiveUnavailable({ reason: event.code, detail: event.message })
         }
+        if (phaseRef.current === 'replying') {
+          // No `ready` is coming for a reply that errored. Back to listening, where the
+          // question box and "never mind, resume" are — not stuck with only Stop Live.
+          flushReplyQueue()
+          setPhaseBoth('listening')
+        }
         push({ kind: 'event', text: `error ${event.code}: ${event.message}` })
         return
       default:
@@ -400,7 +426,17 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
       setPhaseBoth('paused')
     }
     const onPlay = () => {
-      if (phaseRef.current !== 'paused') return
+      const current = phaseRef.current
+      if (current === 'listening' || current === 'replying') {
+        // The listener pressed play on the player itself mid-exchange. That is a resume,
+        // and the service has to hear it: otherwise its clock stays frozen and the mic keeps
+        // going to the voice provider while the briefing plays.
+        clearResumeTimer()
+        flushReplyQueue()
+        pausedByUs.current = false
+      } else if (current !== 'paused') {
+        return
+      }
       send({ type: 'narration_resumed', spoken_through_ms: position() })
       setPhaseBoth('narrating')
     }
@@ -414,11 +450,12 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
     }
   }, [phase, player])
 
-  const startMic = async (audio: AudioContext) => {
+  /** Open the mic and wire it to the socket. Returns the handles rather than storing them, so
+   *  a start that was abandoned while permission was pending never overwrites a newer one's. */
+  const startMic = async (audio: AudioContext): Promise<{ stream: MediaStream; node: ScriptProcessorNode }> => {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
     })
-    mic.current = stream
     const source = audio.createMediaStreamSource(stream)
     // ScriptProcessorNode is deprecated but is the smallest thing that hands us PCM; an
     // AudioWorklet is the real answer and a file of its own.
@@ -439,7 +476,7 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
     }
     source.connect(node)
     node.connect(audio.destination)
-    processor.current = node
+    return { stream, node }
   }
 
   const openSocket = (session: VoiceSession) => {
@@ -478,9 +515,13 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
     setLastInterrupt(null)
     readySeen.current = false
     flushReplyQueue()
+    generation.current += 1
+    const mine = generation.current
+    const abandoned = () => generation.current !== mine
     setPhaseBoth('connecting')
     try {
       const session = await api.startVoiceSession(episode.id, position())
+      if (abandoned()) return
       setArm(`${session.arm}${session.conversational ? '' : ' (text turns only)'}`)
       let audio: AudioContext
       try {
@@ -488,10 +529,26 @@ export function Live({ episode, player }: { episode: Episode; player: RefObject<
       } catch {
         audio = new AudioContext()
       }
+      let opened: { stream: MediaStream; node: ScriptProcessorNode }
+      try {
+        opened = await startMic(audio)
+      } catch (err) {
+        void audio.close()
+        throw err
+      }
+      if (abandoned()) {
+        // Stopped or unmounted while the mic permission was pending: release what we took.
+        opened.node.disconnect()
+        opened.stream.getTracks().forEach((track) => track.stop())
+        void audio.close()
+        return
+      }
       ctx.current = audio
-      await startMic(audio)
+      mic.current = opened.stream
+      processor.current = opened.node
       openSocket(session)
     } catch (err) {
+      if (abandoned()) return
       setError(err instanceof Error ? err.message : String(err))
       teardown()
       setPhaseBoth('error')

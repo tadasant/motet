@@ -262,6 +262,11 @@ class SessionStateEvent(SessionEvent):
     #: ``connection_closed`` … — so a client can show "no credits" and "no key" as two
     #: different sentences. ``detail`` carries the prose; this is the part to branch on.
     reason: str | None = None
+    #: Whether a live, speech-to-speech channel is open behind this state — on the first
+    #: ``ready``, and on the ``listening`` a live channel engages with (which is how a client
+    #: learns that a channel reopened mid-session). ``None`` where it says nothing, so a
+    #: client need not match prose in ``detail`` to know whether its speech is heard.
+    live: bool | None = None
 
 
 class ErrorEvent(SessionEvent):
