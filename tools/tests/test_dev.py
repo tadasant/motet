@@ -48,7 +48,13 @@ from tools.dev import (
     port_is_free,
     read_env_file,
     resolve_database_url,
+    shadow_warning,
+    shadowed_names,
 )
+
+#: A live-credential-shaped value, and a stale one. Neither may ever reach a terminal.
+FILE_KEY = "sk-or-v1-fromthefile0000000000000000"
+STALE_KEY = "sk-or-v1-stalefromzshrc111111111111"
 
 #: A child that forks a grandchild and reports its pid, then waits forever. The
 #: grandchild inherits the child's process group, which is the thing teardown has to
@@ -352,13 +358,73 @@ class TestDatabaseUrlResolution:
         assert env_file_paths(environ) == [first, second]
         assert resolve_database_url(environ) == ("postgresql://from/second", "env file")
 
+    def test_a_later_env_file_wins_as_it_does_in_uv(self, tmp_path: Path) -> None:
+        first = tmp_path / "a.env"
+        first.write_text("DATABASE_URL=postgresql://from/first\n")
+        second = tmp_path / "b.env"
+        second.write_text("DATABASE_URL=postgresql://from/second\n")
+        environ = {"UV_ENV_FILE": f"{first} {second}"}
+        assert resolve_database_url(environ) == ("postgresql://from/second", "env file")
+
     def test_a_missing_file_is_not_an_error(self, tmp_path: Path) -> None:
         assert read_env_file(tmp_path / "absent") == {}
+
+    def test_a_file_that_is_not_utf8_is_not_a_traceback(self, tmp_path: Path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(b"A=\xff\xfe\n")
+        assert read_env_file(env_file) == {}
+
+    def test_double_quoted_escapes_are_read_back(self, tmp_path: Path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text('A="say \\"hi\\" \\$HOME \\\\ \\n"\nB=\'kept \\n\'\n')
+        assert read_env_file(env_file) == {"A": 'say "hi" $HOME \\ \n', "B": "kept \\n"}
 
     def test_quotes_comments_and_export_are_handled(self, tmp_path: Path) -> None:
         env_file = tmp_path / ".env"
         env_file.write_text("# header\n\nexport A=1\nB=\"two words\"\nC='three'\nnot a pair\nD=\n")
         assert read_env_file(env_file) == {"A": "1", "B": "two words", "C": "three", "D": ""}
+
+
+class TestAnExportedNameBeatsTheEnvFile:
+    """motet#85: `uv run --env-file` never overrides an exported variable, and nothing said so."""
+
+    def test_an_exported_name_with_a_different_value_is_named(self, tmp_path: Path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"OPENROUTER_API_KEY={FILE_KEY}\nCARTESIA_API_KEY=x\n")
+        environ = {"OPENROUTER_API_KEY": STALE_KEY}
+        assert shadowed_names([env_file], environ) == ["OPENROUTER_API_KEY"]
+
+    def test_the_same_value_exported_is_not_a_collision(self, tmp_path: Path) -> None:
+        """`set -a; . ./.env` exports the file's own values; nothing that runs changes."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"OPENROUTER_API_KEY={FILE_KEY}\n")
+        assert shadowed_names([env_file], {"OPENROUTER_API_KEY": FILE_KEY}) == []
+
+    def test_an_exported_empty_value_still_wins_and_is_named(self, tmp_path: Path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"OPENROUTER_API_KEY={FILE_KEY}\n")
+        assert shadowed_names([env_file], {"OPENROUTER_API_KEY": ""}) == ["OPENROUTER_API_KEY"]
+
+    def test_several_files_are_merged_later_wins_before_comparing(self, tmp_path: Path) -> None:
+        first = tmp_path / "a.env"
+        first.write_text("B=1\nA=1\n")
+        second = tmp_path / "b.env"
+        second.write_text("A=2\nC=3\n")
+        # A is exported as the effective (later) value, so it changes nothing.
+        environ = {"A": "2", "B": "0", "C": "3"}
+        assert shadowed_names([first, second], environ) == ["B"]
+
+    def test_the_warning_names_the_variables_and_the_file(self) -> None:
+        text = shadow_warning(["OPENROUTER_API_KEY", "CARTESIA_API_KEY"], ".env")
+        assert "OPENROUTER_API_KEY, CARTESIA_API_KEY" in text
+        assert ".env" in text
+        assert "precedence" in text
+
+    @pytest.mark.parametrize("script", ["bin/dev", "bin/local-env"])
+    def test_the_wrappers_keep_the_env_file_out_of_the_tool_itself(self, script: str) -> None:
+        """Under a plain `uv run`, every `.env` line is already in `os.environ` — "exported"."""
+        root = Path(tools.dev.__file__).resolve().parent.parent
+        assert "exec uv run --no-env-file python -m" in (root / script).read_text()
 
 
 class TestWebDependencies:
@@ -427,6 +493,23 @@ class TestTheOneShotStepsFailLoudly:
         env = seen["env"]
         assert isinstance(env, dict)
         assert env["DATABASE_URL"].endswith("/motet_dev")
+
+    def test_a_url_from_the_env_file_is_left_for_uv_to_resolve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Our re-reading of the file must not override uv's (`${VAR}` interpolation)."""
+        seen: dict[str, object] = {}
+
+        def _fake(argv: object, *, cwd: object, env: object = None) -> int:
+            seen["env"] = env
+            return 0
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setattr(tools.dev, "_run", _fake)
+        migrate(tmp_path, "postgresql://from/file", inject_database_url=False)
+        env = seen["env"]
+        assert isinstance(env, dict)
+        assert "DATABASE_URL" not in env
 
 
 class TestMain:
@@ -508,6 +591,75 @@ class TestMain:
         assert str(env_file) in printed
         assert "(env file)" in printed
 
+    def test_a_stale_export_is_warned_about_by_name_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The motet#85 run: a `~/.zshrc` key beat the one in `.env`, and nothing said so."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"OPENROUTER_API_KEY={FILE_KEY}\nDATABASE_URL=postgresql://from/file\n")
+        monkeypatch.setenv("UV_ENV_FILE", str(env_file))
+        monkeypatch.delenv("UV_NO_ENV_FILE", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("OPENROUTER_API_KEY", STALE_KEY)
+
+        status = main(_NOTHING_TO_START)
+
+        printed = capsys.readouterr().out
+        assert status == 0
+        assert "OPENROUTER_API_KEY" in printed
+        assert "precedence" in printed
+        assert FILE_KEY not in printed
+        assert STALE_KEY not in printed
+        # Warn only: DATABASE_URL still resolves from the file, as it did before.
+        assert "(env file)" in printed
+
+    def test_no_warning_when_nothing_collides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"OPENROUTER_API_KEY={FILE_KEY}\n")
+        monkeypatch.setenv("UV_ENV_FILE", str(env_file))
+        monkeypatch.delenv("UV_NO_ENV_FILE", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        main(_NOTHING_TO_START)
+
+        assert "warning:" not in capsys.readouterr().out
+
+    def test_an_exported_database_url_is_said_once_on_its_own_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`--no-db` with an exported URL is legitimate: fold it into the label, not a warning."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://postgres:filepw@localhost/from_file\n")
+        monkeypatch.setenv("UV_ENV_FILE", str(env_file))
+        monkeypatch.delenv("UV_NO_ENV_FILE", raising=False)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:shellpw@localhost/mine")
+
+        main(_NOTHING_TO_START)
+
+        printed = capsys.readouterr().out
+        assert "warning:" not in printed
+        assert "(environment, over the env file's DATABASE_URL)" in printed
+        assert "filepw" not in printed
+        assert "shellpw" not in printed
+
+    def test_an_exported_empty_database_url_is_not_hidden(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The label reads "env file" here, but uv will hand the children the empty export."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://from/file\n")
+        monkeypatch.setenv("UV_ENV_FILE", str(env_file))
+        monkeypatch.delenv("UV_NO_ENV_FILE", raising=False)
+        monkeypatch.setenv("DATABASE_URL", "")
+
+        main(_NOTHING_TO_START)
+
+        printed = capsys.readouterr().out
+        assert "warning:" in printed
+        assert "DATABASE_URL" in printed.split("warning:", 1)[1]
+
     def test_a_dev_error_is_one_line_and_a_nonzero_status(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -538,6 +690,19 @@ class TestTheLineAHumanReads:
         assert _redacted("postgresql://me@localhost/motet_dev") == (
             "postgresql://me@localhost/motet_dev"
         )
+
+
+#: `main`'s arguments with every side effect turned off.
+_NOTHING_TO_START = [
+    "--no-db",
+    "--no-migrate",
+    "--without",
+    "api",
+    "--without",
+    "worker",
+    "--without",
+    "web",
+]
 
 
 def _raise_dev_error(*_args: object, **_kwargs: object) -> None:

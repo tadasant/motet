@@ -290,17 +290,18 @@ def _signal_group(pgid: int, sig: int) -> None:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
-    """Parse the ``KEY=value`` lines of a ``.env`` well enough to read one variable.
+    """Parse the ``KEY=value`` lines of a ``.env`` well enough to read its names and values.
 
     Deliberately small: this exists so the supervisor can resolve ``DATABASE_URL`` for its
-    *own* use — waiting on the database, and telling you what it migrated. Every child
+    *own* use — waiting on the database, and telling you what it migrated — and so it can
+    say which of the file's names an exported variable will beat. Every child
     goes through ``uv run``, which reads the file itself, so nothing here has to be a
     complete dotenv implementation.
     """
     values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return values
     for raw in lines:
         line = raw.strip()
@@ -310,9 +311,37 @@ def read_env_file(path: Path) -> dict[str, str]:
         name = name.removeprefix("export ").strip()
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+            quote, value = value[0], value[1:-1]
+            if quote == '"':
+                value = _unescape(value)
         values[name] = value
     return values
+
+
+#: The escapes ``bin/local-env``'s ``_render_value`` writes inside double quotes, which is
+#: the subset of uv's that a file this repo writes can contain.
+_ESCAPES = {"\\": "\\", '"': '"', "$": "$", "n": "\n"}
+
+
+def _unescape(value: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and i + 1 < len(value) and value[i + 1] in _ESCAPES:
+            out.append(_ESCAPES[value[i + 1]])
+            i += 2
+        else:
+            out.append(value[i])
+            i += 1
+    return "".join(out)
+
+
+def read_env_files(paths: Iterable[Path]) -> dict[str, str]:
+    """Several env files merged the way uv merges them: a later file wins."""
+    merged: dict[str, str] = {}
+    for path in paths:
+        merged.update(read_env_file(path))
+    return merged
 
 
 def env_file_paths(environ: Mapping[str, str] | None = None) -> list[Path]:
@@ -348,11 +377,46 @@ def resolve_database_url(environ: Mapping[str, str] | None = None) -> tuple[str,
     exported = env.get("DATABASE_URL")
     if exported:
         return exported, "environment"
-    for path in env_file_paths(env):
-        from_file = read_env_file(path).get("DATABASE_URL")
-        if from_file:
-            return from_file, "env file"
+    from_file = read_env_files(env_file_paths(env)).get("DATABASE_URL")
+    if from_file:
+        return from_file, "env file"
     return DEFAULT_DATABASE_URL, "default"
+
+
+def shadowed_names(paths: Iterable[Path], environ: Mapping[str, str] | None = None) -> list[str]:
+    """The names an env file sets that this shell already exports **with a different value**.
+
+    ``uv run --env-file`` never overrides a variable that is already in the environment —
+    uv's precedence, the same one :func:`resolve_database_url` follows — so each of these
+    is a line of the file that silently does nothing. That is motet#85: a stale
+    ``OPENROUTER_API_KEY`` exported from ``~/.zshrc`` beat the one ``bin/local-env`` wrote,
+    every health field said real mode was armed, and every ``integrate`` job failed with a
+    vendor 401 pointing nowhere near the cause.
+
+    **Returns names only.** Values are compared and never returned, because they are live
+    credentials and the caller prints the result. A name exported with the *same* value is
+    left out: it changes nothing that runs, and ``set -a; . ./.env`` is an ordinary way to
+    have one. Where :func:`read_env_file`'s small parser reads a value differently from
+    uv's — ``${VAR}`` interpolation — the comparison errs toward reporting, which costs a
+    line rather than hiding a key.
+
+    **Only meaningful in a process uv did not fill from the same file**, which is why
+    ``bin/dev`` and ``bin/local-env`` run under ``uv run --no-env-file``: otherwise every
+    line of the file is "exported" by the time this reads the environment.
+    """
+    env = os.environ if environ is None else environ
+    return sorted(
+        name for name, value in read_env_files(paths).items() if name in env and env[name] != value
+    )
+
+
+def shadow_warning(names: Sequence[str], files: str) -> str:
+    """The sentence both ``bin/dev`` and ``bin/local-env`` print for :func:`shadowed_names`."""
+    return (
+        f"these names are already exported in this shell and will take precedence over "
+        f"{files}: {', '.join(names)}. `uv run` never overrides an exported variable — "
+        "`unset` them for the file's values to apply."
+    )
 
 
 # -- the steps --------------------------------------------------------------------
@@ -397,7 +461,7 @@ def ensure_web_dependencies(root: Path) -> bool:
     return True
 
 
-def migrate(root: Path, database_url: str) -> None:
+def migrate(root: Path, database_url: str, *, inject_database_url: bool = True) -> None:
     """Apply migrations against the database the services are about to use.
 
     Passed explicitly rather than left to be inherited: with no ``.env`` and nothing
@@ -407,8 +471,12 @@ def migrate(root: Path, database_url: str) -> None:
 
     Through the environment rather than ``--database-url``, because an argument is in
     every ``ps`` on the machine and a connection string carries a password.
+
+    ``inject_database_url`` is :func:`build_services`' rule, for its reason: when the URL
+    came from the env file, the migrate step's own ``uv run`` reads it, and an injected
+    copy of our re-reading would override uv's answer.
     """
-    env = {**os.environ, "DATABASE_URL": database_url}
+    env = {**os.environ, **({"DATABASE_URL": database_url} if inject_database_url else {})}
     if _run(["uv", "run", "python", "-m", "motet_db.migrate"], cwd=root, env=env) != 0:
         raise DevError(f"migrations failed against {_redacted(database_url)}")
 
@@ -628,6 +696,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         database_url, source = resolve_database_url()
+        # DATABASE_URL already gets a line of its own naming where it came from, so a
+        # collision on it is said there rather than twice. Only when that line says
+        # "environment": an exported-but-empty one is a collision the label cannot show.
+        label = source
+        shadowed = shadowed_names(env_files)
+        if source == "environment" and "DATABASE_URL" in shadowed:
+            shadowed.remove("DATABASE_URL")
+            label = "environment, over the env file's DATABASE_URL"
+        if shadowed:
+            say("warning: " + shadow_warning(shadowed, ", ".join(map(str, env_files))))
+
         services = build_services(
             root=root,
             api_port=args.api_port,
@@ -640,11 +719,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_ports(services)
 
         if args.no_db:
-            say(f"--no-db: using {_redacted(database_url)} ({source}) as it is")
+            say(f"--no-db: using {_redacted(database_url)} ({label}) as it is")
         else:
             say("bringing up Postgres (docker compose up -d --wait)")
             compose_up(root)
-            say(f"Postgres is healthy: {_redacted(database_url)} ({source})")
+            say(f"Postgres is healthy: {_redacted(database_url)} ({label})")
 
         if any(service.name == "web" for service in services):
             say("checking the SPA's dependencies")
@@ -655,7 +734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             say("--no-migrate: skipping migrations")
         else:
             say("applying migrations")
-            migrate(root, database_url)
+            migrate(root, database_url, inject_database_url=source == "default")
 
         if not services:
             say("nothing left to start (--without)")

@@ -715,7 +715,12 @@ Four things about it are the design:
   `uv run` reads no `.env` without it, real mode spends real money against staging's caps,
   and that export is documented as the deliberate act that turns real mode on. What
   `bin/dev` adds is a line saying the file is there and unread — "my .env is ignored" and
-  "I forgot the export" are otherwise the same five minutes.
+  "I forgot the export" are otherwise the same five minutes. It also names every `.env`
+  variable the shell already exports with a different value, because `uv run` never
+  overrides one and a stale key from `~/.zshrc` otherwise fails as a vendor 401 (motet#85).
+  `bin/local-env` says the same at write time. Both wrappers run `uv run --no-env-file`
+  for that reason: a supervisor whose own environment uv had filled from the file could
+  not tell an export from a loaded line. The children still read it.
 
 **The API's port is now set in one place and passed to the other.** `web/vite.config.ts`
 reads `MOTET_DEV_API_PORT` (defaulting to 8000) and `bin/dev` exports it to the Vite child,
