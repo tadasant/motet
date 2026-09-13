@@ -11,7 +11,13 @@ module-level object. :func:`drain` therefore lives in :mod:`motet_workers.loop`,
 importable, and ``runner`` holds only the CLI. See motet#21.
 """
 
-from .enrich import EnrichConfig, EnrichTarget, enrichment_sites, plan_enrichment
+from .enrich import (
+    EnrichConfig,
+    EnrichTarget,
+    enrichment_sites,
+    plan_enrichment,
+    source_item_links,
+)
 from .handlers import (
     Context,
     PermanentFailure,
@@ -50,5 +56,6 @@ __all__ = [
     "poll_key",
     "queue_depths",
     "queue_readiness",
+    "source_item_links",
     "source_query",
 ]

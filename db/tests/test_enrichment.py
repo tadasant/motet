@@ -122,7 +122,10 @@ class TestTheRunLog:
             )
         newest = enrichment.latest_enrich_run(db, item)
         assert newest is not None and newest.status == "ok"
-        assert len(enrichment.enrich_runs_for_item(db, item)) == 2
+        kept = db.execute(
+            "SELECT count(*) AS n FROM enrich_runs WHERE source_item_id = %s", (item,)
+        )
+        assert kept.fetchone()["n"] == 2  # a log: the older row is still there
 
     def test_spend_is_summed_over_a_rolling_window(self, db: psycopg.Connection[Any]) -> None:
         """Rolling, not a calendar day: a cap that resets at midnight does nothing to a
@@ -220,3 +223,17 @@ class TestTheStateOnTheItem:
     ) -> None:
         assert enrichment.source_item_links(db, an_item(db)) == []
         assert enrichment.source_item_links(db, "si_nonexistent") == []
+
+    def test_many_items_links_come_back_in_one_read(self, db: psycopg.Connection[Any]) -> None:
+        """What "Ingest now" uses: it decides enrichment for up to `HELD_MAX_ITEMS` items
+        inside one transaction holding this user's advisory lock, and a per-item read there
+        would be hundreds of round trips inside it."""
+        first = an_item(db, links=["https://example.com/a", "https://example.com/b"])
+        second = an_item(db)
+        assert enrichment.source_item_links_for(db, [first, second, "si_nonexistent"]) == {
+            first: ["https://example.com/a", "https://example.com/b"],
+            second: [],
+        }
+
+    def test_no_ids_asks_nothing(self, db: psycopg.Connection[Any]) -> None:
+        assert enrichment.source_item_links_for(db, []) == {}

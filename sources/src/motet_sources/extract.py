@@ -334,7 +334,13 @@ def _body_and_links(message: Message) -> tuple[str, tuple[str, ...]]:
     parsed = [parse_html(chunk) for chunk in html]
     body = "\n\n".join(plain) if plain else "\n\n".join(text for text, _ in parsed)
     if not body.strip():
-        raise ExtractionError("message has no text/plain or text/html part")
+        # Two different messages, because the repair is different: nothing to read at all,
+        # or markup that rendered to nothing (an image-only send, a tracking pixel).
+        raise ExtractionError(
+            "message has no text/plain or text/html part"
+            if not (plain or parsed)
+            else "message has a body that renders to no text"
+        )
     return body, merge_links(
         (link for _, links in parsed for link in links),
         (link for chunk in plain for link in find_links(chunk)),

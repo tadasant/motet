@@ -588,7 +588,7 @@ def _run_one(
         llm_job_context(conn, job),
     ):
         outcome = _execute(
-            conn, job, handler, stages, store, recorders, after_commit, enrich_client
+            conn, database_url, job, handler, stages, store, recorders, after_commit, enrich_client
         )
         span.set_attribute("motet.job.outcome", outcome)
         # `already_applied` is a success: the row was recovered and settled, and nothing
@@ -604,6 +604,7 @@ def _run_one(
 
 def _execute(
     conn: psycopg.Connection[Any],
+    database_url: str,
     job: jobs.Job,
     handler: Any,
     stages: Any,
@@ -652,7 +653,13 @@ def _execute(
             jobs.complete(conn, job.id)
         return "already_applied"
 
-    context = Context(conn=conn, stages=stages, store=store, enrich_client=enrich_client)
+    context = Context(
+        conn=conn,
+        stages=stages,
+        store=store,
+        enrich_client=enrich_client,
+        database_url=database_url,
+    )
     try:
         with conn.transaction():
             handler(context, job.payload)

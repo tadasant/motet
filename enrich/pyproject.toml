@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 # metadata server, and the code this process shells out to is third-party npm driving a
 # browser over untrusted pages. The worker opens the credentials one run needs and sends
 # them in the request; this service holds no key path, no database URL and no schema
-# knowledge. `tests/test_no_database_access.py` asserts this list, so adding the
+# knowledge. `tests/test_no_database_reach.py` asserts this list, so adding the
 # dependency fails CI rather than quietly crossing the boundary.
 #
 # `motet-inference` is a pure library — it reaches vendors, never Postgres — and it is

@@ -226,6 +226,13 @@ class EnrichTarget:
         return self.urls[0]
 
 
+def source_item_links(
+    conn: psycopg.Connection[Any], item_ids: Sequence[str]
+) -> dict[str, list[str]]:
+    """The links each of these items carried, in one query. See :func:`plan_enrichment`."""
+    return enrichment_repo.source_item_links_for(conn, item_ids)
+
+
 def enrichment_sites(
     conn: psycopg.Connection[Any], *, user_id: str, config: EnrichConfig
 ) -> list[connectors_repo.StoredConnector]:
@@ -254,6 +261,7 @@ def plan_enrichment(
     item_id: str,
     config: EnrichConfig,
     sites: Sequence[connectors_repo.StoredConnector] | None = None,
+    links: Sequence[str] | None = None,
 ) -> EnrichTarget | None:
     """The rule: does this item link to a site the owner has added?
 
@@ -275,6 +283,12 @@ def plan_enrichment(
 
     Gated on :attr:`EnrichConfig.enabled` rather than ``usable``: the API decides this and
     is deliberately not told the enrichment service's address (see ``usable``).
+
+    ``sites`` and ``links`` are both "the caller already read this" seams, for the same
+    reason: "Ingest now" decides for up to :data:`motet_db.repo.HELD_MAX_ITEMS` items in one
+    transaction holding that user's advisory lock, and a per-item read of either would be
+    hundreds of round trips inside it. Passing neither is correct and is what a single-item
+    caller does.
     """
     if not config.enabled:
         return None
@@ -283,10 +297,10 @@ def plan_enrichment(
     )
     if not known:
         return None
-    links = enrichment_repo.source_item_links(conn, item_id)
-    if not links:
+    carried = list(links) if links is not None else enrichment_repo.source_item_links(conn, item_id)
+    if not carried:
         return None
-    for link in links:
+    for link in carried:
         host = _host_of(link)
         if host is None:
             continue
@@ -295,7 +309,7 @@ def plan_enrichment(
             if connectors_repo.domain_matches(host, site.domain):
                 matching = tuple(
                     candidate
-                    for candidate in links
+                    for candidate in carried
                     if (candidate_host := _host_of(candidate)) is not None
                     and connectors_repo.domain_matches(candidate_host, site.domain)
                 )[:MAX_CANDIDATE_URLS]
@@ -473,10 +487,12 @@ def handle_enrich(context: Any, payload: Mapping[str, Any]) -> None:
     series, at 50–250 seconds each, and this user's other integrate jobs wait behind them.
     Well inside ``MAX_LEASE_EXTENSION_SECONDS``, so the lease keeper covers it (motet#53).
 
-    **Integrate is queued on every path out of this function**, including the ones that
-    raise their way out through the failure recorder. An item that reached this stage is an
-    item the owner asked for; the article is an improvement on the preview and never a
-    precondition for it.
+    **Integrate is queued on every path that leaves the item waiting**, including the ones
+    that raise their way out through the failure recorder. An item that reached this stage is
+    an item the owner asked for; the article is an improvement on the preview and never a
+    precondition for it. The two exceptions are the two where the item is not waiting: one
+    that has already moved on (integrated or dismissed — something else queued it), and one
+    that no longer exists.
     """
     item_id = _require(payload, "source_item_id")
     stored = repo.get_source_item(context.conn, item_id)
@@ -512,7 +528,10 @@ def handle_enrich(context: Any, payload: Mapping[str, Any]) -> None:
         # every other unhappy path here does anyway.
         message = "a previous run was interrupted; not starting a second one for this item"
         logger.warning("source item %s: %s", item_id, message)
-        _record_skip(context.conn, stored, str(state.domain or "unknown"), message)
+        # `failed`, not `skipped`: the agent tried and something killed it, which is not the
+        # same thing as the budget saying no — and `_record_skip`'s docstring is the reason
+        # those two words are kept apart.
+        _record_skip(context.conn, stored, str(state.domain or "unknown"), message, status="failed")
         _finish(context, stored, "failed", message)
         _queue_integration(context.conn, stored.user_id, item_id, payload)
         return
@@ -521,7 +540,18 @@ def handle_enrich(context: Any, payload: Mapping[str, Any]) -> None:
     config = load_config()
     client = getattr(context, "enrich_client", None) or build_enrich_client(config)
     if client is None or not domain:
-        _finish(context, stored, "skipped", "enrichment is not configured here")
+        # Two different faults, named apart: this deployment has no service to call, or the
+        # job row does not say which site it is for. Both end the same way, and both leave a
+        # row — a skip that recorded nothing would make `motet.enrich.runs` a series that
+        # exists only when something is wrong, which cannot tell "nothing happened" from
+        # "nothing is running".
+        message = (
+            "enrichment is not configured on this worker"
+            if client is None
+            else "the enrich job names no site domain"
+        )
+        _record_skip(context.conn, stored, domain or "unknown", message)
+        _finish(context, stored, "skipped", message)
         _queue_integration(context.conn, stored.user_id, item_id, payload)
         return
 
@@ -553,7 +583,15 @@ def handle_enrich(context: Any, payload: Mapping[str, Any]) -> None:
 
     request = _build_request(context, stored, payload, domain, config)
     started = datetime.now(UTC)
-    _announce_running(context, item_id)
+    if not _announce_running(context, item_id):
+        # The announce is the replay guard, not a status light — see `_announce_running`.
+        # Without it landing, a worker killed mid-run would have nothing saying an agent had
+        # been started, and the next claim would start another one.
+        message = "could not record that a run had started, so no run was started"
+        _record_skip(context.conn, stored, domain, message, status="failed")
+        _finish(context, stored, "failed", message)
+        _queue_integration(context.conn, stored.user_id, item_id, payload)
+        return
     try:
         result = client.enrich(request, config.caps)
     except Exception as exc:  # noqa: BLE001 — see below; this must not reach the ladder
@@ -861,26 +899,40 @@ def _record_skip(
     _runs.add(1, {"outcome": status, "domain": domain})
 
 
-def _announce_running(context: Any, item_id: str) -> None:
-    """Say the run has started, on a connection of this function's own.
+def _announce_running(context: Any, item_id: str) -> bool:
+    """Say the run has started, on a connection of this function's own. **Not best effort.**
 
     The handler's transaction stays open for as long as the agent runs, so a write on it is
-    invisible for the ten minutes somebody is most likely to be watching. Best effort: a
-    status nobody could write is a panel that says `queued` for a while, which is a
-    cosmetic loss, and failing the run over it would not be.
+    invisible for the ten minutes somebody is most likely to be watching — which is why this
+    goes out on a side connection. But that write is doing a second, much larger job: it is
+    the **only** durable record that an agent was started for this item, because everything
+    that records a run's cost commits with the handler. ``handle_enrich``'s ``running`` arm
+    is what reads it back, and a killed worker whose flag never landed is an item that runs
+    the agent again with the daily cap seeing nothing spent.
+
+    So a failed announce returns ``False`` and the caller does **not** start the agent. Half
+    a dollar unspent is the cheap side of that trade; the alternative is spending it up to
+    five times over, invisibly.
+
+    The URL comes off the context rather than out of ``DATABASE_URL``, so a ``drain()``
+    called with an explicit one cannot write the flag to a different database and leave the
+    guard quietly absent.
     """
     announce = getattr(context, "announce_running", None)
     if announce is not None:
         announce(item_id)
-        return
-    database_url = os.environ.get("DATABASE_URL")
+        return True
+    database_url = getattr(context, "database_url", "") or os.environ.get("DATABASE_URL", "")
     if not database_url:
-        return
+        logger.error("no database URL to mark %s as enriching; not starting the agent", item_id)
+        return False
     try:
         with psycopg.connect(database_url, autocommit=True) as side:
             enrichment_repo.mark_enrichment_running(side, item_id)
     except psycopg.Error:
-        logger.warning("could not mark %s as enriching", item_id, exc_info=True)
+        logger.exception("could not mark %s as enriching; not starting the agent", item_id)
+        return False
+    return True
 
 
 def _queue_integration(

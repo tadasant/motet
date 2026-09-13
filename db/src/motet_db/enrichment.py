@@ -141,8 +141,21 @@ def apply_enriched_article(
             enriched_at = clock_timestamp()
         WHERE id = %s
         """,
-        (f"Full article fetched from {article_url}\n\n{article}", item_id),
+        (f"Full article fetched from {_provenance_url(article_url)}\n\n{article}", item_id),
     )
+
+
+def _provenance_url(url: str) -> str:
+    """The article's URL with its query string dropped, for the line prepended to the text.
+
+    A per-recipient article token (``?eu=…``) is a bearer secret in a URL — that is exactly
+    what ``motet_enrich.redact`` says about it — and this line goes into ``source_items.text``,
+    which is the column every claim's span is anchored into, which the script stage quotes
+    from, and which the show notes and the WebVTT transcript render out of. The path alone is
+    what a reader wants; the query is what must not travel with it. ``article_url`` on the row
+    keeps the whole thing, because that column is only ever served to the owner.
+    """
+    return url.split("?", 1)[0].split("#", 1)[0] or url
 
 
 def mark_enrichment_finished(
@@ -187,6 +200,26 @@ def source_item_links(conn: psycopg.Connection[Any], item_id: str) -> list[str]:
     """The links the newsletter carried, in document order."""
     row = _maybe_one(conn, "SELECT links FROM source_items WHERE id = %s", (item_id,))
     return list(row["links"] or ()) if row is not None else []
+
+
+def source_item_links_for(
+    conn: psycopg.Connection[Any], item_ids: Sequence[str]
+) -> dict[str, list[str]]:
+    """The same, for many items in one query.
+
+    "Ingest now" names up to :data:`motet_db.repo.HELD_MAX_ITEMS` ids and decides enrichment
+    for each of them while holding that user's advisory lock, so a row-at-a-time read there
+    is five hundred round trips inside one transaction other requests are waiting on. An id
+    with no row is simply absent.
+    """
+    if not item_ids:
+        return {}
+    rows = _all(
+        conn,
+        "SELECT id, links FROM source_items WHERE id = ANY(%s)",
+        (list(dict.fromkeys(item_ids)),),
+    )
+    return {row["id"]: list(row["links"] or ()) for row in rows}
 
 
 # --- the run log ---------------------------------------------------------------------
@@ -265,17 +298,6 @@ def latest_enrich_run(conn: psycopg.Connection[Any], source_item_id: str) -> Sto
         (source_item_id,),
     )
     return None if row is None else _run(row)
-
-
-def enrich_runs_for_item(
-    conn: psycopg.Connection[Any], source_item_id: str
-) -> list[StoredEnrichRun]:
-    rows = _all(
-        conn,
-        "SELECT * FROM enrich_runs WHERE source_item_id = %s ORDER BY started_at DESC, id DESC",
-        (source_item_id,),
-    )
-    return [_run(row) for row in rows]
 
 
 def spend_since(

@@ -27,21 +27,27 @@ event carrying the cumulative usage, including cost. So this reads the stream as
 arrives and kills the group the moment a cap is passed. A cap is a *recorded skip* — the
 answer comes back as ``capped`` with whatever the run had got to, including the cookies.
 
-**The browser server gets a deliberately tiny environment, and that is a control.**
-``browser_execute`` evaluates the model's JavaScript in the MCP server's *Node* process —
-``new AsyncFunction('page', code)`` — so anything in that process's environment is
-readable by whatever the model was talked into writing, and third-party page text is in
-its context. That process therefore never sees ``OPENROUTER_API_KEY``, the service token,
-or any MCP bearer. It sees the paths it needs and the site password, which is the one
-secret that has to be typeable into a form.
+**The browser server gets a deliberately tiny environment, and it raises the bar rather
+than closing the door.** ``browser_execute`` evaluates the model's JavaScript in the MCP
+server's *Node* process — ``new AsyncFunction('page', code)`` — so anything that process can
+read is readable by whatever the model was talked into writing, and third-party page text is
+in its context. So its environment carries no ``OPENROUTER_API_KEY``, no service token and no
+MCP bearer; it gets the paths it needs, a ``HOME`` of its own, and the site password, which
+is the one secret that has to be typeable into a form.
 
-**Say the honest thing about what that bounds and what it does not.** A model with
-arbitrary JavaScript in a Node process can `await import(...)` anything Node can reach; the
-navigation lock in the harness stops the *browser* leaving the site, not the process. The
-boundary that actually holds is the one design option D2 bought: this container's service
-account holds nothing — no KMS, no database, no bucket — so the worst an injected
-instruction can reach is the credentials this one run was handed, which are one site's
-login, one browser's cookies and the MCP servers the owner connected on purpose.
+**Be exact about what that is worth.** The MCP bearers are 0600 files in a sibling directory
+the browser server is never told about — which removes the one-line read that a shared
+``HOME`` used to hand over, and does **not** make them unreachable: the hook that reads them
+runs as the same uid, so a determined instruction that guesses the path still gets there, as
+it would through ``/proc`` for ``pi``'s own environment. A model with arbitrary JavaScript in
+a Node process can ``await import(...)`` anything Node can reach, and the navigation lock in
+the harness stops the *browser* leaving the site rather than the process.
+
+**The boundary that actually holds is the one design option D2 bought**: this container's
+service account holds nothing — no KMS, no database, no bucket — so the worst an injected
+instruction can reach is the credentials this one run was handed, which are one site's login,
+one browser's cookies and the MCP servers the owner connected on purpose. Everything above is
+depth in front of that, not a substitute for it.
 """
 
 from __future__ import annotations
@@ -128,18 +134,25 @@ class PiRunner:
         workdir = Path(tempfile.mkdtemp(prefix="motet-enrich-"))
         os.chmod(workdir, 0o700)
         state_out = workdir / "storage-state.out.json"
+        # Built here rather than inside `_execute`, so that the arm below can still report
+        # what the run had already spent when something threw halfway through the stream.
+        # Reporting zero there is not a rounding error: the worker sums `enrich_runs.cost_usd`
+        # for the rolling daily cap, so a discarded cost is budget the cap never sees.
+        collected = _Collected()
         try:
             self._write_layout(workdir, request)
-            collected = self._execute(workdir, request, caps)
+            self._execute(workdir, request, caps, collected)
             duration = time.monotonic() - started
             return self._assemble(collected, request, redact, state_out, duration)
         except Exception as exc:  # noqa: BLE001 — a failed run is an answer, not a 500
             logger.exception("enrichment run for %s failed", request.item_id)
             return EnrichResult(
                 status="failed",
-                tool_calls=0,
+                tool_calls=collected.tool_calls,
+                cost_usd=round(collected.cost_usd, 6),
                 duration_seconds=time.monotonic() - started,
                 browser_state=_read_if_present(state_out),
+                transcript=list(_redacted(collected.entries, redact)),
                 error=redact(f"{type(exc).__name__}: {exc}"),
             )
         finally:
@@ -150,6 +163,13 @@ class PiRunner:
     def _write_layout(self, workdir: Path, request: EnrichRequest) -> None:
         (workdir / ".pi").mkdir()
         (workdir / "agent").mkdir()
+        # The MCP bearers live apart from anything the browser server is pointed at — see
+        # `_browser_env`. 0700 rather than 0755: same-uid readability is unavoidable (the
+        # `!command` hook runs as a sibling process), so this narrows the reach rather than
+        # closing it, and the docstring above says so.
+        secrets = workdir / "secrets"
+        secrets.mkdir(mode=0o700)
+        (workdir / "browser").mkdir(mode=0o700)
         _write(workdir / "agent" / "models.json", json.dumps(self._models_document(), indent=2))
         if request.browser_state:
             _write(workdir / "storage-state.in.json", request.browser_state)
@@ -157,9 +177,9 @@ class PiRunner:
             # The bearer never goes in the MCP document. The adapter runs a `!command` for
             # a header value at connect time, so what is on disk in a config a subprocess
             # reads is a path, and the token itself is in a 0600 file this process wrote.
-            _write(workdir / f"bearer-{server.name}", f"Bearer {server.access_token}\n", mode=0o600)
+            _write(secrets / f"bearer-{server.name}", f"Bearer {server.access_token}\n", mode=0o600)
             _write(
-                workdir / f"bearer-{server.name}.sh",
+                secrets / f"bearer-{server.name}.sh",
                 f'#!/bin/sh\nexec cat "$(dirname "$0")/bearer-{server.name}"\n',
                 mode=0o700,
             )
@@ -234,7 +254,9 @@ class PiRunner:
                 raise ValueError(f"{BROWSER_SERVER_NAME!r} is reserved for the browser server")
             servers[server.name] = {
                 "url": server.url,
-                "headers": {"Authorization": f"!{workdir / f'bearer-{server.name}.sh'}"},
+                "headers": {
+                    "Authorization": f"!{workdir / 'secrets' / f'bearer-{server.name}.sh'}"
+                },
             }
         return {"mcpServers": servers, "directTools": True}
 
@@ -242,7 +264,10 @@ class PiRunner:
         """Everything the browser server gets, and it is a short list on purpose."""
         env = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "HOME": str(workdir),
+            # A HOME of its own. `HOME=workdir` handed the model's JavaScript the directory
+            # holding every MCP bearer, which made one `readFileSync` the whole of the
+            # attack — see this module's docstring for what this narrows and what it does not.
+            "HOME": str(workdir / "browser"),
             "NODE_PATH": str(self._settings.toolchain.root / "node_modules"),
             "STEALTH_MODE": "true",
             "HEADLESS": "true",
@@ -313,8 +338,9 @@ class PiRunner:
                 env[name] = value
         return env
 
-    def _execute(self, workdir: Path, request: EnrichRequest, caps: RunCaps) -> _Collected:
-        collected = _Collected()
+    def _execute(
+        self, workdir: Path, request: EnrichRequest, caps: RunCaps, collected: _Collected
+    ) -> None:
         # `start_new_session` is the process group: `pi` starts the adapter, which starts
         # the browser server, which starts Chromium, and only a group signal reaches all
         # four. stdin from /dev/null because pi in print mode reads stdin and hangs under
@@ -327,6 +353,10 @@ class PiRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # `errors="replace"`, because `text=True` decodes strict by default and the
+            # stream carries whatever `pi` and a Chromium write. A mid-run UnicodeDecodeError
+            # would otherwise abandon a run that had already been paid for.
+            errors="replace",
             bufsize=1,
             start_new_session=True,
         ) as proc:
@@ -358,7 +388,6 @@ class PiRunner:
                 # it may still be appending, and iterating a deque under mutation raises.
                 collected.stderr = "".join(stderr.copy())[-4_000:]
         collected.exit_code = proc.returncode
-        return collected
 
     def _consume(
         self, line: str, collected: _Collected, caps: RunCaps, proc: subprocess.Popen[str]

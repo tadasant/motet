@@ -99,7 +99,10 @@ class RunCaps(BaseModel):
         description="Abort once the agent's cumulative cost passes this."
     )
     max_tool_calls: Annotated[int, Field(gt=0)] = Field(
-        description="Abort once the agent has made this many tool calls."
+        description=(
+            "How many tool calls the agent may make. It is stopped on the one after, so "
+            "this many are allowed to complete rather than this many attempted."
+        )
     )
     timeout_seconds: Annotated[int, Field(gt=0)] = Field(
         description="Abort the whole run, and everything it started, after this long."

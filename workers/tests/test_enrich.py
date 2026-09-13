@@ -828,3 +828,98 @@ class TestTheApiNeedsNoTopology:
         state = enrichment_repo.enrichment_state(db, item)
         assert state is not None and state.status == "skipped"
         assert _queues_for(db, item) == ["enrich", "integrate"]
+
+
+class TestTheRunningFlagOnTheRealContext:
+    """The announce, driven through ``handlers.Context`` rather than the stand-in above.
+
+    Every other test here replaces it with a list, which is what keeps them readable — and
+    what leaves the mechanism the replay guard actually rests on untested. It is a side
+    connection opened from ``Context.database_url``, and the two things worth pinning are
+    that the flag is *committed* where another connection can see it (a write on the
+    handler's own transaction would be invisible for the whole of a ten-minute run), and
+    that a failure to write it stops the run rather than being shrugged off.
+    """
+
+    def _real_context(
+        self,
+        db: psycopg.Connection[Any],
+        *,
+        database_url: str,
+        client: Any | None = None,
+    ) -> handlers.Context:
+        return handlers.Context(
+            conn=db,
+            stages=None,  # type: ignore[arg-type]
+            store=None,  # type: ignore[arg-type]
+            enrich_client=client if client is not None else FakeEnrichClient(),
+            database_url=database_url,
+        )
+
+    def test_the_flag_is_committed_before_the_agent_starts(
+        self,
+        db: psycopg.Connection[Any],
+        key: LocalKeyManager,
+        _migrated: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Visible from a *second* connection while the handler's transaction is still open,
+        which is the whole point of not writing it on `context.conn`."""
+        item, _ = _ready_to_run(db, key, monkeypatch)
+        seen: list[str | None] = []
+
+        class Watching(FakeEnrichClient):
+            def enrich(self, request: Any, caps: Any) -> Any:
+                with psycopg.connect(_migrated) as other:
+                    state = enrichment_repo.enrichment_state(other, request.item_id)
+                seen.append(state.status if state is not None else None)
+                return super().enrich(request, caps)
+
+        context = self._real_context(db, database_url=_migrated, client=Watching())
+        handle_enrich(context, _payload(db, item))
+        db.commit()
+
+        assert seen == ["running"]
+        state = enrichment_repo.enrichment_state(db, item)
+        assert state is not None and state.status == "done"
+
+    def test_an_unwritable_flag_means_no_run_at_all(
+        self,
+        db: psycopg.Connection[Any],
+        key: LocalKeyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Half a dollar unspent is the cheap side of the trade: without the flag, a worker
+        killed mid-run leaves nothing saying an agent was started, and the next claim starts
+        another one that the daily cap cannot see."""
+        item, _ = _ready_to_run(db, key, monkeypatch)
+        # Refused immediately rather than a hostname that would wait on a resolver.
+        context = self._real_context(db, database_url="postgresql://127.0.0.1:1/nope")
+
+        handle_enrich(context, _payload(db, item))
+        db.commit()
+
+        assert isinstance(context.enrich_client, FakeEnrichClient)
+        assert context.enrich_client.requests == []
+        run = enrichment_repo.latest_enrich_run(db, item)
+        assert run is not None and run.status == "failed"
+        assert "no run was started" in (run.error or "")
+        assert _queues_for(db, item) == ["enrich", "integrate"]
+
+    def test_a_worker_that_knows_no_database_url_does_not_run_either(
+        self,
+        db: psycopg.Connection[Any],
+        key: LocalKeyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        item, _ = _ready_to_run(db, key, monkeypatch)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        context = self._real_context(db, database_url="")
+
+        handle_enrich(context, _payload(db, item))
+        db.commit()
+
+        assert isinstance(context.enrich_client, FakeEnrichClient)
+        assert context.enrich_client.requests == []
+        state = enrichment_repo.enrichment_state(db, item)
+        assert state is not None and state.status == "failed"

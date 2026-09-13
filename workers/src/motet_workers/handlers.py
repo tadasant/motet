@@ -36,7 +36,7 @@ from motet_inference import (
     join_audio,
     record_tts_characters,
 )
-from motet_sources.extract import find_links
+from motet_sources.extract import find_links, merge_links
 from motet_storage import ObjectStore, episode_audio_key
 
 from . import enrich, labels
@@ -108,6 +108,14 @@ class Context:
     #: missing ``google-auth`` is a startup line rather than a swallowed exception inside
     #: the first enrichment, which is the ``motet-vault[kms]`` lesson AGENTS.md draws.
     enrich_client: object | None = None
+    #: The connection string this worker was started with. One caller needs it: agentic
+    #: enrichment writes `enrich_status = 'running'` on a side connection *before* the agent
+    #: starts, because the handler's own transaction is invisible for the ten minutes it may
+    #: hold — and that write is the guard that stops a killed worker's item being enriched
+    #: (and billed) twice. Read off the context rather than out of `DATABASE_URL`, because a
+    #: `drain()` called with an explicit URL would otherwise write the flag to a different
+    #: database and the guard would silently not be there.
+    database_url: str = ""
 
 
 # --- integrate -----------------------------------------------------------------------
@@ -752,7 +760,7 @@ def enqueue_paste(
     because a future "enrich this paste" would need them and cannot recover them later.
     """
     stored = repo.insert_source_item(
-        conn, user_id=user_id, title=title, text=text, links=find_links(text)
+        conn, user_id=user_id, title=title, text=text, links=merge_links(find_links(text))
     )
     enqueue(conn, Queue.INTEGRATE, {"source_item_id": stored.id}, serialize_key=user_id)
     return stored
@@ -787,9 +795,17 @@ def enqueue_integration(
     # Once for the whole request: "select all" sends up to `repo.HELD_MAX_ITEMS` ids, and
     # the sites are the same answer for every one of them.
     sites = enrich.enrichment_sites(conn, user_id=user_id, config=config)
+    # And the links in one query rather than one per item, for the same reason: select-all
+    # names up to `repo.HELD_MAX_ITEMS` ids, and this loop holds the per-user advisory lock.
+    links = enrich.source_item_links(conn, claimed) if sites else {}
     for item_id in claimed:
         target = enrich.plan_enrichment(
-            conn, user_id=user_id, item_id=item_id, config=config, sites=sites
+            conn,
+            user_id=user_id,
+            item_id=item_id,
+            config=config,
+            sites=sites,
+            links=links.get(item_id),
         )
         if target is None:
             enqueue_integrate_job(conn, user_id=user_id, item_id=item_id, deliberate=True)

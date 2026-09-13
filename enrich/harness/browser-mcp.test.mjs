@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { hostAllowed, navigationAllowed } from "./browser-mcp.mjs";
+import { hostAllowed, installWebSocketLock, navigationAllowed } from "./browser-mcp.mjs";
 
 const ALLOWED = ["example.com", "url3396.example.com", "links.sender.test"];
 
@@ -64,7 +64,7 @@ test("a passive sub-resource is not filtered, which is a stated limit", () => {
 });
 
 test("an off-site fetch or XHR is refused — that is the exfiltration shape", () => {
-  for (const type of ["xhr", "fetch", "websocket", "eventsource"]) {
+  for (const type of ["xhr", "fetch", "eventsource"]) {
     const call = request({ url: "https://attacker.test/?d=secret", navigation: false, type });
     assert.equal(navigationAllowed(call, ALLOWED), false, type);
   }
@@ -99,4 +99,58 @@ test("a redirect continuation is followed, because that is what a tracking link 
 
 test("a URL that will not parse is refused rather than allowed", () => {
   assert.equal(navigationAllowed(request({ url: "not a url" }), ALLOWED), false);
+});
+
+
+// The WebSocket lock is a separate Playwright API, because `context.route` never sees a
+// handshake. Driven over a stand-in context so the *handler's* decision is asserted rather
+// than the predicate it calls — which is the gap that let `websocket` sit inertly in the
+// request router's list.
+
+const fakeContext = () => {
+  const calls = [];
+  return {
+    calls,
+    routeWebSocket: async (_pattern, handler) => {
+      calls.push(handler);
+    },
+  };
+};
+
+const fakeSocket = (url) => {
+  const events = [];
+  return {
+    events,
+    url: () => url,
+    connectToServer: () => events.push("connected"),
+    close: (options) => events.push(`closed:${options.code}`),
+  };
+};
+
+test("an on-site websocket is connected through", async () => {
+  const context = fakeContext();
+  assert.equal(await installWebSocketLock(context, ALLOWED), true);
+  const socket = fakeSocket("wss://example.com/live");
+  context.calls[0](socket);
+  assert.deepEqual(socket.events, ["connected"]);
+});
+
+test("an off-site websocket is never connected to the server", async () => {
+  const context = fakeContext();
+  await installWebSocketLock(context, ALLOWED);
+  const socket = fakeSocket("wss://attacker.test/?d=secret");
+  context.calls[0](socket);
+  assert.deepEqual(socket.events, ["closed:1008"]);
+});
+
+test("an empty allowlist refuses every websocket too", async () => {
+  const context = fakeContext();
+  await installWebSocketLock(context, []);
+  const socket = fakeSocket("wss://example.com/live");
+  context.calls[0](socket);
+  assert.deepEqual(socket.events, ["closed:1008"]);
+});
+
+test("a Playwright without routeWebSocket warns rather than breaking every browser call", async () => {
+  assert.equal(await installWebSocketLock({}, ALLOWED), false);
 });

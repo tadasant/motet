@@ -35,10 +35,13 @@ FORBIDDEN = "https://elsewhere.example/steal"
 
 
 def main() -> int:
-    state_out = tempfile.mktemp(suffix=".json")
+    workdir = tempfile.mkdtemp()
+    # Not `mktemp`: the harness creates this file itself, and a name handed out by a
+    # deprecated function that also reserves nothing is a race for no gain.
+    state_out = os.path.join(workdir, "state.json")
     env = {
         "PATH": os.environ["PATH"],
-        "HOME": tempfile.mkdtemp(),
+        "HOME": workdir,
         "NODE_PATH": f"{ROOT}/node_modules",
         "STEALTH_MODE": "true",
         "HEADLESS": "true",

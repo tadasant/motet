@@ -118,7 +118,7 @@ class TestTheLayoutOneRunGets:
         document = (workdir / ".pi" / "mcp.json").read_text()
         assert "t0ken-xyz" not in document
         assert document.count("!") >= 1
-        assert (workdir / "bearer-cn-1").read_text().strip() == "Bearer t0ken-xyz"
+        assert (workdir / "secrets" / "bearer-cn-1").read_text().strip() == "Bearer t0ken-xyz"
 
     def test_the_bearer_file_is_not_world_readable(
         self, settings: EnrichSettings, tmp_path: Path
@@ -132,8 +132,9 @@ class TestTheLayoutOneRunGets:
                 mcp_servers=[McpServer(name="cn-1", url="https://m.example/mcp", access_token="t")]
             ),
         )
-        assert oct(os.stat(workdir / "bearer-cn-1").st_mode)[-3:] == "600"
-        assert oct(os.stat(workdir / "bearer-cn-1.sh").st_mode)[-3:] == "700"
+        assert oct(os.stat(workdir / "secrets" / "bearer-cn-1").st_mode)[-3:] == "600"
+        assert oct(os.stat(workdir / "secrets" / "bearer-cn-1.sh").st_mode)[-3:] == "700"
+        assert oct(os.stat(workdir / "secrets").st_mode)[-3:] == "700"
 
     def test_the_model_row_is_priced_from_the_shared_catalogue(
         self, settings: EnrichSettings, tmp_path: Path
@@ -570,3 +571,72 @@ class TestTheStoredTranscript:
         assert "STATUS: ok" in text
         assert "Body." not in text
         assert "<article, stored on the item>" in text
+
+
+class TestTheBearersAreNotHandedToTheBrowser:
+    """The browser server evaluates the model's JavaScript, so what it is *pointed at* matters.
+
+    `HOME=workdir` used to be the whole attack: one `readFileSync(process.env.HOME + '/…')`
+    and an injected instruction had the owner's mailbox token. Same-uid readability is
+    unavoidable — the `!command` hook is a sibling process — so this narrows the reach rather
+    than closing it, which is what the module docstring now says.
+    """
+
+    def test_its_home_is_not_the_directory_holding_the_bearers(
+        self, settings: EnrichSettings, tmp_path: Path
+    ) -> None:
+        runner = PiRunner(settings)
+        workdir = tmp_path / "run"
+        workdir.mkdir()
+        request = a_request(
+            mcp_servers=[McpServer(name="cn-1", url="https://m.example/mcp", access_token="t0k")]
+        )
+        runner._write_layout(workdir, request)
+        env = runner._browser_env(workdir, request)
+
+        home = Path(env["HOME"])
+        assert home != workdir
+        assert not list(home.glob("bearer-*"))
+        assert (workdir / "secrets" / "bearer-cn-1").is_file()
+
+    def test_no_value_in_its_environment_is_the_secrets_directory(
+        self, settings: EnrichSettings, tmp_path: Path
+    ) -> None:
+        runner = PiRunner(settings)
+        workdir = tmp_path / "run"
+        workdir.mkdir()
+        request = a_request(
+            mcp_servers=[McpServer(name="cn-1", url="https://m.example/mcp", access_token="t0k")]
+        )
+        runner._write_layout(workdir, request)
+        secrets = str(workdir / "secrets")
+        assert not any(secrets in value for value in runner._browser_env(workdir, request).values())
+
+
+class TestACrashKeepsWhatTheRunSpent:
+    """`enrich_runs.cost_usd` is what the rolling daily cap is summed from.
+
+    A run that threw halfway through the stream used to report zero, so money that had been
+    billed was budget the cap never saw.
+    """
+
+    def test_a_crash_mid_stream_still_reports_the_cost_and_the_transcript(
+        self, runner_for: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = runner_for("expensive")
+
+        real_assemble = runner._assemble
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("something threw after the stream was read")
+
+        monkeypatch.setattr(runner, "_assemble", boom)
+        result = runner.run(
+            a_request(), RunCaps(max_usd=99.0, max_tool_calls=999, timeout_seconds=30)
+        )
+        assert real_assemble is not None
+        assert result.status == "failed"
+        assert result.tool_calls > 0
+        assert result.cost_usd > 0
+        assert result.transcript
+        assert result.error is not None and "something threw" in result.error
