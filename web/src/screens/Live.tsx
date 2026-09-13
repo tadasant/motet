@@ -132,7 +132,7 @@ type Line =
 const PHASE_LABEL: Record<Phase, string> = {
   idle: 'idle',
   connecting: 'connecting…',
-  narrating: 'narrating — just ask: talk over it to go deeper',
+  narrating: 'narrating — talk over it to interrupt',
   paused: 'paused — press play to carry on',
   listening: 'listening… — narration paused, ask your question',
   replying: 'replying…',
@@ -638,7 +638,7 @@ export function Live({
         ? micPill('Play Live', { onClick: start })
         : phase === 'narrating' || phase === 'paused'
           ? micPill('just ask', { onClick: interrupt, label: 'just ask (interrupt)' })
-          : micPill(phase === 'connecting' ? 'connecting…' : phase === 'replying' ? 'replying…' : 'listening…', {
+          : micPill(phase === 'connecting' ? 'connecting…' : phase === 'replying' ? 'replying…' : phase === 'resuming' ? 'resuming…' : 'listening…', {
               disabled: true,
             })}
       <div className="row">
@@ -661,7 +661,9 @@ export function Live({
           )
         )}
         <span className={phase === 'error' ? 'error' : 'hint'} role="status" data-live-phase={phase}>
-          {PHASE_LABEL[phase]}
+          {/* "Just ask" only where the question can be spoken: the composed arm hears the
+              interruption but takes the question typed. */}
+          {phase === 'narrating' && live ? 'narrating — just ask: talk over it' : PHASE_LABEL[phase]}
           {arm && ` · ${arm}`}
         </span>
         {running && (

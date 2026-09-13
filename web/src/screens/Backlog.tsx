@@ -126,7 +126,7 @@ export function Backlog({
           <div className="empty">
             <p className="hint">
               Nothing here yet. Paste in a newsletter you trust, or connect a mailbox under
-              Sources, and it becomes a story for your next episode.
+              Sources and pick what to ingest.
             </p>
             <Motif quiet caption="Many voices, one podcast." />
           </div>

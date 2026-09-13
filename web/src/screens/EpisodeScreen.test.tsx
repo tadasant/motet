@@ -368,8 +368,22 @@ describe('the player transport (motet#110)', () => {
 
     fireEvent.change(screen.getByRole('slider', { name: 'Seek' }), { target: { value: '1500000' } })
     expect(audio.currentTime).toBe(1500)
+    // The browser echoes a seek; playing on from past the frontier is not having heard it.
+    fireEvent(audio, new Event('seeking'))
+    playThrough(audio, 1_500_000, 1_520_000)
     fireEvent.pause(audio)
     expect(positionWrites(calls)).toHaveLength(0)
+  })
+
+  it('says so when the audio cannot load, rather than leaving a play button that does nothing', async () => {
+    mockApi()
+    renderScreen()
+    const audio = await findAudio()
+
+    fireEvent.play(audio)
+    fireEvent.error(audio)
+    expect((await screen.findByRole('alert')).textContent).toContain('could not be loaded')
+    expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy()
   })
 
   it('draws Play Live as the mic pill inside the transport, once', async () => {

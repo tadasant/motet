@@ -109,7 +109,7 @@ export function SignIn({
               </span>
             </span>
           </div>
-          <p className="now-playing">Now playing · Saturday’s episode · 9 sources · 31 min</p>
+          <p className="now-playing" aria-hidden="true">Now playing · Saturday’s episode · 9 sources · 31 min</p>
         </Motif>
       </section>
 
@@ -117,8 +117,13 @@ export function SignIn({
         <div>
           <p className="kicker">Your account</p>
           <h2 id="signin-heading">Sign in</h2>
+          <div className="row">
+            <button type="button" onClick={signIn} disabled={status.kind === 'busy'}>
+              Sign in with Google
+            </button>
+          </div>
           <p className="hint">
-            Start listening signs you in with Google. Motet has one account, and signing in is
+            Start listening signs you in with Google too. Motet has one account, and signing in is
             how this browser proves it may use it — only addresses the deployment lists are
             accepted.
           </p>

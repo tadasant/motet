@@ -1841,16 +1841,24 @@ says otherwise.
   assets they belong to. `font-display: swap`, over the guidelines' fallback stacks.
 - **The voice hues are never a status.** A connection state, a stage and a badge are ink at
   opacity. Only vermilion doubles as the error red. Vermilion, ochre, teal and plum appear
-  together — in the eyebrow, the motif, the primary button's hairline, and the played part
-  of a scrubber or progress bar. The previous palette's green "done" and yellow "awaiting"
-  are gone for that reason, not by accident.
+  together — in the eyebrow, the motif, the primary button's hairline, the active sidebar
+  item's underline, and the played part of a scrubber or progress bar. The previous
+  palette's green "done" and yellow "awaiting" are gone for that reason, not by accident.
+- **Two readability departures from the reference, both derived rather than new colours.**
+  Error *text* is `--error-text`, which is vermilion mixed a fifth of the way toward ink.
+  True vermilion is 3.7:1 on parchment, under AA for words, so the hue stays on dots,
+  hairlines and badges. Labels that carry information, such as table headers and fact
+  names, use ink-soft rather than the reference's ink-mute (2.6:1), which is kept for
+  decorative captions.
 - **The old variable names are aliases.** `--fg`, `--muted`, `--line` and `--bad` point at
   the brand tokens, so a screen written against them did not need touching.
 - **The landing is the reference hero.** It has the headline, the positioning, the motif
   and **Start listening**, which starts the Google sign-in the door always offered. The
-  motif's path data is lifted verbatim into `brand/scoreData.ts`, not redrawn. The
+  motif's path data is lifted verbatim into `web/src/brand/scoreData.ts`, not redrawn. The
   landing's transport under the score is a picture (`aria-hidden`), as it is on the
   reference page.
+- **New episodes are titled "Episode — <date>"**, no longer "Briefing — …". The title is
+  stored and appears in the RSS feed, so older episodes keep the old word.
 - **Dark mode is not designed**, so nothing here derives one.
 
 **The web player's transport replaced the browser's own controls.** The ink play circle,
@@ -1858,7 +1866,12 @@ the scrubber with the four-hue gradient, the tabular times and the speed pill al
 same `<audio>` element, and the listening-frontier rules below are unchanged. The scrubber
 is a native range input laid invisibly over the drawn track, so a keyboard and a screen
 reader reach one real slider. **The speed pill is a control the page did not draw
-before**; the browser's native controls offered speed only on some platforms.
+before**; the browser's native controls offered speed only on some platforms. Two costs to
+know about. Volume and mute are gone from the page, so the system's volume is the control.
+And at speeds above 1×, Play Live's server-side clock extrapolates at 1× between the
+once-a-second position reports, so an interruption offset can trail by up to about half a
+second at 2×. A load failure is the transport's own error line, because nothing else would
+show one.
 
 **The mic pill is Play Live's existing control, not hold-to-ask.** The guidelines' pill
 reads "hold to ask". The web player has no push-to-talk: Play Live starts on a press, a

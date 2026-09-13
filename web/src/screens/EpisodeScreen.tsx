@@ -318,6 +318,9 @@ function Player({
   const [playing, setPlaying] = useState(false)
   const [at, setAt] = useState(resumeAt)
   const [rate, setRate] = useState(1)
+  // The browser's own controls used to show a broken player when the audio could not load;
+  // the transport has to say so itself, or its play circle is a button that does nothing.
+  const [failed, setFailed] = useState(false)
   const duration = episode.duration_ms
   const played = duration > 0 ? Math.min(100, (at / duration) * 100) : 0
 
@@ -368,17 +371,26 @@ function Player({
           </div>
           <span className="t">{formatClock(duration)}</span>
         </div>
-        <span className="pills" ref={micSlot}>
+        <span className="pills">
           <button type="button" onClick={cycleRate} aria-label={`Playback speed ${rate}×`}>
             {rate}×
           </button>
+          {/* Empty, and React renders nothing else into it: Play Live portals its mic pill here. */}
+          <span className="mic-slot" ref={micSlot} />
         </span>
       </div>
       <audio
         ref={audioRef}
         preload="metadata"
         src={src}
-        onPlay={() => setPlaying(true)}
+        onPlay={() => {
+          setPlaying(true)
+          setFailed(false)
+        }}
+        onError={() => {
+          setPlaying(false)
+          setFailed(true)
+        }}
         onLoadedMetadata={(event) => {
           const el = event.currentTarget
           if (resumeAt > 0) el.currentTime = resumeAt / 1000
@@ -418,6 +430,11 @@ function Player({
           flush()
         }}
       />
+      {failed && (
+        <p className="error" role="alert">
+          This episode&rsquo;s audio could not be loaded. The podcast feed below still has it.
+        </p>
+      )}
       {resumeAt > 0 && (
         <p className="hint">Resumes at {formatClock(resumeAt)}, where you got to.</p>
       )}

@@ -75,7 +75,7 @@ export function OAuthCallback({
 
   return (
     <section aria-labelledby="callback-heading">
-      <h2 id="callback-heading">Connecting</h2>
+      <h1 id="callback-heading">Connecting</h1>
 
       {callback.kind === 'denied' && (
         <p className="hint" role="status">

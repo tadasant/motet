@@ -63,7 +63,11 @@
   --fg: var(--ink);
   --muted: var(--ink-soft);
   --line: var(--rule);
-  --bad: var(--vermilion);
+  /* Error *text* is vermilion taken a fifth of the way to ink: true vermilion is 3.7:1 on
+     parchment, under AA for body copy, so hairlines, dots and badges keep the hue and words
+     get the derived shade (about 5:1). Derived, not a new colour. */
+  --error-text: color-mix(in srgb, var(--vermilion) 80%, var(--ink));
+  --bad: var(--error-text);
   --good: var(--ink);
   --bg: var(--parchment);
   --hover: rgba(27, 26, 46, 0.05);
@@ -129,10 +133,12 @@ h1 em, h2 em, h3 em { font-style: italic; }
 .voices i:nth-child(3) { background: var(--teal); }
 .voices i:nth-child(4) { background: var(--plum); }
 
-/* A label in the UI's own register: small caps, tracked, muted. */
+/* A label in the UI's own register: small caps, tracked. Ink-soft rather than the reference's
+   ink-mute, because in the app these labels carry information (table headers) and 2.6:1 is
+   too faint to read at 11px; ink-mute stays on decorative captions. */
 .label, .claims th, .grid th {
   font-family: var(--body); font-size: 11px; font-weight: 600;
-  letter-spacing: .14em; text-transform: uppercase; color: var(--ink-mute);
+  letter-spacing: .14em; text-transform: uppercase; color: var(--ink-soft);
 }
 
 /* ---- App shell ------------------------------------------------------------------- */
@@ -337,7 +343,6 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
   .door-panel { grid-template-columns: 1fr; padding-top: 48px; padding-bottom: 56px; }
 }
 @media (max-width: 420px) {
-  :root { font-size: 16px; }
   .ctas { gap: 18px; }
   .btn-primary { padding: 15px 22px; font-size: 15px; }
 }
@@ -395,8 +400,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .btn-text:hover, .linkish:hover:not(:disabled) { background: none; border-bottom-color: var(--ink); }
 .linkish:disabled { border-bottom-color: transparent; }
 
-button.danger { color: var(--vermilion); border-color: rgba(214, 75, 42, .45); }
-button.danger:hover:not(:disabled) { border-color: var(--vermilion); background: rgba(214, 75, 42, .07); }
+button.danger { color: var(--error-text); border-color: rgba(214, 75, 42, .45); }
+button.danger:hover:not(:disabled) { border-color: var(--error-text); background: rgba(214, 75, 42, .07); }
 
 input, textarea, select {
   font: inherit; font-size: 15px; color: var(--ink);
@@ -421,7 +426,7 @@ details > summary:hover { color: var(--ink); }
 
 .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .9rem 0; }
 .hint { color: var(--ink-soft); font-size: 14px; }
-.error { color: var(--vermilion); }
+.error { color: var(--error-text); }
 .ok { color: var(--ink); }
 .token { margin-bottom: 1rem; }
 .feed-url { word-break: break-all; }
@@ -430,7 +435,7 @@ details > summary:hover { color: var(--ink); }
 .items li { border-top: 1px solid var(--rule); padding: 1.1rem 0; }
 .items > li > p { margin: .35rem 0; }
 .items > li > .item-head strong { font-family: var(--display); font-weight: 400; font-size: 1.2rem; font-variation-settings: "SOFT" 100, "opsz" 36; line-height: 1.25; }
-.items > li.read > .item-head strong { color: var(--ink-mute); }
+.items > li.read > .item-head strong { color: var(--ink-soft); }
 .items li.read > p:not(.hint) { color: var(--ink-soft); }
 .item-head { display: flex; gap: 1rem; justify-content: space-between; align-items: baseline; }
 .item-head button { flex: none; }
@@ -469,14 +474,14 @@ details > summary:hover { color: var(--ink); }
   color: var(--ink-soft); border: 1px solid var(--rule); border-radius: 999px; padding: 3px 9px; white-space: nowrap;
   font-family: var(--body); line-height: 1.3;
 }
-.badge.failed { color: var(--vermilion); border-color: rgba(214, 75, 42, .5); }
+.badge.failed { color: var(--error-text); border-color: rgba(214, 75, 42, .5); }
 .badge.integrated { color: var(--ink); border-color: var(--ink); }
 .label-sync { border-top: 1px dashed var(--rule); margin-top: 1rem; padding-top: 1rem; }
 .label-sync .stalled { margin-bottom: .75rem; }
 .label-sync .stalled p { margin-top: 0; }
 /* The reason, monospaced: it is a vendor error string, and it is read to be copied. */
 .reason { font-family: var(--mono); font-size: 12.5px; background: rgba(27, 26, 46, .05); border-left: 2px solid var(--rule); border-radius: 0 8px 8px 0; padding: .45rem .7rem; margin: .3rem 0 0; overflow-wrap: anywhere; }
-.ingestion.failed .reason { border-left-color: var(--vermilion); }
+.ingestion.failed .reason { border-left-color: var(--error-text); }
 
 /* The sidebar count: what needs a person. Ink when it is only waiting; vermilion when one of
    them is never coming back on its own. */
@@ -495,7 +500,7 @@ details > summary:hover { color: var(--ink); }
 .grid td { border-bottom: 1px solid var(--rule); padding: .45rem .6rem; vertical-align: top; }
 .grid th.num, .grid td.num { text-align: right; font-variant-numeric: tabular-nums; width: 4rem; }
 .grid td.zero { color: var(--ink-mute); }
-.grid td.bad, .grid td.err { color: var(--vermilion); }
+.grid td.bad, .grid td.err { color: var(--error-text); }
 .grid td.live { color: var(--ink); font-weight: 700; }
 .grid td.ok { color: var(--ink); }
 .grid tbody tr:hover { background: var(--hover); cursor: pointer; }
@@ -538,7 +543,7 @@ details > summary:hover { color: var(--ink); }
 }
 .episode-title:hover { border-bottom: 0; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 4px; }
 .episode-meta { margin: .25rem 0 0; font-variant-numeric: tabular-nums; }
-.episode-error { margin: .35rem 0 0; color: var(--vermilion); font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.episode-error { margin: .35rem 0 0; color: var(--error-text); font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
 .episode-progress { display: flex; align-items: center; gap: .9rem; margin-top: .6rem; }
 /* How far in: the played portion of a scrubber, in miniature. */
 .progress { flex: 1; max-width: 18rem; height: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; }
@@ -593,6 +598,7 @@ details > summary:hover { color: var(--ink); }
 }
 .track:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 6px; }
 .transport .pills { display: inline-flex; gap: 8px; align-items: center; }
+.transport .mic-slot { display: contents; }
 .pill-button, .transport .pills button {
   display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px;
   font-size: 13px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -635,12 +641,12 @@ details > summary:hover { color: var(--ink); }
 }
 .stage-what { margin: 0 0 .5rem; font-size: 13.5px; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; margin: .4rem 0; font-size: 14px; }
-.facts dt { color: var(--ink-mute); }
+.facts dt { color: var(--ink-soft); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .mono { font-family: var(--mono); font-size: 13px; }
 .extracted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; border: 1px solid var(--rule); border-radius: 12px; padding: .75rem; font-size: 13.5px; background: var(--parchment); }
 .stage-status { margin: .3rem 0; }
-.stage-status.status-failed strong { color: var(--vermilion); }
+.stage-status.status-failed strong { color: var(--error-text); }
 .stage-status.status-done strong { color: var(--ink); }
 .stage-gaps { margin: .4rem 0 0; font-size: 13px; }
 .linked-news { list-style: none; padding: 0; margin: 0; }
@@ -682,7 +688,7 @@ details > summary:hover { color: var(--ink); }
 }
 .pill-dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--ink-mute); flex: none; }
 .pill-connected .pill-dot, .pill-always_on .pill-dot { background: var(--ink); }
-.pill-error { border-color: rgba(214, 75, 42, .5); color: var(--vermilion); }
+.pill-error { border-color: rgba(214, 75, 42, .5); color: var(--error-text); }
 .pill-error .pill-dot { background: var(--vermilion); }
 .pill-paused .pill-dot, .pill-disconnected .pill-dot { background: var(--ink-mute); }
 .pill-awaiting_consent .pill-dot { background: transparent; border: 2px solid var(--ink); }
@@ -717,7 +723,7 @@ details > summary:hover { color: var(--ink); }
 .stat-label { font-size: 12px; color: var(--ink-soft); }
 .stat.zero .stat-value { color: var(--ink-mute); }
 .stat.emphasis { border-color: var(--ink); }
-.stat.bad .stat-value { color: var(--vermilion); }
+.stat.bad .stat-value { color: var(--error-text); }
 .stat-note { margin: .3rem 0 0; font-size: 13px; }
 .waiting-hint { margin: .7rem 0 0; font-size: 15px; }
 .waiting-hint .linkish { color: var(--ink); font-weight: 600; }
