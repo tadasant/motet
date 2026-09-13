@@ -22,8 +22,14 @@ type Status =
  * answer to being asked for a mailbox — so it must not read like a crash. Anything else
  * falls through to the raw code, which is more use to whoever has to look it up than a
  * generic apology would be.
+ *
+ * Exported because the same sentence is shown twice, in two places, and must not become
+ * two sentences: here while the callback page is up, and again at the top of Sources once
+ * this page is dismissed (motet#98). Without the second, the only trace of a cancelled
+ * consent was a row reading "waiting for consent" — which says nothing about whether the
+ * grant is still coming.
  */
-function explain(error: string, description: string): string {
+export function explain(error: string, description: string): string {
   if (error === 'access_denied') {
     return 'You did not grant access, so nothing was connected. Nothing was changed.'
   }

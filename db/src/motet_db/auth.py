@@ -142,7 +142,34 @@ def create_session_for_digest(
         """,
         (new_id("sess"), user_id, token_sha256, email, ttl_seconds),
     )
+    _backfill_user_email(conn, user_id=user_id, email=email)
     return _session(row)
+
+
+def _backfill_user_email(conn: psycopg.Connection[Any], *, user_id: str, email: str) -> None:
+    """Give the user row the address this session just proved, if it has none — motet#98.
+
+    Migration 0002 seeds ``('motet-owner', NULL)``, because the account predates there
+    being any way to learn an address: the shared API token proves nothing about who is
+    holding it. Sign-in is the moment one *is* known, and until this ran the Admin users
+    table showed a row identified by its id and nothing else, on the one screen whose job
+    is to say who is who.
+
+    **Only ever fills a NULL**, and never rewrites an address — the row is the account,
+    not this session. A second person on the allowlist signing into the same account would
+    otherwise flip the label back and forth between two sessions of equal standing, and
+    which one the screen showed would be "whoever signed in last".
+
+    Here rather than in the sign-in route so that the staging mint
+    (:mod:`motet_db.mint_session`) writes it too: both are a caller proving an allowlisted
+    address, and both already come through this function. In the same transaction as the
+    session row for the same reason — a session that exists is exactly the evidence this
+    is written from.
+    """
+    conn.execute(
+        "UPDATE users SET email = %s WHERE id = %s AND email IS NULL",
+        (email, user_id),
+    )
 
 
 #: How stale ``last_seen_at`` may get before a request bothers to write it.

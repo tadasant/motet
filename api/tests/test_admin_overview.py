@@ -271,7 +271,11 @@ class TestAdminOverview:
         # Every user, every counter, zeros included.
         assert [user["user_id"] for user in body["users"]] == [repo.OWNER_USER_ID]
         owner = body["users"][0]
-        assert owner["email"] is None
+        # Not NULL any more: minting the admin session above is a sign-in, and the first one
+        # fills the owner row's address (motet#98). Which address depends on which session
+        # this run minted first — `users` is not truncated between tests — so that exact
+        # behaviour is pinned in `test_auth.py::TestTheOwnerRowLearnsItsAddress` instead.
+        assert owner["email"] is not None
         assert owner["source_items"] == {
             "held": 0,
             "pending": 1,

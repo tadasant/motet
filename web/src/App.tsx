@@ -43,7 +43,7 @@ import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
 import { IN_PROGRESS } from './screens/EpisodeScreen'
 import { Episodes, newestFirst } from './screens/Episodes'
-import { OAuthCallback } from './screens/OAuthCallback'
+import { OAuthCallback, explain as explainDenial } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
 import { SignInCallback } from './screens/SignInCallback'
@@ -70,6 +70,11 @@ export default function App() {
   // Whether the last attempt to ask actually got an answer. Kept apart from an empty list
   // because "nothing is being processed" and "I could not find out" are different claims.
   const [ingestionUnavailable, setIngestionUnavailable] = useState(false)
+  // How many polled items are held — extracted, and waiting for a person to press Ingest
+  // now or Dismiss (motet#91). Only the count: the Held panel owns the list and polls it
+  // itself. Here because the sidebar badge counts them, and the badge has to be right on
+  // every section, not only on the one where that panel is mounted.
+  const [heldCount, setHeldCount] = useState(0)
   // Whether anything is draining the queues, or null when the question could not be
   // asked. Best-effort in exactly the way `ingestion` is, and for the same reason.
   const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
@@ -101,6 +106,13 @@ export default function App() {
   // Read once, in an initializer, so every later render works from state rather than
   // from an address bar the callback is about to rewrite.
   const [callback, setCallback] = useState(readCallback)
+  // What Google said when it refused, carried from the callback page to the screen the
+  // flow started on (motet#98). Cancelling a consent is an answer, and until this existed
+  // the only trace of it on Sources was a row reading "waiting for consent" — which is
+  // what an *abandoned* attempt and one still in progress both look like. Cleared when
+  // the section changes, so it is said once rather than sitting there for the rest of the
+  // session.
+  const [consentNotice, setConsentNotice] = useState('')
   // Who the *server* says this browser is, or null when it says nobody. Best-effort: an
   // older API with no /v1/auth answers 404 and this stays null.
   const [who, setWho] = useState<SessionInfo | null>(null)
@@ -157,6 +169,13 @@ export default function App() {
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)))
 
+    // Best-effort and on its own, like the episode list below: an older API without the
+    // held route must cost the badge its held half, not blank the backlog.
+    api
+      .heldSourceItems()
+      .then((list) => setHeldCount(list.length))
+      .catch(() => setHeldCount(0))
+
     // The episode list rides the same refresh, so a Mark listened, a render finishing, or
     // a position reported from another device shows without a reload — and the shelf
     // needs no fetch of its own. Its own promise rather than a fourth member of the one
@@ -211,11 +230,15 @@ export default function App() {
   const waiting =
     ingestion.some((item) => item.state === 'pending') ||
     episodes.some((entry) => IN_PROGRESS.has(entry.state))
-  // A stuck item gets a louder count than a busy one. "3 in flight" and "3, one of which
-  // is never coming back" want different reactions. Settled items are not counted at all:
-  // a badge that stays at 3 for ten minutes after everything landed means nothing.
+  // The badge counts what is waiting for *you* (motet#98): held items, which nothing will
+  // move until somebody picks them, and failed ones, which nothing will move at all. An
+  // item a worker is still carrying is not counted — it needs nobody, and the Processing
+  // panel already says it is on its way. Before motet#91 the held count was in here by
+  // accident, as "pending" rows of the ingestion list; this makes it the meaning on
+  // purpose. A failure still makes the count loud: "3 to pick" and "3, one of which is
+  // never coming back" want different reactions.
   const anyFailed = ingestion.some((item) => item.state === 'failed')
-  const unsettled = ingestion.filter((item) => item.state !== 'integrated').length
+  const waitingForYou = heldCount + ingestion.filter((item) => item.state === 'failed').length
   useEffect(() => {
     if (!waiting || callback || !(token || unlocked)) return
     const timer = window.setInterval(refresh, POLL_MS)
@@ -297,12 +320,22 @@ export default function App() {
     }
   }, [inShell, navigate, path, section.path])
 
+  // The consent notice belongs to the visit it was raised for. Cleared here rather than
+  // when Sources unmounts, because StrictMode unmounts and remounts a screen on purpose
+  // and a cleanup would take the notice down before it had been read once.
+  useEffect(() => {
+    if (section.id !== 'sources') setConsentNotice('')
+  }, [section.id])
+
   // Every history entry says which section it is, so the Back button's list is readable.
   useEffect(() => {
     document.title = inShell ? `${section.label} · Motet` : 'Motet'
   }, [inShell, section.label])
 
   const finishCallback = () => {
+    if (!signingIn && callback?.kind === 'denied') {
+      setConsentNotice(explainDenial(callback.error, callback.description))
+    }
     setCallback(null)
     // Back to where the flow started from: a mailbox connection belongs on Sources, and a
     // sign-in belongs at the front of the app the person was trying to reach. `replace`,
@@ -409,7 +442,7 @@ export default function App() {
       section={section}
       sections={offered}
       onNavigate={navigate}
-      badge={{ count: unsettled, failed: anyFailed }}
+      badge={{ count: waitingForYou, failed: anyFailed }}
       account={account}
     >
       {errorLine}
@@ -437,7 +470,9 @@ export default function App() {
           onChanged={refresh}
         />
       )}
-      {section.id === 'sources' && <Sources />}
+      {section.id === 'sources' && (
+        <Sources notice={consentNotice} />
+      )}
       {section.id === 'admin' &&
         (isAdmin ? (
           <Admin />

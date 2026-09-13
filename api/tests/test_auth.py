@@ -720,6 +720,81 @@ class TestSessionsAreOneAccount:
         assert [row["user_id"] for row in owners] == [repo.OWNER_USER_ID]
 
 
+class TestTheOwnerRowLearnsItsAddress:
+    """motet#98: the seeded user row had ``email = NULL`` and the Admin screen showed an id.
+
+    Migration 0002 seeds ``('motet-owner', NULL)`` because nothing knew an address then —
+    the shared API token proves who holds it and nothing about who they are. Sign-in is
+    the moment one is known.
+
+    Each test states the address it starts from rather than assuming the seed is intact:
+    ``users`` is one of the tables the ``db`` fixture deliberately does not truncate (see
+    ``conftest.TABLES``), so a test that wrote one would otherwise decide the next one.
+    """
+
+    @staticmethod
+    def _owner_email(db: psycopg.Connection[Any], value: str | None) -> None:
+        """Set the address this test starts from, and **commit**.
+
+        The commit is load-bearing rather than tidiness: the request under test updates
+        this same row on a connection of its own, so an uncommitted precondition here
+        holds the row lock the API then waits on — and the test hangs rather than fails.
+        """
+        db.execute("UPDATE users SET email = %s WHERE id = %s", (value, repo.OWNER_USER_ID))
+        db.commit()
+
+    @staticmethod
+    def _read_owner_email(db: psycopg.Connection[Any]) -> str | None:
+        # A fresh snapshot: the write under test happened on another connection.
+        db.rollback()
+        row = db.execute("SELECT email FROM users WHERE id = %s", (repo.OWNER_USER_ID,)).fetchone()
+        assert row is not None, "migration 0002 seeds the owner row"
+        email: str | None = row["email"]
+        return email
+
+    def test_signing_in_fills_the_owner_row_s_missing_email(
+        self, api: TestClient, db: psycopg.Connection[Any]
+    ) -> None:
+        self._owner_email(db, None)  # what migration 0002 seeds
+
+        sign_in(api)
+
+        assert self._read_owner_email(db) == FAKE_EMAIL
+
+    def test_an_address_already_on_the_row_is_never_rewritten(
+        self, api: TestClient, db: psycopg.Connection[Any]
+    ) -> None:
+        """The row is the account, not this session — see ``_backfill_user_email``."""
+        db.execute(
+            "UPDATE users SET email = %s WHERE id = %s",
+            ("first@motet.test", repo.OWNER_USER_ID),
+        )
+
+        sign_in(api)
+
+        row = db.execute("SELECT email FROM users WHERE id = %s", (repo.OWNER_USER_ID,)).fetchone()
+        assert row is not None and row["email"] == "first@motet.test"
+
+    def test_a_minted_staging_session_fills_it_too(
+        self,
+        api: TestClient,
+        _migrated: str,
+        db: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both writers of ``auth_sessions`` go through one function, so both backfill."""
+        self._owner_email(db, None)
+        monkeypatch.setenv(MINT_ENABLED_ENV, "1")
+        mint_session.mint(
+            _migrated,
+            token_sha256=auth_repo.token_digest(auth_repo.new_session_token()),
+            email=FAKE_EMAIL,
+            ttl_seconds=8 * 3600,
+        )
+
+        assert self._read_owner_email(db) == FAKE_EMAIL
+
+
 class TestAMintedStagingSession:
     """The staging deploy's mint, from the other side: is the row it writes a credential?
 
