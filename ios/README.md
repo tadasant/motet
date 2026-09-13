@@ -141,8 +141,8 @@ links. It says nothing about any of this.
    Device-only.
 4. **Lockscreen and Control Centre.** `MPNowPlayingInfoCenter` publishes *our* elapsed time
    and the real rate (a rate of 1.0 while playing at 1.5 makes the scrubber drift). Check
-   the artwork-less layout, that the scrubber tracks, and that the skip intervals show as
-   30/15.
+   that the mark shows as artwork, that the scrubber tracks, and that the skip intervals
+   show as 30/15.
 5. **Remote commands.** Play/pause/skip/next/previous/seek/rate are wired to
    `MPRemoteCommandCenter`. Test from the lockscreen, from headphone buttons, and — the one
    most likely to be wrong — next/previous *track*, which this app maps to next/previous
@@ -164,6 +164,10 @@ links. It says nothing about any of this.
 10. **TestFlight and device installs.** Enrolment is done, so these are now unblocked
     rather than impossible — and both need signing, which the `ios` job deliberately does
     not do.
+11. **The brand typefaces.** Fraunces and Instrument Sans are bundled under `App/Motet/Fonts`
+    and registered at runtime (`BrandFont`), with `wght`/`opsz`/`SOFT` set through a
+    variation descriptor. A build cannot tell a registered face from the system fallback;
+    look at a screen — titles in a soft serif, the `motet` wordmark in italic.
 
 ## Playback position is still device-local, and that is now a client gap
 

@@ -22,6 +22,10 @@ public final class NowPlayingController: @unchecked Sendable {
     private let commandCenter = MPRemoteCommandCenter.shared()
     private let infoCenter = MPNowPlayingInfoCenter.default()
 
+    /// Podcast artwork for the lockscreen and CarPlay's Now Playing screen. The image lives
+    /// in the app's asset catalog, so the app hands it in; this package holds no assets.
+    public var artwork: MPMediaItemArtwork?
+
     public init() {}
 
     /// Wire the remote command centre to the controller.
@@ -128,6 +132,9 @@ public final class NowPlayingController: @unchecked Sendable {
         info[MPNowPlayingInfoPropertyPlaybackRate] = snapshot.isPlaying ? snapshot.rate : 0.0
         info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = snapshot.rate
         info[MPNowPlayingInfoPropertyIsLiveStream] = false
+        if let artwork {
+            info[MPMediaItemPropertyArtwork] = artwork
+        }
         // A spoken briefing, not music: this is what makes CarPlay and the lockscreen show
         // podcast-shaped controls.
         info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue

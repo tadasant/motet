@@ -84,11 +84,14 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         episodes: [EpisodeResponse], downloaded: Set<String>
     ) -> CPListTemplate {
         let playable = episodes.filter { $0.episodeState.isPlayable }.prefix(Self.maximumRows)
+        let artwork = BrandArtwork.mark()
         let items: [CPListItem] = playable.map { episode in
             let detail = downloaded.contains(episode.id)
                 ? "\(Format.duration(episode.durationMs)) · on this phone"
                 : Format.duration(episode.durationMs)
-            let item = CPListItem(text: episode.title, detailText: detail)
+            // The mark is the podcast's artwork, so every episode row carries it — the one
+            // piece of the brand a CarPlay template lets an app draw.
+            let item = CPListItem(text: episode.title, detailText: detail, image: artwork)
             item.handler = { [weak self] _, completion in
                 // Tell CarPlay the tap is dealt with *before* starting playback, rather
                 // than from inside the task: `completion` is a plain escaping closure, and

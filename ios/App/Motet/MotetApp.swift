@@ -15,18 +15,39 @@ struct MotetApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel(environment: AppEnvironment.shared)
 
+    init() {
+        // Before the first view renders, so no screen is ever drawn in a fallback face
+        // that the real one then replaces.
+        BrandFont.register()
+        Theme.applyBarAppearance()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                // Dark mode is not designed (brand/GUIDELINES.md), so hold the app in light
+                // mode rather than let the system invert a palette nobody chose.
+                .preferredColorScheme(.light)
+                .tint(Theme.ink)
                 .task { await model.start() }
         }
     }
 }
 
-/// Two things need an app delegate, and neither has a SwiftUI equivalent.
+/// Three things need an app delegate, and none has a SwiftUI equivalent.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// The mark as Now Playing artwork, for the lockscreen and CarPlay. Set here rather than
+    /// in a scene because iOS can launch straight into CarPlay with no window scene.
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        AppEnvironment.shared.nowPlaying.artwork = BrandArtwork.nowPlaying()
+        return true
+    }
+
     /// iOS wakes the app when a background download finishes while it is suspended, and
     /// expects the handler to be called once the app has dealt with the events.
     func application(
