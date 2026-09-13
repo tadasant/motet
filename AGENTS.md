@@ -2526,7 +2526,7 @@ confirmation email (a vendor), a redirect variable, and a rate limiter.
 **Sign-off: PENDING-TADAS — this line is replaced with the owner's answer before the PR
 merges (motet#92's design session).**
 
-`GET/PUT /v1/admin/llm-config`, `GET /v1/admin/llm-spend`, migration 0012,
+`GET/PUT /v1/admin/llm-config`, `GET /v1/admin/llm-spend`, migration 0013,
 `motet_db.settings`, `motet_db.llm_usage`, `motet_workers.llm_context`,
 `web/src/screens/ModelsAndSpend.tsx`. Two questions an operator asks about the LLM seam
 had no surface: *which model is dedup on, and why?* — motet#85 was an afternoon of a shell

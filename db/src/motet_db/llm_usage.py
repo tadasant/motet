@@ -1,6 +1,6 @@
 """The ``llm_usage`` ledger: one row per completion, appended by the worker, summed by the API.
 
-Migration 0012, motet#92. The third record of what a completion cost, beside the
+Migration 0013, motet#92. The third record of what a completion cost, beside the
 ``motet.llm.tokens`` metric (the fleet, no ids) and the per-episode log line (ids, not
 summable), and the only one that can be summed per user — which is the whole reason it
 exists. Nothing here knows what a stage or a model *is*: ``motet_db`` sits below
