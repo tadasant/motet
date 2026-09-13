@@ -14,19 +14,31 @@ no duration on a lockscreen and nothing would have errored anywhere.
 from __future__ import annotations
 
 import io
+import struct
 from datetime import UTC, datetime
+from pathlib import Path
 
 import feedparser
 import podcastparser
 import pytest
 from motet_api.feed import (
+    ARTWORK_PATH,
     FeedMetadata,
+    artwork_bytes,
+    artwork_url,
+    artwork_version,
     episode_audio_url,
     feed_url,
     itunes_duration,
     render_feed,
 )
-from motet_api.shownotes import show_notes_html, show_notes_text
+from motet_api.shownotes import (
+    CLOSING_LINE,
+    MAX_QUOTE_CHARS,
+    SourceExcerpt,
+    show_notes_html,
+    show_notes_text,
+)
 from motet_db import (
     EpisodeKind,
     EpisodeState,
@@ -187,6 +199,25 @@ class TestRenderedFeed:
         assert parsed.bozo is False
         assert parsed.entries[0].title == 'Deals & <Mergers> — "Q3"'
 
+    def test_a_control_character_in_source_text_does_not_break_the_document(self) -> None:
+        """One stray control character in a title or a quote used to make the whole feed
+        unparseable — every episode in it stopped updating in every client."""
+        hostile = episode(title="Deals\x01 today")
+        segment_ = hostile.segments[0] if hostile.segments else None
+        titles = {segment_.news_item_id: "Story\x02 title"} if segment_ else {}
+        excerpts = (
+            {segment_.claims[0].id: SourceExcerpt("Source\x0b", "A quote\x1b here.")}
+            if segment_ and segment_.claims
+            else {}
+        )
+        xml = render_feed(METADATA, [hostile], titles, excerpts)
+
+        import xml.etree.ElementTree as StrictET
+
+        StrictET.fromstring(xml)  # raises on any character XML 1.0 forbids
+        assert feedparser.parse(xml).bozo is False
+        assert "Deals today" in xml.decode()
+
     def test_an_empty_feed_is_still_valid(self) -> None:
         """A brand new account subscribes before the first episode exists."""
         parsed = feedparser.parse(render_feed(METADATA, []).decode())
@@ -239,7 +270,7 @@ def test_show_notes_list_the_stories_with_timestamps() -> None:
     notes = show_notes_text(episode, titles)
     assert "1. Acme raises $20M (0:00)" in notes
     assert "2. Regulator opens an inquiry (0:05)" in notes
-    assert "traceable to the source" in notes
+    assert notes.endswith(CLOSING_LINE)
 
 
 def test_show_notes_html_escapes_and_cannot_close_its_own_cdata() -> None:
@@ -264,13 +295,13 @@ def test_the_feed_carries_show_notes_in_both_forms() -> None:
     """
     document = _render_with_titles()
     assert b"<![CDATA[" in document, "content:encoded must survive as markup"
-    assert b"<ol>" in document
+    assert b"<ol" in document
 
     parsed = feedparser.parse(document)
     entry = parsed.entries[0]
     assert "Acme raises $20M" in entry.description
     # `content:encoded` is where feedparser puts the richer form.
-    assert any("<ol>" in content.value for content in entry.content)
+    assert any("<ol" in content.value for content in entry.content)
 
 
 def test_the_feed_advertises_a_transcript_and_chapters() -> None:
@@ -342,6 +373,156 @@ def test_an_episode_with_no_segments_still_renders() -> None:
     document = render_feed(_metadata(), [_episode(segments=[])], {})
     assert not feedparser.parse(document).bozo
     assert b"No stories in this episode." in document
+
+
+# --- Polyphony: artwork, show-notes markup, and copy (motet#110) ----------------------
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class TestArtwork:
+    def test_the_packaged_artwork_is_the_brand_mark_byte_for_byte(self) -> None:
+        """The API ships a copy, because ``brand/`` is not in the wheel or the image.
+
+        A copy is a thing that drifts, so it is pinned here: re-rendering the mark without
+        re-copying it is a red run rather than a feed quietly serving the old cover.
+        """
+        source = REPO_ROOT / "brand" / "mark" / "motet-mark-3000.png"
+        assert artwork_bytes() == source.read_bytes()
+
+    def test_the_artwork_is_what_apple_accepts(self) -> None:
+        """Square, 1400–3000 px, RGB with no alpha channel, PNG."""
+        data = artwork_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+        width, height = struct.unpack(">II", data[16:24])
+        colour_type = data[25]
+        assert width == height
+        assert 1400 <= width <= 3000
+        assert colour_type == 2, "truecolour without alpha"
+
+    def test_the_artwork_url_is_absolute_ours_and_carries_no_token(self) -> None:
+        url = artwork_url(f"{BASE}/")
+        assert url == f"{BASE}{ARTWORK_PATH}?v={artwork_version()}"
+        assert TOKEN not in url
+
+    def test_both_parsers_find_the_cover(self) -> None:
+        """`itunes:image` for podcast apps, RSS 2.0 `<image>` for feed tooling."""
+        document = render_feed(METADATA, [episode()])
+
+        gpodder = podcastparser.parse(feed_url(BASE, TOKEN), io.BytesIO(document))
+        assert gpodder["cover_url"] == artwork_url(BASE)
+
+        parsed = feedparser.parse(document)
+        assert not parsed.bozo
+        assert parsed.feed.image.href == artwork_url(BASE)
+        assert parsed.feed.image.href.startswith("https://")
+        assert f'<itunes:image href="{artwork_url(BASE)}"' in document.decode().replace(
+            "&amp;", "&"
+        )
+
+
+class TestBrandCopy:
+    def test_the_channel_leads_with_the_positioning_line(self) -> None:
+        from motet_api.config import DEFAULT_FEED_DESCRIPTION
+
+        assert DEFAULT_FEED_DESCRIPTION == (
+            "Motet turns content you trust into a podcast you can listen to on the go."
+        )
+
+    def test_the_channel_has_a_subtitle(self) -> None:
+        parsed = feedparser.parse(render_feed(METADATA, [episode()]))
+        assert parsed.feed.subtitle  # feedparser folds itunes:subtitle / description here
+        assert "Many voices. One thing worth hearing." in render_feed(METADATA, []).decode()
+
+    def test_no_show_notes_copy_uses_a_retired_noun_or_leads_with_citations(self) -> None:
+        episode_ = _episode(segments=[_segment("ni_1", 0, 5_000)])
+        for rendered in (
+            show_notes_text(episode_, {}),
+            show_notes_html(episode_, {}),
+            show_notes_html(_episode(segments=[]), {}),
+        ):
+            lowered = rendered.lower()
+            for retired in ("briefing", "digest", "traceable"):
+                assert retired not in lowered
+
+
+class TestShowNotesMarkup:
+    TITLES = {"ni_1": "Acme raises $20M", "ni_2": "Regulator opens an inquiry"}
+
+    def _episode(self) -> StoredEpisode:
+        return _episode(segments=[_segment("ni_1", 0, 6_000), _segment("ni_2", 6_000, 4_000)])
+
+    def test_each_story_is_a_heading_with_its_lead_claims_source_quoted(self) -> None:
+        excerpts = {
+            "cl_ni_1_a": SourceExcerpt("Northwind Weekly", "Acme raised $20M on Tuesday."),
+            "cl_ni_2_a": SourceExcerpt("The Ledger", "The agency confirmed an inquiry."),
+        }
+        markup = show_notes_html(self._episode(), self.TITLES, excerpts)
+
+        assert markup.count("<h3") == 2
+        assert markup.count("<blockquote") == 2
+        assert "Acme raised $20M on Tuesday." in markup
+        assert "<cite" in markup and "Northwind Weekly" in markup
+        # The story order is the spoken order.
+        assert markup.index("Acme raises $20M") < markup.index("Regulator opens an inquiry")
+
+    def test_the_styles_are_inline_brand_stacks_and_nothing_external(self) -> None:
+        excerpts = {"cl_ni_1_a": SourceExcerpt("Northwind Weekly", "Acme raised $20M.")}
+        markup = show_notes_html(self._episode(), self.TITLES, excerpts)
+
+        assert "font-family: Fraunces, 'Iowan Old Style', Palatino, Georgia, serif" in markup
+        assert "font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif" in markup
+        # No colour, so a dark-themed client that keeps inline styles is not dark on dark;
+        # secondary text is the client's own colour at ink-soft's .66.
+        assert "color:" not in markup
+        assert "opacity: .66" in markup
+        assert "border-left: 2px solid" in markup
+        assert "<style" not in markup
+        assert "<link" not in markup
+        assert "http" not in markup  # no font, image or stylesheet fetched from anywhere
+        for voice in ("#D64B2A", "#D9A441", "#2A7F86", "#6B3E86"):
+            assert voice.lower() not in markup.lower()
+
+    def test_a_story_without_an_excerpt_gets_no_empty_quote(self) -> None:
+        excerpts = {"cl_ni_1_a": SourceExcerpt("Northwind Weekly", "Acme raised $20M.")}
+        markup = show_notes_html(self._episode(), self.TITLES, excerpts)
+        assert markup.count("<blockquote") == 1
+        assert "<blockquote" not in show_notes_html(self._episode(), self.TITLES)
+
+    def test_a_quote_is_escaped_and_cannot_close_its_own_cdata(self) -> None:
+        excerpts = {"cl_ni_1_a": SourceExcerpt("A <b>&</b> B", "Deals & <Mergers> ]]> end")}
+        markup = show_notes_html(self._episode(), self.TITLES, excerpts)
+        assert "Deals &amp; &lt;Mergers&gt;" in markup
+        assert "A &lt;b&gt;&amp;&lt;/b&gt; B" in markup
+        assert "]]>" not in markup
+
+    def test_a_long_span_is_cut_at_a_word_and_says_so(self) -> None:
+        long_span = " ".join(["word"] * 200)
+        excerpts = {"cl_ni_1_a": SourceExcerpt("Source", long_span)}
+        markup = show_notes_html(self._episode(), self.TITLES, excerpts)
+        quoted = markup.split('<p style="margin: 0">', 1)[1].split("</p>", 1)[0]
+        assert quoted.endswith("word…")
+        assert len(quoted) <= MAX_QUOTE_CHARS + 1
+
+    def test_the_markup_survives_both_parsers_inside_the_feed(self) -> None:
+        excerpts = {
+            "cl_ni_1_a": SourceExcerpt("Northwind Weekly", "Acme raised $20M & more."),
+        }
+        document = render_feed(_metadata(), [self._episode()], self.TITLES, excerpts)
+
+        parsed = feedparser.parse(document)
+        assert not parsed.bozo, getattr(parsed, "bozo_exception", None)
+        # feedparser lists `itunes:summary` as content too; the markup is the HTML one.
+        html = next(c.value for c in parsed.entries[0].content if c.type == "text/html")
+        assert "<h2" in html
+        assert "<blockquote" in html
+        assert "Acme raised $20M &amp; more." in html
+        assert "Northwind Weekly" in html
+
+        gpodder = podcastparser.parse("https://example.test/feed.xml", io.BytesIO(document))
+        (entry,) = gpodder["episodes"]
+        assert "Acme raised $20M" in (entry.get("description_html") or "")
 
 
 # --- helpers for the Phase 2 feed tests ----------------------------------------------

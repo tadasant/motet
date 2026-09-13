@@ -16,9 +16,12 @@ against what clients actually require rather than against the RSS specification 
 * **``<itunes:duration>``**, because that is where the lockscreen gets the length before
   the file is downloaded.
 * **``<itunes:explicit>``, ``<itunes:category>``, and an ``<atom:link rel="self">``** on
-  the channel, because a client that cannot find them either nags or refuses. There is
-  deliberately no ``<itunes:image>``: artwork is brand, and brand is Phase 3 — a feed with
-  a placeholder image looks broken in a way a feed with none does not.
+  the channel, because a client that cannot find them either nags or refuses.
+* **``<itunes:image>`` and RSS 2.0's ``<image>``**, both pointing at the Polyphony mark on
+  parchment, served by this API (:func:`artwork_url`). There used to be none on purpose,
+  because brand was undecided and a placeholder looks broken in a way an absence does not;
+  ``brand/GUIDELINES.md`` decided it. Apple wants a square RGB image of 1400–3000 px with
+  no alpha, which is exactly what ``brand/mark/render.py`` writes at 3000.
 
 Built with ``ElementTree`` rather than string formatting: an unescaped ``&`` in a
 newsletter title produces a document that a client rejects with no useful error, and
@@ -27,17 +30,31 @@ hand-rolled escaping is exactly the kind of thing that works until the first amp
 
 from __future__ import annotations
 
+import hashlib
+import re
 import secrets
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from functools import cache
+from importlib.resources import files
 from urllib.parse import quote, urlencode
 
 from motet_db import StoredEpisode
 
-from .shownotes import chapters, show_notes_html, show_notes_text
+from .shownotes import SourceExcerpt, chapters, show_notes_html, show_notes_text
+
+#: The channel's one-line subtitle, for a client with room for a line under the title.
+#: The brand's reference headline, not a description of the pipeline.
+CHANNEL_SUBTITLE = "Many voices. One thing worth hearing."
+
+#: Where the artwork is served. Under ``/v1/feed``, beside the route that hands out the
+#: feed URL — and, unlike every other URL in the document, carrying no token; see
+#: ``motet_api.main.feed_artwork`` for why.
+ARTWORK_PATH = "/v1/feed/artwork.png"
+ARTWORK_MEDIA_TYPE = "image/png"
 
 #: Apple's namespace URI, and the trailing ``.dtd`` is load-bearing. A feed that declares
 #: ``.../podcast-1.0/`` instead is still well-formed XML and still parses — the itunes
@@ -96,6 +113,33 @@ class FeedMetadata:
     token: str
 
 
+@cache
+def artwork_bytes() -> bytes:
+    """The podcast artwork: a byte-for-byte copy of ``brand/mark/motet-mark-3000.png``.
+
+    Package data rather than a path into ``brand/``, so it is in the wheel and in the image
+    wherever the package is — ``brand/`` is a build input of neither. A test holds the copy
+    equal to its source, so re-rendering the mark without re-copying it is a red run.
+    """
+    return (files("motet_api") / "assets" / "podcast-artwork.png").read_bytes()
+
+
+@cache
+def artwork_version() -> str:
+    """A short content hash: the artwork URL's cache key, and the route's ETag.
+
+    Podcast apps and directories cache artwork by URL, often for far longer than any header
+    asks. A hash in the URL is what makes a re-rendered mark reach a client that already
+    holds the old one.
+    """
+    return hashlib.sha256(artwork_bytes()).hexdigest()[:16]
+
+
+def artwork_url(base_url: str) -> str:
+    """Absolute and on our own origin, built the way the enclosure URLs are."""
+    return f"{base_url.rstrip('/')}{ARTWORK_PATH}?{urlencode({'v': artwork_version()})}"
+
+
 def feed_url(base_url: str, token: str) -> str:
     return f"{base_url.rstrip('/')}/feed.xml?{urlencode({'token': token})}"
 
@@ -135,14 +179,18 @@ def render_feed(
     metadata: FeedMetadata,
     episodes: Sequence[StoredEpisode],
     titles: Mapping[str, str] | None = None,
+    excerpts: Mapping[str, SourceExcerpt] | None = None,
 ) -> bytes:
     """Build the whole document. Returns UTF-8 bytes, declaration included.
 
-    ``titles`` maps a news item id to its title, for show notes and chapter markers. Passed
-    in rather than looked up here because this module does no database work — which is what
-    lets the feed be rendered from fixtures in a test.
+    ``titles`` maps a news item id to its title, for show notes and chapter markers.
+    ``excerpts`` maps a claim id to the source text its span covers, for the quote under
+    each story in the show notes. Both are passed in rather than looked up here because
+    this module does no database work — which is what lets the feed be rendered from
+    fixtures in a test.
     """
     story_titles = dict(titles or {})
+    claim_excerpts = dict(excerpts or {})
     # Token -> markup, filled by `_cdata` and substituted after serialization.
     pending: dict[str, str] = {}
     nonce = secrets.token_hex(8)
@@ -156,11 +204,22 @@ def render_feed(
     _text(channel, "title", metadata.title)
     _text(channel, "description", metadata.description)
     _text(channel, "link", metadata.base_url)
+    # RSS 2.0's own artwork element, which feedparser-based tooling reads. Its `title` and
+    # `link` are specified to match the channel's, because a reader may render the image as
+    # a link.
+    image = ET.SubElement(channel, "image")
+    _text(image, "url", artwork_url(metadata.base_url))
+    _text(image, "title", metadata.title)
+    _text(image, "link", metadata.base_url)
     _text(channel, "language", "en-us")
     _text(channel, "generator", "Motet")
     _text(channel, "lastBuildDate", format_datetime(_latest(episodes)))
     _text(channel, f"{{{ITUNES_NS}}}author", metadata.author)
+    _text(channel, f"{{{ITUNES_NS}}}subtitle", CHANNEL_SUBTITLE)
     _text(channel, f"{{{ITUNES_NS}}}summary", metadata.description)
+    # What Apple Podcasts, Overcast and gPodder show as the cover. The URL is an attribute,
+    # not text: `<itunes:image>url</itunes:image>` is the classic mistake, silently ignored.
+    ET.SubElement(channel, f"{{{ITUNES_NS}}}image", {"href": artwork_url(metadata.base_url)})
     # A private feed is by definition not for a general audience, and a client that cannot
     # tell will nag about it. "no" is a statement about content, not about privacy.
     _text(channel, f"{{{ITUNES_NS}}}explicit", "no")
@@ -179,7 +238,7 @@ def render_feed(
     _text(owner, f"{{{ITUNES_NS}}}name", metadata.author)
 
     for episode in episodes:
-        _episode_item(channel, metadata, episode, story_titles, pending, nonce)
+        _episode_item(channel, metadata, episode, story_titles, claim_excerpts, pending, nonce)
 
     document: bytes = ET.tostring(rss, encoding="utf-8", xml_declaration=True)
     # Swap each placeholder for a real CDATA section. Done on the serialized bytes because
@@ -187,7 +246,27 @@ def render_feed(
     # they contain no character the writer would escape.
     for token, markup in pending.items():
         document = document.replace(token.encode(), b"<![CDATA[" + markup.encode() + b"]]>")
-    return document
+    return _xml_safe(document)
+
+
+#: Characters XML 1.0 does not allow anywhere in a document, escaped or not.
+_NOT_XML = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def _xml_safe(document: bytes) -> bytes:
+    """The document with every character XML 1.0 forbids removed.
+
+    Titles, quotes and summaries are text a newsletter or a paste supplied, and nothing
+    upstream promises they are free of control characters — `extract` repairs the C1 block
+    and nothing else, and a paste is stored as sent. `ElementTree` writes such a character
+    without complaint, and one of them anywhere makes the *whole* document unparseable:
+    every episode in it stops updating in every client, for as long as that episode is
+    published. Removing them at the one place the document is finished covers every text
+    node and every CDATA body at once.
+    """
+    text = document.decode("utf-8")
+    cleaned = _NOT_XML.sub("", text)
+    return document if cleaned == text else cleaned.encode("utf-8")
 
 
 def _episode_item(
@@ -195,6 +274,7 @@ def _episode_item(
     metadata: FeedMetadata,
     episode: StoredEpisode,
     titles: dict[str, str],
+    excerpts: dict[str, SourceExcerpt],
     pending: dict[str, str],
     nonce: str,
 ) -> None:
@@ -210,7 +290,7 @@ def _episode_item(
     _cdata(
         item,
         f"{{{CONTENT_NS}}}encoded",
-        show_notes_html(episode, titles),
+        show_notes_html(episode, titles, excerpts),
         pending,
         nonce,
     )

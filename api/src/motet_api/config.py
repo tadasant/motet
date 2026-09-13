@@ -27,16 +27,17 @@ PUBLIC_BASE_URL_ENV: Final = "MOTET_PUBLIC_BASE_URL"
 #: which is right on a laptop, where the Vite dev server proxies and the origin is shared.
 APP_BASE_URL_ENV: Final = "MOTET_APP_BASE_URL"
 
-#: What a podcast client shows for the feed. Configurable because "Motet" is a working
-#: name for one user's briefing and Phase 3 gives the product a brand; not secret, and not
-#: infrastructure.
+#: What a podcast client shows for the feed. Configurable so an environment can tell itself
+#: apart in a podcast app; not secret, and not infrastructure. The defaults are the brand's
+#: copy (``brand/GUIDELINES.md``), which leads with the positioning line rather than with
+#: citations — less "interactive", because nothing a podcast client can reach is.
 FEED_TITLE_ENV: Final = "MOTET_FEED_TITLE"
 FEED_DESCRIPTION_ENV: Final = "MOTET_FEED_DESCRIPTION"
 FEED_AUTHOR_ENV: Final = "MOTET_FEED_AUTHOR"
 
 DEFAULT_FEED_TITLE: Final = "Motet"
 DEFAULT_FEED_DESCRIPTION: Final = (
-    "Your reading backlog, read aloud. Every claim traces to the source it came from."
+    "Motet turns content you trust into a podcast you can listen to on the go."
 )
 DEFAULT_FEED_AUTHOR: Final = "Motet"
 

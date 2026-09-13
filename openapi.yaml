@@ -2962,6 +2962,29 @@ paths:
       summary: Get Feed Info
       tags:
       - feed
+  /v1/feed/artwork.png:
+    get:
+      description: "The podcast artwork the feed's ``<itunes:image>`` points at: the Motet mark.\n\n**Unauthenticated,\
+        \ deliberately \u2014 the one feed URL without the token.** The image is\nnot secret: it is the\
+        \ public brand mark, the same bytes for every user, and committed\nto this public repo. And the\
+        \ clients that fetch it are the ones least likely to carry a\ncredential faithfully: a podcast\
+        \ app hands artwork to an image cache or a proxy, a\ndirectory fetches it server-side, and either\
+        \ may drop the query string or keep the URL\nfar longer than the feed. A feed token in that URL\
+        \ would copy a bearer secret into more\ncaches and logs for nothing \u2014 and a token rotation,\
+        \ which is meant to unsubscribe\nplayers, would also blank the cover in every client that still\
+        \ holds the old image URL.\n\nNo database, no storage backend: it is package data, so it answers\
+        \ wherever the process\nruns, including a container with no ``DATABASE_URL`` at all."
+      operationId: feed_artwork_v1_feed_artwork_png_get
+      responses:
+        '200':
+          content:
+            image/png: {}
+          description: The podcast artwork
+        '304':
+          description: The artwork the client already holds is current
+      summary: Feed Artwork
+      tags:
+      - feed
   /v1/feed/rotate:
     post:
       description: "Revoke the current feed URL and mint a new one.\n\nThis unsubscribes every client\

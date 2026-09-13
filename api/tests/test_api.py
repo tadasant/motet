@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import io
 import json
+from html import escape as html_escape
 from typing import Any
+from urllib.parse import urlsplit
 
 import feedparser
 import podcastparser
@@ -19,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.deps import reset_store
+from motet_api.feed import ARTWORK_PATH, artwork_bytes, artwork_version
 from motet_api.main import HEALTH_PATH
 from motet_api.obs import (
     ERROR_DSN_ENV,
@@ -314,6 +317,31 @@ class TestAuthentication:
         assert api.get("/feed.xml").status_code == 401
 
 
+class TestFeedArtwork:
+    """The cover the feed's `<itunes:image>` points at. No database, no token."""
+
+    def test_is_a_png_anyone_can_fetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MOTET_API_TOKEN", TOKEN)  # an authenticated deployment
+        response = client.get(ARTWORK_PATH)
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.content == artwork_bytes()
+        assert response.content[:8] == b"\x89PNG\r\n\x1a\n"
+        assert "public" in response.headers["cache-control"]
+        assert "max-age=" in response.headers["cache-control"]
+
+    def test_a_client_holding_the_current_image_gets_a_304(self) -> None:
+        etag = client.get(ARTWORK_PATH).headers["etag"]
+        assert etag == f'"{artwork_version()}"'
+        again = client.get(ARTWORK_PATH, headers={"If-None-Match": etag})
+        assert again.status_code == 304
+        assert again.content == b""
+
+    def test_the_versioned_url_the_feed_advertises_resolves(self) -> None:
+        response = client.get(f"{ARTWORK_PATH}?v={artwork_version()}")
+        assert response.status_code == 200
+
+
 class TestValidation:
     def test_request_models_are_enforced(self, api: TestClient) -> None:
         assert (
@@ -387,7 +415,27 @@ class TestEndToEnd:
         (enclosure,) = entry["enclosures"]
         assert enclosure["file_size"] == episode["audio_bytes"]
 
-        assert feedparser.parse(feed.text).bozo is False
+        parsed_feed = feedparser.parse(feed.text)
+        assert parsed_feed.bozo is False
+
+        # The cover is absolute and fetchable with no credential at all.
+        cover_url = urlsplit(parsed["cover_url"])
+        assert cover_url.scheme and cover_url.netloc  # absolute
+        assert cover_url.path == ARTWORK_PATH
+        assert "token" not in cover_url.query
+        cover = client.get(f"{cover_url.path}?{cover_url.query}")
+        assert cover.status_code == 200
+        assert cover.headers["content-type"] == "image/png"
+
+        # The show notes name each story and quote the source its lead claim cites —
+        # the same excerpt the episode screen shows beside that claim.
+        html = next(c.value for c in parsed_feed.entries[0].content if c.type == "text/html")
+        assert "Story 1" not in html
+        for segment in episode["segments"]:
+            assert html_escape(segment["news_item_title"], quote=False) in html
+        lead_excerpt = episode["segments"][0]["claims"][0]["source_excerpt"]
+        assert "<blockquote" in html
+        assert html_escape(" ".join(lead_excerpt.split())[:40], quote=False) in html
 
         # And the enclosure URL a client would follow actually returns the bytes.
         audio = api.get(enclosure["url"].replace("https://motet.example", ""))
