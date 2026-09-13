@@ -107,8 +107,8 @@ export function Sources({
   }
 
   return (
-    <section aria-labelledby="sources-heading">
-      <h2 id="sources-heading">Sources</h2>
+    <section aria-label="Sources">
+      {/* PROTOTYPE: the "Sources" title is the shell's top bar now (App.tsx). */}
       <p className="hint">
         Where source items come from. Pasting in needs nothing; a mailbox needs your
         consent, which Google asks for on its own page.
