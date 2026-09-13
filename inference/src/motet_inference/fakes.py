@@ -17,7 +17,7 @@ import re
 import struct
 from collections.abc import Mapping, Sequence
 
-from .interfaces import IntegrationResult
+from .interfaces import DedupDecision, IntegrationResult
 from .types import (
     Audio,
     Claim,
@@ -76,8 +76,18 @@ def first_sentence_span(item: SourceItem) -> SourceSpan:
     return SourceSpan(source_item_id=item.id, start=start, end=end)
 
 
+#: What the fake integrator reports as the model that decided — a value no catalogue slug
+#: can take, so a recorded decision says plainly that no model was involved.
+FAKE_MODEL = "fake"
+
+
 class FakeIntegrator:
-    """Dedup by normalized title; merge into the existing news item when it matches."""
+    """Dedup by normalized title; merge into the existing news item when it matches.
+
+    Its decision is reported in the real adapter's vocabulary — ``same_event`` with the
+    matched item as the candidate, or ``unrelated`` with none — so the path that persists a
+    decision runs in every test and every golden-set run, not only against a model.
+    """
 
     def integrate(self, item: SourceItem, window: Sequence[NewsItem]) -> IntegrationResult:
         key = _dedup_key(item.title)
@@ -89,7 +99,16 @@ class FakeIntegrator:
                     summary=existing.summary,
                     source_item_ids=(*existing.source_item_ids, item.id),
                 )
-                return IntegrationResult(news_item=merged, merged=True)
+                return IntegrationResult(
+                    news_item=merged,
+                    merged=True,
+                    decision=DedupDecision(
+                        relation="same_event",
+                        reason="The titles normalize to the same words.",
+                        candidate_id=existing.id,
+                        model=FAKE_MODEL,
+                    ),
+                )
 
         created = NewsItem(
             id=_stable_id("ni", key),
@@ -97,7 +116,16 @@ class FakeIntegrator:
             summary=item.text[: item.text.find("\n")] if "\n" in item.text else item.text,
             source_item_ids=(item.id,),
         )
-        return IntegrationResult(news_item=created, merged=False)
+        return IntegrationResult(
+            news_item=created,
+            merged=False,
+            decision=DedupDecision(
+                relation="unrelated",
+                reason="No title in the window normalizes to the same words.",
+                candidate_id=None,
+                model=FAKE_MODEL,
+            ),
+        )
 
 
 class FakeScriptGenerator:

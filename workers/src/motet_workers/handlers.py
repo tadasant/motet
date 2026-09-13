@@ -109,6 +109,12 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
         # and importantly, nothing to do *twice*.
         logger.info("source item %s is already integrated; nothing to do", source_item_id)
         return
+    if stored.state is SourceItemState.DISMISSED:
+        # Only a held item — one with no integrate job — can be dismissed, and the dismiss
+        # and the claim share a lock, so this should be unreachable. If it is reached, the
+        # person said not to spend on this item, and that is the answer that stands.
+        logger.warning("source item %s was dismissed; not integrating it", source_item_id)
+        return
 
     window = repo.news_item_window(context.conn, stored.user_id)
     # Dedup is the volume stage — one completion per source item, with the whole window
@@ -148,7 +154,50 @@ def handle_integrate(context: Context, payload: Mapping[str, Any]) -> None:
         )
         logger.info("source %s became new news item %s", stored.id, news_item_id)
 
+    repo.record_dedup_decision(
+        context.conn,
+        stored.id,
+        _decision_record(
+            result,
+            backstop=merge_into is not None and not result.merged,
+            title=title,
+            summary=summary,
+        ),
+    )
     repo.mark_source_item(context.conn, stored.id, SourceItemState.INTEGRATED)
+
+
+def _decision_record(
+    result: IntegrationResult, *, backstop: bool, title: str, summary: str
+) -> repo.DedupDecisionRecord:
+    """What to persist about this decision, beside the link row it produced (motet#91).
+
+    ``basis`` is the step the outcome rests on, which is not always the integrator's: a
+    "new story" that :func:`_merge_target`'s title backstop turned into a merge was never
+    the model's call, and a stored ``relation`` of ``unrelated`` beside a merge would
+    otherwise read as dedup contradicting itself. ``title`` and ``summary`` are what was
+    written to the news item by this decision — not the integrator's proposal, which the
+    second look and the backstop both deliberately discard.
+
+    An integrator that returned no decision still gets a basis and the copy; the relation,
+    reason, candidate and model are NULL, which the lifecycle view reports as not recorded.
+    """
+    decision = result.decision
+    if backstop:
+        basis = "title_backstop"
+    elif decision is not None and decision.second_look is not None:
+        basis = "second_look"
+    else:
+        basis = "first_pass"
+    return repo.DedupDecisionRecord(
+        relation=decision.relation if decision is not None else None,
+        reason=(decision.reason or None) if decision is not None else None,
+        candidate_id=decision.candidate_id if decision is not None else None,
+        model=decision.model if decision is not None else None,
+        basis=basis,
+        title=title,
+        summary=summary,
+    )
 
 
 def _merge_target(
@@ -671,6 +720,24 @@ def enqueue_paste(
     stored = repo.insert_source_item(conn, user_id=user_id, title=title, text=text)
     enqueue(conn, Queue.INTEGRATE, {"source_item_id": stored.id}, serialize_key=user_id)
     return stored
+
+
+def enqueue_integration(
+    conn: psycopg.Connection[Any], *, user_id: str, source_item_ids: Sequence[str]
+) -> list[str]:
+    """Queue held source items for integration — the owner saying "ingest now".
+
+    The API calls this. A connected source's ``handle_extract`` deliberately stops short
+    of this stage (``motet_workers.ingest`` says why), so this is the *only* way a polled
+    item reaches dedup. Each id is checked to be the caller's, ``pending`` and without an
+    integrate job before a job is written for it; the rest are dropped without comment,
+    and the ids actually queued come back so the caller can count both. Same queue, same
+    payload and same serialization key as a paste — invariant 6 lives on this stage.
+    """
+    claimed = repo.claim_held_source_items(conn, user_id, source_item_ids)
+    for item_id in claimed:
+        enqueue(conn, Queue.INTEGRATE, {"source_item_id": item_id}, serialize_key=user_id)
+    return claimed
 
 
 def enqueue_episode(

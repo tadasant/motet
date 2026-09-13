@@ -395,25 +395,31 @@ def insert_polled_source_item(
     external_id: str,
     title: str,
     text: str,
+    received_at: datetime | None = None,
 ) -> str | None:
     """Store a fetched message, or return ``None`` if it was already stored.
 
     ``ON CONFLICT DO NOTHING`` against the ``(source_id, external_id)`` index is what makes
     a re-poll after a crash idempotent. Returning ``None`` rather than raising lets the
-    caller treat "already have it" as the ordinary outcome it is, and — importantly — skip
-    enqueueing a second integrate job for a source item that already has one.
+    caller treat "already have it" as the ordinary outcome it is.
+
+    ``received_at`` is the message's own ``Date:``, which is what a person means by when
+    it arrived; ``None`` — no header, or one that did not parse — falls back to the time
+    of storing. **Clamped to the database's now**, because a sender's clock is not ours:
+    a message dated next week would otherwise sort after everything that arrives until
+    then. ``LEAST`` ignores a NULL, which is what makes the fallback one expression.
     """
     from .ids import source_item_id  # noqa: PLC0415
 
     row = _maybe_one(
         conn,
         """
-        INSERT INTO source_items (id, user_id, source_id, title, text, external_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO source_items (id, user_id, source_id, title, text, external_id, received_at)
+        VALUES (%s, %s, %s, %s, %s, %s, LEAST(%s::timestamptz, now()))
         ON CONFLICT (source_id, external_id) WHERE external_id IS NOT NULL DO NOTHING
         RETURNING id
         """,
-        (source_item_id(), user_id, source_id_, title, text, external_id),
+        (source_item_id(), user_id, source_id_, title, text, external_id, received_at),
     )
     return row["id"] if row else None
 

@@ -26,7 +26,7 @@ final class MotetHTTPClientTests: XCTestCase {
     func testReadStateSendsTheContractsBody() async throws {
         let transport = StubTransport()
         transport.enqueueJSON("""
-        {"id":"n1","title":"T","summary":"S","source_item_ids":[],"read":true,
+        {"id":"n1","title":"T","summary":"S","source_item_ids":[],"sources":[],"read":true,
          "created_at":"2026-08-24T04:00:00.123456Z"}
         """)
 
@@ -81,7 +81,7 @@ final class MotetHTTPClientTests: XCTestCase {
         // accept them. This is the shape the API actually emits.
         let transport = StubTransport()
         transport.enqueueJSON("""
-        [{"id":"n1","title":"T","summary":"S","source_item_ids":[],"read":false,
+        [{"id":"n1","title":"T","summary":"S","source_item_ids":[],"sources":[],"read":false,
           "created_at":"2026-08-24T04:00:00.123456+00:00"}]
         """)
         let items = try await makeClient(transport).listNewsItems()

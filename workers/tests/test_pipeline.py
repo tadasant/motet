@@ -2794,3 +2794,145 @@ class TestTheScalingSignal:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(loop.jobs, "queue_readiness", _boom)
             assert drain(Queue.INTEGRATE, _migrated) == 1
+
+
+def _link(db: psycopg.Connection[Any], source_item_id: str) -> Mapping[str, Any]:
+    row = db.execute(
+        "SELECT position, relation, reason, candidate_id, model, basis, decided_title, "
+        "decided_summary, decided_at FROM news_item_sources WHERE source_item_id = %s",
+        (source_item_id,),
+    ).fetchone()
+    assert row is not None
+    return row
+
+
+class TestTheDecisionIsRecorded:
+    """motet#91: dedup's *why* lands on the link row, in `handle_integrate`'s transaction.
+
+    `position` always said which thing dedup did; these columns say why, against what, by
+    which model, and what the news item's copy was the moment this item joined it — the
+    news item's own columns are rewritten by every later merge.
+    """
+
+    def test_a_new_story_and_a_merge_each_record_their_decision(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        morning = paste(db, MORNING)
+        evening = paste(db, EVENING)
+        drain(Queue.INTEGRATE, _migrated)
+
+        created = _link(db, morning)
+        assert created["position"] == 0
+        assert (created["relation"], created["basis"], created["model"]) == (
+            "unrelated",
+            "first_pass",
+            "fake",
+        )
+        assert created["candidate_id"] is None
+        assert created["decided_title"] == MORNING[0]
+        assert created["decided_at"] is not None
+
+        merged = _link(db, evening)
+        (story,) = repo.list_news_items(db, USER)
+        assert merged["position"] == 1
+        assert (merged["relation"], merged["basis"]) == ("same_event", "first_pass")
+        assert merged["candidate_id"] == story.id
+        assert merged["decided_title"] == story.title
+
+    def test_the_title_backstop_is_recorded_as_the_basis_not_as_the_models_merge(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """Dedup said "new"; the handler merged. A stored `unrelated` beside a merge would
+        otherwise read as dedup contradicting itself, which it did — but not like that."""
+        from motet_inference import DedupDecision, IntegrationResult, NewsItem
+        from motet_workers import handlers
+
+        existing = repo.insert_news_item(
+            db,
+            user_id=USER,
+            title="Acme raises $20M Series A",
+            summary="Acme announced the round.",
+            source_item_id_=paste(db, MORNING),
+        )
+        source_item_id = paste(db, EVENING)
+        db.commit()
+
+        class SaysNew:
+            def integrate(self, item: SourceItem, window: Any) -> IntegrationResult:  # noqa: ARG002
+                return IntegrationResult(
+                    news_item=NewsItem(
+                        id="ni_proposed",
+                        title="Acme raises $20M Series A",
+                        summary="A second outlet.",
+                        source_item_ids=(item.id,),
+                    ),
+                    merged=False,
+                    decision=DedupDecision(
+                        relation="unrelated",
+                        reason="Looked different.",
+                        candidate_id=None,
+                        model="anthropic/claude-sonnet-5",
+                    ),
+                )
+
+        context = handlers.Context(conn=db, stages=_stages_with(SaysNew()), store=None)
+        handlers.handle_integrate(context, {"source_item_id": source_item_id})
+
+        link = _link(db, source_item_id)
+        assert link["position"] == 1, "merged"
+        assert link["basis"] == "title_backstop"
+        assert link["relation"] == "unrelated", "the model's answer, kept as it was given"
+        assert link["model"] == "anthropic/claude-sonnet-5"
+        assert link["decided_summary"] == "Acme announced the round.", "the stored copy"
+        assert [item.id for item in repo.list_news_items(db, USER)] == [existing]
+
+    def test_a_second_look_is_recorded_as_the_basis(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        model = _ScriptedModel(
+            [
+                _first_pass("unrelated", "Canada announces tariffs", closest=None),
+                _first_pass("related", "Ottawa hits back"),
+            ],
+            {"same_event": True, "reason": "One announcement."},
+        )
+        _integrate_with(db, model, [MORNING, EVENING])
+
+        second = db.execute(
+            "SELECT source_item_id FROM news_item_sources WHERE position = 1"
+        ).fetchone()
+        assert second is not None
+        link = _link(db, second["source_item_id"])
+        assert (link["relation"], link["basis"]) == ("related", "second_look")
+        assert link["candidate_id"] is not None
+
+    def test_an_integrator_that_explains_nothing_is_recorded_as_not_recorded(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """`decision` is optional on the seam; its absence is NULLs, never an invention."""
+        from motet_workers import handlers
+
+        source_item_id = paste(db, INQUIRY)
+
+        class Silent:
+            def integrate(self, item: SourceItem, window: Any) -> Any:  # noqa: ARG002
+                return _stub_result(title="Regulator opens inquiry")
+
+        context = handlers.Context(conn=db, stages=_stages_with(Silent()), store=None)
+        handlers.handle_integrate(context, {"source_item_id": source_item_id})
+
+        link = _link(db, source_item_id)
+        assert (link["relation"], link["reason"], link["model"]) == (None, None, None)
+        assert link["basis"] == "first_pass"
+        assert link["decided_title"] == "Regulator opens inquiry"
+
+    def test_a_dismissed_item_is_never_integrated(
+        self, db: psycopg.Connection[Any], _migrated: str
+    ) -> None:
+        """Unreachable through the routes — they share a lock — and a no-op if reached."""
+        source_item_id = paste(db, INQUIRY)
+        db.execute("UPDATE source_items SET state = 'dismissed' WHERE id = %s", (source_item_id,))
+        db.commit()
+        drain(Queue.INTEGRATE, _migrated)
+
+        assert repo.list_news_items(db, USER) == []

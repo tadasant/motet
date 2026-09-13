@@ -155,6 +155,10 @@ SELECT * FROM (
          LIMIT 1
      ) job ON true
      WHERE si.user_id = %(user_id)s
+       -- Held (pending, no job) and dismissed items are not on their way anywhere, so
+       -- they are not reported here: `list_held_source_items` is where a held one is.
+       AND si.state <> 'dismissed'
+       AND (si.state <> 'pending' OR job.state IS NOT NULL)
        AND (
          si.state <> 'integrated'
          OR si.integrated_at > COALESCE(%(now)s, now())
@@ -242,8 +246,16 @@ def list_ingestion(
     The join is a ``LEFT JOIN LATERAL`` onto the *newest* integrate job for each item
     rather than an aggregate: a source item has one such job in every normal case, and
     ``ORDER BY id DESC LIMIT 1`` is the honest answer if a re-enqueue ever gives it two.
-    Left, not inner, because an item whose job row is somehow missing is precisely the
-    case worth showing — it is the one that will never be processed at all.
+
+    **A pending item with no job is *held*, and is not reported here** (motet#91). A
+    connected source stops before ``integrate`` on purpose, so that combination is a
+    person's decision still to be made rather than work in flight — reported here it read
+    as "on the way in", and the Processing panel called a deliberately waiting item
+    stalled. :func:`list_held_source_items` reports it instead, on the same predicate
+    negated, so every item still has exactly one surface. That includes the anomaly this
+    join used to be left for — a paste whose job row is somehow missing — which now
+    appears as held, with a checkbox that repairs it. A ``dismissed`` item is a decision
+    already made, and appears nowhere.
 
     ``next_attempt_at`` is gated on the *source item* being pending as well as on the job
     being ready, so that the two rows disagreeing cannot produce "failed, and trying again
@@ -1081,6 +1093,422 @@ def admin_overview_jobs(
         )
         for row in rows
     ]
+
+
+# --- held source items ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HeldSourceItem:
+    """A source item that is extracted and waiting for a person to say "ingest now".
+
+    Held *is* ``state = 'pending'`` with no ``integrate`` job row, in any job state — no
+    column says so (motet#91). A connected source polls, fetches and extracts on its own
+    and stops there, because ``integrate`` is the first stage that spends inference; a
+    paste queues its job on arrival and so never appears here for longer than a
+    transaction.
+    """
+
+    id: str
+    title: str
+    source_id: str
+    source_kind: str
+    source_name: str
+    received_at: datetime
+    chars: int
+    preview: str
+
+
+#: Characters of text a held item's preview carries.
+HELD_PREVIEW_CHARS: Final = 200
+
+#: A ceiling on the held list, and the most ids one "ingest now" or "dismiss" may name —
+#: the same number on purpose, so that "select all, ingest" always fits in one request.
+#: The SPA polls the list every few seconds; a first sync over a wide window can hold
+#: hundreds of messages. Oldest first, so what the bound hides is the newest end, and it
+#: comes into view as the older end is ingested or dismissed.
+HELD_MAX_ITEMS: Final = 500
+
+#: The held predicate, shared by the listing, the claim and the dismiss so the three
+#: cannot disagree about what "held" means — and the exact negation of the condition
+#: ``INGESTION_SQL`` reports a pending item on, so every item is on one surface. The
+#: ``NOT EXISTS`` walks migration 0005's partial expression index on
+#: ``payload ->> 'source_item_id'``, exactly as ``INGESTION_SQL``'s lateral join does.
+_HELD_WHERE = """
+    si.user_id = %(user_id)s
+    AND si.state = 'pending'
+    AND NOT EXISTS (
+        SELECT 1 FROM jobs j
+        WHERE j.queue = 'integrate' AND j.payload ->> 'source_item_id' = si.id
+    )
+"""
+
+HELD_SQL = f"""
+SELECT si.id, si.title, si.source_id, src.kind AS source_kind, src.name AS source_name,
+       si.received_at, length(si.text) AS chars,
+       left(regexp_replace(si.text, '\\s+', ' ', 'g'), %(preview)s) AS preview
+FROM source_items si
+JOIN sources src ON src.id = si.source_id
+WHERE {_HELD_WHERE}
+ORDER BY si.received_at ASC, si.id ASC
+LIMIT %(limit)s
+"""
+
+CLAIM_HELD_SQL = f"""
+SELECT si.id
+FROM source_items si
+WHERE si.id = ANY(%(ids)s)
+  AND {_HELD_WHERE}
+ORDER BY si.received_at ASC, si.id ASC
+"""
+
+DISMISS_HELD_SQL = f"""
+UPDATE source_items si
+SET state = 'dismissed'
+WHERE si.id = ANY(%(ids)s)
+  AND {_HELD_WHERE}
+RETURNING si.id
+"""
+
+#: Namespace for the per-user transaction lock a claim or a dismiss takes. The
+#: two-argument ``pg_advisory_xact_lock(int, int)`` form lives in a different lock space
+#: from the one-argument bigint form the worker's ``try_lock`` uses on the same user id,
+#: so an "ingest now" request never waits behind an integrate job running for that user.
+HELD_CLAIM_LOCK_NAMESPACE: Final = 2
+
+
+def list_held_source_items(conn: psycopg.Connection[Any], user_id: str) -> list[HeldSourceItem]:
+    """This user's held source items, oldest message first, at most :data:`HELD_MAX_ITEMS`.
+
+    **Nothing here ages out.** A held item can sit for days — that is what holding is — so
+    there is no grace window and no time bound, unlike :data:`INTEGRATED_GRACE` on the
+    ingestion list. It leaves this list by being ingested or dismissed, and by nothing
+    else.
+    """
+    rows = _all(
+        conn,
+        HELD_SQL,
+        {"user_id": user_id, "preview": HELD_PREVIEW_CHARS, "limit": HELD_MAX_ITEMS},
+    )
+    return [
+        HeldSourceItem(
+            id=row["id"],
+            title=row["title"],
+            source_id=row["source_id"],
+            source_kind=row["source_kind"],
+            source_name=row["source_name"],
+            received_at=row["received_at"],
+            chars=row["chars"],
+            preview=row["preview"].strip(),
+        )
+        for row in rows
+    ]
+
+
+def _lock_held(conn: psycopg.Connection[Any], user_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+            (HELD_CLAIM_LOCK_NAMESPACE, user_id),
+        )
+
+
+def claim_held_source_items(
+    conn: psycopg.Connection[Any], user_id: str, ids: Sequence[str]
+) -> list[str]:
+    """Which of ``ids`` are this user's *and* held, under a lock so the caller may enqueue.
+
+    A transaction-level advisory lock on the user is what makes two concurrent "ingest now"
+    requests for one item produce one integrate job rather than two: the second waits for
+    the first to commit, and the claim statement then runs on a snapshot that sees the job
+    the first one wrote. ``FOR UPDATE`` on the row would not do it — nothing updates the
+    source item, so a waiter would be handed the row unchanged and its ``NOT EXISTS``
+    would still be answered from the older snapshot. The lock is released with the
+    transaction, which is the one the caller commits the jobs in. Ids that do not qualify —
+    another user's, already queued, already integrated, dismissed, unknown — are simply
+    absent from the answer.
+    """
+    if not ids:
+        return []
+    _lock_held(conn, user_id)
+    rows = _all(conn, CLAIM_HELD_SQL, {"user_id": user_id, "ids": list(dict.fromkeys(ids))})
+    return [row["id"] for row in rows]
+
+
+def dismiss_held_source_items(
+    conn: psycopg.Connection[Any], user_id: str, ids: Sequence[str]
+) -> list[str]:
+    """Discard held items without spending on them; returns the ids actually dismissed.
+
+    Under the same lock as :func:`claim_held_source_items`, so a dismiss and an "ingest
+    now" racing for one item cannot both win: whichever commits second finds it no longer
+    held. Only a held item can be dismissed — one that is queued, integrated or another
+    user's is skipped — because a dismiss is a decision *not to start*, and an item that
+    has started has a job and a pipeline that a state flip would strand.
+    """
+    if not ids:
+        return []
+    _lock_held(conn, user_id)
+    rows = _all(conn, DISMISS_HELD_SQL, {"user_id": user_id, "ids": list(dict.fromkeys(ids))})
+    return [row["id"] for row in rows]
+
+
+# --- dedup's decision ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DedupDecisionRecord:
+    """Why a source item ended up where it did, as ``handle_integrate`` records it.
+
+    ``relation``, ``reason``, ``candidate_id`` and ``model`` are the first pass's answer.
+    ``basis`` names the step the outcome rests on — ``first_pass``, ``second_look`` or
+    ``title_backstop`` — so a merge the model never asked for is not mistaken for one it
+    did. ``title`` and ``summary`` are the news item's copy as *this* decision left it.
+    """
+
+    relation: str | None
+    reason: str | None
+    candidate_id: str | None
+    model: str | None
+    basis: str
+    title: str
+    summary: str
+
+
+def record_dedup_decision(
+    conn: psycopg.Connection[Any], source_item_id_: str, decision: DedupDecisionRecord
+) -> None:
+    """Persist dedup's decision on the link row the same transaction just wrote.
+
+    On ``news_item_sources`` because that row is already the record of the outcome —
+    ``position`` says *which* thing dedup did — and one source item has exactly one.
+    """
+    conn.execute(
+        """
+        UPDATE news_item_sources
+        SET relation = %s, reason = %s, candidate_id = %s, model = %s, basis = %s,
+            decided_title = %s, decided_summary = %s, decided_at = now()
+        WHERE source_item_id = %s
+        """,
+        (
+            decision.relation,
+            decision.reason,
+            decision.candidate_id,
+            decision.model,
+            decision.basis,
+            decision.title,
+            decision.summary,
+            source_item_id_,
+        ),
+    )
+
+
+# --- source item lifecycle ----------------------------------------------------------
+#
+# One source item, told as the three stages the owner asked to see as stages: what the
+# deterministic scrape pulled in, what processing did with it, and the deduped news item it
+# feeds. A read over `source_items`, the newest `integrate` job, and `news_item_sources` —
+# including the dedup decision `record_dedup_decision` writes there. What is *not*
+# persisted is named on the result rather than left to be rediscovered: the per-item spend
+# exists only as a log line keyed by the source item id and a per-stage metric (see
+# `handle_integrate`'s `collect_usage`), and the raw RFC 822 bytes are never stored —
+# `source_items.text` is what `motet_sources.extract` produced.
+
+
+@dataclass(frozen=True)
+class SourceItemJob:
+    """The newest ``integrate`` job for a source item, as the queue holds it."""
+
+    id: int
+    state: str
+    attempts: int
+    run_at: datetime
+    locked_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    last_error: str | None
+    work_committed: bool
+
+
+@dataclass(frozen=True)
+class SourceItemNewsItem:
+    """The deduped news item a source item feeds, with what the link itself records."""
+
+    id: str
+    title: str
+    summary: str
+    read: bool
+    source_count: int
+    position: int
+
+
+@dataclass(frozen=True)
+class SourceItemDecision:
+    """The dedup decision stored on a source item's link row, with its candidate named.
+
+    ``candidate_title`` is the candidate's *current* title, and ``None`` when the model
+    named an id that is not one of this user's news items — which is itself worth seeing.
+    """
+
+    relation: str | None
+    reason: str | None
+    candidate_id: str | None
+    candidate_title: str | None
+    model: str | None
+    basis: str | None
+    title: str | None
+    summary: str | None
+    decided_at: datetime
+
+
+@dataclass(frozen=True)
+class SourceItemLifecycle:
+    """One source item across all three stages. See the section comment above."""
+
+    id: str
+    title: str
+    text: str
+    state: SourceItemState
+    last_error: str | None
+    source_id: str
+    source_kind: str
+    source_name: str
+    external_id: str | None
+    received_at: datetime
+    created_at: datetime
+    integrated_at: datetime | None
+    job: SourceItemJob | None
+    news_item: SourceItemNewsItem | None
+    decision: SourceItemDecision | None
+
+
+LIFECYCLE_SQL = """
+SELECT si.id, si.title, si.text, si.state, si.last_error, si.source_id, si.external_id,
+       si.received_at, si.created_at, si.integrated_at,
+       src.kind AS source_kind, src.name AS source_name,
+       job.id AS job_id, job.state AS job_state, job.attempts AS job_attempts,
+       job.run_at AS job_run_at, job.locked_at AS job_locked_at,
+       job.created_at AS job_created_at, job.updated_at AS job_updated_at,
+       job.last_error AS job_last_error,
+       job.work_committed_attempt IS NOT NULL AS job_work_committed,
+       ni.id AS news_item_id, ni.title AS news_item_title, ni.summary AS news_item_summary,
+       ni.read_at IS NOT NULL AS news_item_read, link.position AS link_position,
+       (SELECT count(*) FROM news_item_sources s WHERE s.news_item_id = ni.id) AS source_count,
+       link.relation, link.reason, link.candidate_id, link.model, link.basis,
+       link.decided_title, link.decided_summary, link.decided_at,
+       cand.title AS candidate_title
+FROM source_items si
+JOIN sources src ON src.id = si.source_id
+LEFT JOIN LATERAL (
+    SELECT id, state, attempts, run_at, locked_at, created_at, updated_at, last_error,
+           work_committed_attempt
+    FROM jobs
+    WHERE queue = 'integrate' AND payload ->> 'source_item_id' = si.id
+    ORDER BY id DESC
+    LIMIT 1
+) job ON true
+LEFT JOIN news_item_sources link ON link.source_item_id = si.id
+LEFT JOIN news_items ni ON ni.id = link.news_item_id
+-- Scoped to the same user: the candidate id is whatever the model said, and a title is
+-- only ever read back from this user's own stories.
+LEFT JOIN news_items cand ON cand.id = link.candidate_id AND cand.user_id = si.user_id
+WHERE si.id = %(id)s AND si.user_id = %(user_id)s
+"""
+
+
+def source_item_lifecycle(
+    conn: psycopg.Connection[Any], user_id: str, item_id: str
+) -> SourceItemLifecycle | None:
+    """One source item across the three stages, or ``None`` if it is not this user's.
+
+    **Scoped by user in the statement itself**, because the answer carries the item's full
+    text — mailbox content — and "not yours" and "does not exist" must be one answer.
+
+    The job is the newest ``integrate`` row, exactly as ``list_ingestion`` joins it — a
+    source item has one in every normal case. The news item is the one row
+    ``news_item_sources`` can hold for it (the column is ``UNIQUE``); ``position`` on that
+    link says *which* thing dedup did (``0`` created the story, anything higher merged
+    into it), and the decision columns beside it say why — for links written since
+    migration 0012. An older link has ``decided_at`` NULL and reports no decision.
+    """
+    row = _maybe_one(conn, LIFECYCLE_SQL, {"id": item_id, "user_id": user_id})
+    if row is None:
+        return None
+    job = (
+        SourceItemJob(
+            id=row["job_id"],
+            state=row["job_state"],
+            attempts=row["job_attempts"],
+            run_at=row["job_run_at"],
+            locked_at=row["job_locked_at"],
+            created_at=row["job_created_at"],
+            updated_at=row["job_updated_at"],
+            last_error=row["job_last_error"],
+            work_committed=row["job_work_committed"],
+        )
+        if row["job_id"] is not None
+        else None
+    )
+    news_item = (
+        SourceItemNewsItem(
+            id=row["news_item_id"],
+            title=row["news_item_title"],
+            summary=row["news_item_summary"],
+            read=row["news_item_read"],
+            source_count=row["source_count"],
+            position=row["link_position"],
+        )
+        if row["news_item_id"] is not None
+        else None
+    )
+    decision = (
+        SourceItemDecision(
+            relation=row["relation"],
+            reason=row["reason"],
+            candidate_id=row["candidate_id"],
+            candidate_title=row["candidate_title"],
+            model=row["model"],
+            basis=row["basis"],
+            title=row["decided_title"],
+            summary=row["decided_summary"],
+            decided_at=row["decided_at"],
+        )
+        if row["decided_at"] is not None
+        else None
+    )
+    return SourceItemLifecycle(
+        id=row["id"],
+        title=row["title"],
+        text=row["text"],
+        state=SourceItemState(row["state"]),
+        last_error=row["last_error"],
+        source_id=row["source_id"],
+        source_kind=row["source_kind"],
+        source_name=row["source_name"],
+        external_id=row["external_id"],
+        received_at=row["received_at"],
+        created_at=row["created_at"],
+        integrated_at=row["integrated_at"],
+        job=job,
+        news_item=news_item,
+        decision=decision,
+    )
+
+
+def source_item_titles(conn: psycopg.Connection[Any], item_ids: Sequence[str]) -> dict[str, str]:
+    """Titles for many source items, for listing a news item's sources by name.
+
+    ``load_source_items`` would do, but it carries every item's full text — the backlog
+    route would be reading every newsletter body to print a list of subject lines.
+    """
+    if not item_ids:
+        return {}
+    rows = _all(
+        conn,
+        "SELECT id, title FROM source_items WHERE id = ANY(%s)",
+        (list(dict.fromkeys(item_ids)),),
+    )
+    return {row["id"]: row["title"] for row in rows}
 
 
 # --- row plumbing ------------------------------------------------------------------

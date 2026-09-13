@@ -9,6 +9,7 @@ retrying forever.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +20,9 @@ from motet_inference import fake_stages
 from motet_sources import GMAIL_READONLY_SCOPE, PROVIDER, SourceAuthError
 from motet_storage import LocalObjectStore
 from motet_vault import build_key_manager
-from motet_workers import Queue, drain, enqueue_source_poll, poll_key
+from motet_workers import Queue, drain, enqueue_integration, enqueue_source_poll, poll_key
 from motet_workers.handlers import Context, PermanentFailure
-from motet_workers.ingest import handle_extract, handle_poll
+from motet_workers.ingest import _sent_at, handle_extract, handle_poll
 from motet_workers.jobs import DEFAULT_MAX_ATTEMPTS
 
 USER = repo.OWNER_USER_ID
@@ -193,23 +194,93 @@ def test_the_poll_serialization_key_is_per_source(db: psycopg.Connection[Any]) -
 # --- extract -------------------------------------------------------------------------
 
 
-def test_extraction_produces_a_source_item_and_queues_integration(
+def test_extraction_produces_a_source_item_and_holds_it(
     db: psycopg.Connection[Any],
 ) -> None:
+    """Extract is the last free stage; the item waits there for a person.
+
+    Integration is the first stage that spends inference, so a connected source stops
+    short of it: the row is `pending` with no integrate job, which is what "held" means.
+    """
     source_id = connected_source(db)
     handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
 
     items = _source_items(db, source_id)
     assert len(items) == 1
     assert items[0]["external_id"] == "01_acme_series_a"
+    assert items[0]["state"] == SourceItemState.PENDING.value
     assert "Acme" in items[0]["title"]
     assert "Northwind Ventures" in items[0]["text"]
     assert "Unsubscribe" not in items[0]["text"], "the footer should have been cut"
 
+    assert _jobs(db, Queue.INTEGRATE) == [], "extraction must not spend inference"
+    held = repo.list_held_source_items(db, USER)
+    assert [item.id for item in held] == [items[0]["id"]]
+
+
+def test_ingest_now_queues_a_held_item_exactly_as_a_paste_would(
+    db: psycopg.Connection[Any],
+) -> None:
+    source_id = connected_source(db)
+    handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
+    item_id = _source_items(db, source_id)[0]["id"]
+
+    queued = enqueue_integration(db, user_id=USER, source_item_ids=[item_id, "si_nope"])
+    assert queued == [item_id]
     integrate = _jobs(db, Queue.INTEGRATE)
     assert len(integrate) == 1
-    assert integrate[0]["payload"]["source_item_id"] == items[0]["id"]
+    assert integrate[0]["payload"]["source_item_id"] == item_id
     assert integrate[0]["serialize_key"] == USER, "invariant 6 lives on the integrate stage"
+
+    # Asking twice writes one job: the item is no longer held.
+    assert enqueue_integration(db, user_id=USER, source_item_ids=[item_id]) == []
+    assert len(_jobs(db, Queue.INTEGRATE)) == 1
+    assert repo.list_held_source_items(db, USER) == []
+
+
+def test_a_held_item_is_dated_by_its_message_not_by_when_it_was_stored(
+    db: psycopg.Connection[Any],
+) -> None:
+    """`received_at` is the `Date:` header — motet#91's "every row read 5:04 PM today".
+
+    A first sync over a wide window stores every message inside one minute, so the time of
+    storing says nothing about which newsletter is which. The fixture is dated in August
+    2026 and stored now.
+    """
+    source_id = connected_source(db)
+    handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
+
+    (held,) = repo.list_held_source_items(db, USER)
+    assert held.received_at == datetime(2026, 8, 18, 7, 2, 11, tzinfo=UTC)
+
+
+def test_a_zoneless_or_missing_date_reads_as_utc_or_as_now() -> None:
+    """RFC 5322's `-0000` parses naive; a naive value into `timestamptz` would take the
+    session's zone instead. No header at all falls back to the time of storing."""
+    assert _sent_at("2026-08-18T07:02:11") == datetime(2026, 8, 18, 7, 2, 11, tzinfo=UTC)
+    assert _sent_at("2026-08-19T06:30:00-04:00") == datetime(2026, 8, 19, 10, 30, tzinfo=UTC)
+    assert _sent_at("") is None
+    assert _sent_at("not a date") is None
+
+
+def test_a_message_dated_in_the_future_is_clamped_to_now(db: psycopg.Connection[Any]) -> None:
+    """A sender's clock is not ours; next week's date would sort after everything until then."""
+    source_id = connected_source(db)
+    item_id = phase2.insert_polled_source_item(
+        db,
+        user_id=USER,
+        source_id_=source_id,
+        external_id="from-the-future",
+        title="Tomorrow's news",
+        text="Something that has not happened yet.",
+        received_at=datetime.now(UTC) + timedelta(days=7),
+    )
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT received_at <= now() AS clamped FROM source_items WHERE id = %s", (item_id,)
+        )
+        row = cur.fetchone()
+    assert row is not None and row["clamped"] is True
 
 
 def test_extracting_the_same_message_twice_is_a_no_op(
@@ -221,7 +292,7 @@ def test_extracting_the_same_message_twice_is_a_no_op(
     handle_extract(context(db), payload)
     handle_extract(context(db), payload)
     assert len(_source_items(db, source_id)) == 1
-    assert len(_jobs(db, Queue.INTEGRATE)) == 1, "and exactly one integrate job"
+    assert _jobs(db, Queue.INTEGRATE) == []
 
 
 def test_a_message_that_is_not_a_newsletter_is_skipped_not_failed(
@@ -258,11 +329,12 @@ def test_a_missing_payload_field_is_a_permanent_failure(
 def test_gmail_ingestion_reaches_the_backlog(
     db: psycopg.Connection[Any], database_url: str
 ) -> None:
-    """`poll -> extract -> integrate`, drained by the actual runner.
+    """`poll -> extract`, then "ingest now", then `integrate` — drained by the actual runner.
 
     The point of going through `drain` rather than calling handlers is that it exercises the
     three transaction boundaries and the advisory lock — which is where a serialization bug
-    would live, and which a direct handler call would skip entirely.
+    would live, and which a direct handler call would skip entirely. The explicit step in
+    the middle is the product: nothing reaches dedup until a person asks.
     """
     source_id = connected_source(db)
     enqueue_source_poll(db, source_id)
@@ -270,6 +342,13 @@ def test_gmail_ingestion_reaches_the_backlog(
 
     assert drain(Queue.POLL, database_url) == 1
     assert drain(Queue.EXTRACT, database_url) >= 3
+    assert drain(Queue.INTEGRATE, database_url) == 0, "nothing is queued until asked for"
+    assert repo.list_news_items(db, USER) == []
+
+    held = [item.id for item in repo.list_held_source_items(db, USER)]
+    assert len(held) >= 3
+    assert enqueue_integration(db, user_id=USER, source_item_ids=held) == held
+    db.commit()
     assert drain(Queue.INTEGRATE, database_url) >= 3
 
     items = repo.list_news_items(db, USER)
@@ -287,19 +366,25 @@ def test_gmail_ingestion_reaches_the_backlog(
 
 def test_a_second_full_run_adds_nothing(db: psycopg.Connection[Any], database_url: str) -> None:
     """The property that makes a scheduled poll safe to run every five minutes."""
+
+    def full_run() -> None:
+        enqueue_source_poll(db, source_id)
+        db.commit()
+        for queue in (Queue.POLL, Queue.EXTRACT):
+            drain(queue, database_url)
+        held = [item.id for item in repo.list_held_source_items(db, USER)]
+        enqueue_integration(db, user_id=USER, source_item_ids=held)
+        db.commit()
+        drain(Queue.INTEGRATE, database_url)
+
     source_id = connected_source(db)
-    enqueue_source_poll(db, source_id)
-    db.commit()
-    for queue in (Queue.POLL, Queue.EXTRACT, Queue.INTEGRATE):
-        drain(queue, database_url)
+    full_run()
     before = {item.id for item in repo.list_news_items(db, USER)}
+    assert before
 
-    enqueue_source_poll(db, source_id)
-    db.commit()
-    for queue in (Queue.POLL, Queue.EXTRACT, Queue.INTEGRATE):
-        drain(queue, database_url)
-
+    full_run()
     assert {item.id for item in repo.list_news_items(db, USER)} == before
+    assert repo.list_held_source_items(db, USER) == [], "a re-poll holds nothing new"
 
 
 # --- a message that never becomes a source item ---------------------------------------
@@ -441,6 +526,11 @@ def test_extraction_succeeding_replaces_the_job_row_with_the_item_it_wrote(
 ) -> None:
     """One message is one line, and extraction is the moment it changes which line.
 
+    Since motet#91 the line it moves to is the *held* list, not the ingestion list: an
+    extracted message is waiting for a person, not on its way in, and reporting it as
+    pending is what made the Processing panel call it stalled. "Ingest now" is what moves
+    it onto the ingestion list — once, from its own row.
+
     The idempotence case the unique index guarantees is the one that could break this
     quietly: a job re-run after its insert committed leaves both records describing one
     message, and a panel showing it twice would be the accounting surface disagreeing with
@@ -454,21 +544,27 @@ def test_extraction_succeeding_replaces_the_job_row_with_the_item_it_wrote(
     db.commit()
 
     items = _source_items(db, source_id)
-    statuses = repo.list_ingestion(db, USER)
-    assert len(statuses) == len(items), "each message is reported once, from its own row"
-    assert {status.id for status in statuses} == {item["id"] for item in items}
-    assert all(not status.title.startswith("Gmail message ") for status in statuses)
+    item_ids = {item["id"] for item in items}
+    assert items
+    assert repo.list_ingestion(db, USER) == [], "held is not in flight"
+    assert {item.id for item in repo.list_held_source_items(db, USER)} == item_ids
 
-    # And re-running an extract job that already has its row — the reclaimed-lease case —
-    # changes neither the row count nor the ingestion list.
+    # Re-running an extract job that already has its row — the reclaimed-lease case —
+    # changes neither the row count nor either list.
     for job in _jobs_any_state(db, Queue.EXTRACT):
         handle_extract(context(db), job["payload"])
     db.commit()
     assert len(_source_items(db, source_id)) == len(items)
-    assert {status.id for status in repo.list_ingestion(db, USER)} == {item["id"] for item in items}
+    assert repo.list_ingestion(db, USER) == []
+    assert {item.id for item in repo.list_held_source_items(db, USER)} == item_ids
 
-
-# --- helpers -------------------------------------------------------------------------
+    enqueue_integration(db, user_id=USER, source_item_ids=sorted(item_ids))
+    db.commit()
+    statuses = repo.list_ingestion(db, USER)
+    assert len(statuses) == len(items), "each message is reported once, from its own row"
+    assert {status.id for status in statuses} == item_ids
+    assert all(not status.title.startswith("Gmail message ") for status in statuses)
+    assert repo.list_held_source_items(db, USER) == []
 
 
 def _jobs(db: psycopg.Connection[Any], queue: Queue) -> list[dict[str, Any]]:
@@ -488,7 +584,7 @@ def _clear(db: psycopg.Connection[Any], queue: Queue) -> None:
 def _source_items(db: psycopg.Connection[Any], source_id: str) -> list[dict[str, Any]]:
     with db.cursor() as cur:
         cur.execute(
-            "SELECT id, external_id, title, text FROM source_items WHERE source_id = %s "
+            "SELECT id, external_id, title, text, state FROM source_items WHERE source_id = %s "
             "ORDER BY created_at, id",
             (source_id,),
         )
@@ -500,3 +596,44 @@ def _jobs_any_state(db: psycopg.Connection[Any], queue: Queue) -> list[dict[str,
     with db.cursor() as cur:
         cur.execute("SELECT payload FROM jobs WHERE queue = %s ORDER BY id", (queue.value,))
         return list(cur.fetchall())
+
+
+def test_two_concurrent_ingest_nows_write_one_integrate_job(
+    db: psycopg.Connection[Any], database_url: str
+) -> None:
+    """The claim's per-user transaction lock is what stops a double-enqueue.
+
+    Two tabs press "Ingest now" on the same item at once. The first holds the lock with
+    its job written but not committed; the second must wait, and then see the job, rather
+    than answer from a snapshot in which the item still looked held.
+    """
+    import threading
+
+    source_id = connected_source(db)
+    handle_extract(context(db), {"source_id": source_id, "message_id": "01_acme_series_a"})
+    db.commit()
+    (item_id,) = [item.id for item in repo.list_held_source_items(db, USER)]
+
+    first = repo.connect(database_url)
+    second = repo.connect(database_url)
+    try:
+        assert enqueue_integration(first, user_id=USER, source_item_ids=[item_id]) == [item_id]
+        answer: list[list[str]] = []
+        waiter = threading.Thread(
+            target=lambda: answer.append(
+                enqueue_integration(second, user_id=USER, source_item_ids=[item_id])
+            )
+        )
+        waiter.start()
+        waiter.join(timeout=1.0)
+        assert waiter.is_alive(), "the second claim must wait on the first's lock"
+
+        first.commit()
+        waiter.join(timeout=10.0)
+        second.commit()
+        assert answer == [[]], "and then find the item already queued"
+    finally:
+        first.close()
+        second.close()
+
+    assert len(_jobs(db, Queue.INTEGRATE)) == 1

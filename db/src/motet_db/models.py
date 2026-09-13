@@ -36,9 +36,20 @@ class EpisodeState(StrEnum):
 
 
 class SourceItemState(StrEnum):
+    """Where a source item is in ingestion.
+
+    ``pending`` covers two situations that the job queue tells apart: with an
+    ``integrate`` job it is on its way into the backlog, and without one it is *held* —
+    extracted from a connected source and waiting for a person to say "ingest now"
+    (``repo.list_held_source_items``). ``dismissed`` is a held item somebody discarded
+    without spending inference on it; it stays as a row so a re-poll does not fetch the
+    message again.
+    """
+
     PENDING = "pending"
     INTEGRATED = "integrated"
     FAILED = "failed"
+    DISMISSED = "dismissed"
 
 
 @dataclass(frozen=True)

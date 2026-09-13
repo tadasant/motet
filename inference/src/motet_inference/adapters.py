@@ -31,7 +31,7 @@ from .accounting import (
     record_usage,
 )
 from .cartesia import CartesiaSpeechSynthesizer
-from .interfaces import IntegrationResult
+from .interfaces import DedupDecision, IntegrationResult
 from .llm import (
     LlmBudgetExhaustedError,
     LlmClient,
@@ -155,6 +155,10 @@ class ClaudeIntegrator:
 
         candidate_id = data.get("closest_news_item_id")
         candidate = next((n for n in window if n.id == candidate_id), None)
+        # Kept as the model named it, including an id that is not in the window: that is
+        # the model error most worth being able to read back off a stored decision.
+        named = candidate_id if isinstance(candidate_id, str) and candidate_id else None
+        second_look: bool | None = None
 
         if relation not in (SAME_EVENT, RELATED, UNRELATED):
             # The schema constrains this, so reaching here means a provider that did not
@@ -170,9 +174,18 @@ class ClaudeIntegrator:
             )
             relation = RELATED
 
+        def decided() -> DedupDecision:
+            return DedupDecision(
+                relation=relation,
+                reason=reason,
+                candidate_id=named,
+                model=response.model,
+                second_look=second_look,
+            )
+
         if relation == SAME_EVENT:
             if candidate is not None:
-                return self._merged(item, candidate, title, summary, relation=relation)
+                return self._merged(item, candidate, title, summary, decision=decided())
             # Naming a story that is not in the window is a model error. Degrade to "new"
             # rather than raising: the cost of under-merging is one duplicate story in a
             # briefing, and the cost of raising is that ingestion stops entirely.
@@ -188,14 +201,15 @@ class ClaudeIntegrator:
                 candidate.id,
                 reason or "no reason given",
             )
-            if self._is_same_event(item, candidate):
+            second_look = self._is_same_event(item, candidate)
+            if second_look:
                 # The stored copy travels, not the copy the first pass wrote. It wrote a
                 # headline and a summary for this source item *alone*, because it had not
                 # decided the story was already in the backlog — the same reason
                 # ``_merge_target``'s title backstop keeps the stored title. Only a
                 # ``same_event`` answer is asked for copy that reflects both sources.
                 return self._merged(
-                    item, candidate, candidate.title, candidate.summary, relation=relation
+                    item, candidate, candidate.title, candidate.summary, decision=decided()
                 )
         elif relation == RELATED:
             # Symmetric with the `same_event` warning above: "related to what?" is a model
@@ -220,6 +234,7 @@ class ClaudeIntegrator:
                 source_item_ids=(item.id,),
             ),
             merged=False,
+            decision=decided(),
         )
 
     def _merged(
@@ -229,9 +244,9 @@ class ClaudeIntegrator:
         title: str,
         summary: str,
         *,
-        relation: str,
+        decision: DedupDecision,
     ) -> IntegrationResult:
-        record_dedup_decision(relation=relation, outcome="merged")
+        record_dedup_decision(relation=decision.relation, outcome="merged")
         return IntegrationResult(
             news_item=NewsItem(
                 id=existing.id,
@@ -240,6 +255,7 @@ class ClaudeIntegrator:
                 source_item_ids=(*existing.source_item_ids, item.id),
             ),
             merged=True,
+            decision=decision,
         )
 
     def _is_same_event(self, item: SourceItem, candidate: NewsItem) -> bool:

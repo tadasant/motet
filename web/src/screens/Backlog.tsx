@@ -4,7 +4,7 @@
 // "I listened to this episode" does — so marking something read here and having heard it
 // on a walk are one fact, not two that drift.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import {
   ApiError,
@@ -14,7 +14,9 @@ import {
   type ProcessingStatus,
   api,
 } from '../api/client'
+import { Held } from './Held'
 import { Processing } from './Processing'
+import { SourceItemDetail } from './SourceItemDetail'
 
 const DEFAULT_MAX_MINUTES = 20
 
@@ -36,6 +38,17 @@ export function Backlog({
   const [minutes, setMinutes] = useState(DEFAULT_MAX_MINUTES)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Which source item's three-stage detail is open under a news item, and which news
+  // item is being pointed at (scrolled to and briefly highlighted) from one.
+  const [openSource, setOpenSource] = useState<string | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!flash) return
+    document.getElementById(`ni-${flash}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const timer = window.setTimeout(() => setFlash(null), 2_500)
+    return () => window.clearTimeout(timer)
+  }, [flash])
 
   const unread = items.filter((item) => !item.read)
 
@@ -71,8 +84,12 @@ export function Backlog({
           pasted go" is asked immediately after pasting, and an answer under a long list of
           older stories is an answer nobody scrolls to. It renders nothing when there is
           nothing in flight. */}
+      {/* What has been pulled in but not yet paid for (motet#91). */}
+      <Held onQueued={onChanged} onJumpToNewsItem={setFlash} />
+
       <Processing items={ingestion} unavailable={ingestionUnavailable} processing={processing} />
 
+      <h3>Processed</h3>
       <p className="hint">
         {unread.length} unread of {items.length}. An episode takes everything unread, oldest
         first, until it hits the cap.
@@ -108,7 +125,13 @@ export function Backlog({
       ) : (
         <ul className="items">
           {items.map((item) => (
-            <li key={item.id} className={item.read ? 'read' : ''}>
+            <li
+              key={item.id}
+              id={`ni-${item.id}`}
+              className={[item.read ? 'read' : '', flash === item.id ? 'flash' : '']
+                .filter(Boolean)
+                .join(' ')}
+            >
               <div className="item-head">
                 <strong>{item.title}</strong>
                 <button type="button" onClick={() => toggle(item)}>
@@ -116,10 +139,32 @@ export function Backlog({
                 </button>
               </div>
               <p>{item.summary}</p>
+              {/* The source items behind this story, by title; each opens its
+                  three-stage lifecycle. */}
               <p className="hint">
-                {item.source_item_ids.length} source
-                {item.source_item_ids.length === 1 ? '' : 's'} · {item.id}
+                {item.sources.length} source{item.sources.length === 1 ? '' : 's'}:{' '}
+                {item.sources.map((source, index) => (
+                  <span key={source.id}>
+                    {index > 0 && ', '}
+                    <button
+                      type="button"
+                      className="linkish hint"
+                      aria-expanded={openSource === source.id}
+                      onClick={() => setOpenSource(openSource === source.id ? null : source.id)}
+                    >
+                      {source.title || source.id}
+                    </button>
+                  </span>
+                ))}{' '}
+                · {item.id}
               </p>
+              {openSource !== null && item.source_item_ids.includes(openSource) && (
+                <SourceItemDetail
+                  id={openSource}
+                  onClose={() => setOpenSource(null)}
+                  onJumpToNewsItem={setFlash}
+                />
+              )}
             </li>
           ))}
         </ul>
