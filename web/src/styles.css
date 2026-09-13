@@ -92,3 +92,7 @@ main.wide { max-width: 90rem; }
 .badge.running { color: #06c; border-color: #06c; }
 .badge.done { color: var(--muted); }
 .admin select { font: inherit; padding: .3rem; }
+
+/* PROTOTYPE: in-page player */
+.player { margin: .75rem 0 1rem; }
+.player audio { width: 100%; max-width: 46rem; display: block; }
