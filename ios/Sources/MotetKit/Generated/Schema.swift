@@ -1390,32 +1390,41 @@ public struct SourceResponse: Codable, Hashable, Sendable {
     public var active: Bool
     public var connected: Bool
     public var createdAt: Date
+    public var firstSyncDays: Int?
     public var id: String
     public var kind: String
     public var lastError: String?
     public var lastPolledAt: Date?
+    public var lastSync: SourceSyncResult?
     public var name: String
+    public var query: String?
     public var scopes: [String]
 
     public init(
         active: Bool,
         connected: Bool,
         createdAt: Date,
+        firstSyncDays: Int? = nil,
         id: String,
         kind: String,
         lastError: String? = nil,
         lastPolledAt: Date? = nil,
+        lastSync: SourceSyncResult? = nil,
         name: String,
+        query: String? = nil,
         scopes: [String]
     ) {
         self.active = active
         self.connected = connected
         self.createdAt = createdAt
+        self.firstSyncDays = firstSyncDays
         self.id = id
         self.kind = kind
         self.lastError = lastError
         self.lastPolledAt = lastPolledAt
+        self.lastSync = lastSync
         self.name = name
+        self.query = query
         self.scopes = scopes
     }
 
@@ -1423,11 +1432,14 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         case active
         case connected
         case createdAt = "created_at"
+        case firstSyncDays = "first_sync_days"
         case id
         case kind
         case lastError = "last_error"
         case lastPolledAt = "last_polled_at"
+        case lastSync = "last_sync"
         case name
+        case query
         case scopes
     }
 }
@@ -1448,6 +1460,31 @@ public struct SourceSpanModel: Codable, Hashable, Sendable {
         case end
         case sourceItemId = "source_item_id"
         case start
+    }
+}
+
+/// What the most recent poll of a connected source found — or why it gave up.
+public struct SourceSyncResult: Codable, Hashable, Sendable {
+    public var at: Date
+    public var caughtUp: Bool
+    public var error: String?
+    public var queued: Int
+    public var seen: Int
+
+    public init(at: Date, caughtUp: Bool, error: String? = nil, queued: Int, seen: Int) {
+        self.at = at
+        self.caughtUp = caughtUp
+        self.error = error
+        self.queued = queued
+        self.seen = seen
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case at
+        case caughtUp = "caught_up"
+        case error
+        case queued
+        case seen
     }
 }
 

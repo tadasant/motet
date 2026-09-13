@@ -298,6 +298,26 @@ the roster rather than from this repo. Which secrets carry `motet-local=true` is
 private infrastructure repo's decision (tadasant-internal#2804), which is exactly what
 keeps the roster out of a public repo.
 
+### Gmail: what polls, and how far back
+
+**Nothing schedules a poll on a laptop.** `handle_poll` does not run on a clock: a poll is
+queued when a mailbox finishes connecting, and when you ask for one with
+`POST /v1/sources/{id}/poll` — which is what a Sources screen's **Sync now** calls. So new
+mail waits for you to ask. (A deployed cadence, if an environment has one, is configured in
+the private infrastructure repo; nothing in this one sets it.)
+
+**A poll does re-arm itself while its search has pages left**, so a first sync of a large
+backlog drains on its own, one bounded poll after another, and stops once it is caught up.
+`GET /v1/sources` says where it got to: `last_sync.caught_up`, and `seen` / `queued` for the
+most recent run.
+
+**The first sync reads only the last `MOTET_GMAIL_FIRST_SYNC_DAYS` days** (7 when unset;
+read by the worker, at the moment a first sync starts). Older matching mail is not
+ingested, on purpose — an unbounded first sync would ingest an archive and bill dedup for
+all of it. The window a source's first sync used is reported as `first_sync_days`. There is
+no supported way to re-read an already-synced source with a wider window yet; that is an
+open question on motet#94, not a missing step.
+
 ### Going back
 
 Delete `.env`, or `unset UV_ENV_FILE`. `bin/ci` is untouched by any of this either way,

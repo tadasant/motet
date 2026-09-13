@@ -20,7 +20,7 @@ from .handlers import (
     enqueue_paste,
     enqueue_smart_episode,
 )
-from .ingest import enqueue_source_poll, poll_key
+from .ingest import enqueue_source_poll, poll_key, source_query
 from .jobs import DEFAULT_MAX_ATTEMPTS, Job, QueueReadiness, enqueue, queue_depths, queue_readiness
 from .loop import drain
 from .queues import Queue
@@ -43,4 +43,5 @@ __all__ = [
     "poll_key",
     "queue_depths",
     "queue_readiness",
+    "source_query",
 ]

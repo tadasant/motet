@@ -17,12 +17,26 @@ import psycopg
 import pytest
 from motet_db import CredentialPurpose, SourceItemState, SourceKind, phase2, repo
 from motet_inference import fake_stages
-from motet_sources import GMAIL_READONLY_SCOPE, PROVIDER, SourceAuthError
+from motet_sources import (
+    DEFAULT_QUERY,
+    GMAIL_READONLY_SCOPE,
+    PROVIDER,
+    FakeMailClient,
+    RawMessage,
+    SourceAuthError,
+)
+from motet_sources.gmail import DEFAULT_FIRST_SYNC_DAYS, FIRST_SYNC_DAYS_ENV
 from motet_storage import LocalObjectStore
 from motet_vault import build_key_manager
 from motet_workers import Queue, drain, enqueue_integration, enqueue_source_poll, poll_key
 from motet_workers.handlers import Context, PermanentFailure
-from motet_workers.ingest import _sent_at, handle_extract, handle_poll
+from motet_workers.ingest import (
+    MAX_PAGES_PER_POLL,
+    POLL_PAGE_SIZE,
+    _sent_at,
+    handle_extract,
+    handle_poll,
+)
 from motet_workers.jobs import DEFAULT_MAX_ATTEMPTS
 
 USER = repo.OWNER_USER_ID
@@ -129,30 +143,25 @@ def test_a_source_with_no_credential_is_a_permanent_failure(
         handle_poll(context(db), {"source_id": source.id})
 
 
-def test_an_expired_cursor_schedules_a_resync_rather_than_failing(
-    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+def test_a_history_id_cursor_from_before_the_search_is_resynced_not_errored(
+    db: psycopg.Connection[Any],
 ) -> None:
-    """A provider's history window moving past our bookmark is not an error.
+    """A source connected before listing moved to search carries a Gmail history id.
 
-    The repair is a bounded first sync, which is a different action from a retry — so the
-    cursor is dropped and a fresh poll is queued, and the source records why.
+    The adapter cannot resume from one, so it starts a bounded first sync — in the same
+    poll, without an error on the source, and recording the window it used.
     """
-    from motet_sources import FakeMailClient
-
     source_id = connected_source(db)
-    phase2.set_source_sync_state(db, source_id, {"cursor": "999"})
+    phase2.set_source_sync_state(db, source_id, {"cursor": "10892907"})
 
-    monkeypatch.setattr(
-        "motet_workers.ingest.build_mail_client",
-        lambda token, env=None: FakeMailClient(expire_cursor=True),
-    )
     handle_poll(context(db), {"source_id": source_id})
 
     source = phase2.get_source(db, source_id)
     assert source is not None
-    assert source.sync_state["cursor"] is None
-    assert source.last_error is not None and "history window" in source.last_error
-    assert len(_jobs(db, Queue.POLL)) == 1, "a fresh bounded sync should be queued"
+    assert source.last_error is None
+    assert source.sync_state["cursor"].startswith("fake:"), "a search watermark now"
+    assert source.sync_state["first_sync_days"] == DEFAULT_FIRST_SYNC_DAYS
+    assert len(_jobs(db, Queue.EXTRACT)) == 4
 
 
 def test_a_revoked_mailbox_is_deactivated_rather_than_retried(
@@ -189,6 +198,240 @@ def test_the_poll_serialization_key_is_per_source(db: psycopg.Connection[Any]) -
     job = _jobs(db, Queue.POLL)[0]
     assert job["serialize_key"] == poll_key(source_id)
     assert job["serialize_key"] != USER
+
+
+# --- a search longer than one run, and the filter on every poll ----------------------
+#
+# motet#94: the first sync read one page and moved the cursor to the mailbox's live
+# position, so whatever that page did not include was never listed again. motet#95: every
+# poll after the first ignored the source's filter. The mailbox here is the fake, so these
+# pin the *handler's* half — the cursor, the chain, the bounds, and what lands on the
+# source; `sources/tests/test_gmail.py` pins the adapter's half on the wire.
+
+
+def synthesized_mailbox(count: int) -> list[RawMessage]:
+    """``count`` messages that exist only to be listed. Polling fetches no bodies."""
+    return [RawMessage(id=f"synth_{i:04d}", raw=b"") for i in range(count)]
+
+
+def use_mailbox(monkeypatch: pytest.MonkeyPatch, mailbox: FakeMailClient) -> None:
+    """Hand every poll the same mailbox, so messages can arrive between polls."""
+    monkeypatch.setattr("motet_workers.ingest.build_mail_client", lambda token, env=None: mailbox)
+
+
+def test_a_search_longer_than_one_run_leaves_the_cursor_on_the_next_page(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run stops at its bound and says so; it does not step past what it did not read.
+
+    Pages come back short — 20 against a limit of 50 — so a run needs three of them to
+    reach its ceiling, and "fewer than asked for" never reads as the end of the search.
+    """
+    mailbox = FakeMailClient(messages=synthesized_mailbox(170), page_size=20)
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    queued = [job["payload"]["message_id"] for job in _jobs(db, Queue.EXTRACT)]
+    assert POLL_PAGE_SIZE <= len(queued) < POLL_PAGE_SIZE + 20, "bounded, page-whole"
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    last = source.sync_state["last_sync"]
+    assert last["caught_up"] is False
+    assert (last["seen"], last["queued"], last["error"]) == (len(queued), len(queued), None)
+    # The cursor holds the pass's place — "after:0, pass ended at 170, next offset 60" —
+    # rather than a watermark past the 110 messages nobody has read yet.
+    assert source.sync_state["cursor"] == f"fake:0:170:{len(queued)}"
+    assert len(_jobs(db, Queue.POLL)) == 1, "the next link of the chain is queued"
+
+
+def test_a_chain_of_polls_drains_the_whole_search_exactly_once(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """170 matching messages become 170 extract jobs — the number motet#94 lost 130 of."""
+    mailbox = FakeMailClient(messages=synthesized_mailbox(170), page_size=20)
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+
+    polls = 0
+    while True:
+        handle_poll(context(db), {"source_id": source_id})
+        polls += 1
+        rearmed = _jobs(db, Queue.POLL)
+        _clear(db, Queue.POLL)
+        if not rearmed:
+            break
+        assert polls < 10, "the chain must end"
+
+    queued = [job["payload"]["message_id"] for job in _jobs(db, Queue.EXTRACT)]
+    assert len(queued) == 170
+    assert set(queued) == {f"synth_{i:04d}" for i in range(170)}
+    assert polls == 3, "60 + 60 + 50: each run bounded, the search finished"
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.sync_state["last_sync"]["caught_up"] is True
+    assert source.sync_state["cursor"] == "fake:170", "the watermark, once and only once exhausted"
+
+
+def test_a_run_of_already_queued_pages_is_bounded_by_pages_not_only_by_messages(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page of messages already handed on costs a request and queues nothing.
+
+    Without a page bound, a long run of those — a re-read after a refused page token, say —
+    would keep one job listing for as long as the search is.
+    """
+    mailbox = FakeMailClient(messages=synthesized_mailbox(40), page_size=1)
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+    for i in range(40):
+        db.execute(
+            "INSERT INTO jobs (queue, payload) VALUES ('extract', %s::jsonb)",
+            (f'{{"source_id": "{source_id}", "message_id": "synth_{i:04d}"}}',),
+        )
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    assert len(mailbox.searches) == MAX_PAGES_PER_POLL
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.sync_state["last_sync"]["queued"] == 0
+    assert source.sync_state["last_sync"]["caught_up"] is False
+    assert len(_jobs(db, Queue.POLL)) == 1, "and it carries on from where it stopped"
+
+
+def test_an_incremental_poll_sends_the_sources_filter(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """motet#95. The filter rides on the poll after the first sync, not only on the first.
+
+    Before, an incremental poll asked for "everything added since this history id" and the
+    filter was never sent — a receipt in the inbox arrived under a Newsletters filter.
+    """
+    mailbox = FakeMailClient(messages=synthesized_mailbox(3))
+    use_mailbox(monkeypatch, mailbox)
+    source = phase2.create_source(
+        db,
+        user_id=USER,
+        kind=SourceKind.GMAIL.value,
+        name="Gmail",
+        config={"query": "label:newsletters"},
+    )
+    phase2.store_source_credential(
+        db,
+        build_key_manager(),
+        user_id=USER,
+        source_id_=source.id,
+        provider=PROVIDER,
+        purpose=CredentialPurpose.REFRESH.value,
+        secret="fake-refresh-token",
+        scopes=[GMAIL_READONLY_SCOPE],
+    )
+
+    handle_poll(context(db), {"source_id": source.id})  # the first sync
+    mailbox.messages.append(RawMessage(id="synth_arrived_later", raw=b""))
+    handle_poll(context(db), {"source_id": source.id})  # incremental
+
+    assert mailbox.searches == [
+        "(label:newsletters) after:0",
+        "(label:newsletters) after:3",
+    ], "both polls are the same search; the second is bounded by the first's watermark"
+    queued = [job["payload"]["message_id"] for job in _jobs(db, Queue.EXTRACT)]
+    assert queued[-1] == "synth_arrived_later"
+    assert len(queued) == 4
+
+
+def test_a_source_with_no_filter_of_its_own_is_polled_with_the_default(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mailbox = FakeMailClient(messages=synthesized_mailbox(1))
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    handle_poll(context(db), {"source_id": source_id})
+    assert all(search.startswith(f"({DEFAULT_QUERY}) after:") for search in mailbox.searches)
+    assert len(mailbox.searches) == 2
+
+
+def test_the_first_sync_window_is_a_fact_on_the_source(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded by the run that chose it, and left alone by the polls after it."""
+    monkeypatch.setenv(FIRST_SYNC_DAYS_ENV, "30")
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    monkeypatch.setenv(FIRST_SYNC_DAYS_ENV, "90")
+    handle_poll(context(db), {"source_id": source_id})
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.sync_state["first_sync_days"] == 30, "what was searched, not today's setting"
+
+
+def test_a_message_extraction_skipped_is_not_fetched_again_when_re_listed(
+    db: psycopg.Connection[Any],
+) -> None:
+    """The search overlaps its previous pass, so it re-lists messages on purpose.
+
+    One that became a source item is caught by the unique index. One extraction *skipped*
+    — a receipt — has no source item, only a finished extract job, and without the job half
+    of the pre-check every poll inside the overlap would fetch it again.
+    """
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    for job in _jobs(db, Queue.EXTRACT):
+        handle_extract(context(db), job["payload"])
+    db.execute("UPDATE jobs SET state = 'done' WHERE queue = 'extract'")
+    assert "04_receipt_too_short" not in {
+        row["external_id"] for row in _source_items(db, source_id)
+    }
+
+    # Re-read the whole mailbox, as a history-id source's resync does.
+    phase2.set_source_sync_state(db, source_id, {"cursor": None})
+    handle_poll(context(db), {"source_id": source_id})
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT payload ->> 'message_id' AS id, count(*) AS n FROM jobs "
+            "WHERE queue = 'extract' GROUP BY 1"
+        )
+        counts = {row["id"]: row["n"] for row in cur.fetchall()}
+    assert counts["04_receipt_too_short"] == 1
+    assert set(counts.values()) == {1}
+
+
+def test_a_poll_that_gives_up_says_why_on_the_source_and_keeps_its_place(
+    db: psycopg.Connection[Any], database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the runner, because the handler's own transaction is the one that rolled back.
+
+    A revoked mailbox fails permanently on the first attempt, which is the recorder's path
+    without five rounds of backoff in front of it.
+    """
+
+    class Revoked:
+        def refresh(self, *, refresh_token: str) -> Any:
+            raise SourceAuthError("invalid_grant")
+
+    source_id = connected_source(db)
+    phase2.set_source_sync_state(
+        db, source_id, {"cursor": "fake:0:170:60", "last_sync": {"caught_up": False}}
+    )
+    enqueue_source_poll(db, source_id)
+    db.commit()
+    monkeypatch.setattr("motet_workers.ingest.build_oauth_client", lambda env=None: Revoked())
+
+    drain(Queue.POLL, database_url)
+    db.commit()
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.last_error is not None and "reconnecting" in source.last_error
+    last = source.sync_state["last_sync"]
+    assert last["error"] is not None and "reconnecting" in last["error"]
+    assert (last["seen"], last["queued"], last["caught_up"]) == (0, 0, False)
+    assert source.sync_state["cursor"] == "fake:0:170:60", "nothing read, nothing skipped"
 
 
 # --- extract -------------------------------------------------------------------------

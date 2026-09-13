@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.deps import dek_wrapper, reset_store
 from motet_db import CredentialPurpose, phase2, repo
+from motet_sources import DEFAULT_QUERY
 from motet_vault import BACKEND_ENV, KMS_KEY_ENV, CloudKmsKeyManager
 from motet_workers import Queue, drain
 
@@ -321,6 +322,70 @@ def test_listing_sources_reports_connection_without_decrypting(api: TestClient) 
     # The Phase 1 paste source is listed too, and has no credential.
     paste = next(source for source in listed if source["id"] == repo.PASTE_SOURCE_ID)
     assert paste["connected"] is False
+
+
+def test_a_source_reports_its_filter_its_window_and_what_its_last_poll_found(
+    api: TestClient, _migrated: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three facts a poll used to leave only in a log line (motet#94, motet#95).
+
+    Before the first poll there is a filter and nothing else; after it, the window that
+    first sync was bounded to and what it found. The fake mailbox holds four messages, so
+    the poll sees four, queues four and is caught up.
+    """
+    monkeypatch.setenv("MOTET_GMAIL_FIRST_SYNC_DAYS", "14")
+    started = api.post(
+        "/v1/sources/connect",
+        json={
+            "provider": "gmail",
+            "name": "Gmail",
+            "query": "label:newsletters",
+            "redirect_uri": REDIRECT,
+        },
+        headers=AUTH,
+    )
+    done = api.post(
+        "/v1/sources/callback",
+        json={"state": started.json()["state"], "code": "fake-auth-code"},
+        headers=AUTH,
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["query"] == "label:newsletters"
+    assert (done.json()["first_sync_days"], done.json()["last_sync"]) == (None, None)
+
+    drain(Queue.POLL, _migrated)
+
+    listed = api.get("/v1/sources", headers=AUTH).json()
+    gmail = next(source for source in listed if source["id"] == started.json()["source_id"])
+    assert gmail["query"] == "label:newsletters"
+    assert gmail["first_sync_days"] == 14
+    last = gmail["last_sync"]
+    assert (last["seen"], last["queued"], last["caught_up"], last["error"]) == (4, 4, True, None)
+    assert last["at"]
+
+    paste = next(source for source in listed if source["id"] == repo.PASTE_SOURCE_ID)
+    assert (paste["query"], paste["first_sync_days"], paste["last_sync"]) == (None, None, None)
+
+
+def test_a_source_with_no_filter_of_its_own_reports_the_default_it_is_polled_with(
+    api: TestClient,
+) -> None:
+    source_id = connect_gmail(api)
+    listed = api.get("/v1/sources", headers=AUTH).json()
+    gmail = next(source for source in listed if source["id"] == source_id)
+    assert gmail["query"] == DEFAULT_QUERY
+
+
+def test_an_unreadable_last_sync_is_reported_as_absent_not_as_a_500(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    source_id = connect_gmail(api)
+    phase2.set_source_sync_state(db, source_id, {"last_sync": {"at": "not a time"}})
+    db.commit()
+    listed = api.get("/v1/sources", headers=AUTH)
+    assert listed.status_code == 200
+    gmail = next(source for source in listed.json() if source["id"] == source_id)
+    assert gmail["last_sync"] is None
 
 
 def test_disconnecting_forgets_the_credential_and_stops_polling(

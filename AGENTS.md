@@ -1063,9 +1063,10 @@ everything the surface reports.
 mean that.** The first is on `(source_id, external_id)` and drops a job whose message
 already has a source item — a `done` job in the ordinary case, a lease reclaimed after the
 insert committed in the awkward one. The second keeps only the newest *open* job for a
-message, because a message can genuinely have two: an expired provider cursor makes
-`handle_poll` re-list a window, and a message whose earlier extraction *failed* has no
-source item, so the pre-check that makes a re-poll idempotent does not fire. Reporting one
+message. `handle_poll`'s pre-check refuses to queue a message that already has an extract
+job in any state, so two jobs for one message are no longer routine — but a re-read that
+reaches back past job retention (below) can still meet a message whose earlier job was
+pruned, and the exclusion is what keeps that one line too. Reporting one
 newsletter twice would be the accounting surface contradicting itself, which is motet#41's
 shape one stage up. `source_kind` rides on both arms because it is
 what decides the repair: a failed paste can be pasted again, and a failed mailbox message
@@ -1585,13 +1586,13 @@ the short one is the one that fails quietly.**
 | | `done` — 7 days | `failed` — 90 days |
 |---|---|---|
 | What the row still holds | when a stage ran, and how many attempts it took | that, plus `last_error` |
-| Who else holds it | `source_items.state`, `episodes.state` | for `integrate`/`assemble`/`script`/`tts`, `si.last_error`. **For `poll` and `extract`, nobody** |
+| Who else holds it | `source_items.state`, `episodes.state` | for `integrate`/`assemble`/`script`/`tts`, `si.last_error`; for `poll`, `sources.last_error`. **For `extract`, nobody** |
 | The floor it must clear | `repo.INTEGRATED_GRACE`, ten minutes | the debugging window for a failure a person has not looked at yet |
 
 **`failed` is materially longer because of one specific row.** `failure_recorders` has no
-entry for `poll` or `extract` — neither has a domain object to mark, extraction is what
-writes the `source_items` row, and `handle_poll` has already advanced the cursor past the
-message — so a failed `extract` job *is* the record that a newsletter arrived and was lost
+entry for `extract` — there is no domain object to mark, extraction is what writes the
+`source_items` row, and `handle_poll` has already advanced the cursor past the message — so
+a failed `extract` job *is* the record that a newsletter arrived and was lost
 (motet#35). `list_ingestion`'s extract arm, which is what puts it on the user's screen, is
 driven by those job rows and has no time bound of its own: delete one and the message does
 not age off the panel, it disappears from it, with nothing anywhere saying it existed. A
@@ -1924,8 +1925,55 @@ adapter, and deterministic fakes — the same shape as the inference seam, readi
 
 **The interface is deliberately smaller than Gmail's API**: list what arrived since a
 cursor, and fetch one message's raw RFC 822 bytes. A narrow interface is what makes the fake
-honest; a fake that had to model Gmail's history API would be a worse Gmail rather than a
+honest; a fake that had to model Gmail's search syntax would be a worse Gmail rather than a
 better test.
+
+**Every listing is a `messages.list` search carrying the source's filter, first sync or
+not** — `(<filter>) after:<epoch seconds>`, paged with `pageToken`. Incremental polls used to
+ask the history API, which is cheaper and has no `q`, so from the second poll on everything
+added to the mailbox was ingested whatever the filter said (motet#95). A watermarked search
+costs the same one request for a quiet mailbox, and it is the only shape that can honour an
+arbitrary Gmail query; resolving a label to a `labelId` for history would have served one
+kind of filter and special-cased the rest.
+
+Four things about it are the design, and each is a failure the first version had:
+
+- **A pass is followed to its end, and the cursor never moves past a page nobody read.**
+  The first sync used to read one page of 50 and then set the cursor to the mailbox's live
+  history id, so a 170-message backlog became 40 items and nothing said so (motet#94). The
+  cursor now holds the pass's `nextPageToken` for as long as there is one; only an exhausted
+  pass moves the watermark, and only to where that pass *began*, less an hour. "Fewer than
+  50 came back" proves nothing — Gmail pages can come back short with more behind them — so
+  the token is the only end-of-search signal read.
+- **A run is bounded; the search is not, so the run re-arms.** `handle_poll` stops paging at
+  `POLL_PAGE_SIZE` queued or `MAX_PAGES_PER_POLL` read, records where it got to, and — only
+  while the search has pages left — enqueues the next poll with no delay, which the same
+  drain then claims. That is the existing worker-side re-arm the drain-trigger section
+  describes, keyed on "more pages" rather than on an expired history id, and the chain ends
+  on the run that finds no further page. **This is why a first connect's total extraction
+  spend went up**: it used to stop silently at one page, and now the whole window drains.
+- **The overlap is deliberate, and the pre-check is what makes it free.** The watermark
+  trails the pass start by `WATERMARK_OVERLAP_SECONDS` because the pass start is this
+  process's clock and Gmail's index lags arrival. What the overlap re-lists is dropped before
+  a fetch by `phase2.unqueued_message_ids`, which counts an `extract` job in *any* state as
+  "already handed on" — without that half, a receipt extraction skipped has no source item
+  and would be fetched again on every poll inside the overlap.
+- **The window is a fact on the source, not a constant in the adapter.** A first sync is
+  bounded to `MOTET_GMAIL_FIRST_SYNC_DAYS` (default 7), and the run that starts one records
+  the value in `sync_state.first_sync_days`. Each run records `sync_state.last_sync` (`at`,
+  `seen`, `queued`, `caught_up`, `error`); a poll that gives up after its retries writes its
+  reason there and on `sources.last_error` through the `poll` failure recorder, because its
+  own transaction is the one that rolled back. `SourceResponse` reports `query`,
+  `first_sync_days` and `last_sync`; the cursor stays the adapter's and is never reported.
+
+**A cursor the adapter did not write is a bounded first sync, not an error.** A source
+connected before the change carries a history id; re-reading its window is the repair, and
+it recovers what that source's first sync dropped for as far back as the window reaches.
+Two things this still does not do, both inherited from the history version rather than
+introduced: a message that *starts* matching the filter after it arrived — a label added a
+week later — is older than the watermark and is not listed, and Gmail offers no
+oldest-first search, so across the pages of one long pass the newer page is ingested first
+(within a page the order is still oldest first).
 
 **Fetching returns raw bytes, not a parsed message.** Parsing is
 `motet_sources.extract`, and it runs identically on real and fake input — which is what

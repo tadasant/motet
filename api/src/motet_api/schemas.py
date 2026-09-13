@@ -591,6 +591,32 @@ class FeedInfoResponse(BaseModel):
 # --- Phase 2: connected sources ------------------------------------------------------
 
 
+class SourceSyncResult(BaseModel):
+    """What the most recent poll of a connected source found — or why it gave up."""
+
+    at: datetime = Field(description="When that poll finished, or gave up.")
+    seen: int = Field(
+        description=(
+            "Messages it listed that match the source's filter, including ones already "
+            "ingested. Zero for a poll that gave up."
+        )
+    )
+    queued: int = Field(description="Messages new to Motet that it queued for extraction.")
+    caught_up: bool = Field(
+        description=(
+            "False while the search has matching messages left to list — a first sync of "
+            "a large backlog takes several polls, and each one queues the next. True once "
+            "the search is exhausted and only new mail is left to find."
+        )
+    )
+    error: str | None = Field(
+        description=(
+            "Why the poll gave up after its retries, or null. A poll still being retried "
+            "is not reported here."
+        )
+    )
+
+
 class SourceResponse(BaseModel):
     """A place source items come from — pasted text, or a connected mailbox."""
 
@@ -612,6 +638,23 @@ class SourceResponse(BaseModel):
     last_polled_at: datetime | None
     last_error: str | None
     created_at: datetime
+    query: str | None = Field(
+        description=(
+            "The search this source is polled with — its own, or the default when it has "
+            "none — applied on every poll, not only the first. Null for a source that is "
+            "not polled."
+        ),
+    )
+    first_sync_days: int | None = Field(
+        description=(
+            "How many days back this source's most recent first sync reached. A first sync "
+            "reads only that window, so older matching mail is not ingested. Null until "
+            "a first sync has run."
+        ),
+    )
+    last_sync: SourceSyncResult | None = Field(
+        description="The most recent poll's result. Null until one has run."
+    )
 
 
 class ConnectSourceRequest(BaseModel):

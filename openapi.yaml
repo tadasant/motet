@@ -1645,6 +1645,13 @@ components:
           format: date-time
           title: Created At
           type: string
+        first_sync_days:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: How many days back this source's most recent first sync reached. A first sync reads
+            only that window, so older matching mail is not ingested. Null until a first sync has run.
+          title: First Sync Days
         id:
           title: Id
           type: string
@@ -1663,9 +1670,21 @@ components:
             type: string
           - type: 'null'
           title: Last Polled At
+        last_sync:
+          anyOf:
+          - $ref: '#/components/schemas/SourceSyncResult'
+          - type: 'null'
+          description: The most recent poll's result. Null until one has run.
         name:
           title: Name
           type: string
+        query:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: "The search this source is polled with \u2014 its own, or the default when it has\
+            \ none \u2014 applied on every poll, not only the first. Null for a source that is not polled."
+          title: Query
         scopes:
           description: OAuth scopes actually granted, which may be more than were asked for.
           items:
@@ -1682,6 +1701,9 @@ components:
       - last_polled_at
       - last_error
       - created_at
+      - query
+      - first_sync_days
+      - last_sync
       title: SourceResponse
       type: object
     SourceSpanModel:
@@ -1701,6 +1723,44 @@ components:
       - start
       - end
       title: SourceSpanModel
+      type: object
+    SourceSyncResult:
+      description: "What the most recent poll of a connected source found \u2014 or why it gave up."
+      properties:
+        at:
+          description: When that poll finished, or gave up.
+          format: date-time
+          title: At
+          type: string
+        caught_up:
+          description: "False while the search has matching messages left to list \u2014 a first sync\
+            \ of a large backlog takes several polls, and each one queues the next. True once the search\
+            \ is exhausted and only new mail is left to find."
+          title: Caught Up
+          type: boolean
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Why the poll gave up after its retries, or null. A poll still being retried is
+            not reported here.
+          title: Error
+        queued:
+          description: Messages new to Motet that it queued for extraction.
+          title: Queued
+          type: integer
+        seen:
+          description: Messages it listed that match the source's filter, including ones already ingested.
+            Zero for a poll that gave up.
+          title: Seen
+          type: integer
+      required:
+      - at
+      - seen
+      - queued
+      - caught_up
+      - error
+      title: SourceSyncResult
       type: object
     StartLoginRequest:
       description: Begin a Google sign-in. Answered with a URL for the browser to visit.

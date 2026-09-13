@@ -56,27 +56,55 @@ def load_fixture_messages(directory: Path = FIXTURES_DIR) -> list[RawMessage]:
 
 @dataclass
 class FakeMailClient:
-    """A mailbox that hands out fixture messages, paging by an integer cursor.
+    """A mailbox that hands out fixture messages as a paged, watermarked search.
 
-    The cursor is the count already delivered, rendered as a string, because the interface
-    says a cursor is opaque and the fake should not be the thing that quietly makes it
-    structured. It behaves like a real one in the way that matters: resuming from a stale
-    cursor returns nothing new rather than replaying the mailbox.
+    The same shape as the real adapter, because that shape is what a poll has to get right:
+    a pass lists everything past the watermark newest first, a page at a time; the cursor
+    holds the pass's place while it has more; and only an exhausted pass moves the
+    watermark, to where that pass began. Arrival order stands in for time — a message's
+    index in :attr:`messages` is its timestamp — so appending to the list is a message
+    arriving. Resuming from a caught-up cursor returns nothing new rather than replaying
+    the mailbox.
+
+    The cursor is opaque in the same sense the interface means: ``fake:`` and a few
+    integers, and anything else — a history id stored before listing moved to search, most
+    obviously — is treated as no cursor, exactly as the real adapter treats it.
     """
 
     messages: list[RawMessage] = field(default_factory=load_fixture_messages)
-    #: Set to make the next ``list_messages`` report an expired cursor, so the caller's
-    #: full-resync path is reachable in a test without a real Gmail history window.
-    expire_cursor: bool = False
+    #: The provider's own page size. Below the caller's ``limit`` it produces a *short*
+    #: page with more behind it, which is the case that proves "fewer than asked for" is
+    #: not the end of a search.
+    page_size: int | None = None
+    #: Every search this mailbox was sent, in the form the real adapter sends it — so a test
+    #: can see that the source's filter rode on an incremental poll and not only a first
+    #: sync (motet#95).
+    searches: list[str] = field(default_factory=list)
 
     def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
-        if self.expire_cursor and cursor is not None:
-            return MessagePage(messages=(), cursor=None, cursor_expired=True)
-        start = int(cursor) if cursor else 0
-        window = self.messages[start : start + max(1, limit)]
+        from .gmail import first_sync_days, search_query  # noqa: PLC0415
+
+        state = _fake_cursor(cursor)
+        window_days: int | None = None
+        if state is None:
+            # The fake's window is the whole mailbox; it reports the configured one so the
+            # caller's handling of the reported window is exercised all the same.
+            window_days = first_sync_days()
+            state = (0, None, 0)
+        after, started, offset = state
+        if started is None:
+            started, offset = len(self.messages), 0
+        self.searches.append(search_query(query, after=after))
+
+        in_pass = list(reversed(self.messages[after:started]))  # newest first, like Gmail
+        size = max(1, min(limit, self.page_size or limit))
+        page = in_pass[offset : offset + size]
+        more = offset + size < len(in_pass)
         return MessagePage(
-            messages=tuple(MessageRef(id=message.id) for message in window),
-            cursor=str(start + len(window)),
+            messages=tuple(MessageRef(id=message.id) for message in reversed(page)),
+            cursor=f"fake:{after}:{started}:{offset + size}" if more else f"fake:{started}",
+            more=more,
+            first_sync_days=window_days,
         )
 
     def fetch_message(self, message_id: str) -> RawMessage:
@@ -84,6 +112,21 @@ class FakeMailClient:
             if message.id == message_id:
                 return message
         raise SourceError(f"no such message in the fake mailbox: {message_id!r}")
+
+
+def _fake_cursor(cursor: str | None) -> tuple[int, int | None, int] | None:
+    """``(after, started, offset)`` out of a cursor this fake wrote, or None for any other."""
+    if not cursor or not cursor.startswith("fake:"):
+        return None
+    try:
+        parts = [int(part) for part in cursor.removeprefix("fake:").split(":")]
+    except ValueError:
+        return None
+    if len(parts) == 1:
+        return (parts[0], None, 0)
+    if len(parts) == 3:
+        return (parts[0], parts[1], parts[2])
+    return None
 
 
 @dataclass(frozen=True)

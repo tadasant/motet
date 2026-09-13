@@ -59,8 +59,10 @@ from motet_workers import (
     enqueue_smart_episode,
     enqueue_source_poll,
     queue_readiness,
+    source_query,
 )
 from motet_workers.queues import PIPELINE
+from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
 from . import obs
@@ -144,6 +146,7 @@ from .schemas import (
     SourceItemResponse,
     SourceResponse,
     SourceSpanModel,
+    SourceSyncResult,
     StartLoginRequest,
     StartLoginResponse,
 )
@@ -1390,6 +1393,7 @@ def list_sources(conn: Conn, user_id: User) -> list[SourceResponse]:
                 last_polled_at=source.last_polled_at,
                 last_error=source.last_error,
                 created_at=source.created_at,
+                **sync_facts(source),
             )
         )
     return out
@@ -1560,6 +1564,7 @@ def oauth_callback(
         last_polled_at=source.last_polled_at,
         last_error=None,
         created_at=source.created_at,
+        **sync_facts(source),
     )
 
 
@@ -1592,6 +1597,7 @@ def poll_source(
         last_polled_at=source.last_polled_at,
         last_error=source.last_error,
         created_at=source.created_at,
+        **sync_facts(source),
     )
 
 
@@ -1861,6 +1867,31 @@ def _highlight(item: Highlight) -> HighlightResponse:
         anchor_ms=item.anchor_ms,
         created_at=item.created_at,
     )
+
+
+def sync_facts(source: StoredSource) -> dict[str, Any]:
+    """The three facts a poll records on a source, as ``SourceResponse`` fields.
+
+    Read out of ``sync_state``, which the worker writes and this route only reports. The
+    cursor is deliberately not among them: it is the adapter's own, and opaque above it.
+    """
+    if source.kind != SourceKind.GMAIL.value:
+        return {"query": None, "first_sync_days": None, "last_sync": None}
+    days = source.sync_state.get("first_sync_days")
+    raw = source.sync_state.get("last_sync")
+    last: SourceSyncResult | None = None
+    if isinstance(raw, dict):
+        try:
+            last = SourceSyncResult.model_validate(raw)
+        except ValidationError:
+            # A shape this build does not know is reported as absent rather than as a
+            # 500 on the Sources screen; the worker is what writes it.
+            logger.warning("source %s has an unreadable last_sync; not reporting it", source.id)
+    return {
+        "query": source_query(source.config),
+        "first_sync_days": days if isinstance(days, int) and not isinstance(days, bool) else None,
+        "last_sync": last,
+    }
 
 
 def repo_sources(conn: psycopg.Connection[Any], user_id: str) -> list[StoredSource]:

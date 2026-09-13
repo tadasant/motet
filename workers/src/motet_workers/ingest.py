@@ -59,10 +59,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("motet.worker.ingest")
 
-#: Messages one poll will look at. A ceiling rather than a target: the cursor advances by
-#: what was actually seen, so a mailbox with more waiting is drained over several runs
-#: instead of in one job that outlives its lease.
+#: Messages one poll will queue, and the page size it asks the provider for. A ceiling
+#: rather than a target, and it bounds the *run* rather than the search: a poll stops paging
+#: once it has queued this many, and the next poll resumes the same search from its cursor.
+#: A run can pass it by less than a page, because a page is queued whole or not at all — a
+#: cursor that pointed half-way into a page would need an offset Gmail does not have.
 POLL_PAGE_SIZE = 50
+
+#: Pages one poll will read, whatever they held. The other half of the run's bound: a page
+#: of messages that are all already queued costs a request and queues nothing, and a long
+#: overlap of those must not keep one job listing for longer than its lease is worth.
+MAX_PAGES_PER_POLL = 10
 
 
 class IngestError(RuntimeError):
@@ -80,6 +87,13 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
     The cursor is advanced **in the same transaction** as the enqueued extract jobs. On its
     own it would be the classic ingestion bug — a crash between the two either loses a
     day's newsletters or replays them forever.
+
+    **The cursor never moves past a page nobody read.** A search with more pages than one
+    run takes leaves the cursor on the next page, and this handler queues the next poll to
+    read it (motet#94). That chain is bounded by the search itself: it ends on the run that
+    finds no further page. Each link is one short job, so the lease argument that bounds a
+    run is unchanged — what changed is that the rest of the backlog is *later* rather than
+    *never*.
     """
     source_id = _require(payload, "source_id")
     source = phase2.get_source(context.conn, source_id)
@@ -93,56 +107,107 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
 
     access_token = _access_token(context.conn, source_id=source_id, user_id=source.user_id)
     client = build_mail_client(access_token)
-    cursor = source.sync_state.get("cursor")
-    query = source.config.get("query") or DEFAULT_QUERY
+    stored = source.sync_state.get("cursor")
+    cursor = stored if isinstance(stored, str) else None
+    query = source_query(source.config)
 
-    page = client.list_messages(
-        query=query, cursor=cursor if isinstance(cursor, str) else None, limit=POLL_PAGE_SIZE
-    )
-
-    if page.cursor_expired:
-        # The provider's history window has moved past our bookmark. Not an error and not
-        # retryable: dropping the cursor makes the next poll do a bounded first sync,
-        # which is the actual repair.
-        logger.warning("source %s cursor expired; scheduling a bounded resync", source_id)
-        phase2.set_source_sync_state(
+    seen = queued = pages = 0
+    window_days: int | None = None
+    more = True
+    while more and queued < POLL_PAGE_SIZE and pages < MAX_PAGES_PER_POLL:
+        page = client.list_messages(query=query, cursor=cursor, limit=POLL_PAGE_SIZE)
+        pages += 1
+        seen += len(page.messages)
+        if page.first_sync_days is not None:
+            window_days = page.first_sync_days
+        # A message already handed on — a row, or an extract job in any state — is not
+        # queued again. The search overlaps its previous pass on purpose, and without the
+        # job half a receipt extraction skipped would be fetched again on every poll inside
+        # that overlap. The unique index is still what guarantees one row per message; this
+        # is what keeps the normal case from paying for a fetch it would discard.
+        fresh = phase2.unqueued_message_ids(
             context.conn,
-            source_id,
-            {"cursor": None, "resynced_from": cursor},
-            error="the provider's history window expired; resyncing from a date watermark",
+            source_id_=source_id,
+            external_ids=[message.id for message in page.messages],
         )
-        enqueue(
-            context.conn,
-            Queue.POLL,
-            {"source_id": source_id},
-            serialize_key=poll_key(source_id),
-            delay_seconds=5,
-        )
-        return
+        for message_id in fresh:
+            enqueue(
+                context.conn,
+                Queue.EXTRACT,
+                {"source_id": source_id, "message_id": message_id},
+            )
+        queued += len(fresh)
+        cursor = page.cursor
+        more = page.more
 
-    queued = 0
-    for message in page.messages:
-        # Cheap pre-check so the normal case skips a fetch it would only discard. The
-        # unique index is what actually guarantees this; the check is what makes it fast.
-        if phase2.source_item_exists(context.conn, source_id_=source_id, external_id=message.id):
-            continue
-        enqueue(
-            context.conn,
-            Queue.EXTRACT,
-            {"source_id": source_id, "message_id": message.id},
-        )
-        queued += 1
+    sync_state = {
+        **source.sync_state,
+        "cursor": cursor,
+        "last_sync": {
+            "at": datetime.now(UTC).isoformat(),
+            "seen": seen,
+            "queued": queued,
+            "caught_up": not more,
+            "error": None,
+        },
+    }
+    if window_days is not None:
+        # The window of the most recent first sync, as a fact on the source. Recorded only
+        # by the run that started one, so it describes what was actually searched rather
+        # than what the deployment would choose today.
+        logger.info("source %s: first sync bounded to the last %d days", source_id, window_days)
+        sync_state["first_sync_days"] = window_days
+    phase2.set_source_sync_state(context.conn, source_id, sync_state)
 
-    phase2.set_source_sync_state(
-        context.conn, source_id, {**source.sync_state, "cursor": page.cursor}
-    )
+    if more:
+        # No delay: a drain claims it as soon as this job's lock is released, so one
+        # execution reads the whole window as a chain of bounded jobs.
+        enqueue_source_poll(context.conn, source_id)
     logger.info(
-        "polled source %s: %d message(s) seen, %d queued for extraction, cursor -> %s",
+        "polled source %s: %d message(s) seen over %d page(s), %d queued for extraction; %s",
         source_id,
-        len(page.messages),
+        seen,
+        pages,
         queued,
-        page.cursor,
+        "more waiting, next poll queued" if more else "caught up",
     )
+
+
+def source_query(config: Mapping[str, Any]) -> str:
+    """The search a source is polled with: its own, or the default. Used by every poll."""
+    query = config.get("query")
+    return query.strip() if isinstance(query, str) and query.strip() else DEFAULT_QUERY
+
+
+def record_poll_failure(
+    conn: psycopg.Connection[Any], payload: Mapping[str, Any], error: str
+) -> None:
+    """Put a poll that gave up on its source — ``last_error``, and the last-sync result.
+
+    The runner calls this once the retries are spent (``handlers.failure_recorders``).
+    Written from outside the handler because the handler's own transaction is the one that
+    rolled back. The cursor is left exactly where it was: nothing was read, so nothing may
+    be stepped over, and the next poll resumes from the same place.
+    """
+    source_id = payload.get("source_id")
+    source = phase2.get_source(conn, source_id) if isinstance(source_id, str) else None
+    if source is None or source.kind != SourceKind.GMAIL.value:
+        # Gone, or a poll asked of a source nothing polls — the job row says so, and a
+        # sync result on a source that has no sync would be a fact about nothing.
+        return
+    previous = source.sync_state.get("last_sync")
+    caught_up = previous.get("caught_up", False) if isinstance(previous, dict) else False
+    sync_state = {
+        **source.sync_state,
+        "last_sync": {
+            "at": datetime.now(UTC).isoformat(),
+            "seen": 0,
+            "queued": 0,
+            "caught_up": caught_up,
+            "error": error[:2000],
+        },
+    }
+    phase2.set_source_sync_state(conn, source.id, sync_state, error=error[:2000])
 
 
 def handle_extract(context: Context, payload: Mapping[str, Any]) -> None:

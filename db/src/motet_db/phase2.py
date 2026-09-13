@@ -387,6 +387,52 @@ def source_item_exists(conn: psycopg.Connection[Any], *, source_id_: str, extern
     return row is not None
 
 
+#: The poll's pre-check, hoisted so a test can ``EXPLAIN`` the statement that actually runs.
+#: The job half is served by migration 0013's ``jobs_extract_message_idx``; the source-item
+#: half by the ``(source_id, external_id)`` unique index.
+UNQUEUED_MESSAGE_IDS_SQL = """
+    SELECT m.id
+    FROM unnest(%s::text[]) WITH ORDINALITY AS m(id, n)
+    WHERE NOT EXISTS (
+            SELECT 1 FROM source_items s WHERE s.source_id = %s AND s.external_id = m.id
+          )
+      AND NOT EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.queue = 'extract'
+              AND j.payload ->> 'source_id' = %s
+              AND j.payload ->> 'message_id' = m.id
+          )
+    ORDER BY m.n
+"""
+
+
+def unqueued_message_ids(
+    conn: psycopg.Connection[Any], *, source_id_: str, external_ids: Sequence[str]
+) -> list[str]:
+    """Which of these provider messages have never been queued for extraction, in order.
+
+    "Queued" is either record that a poll already handed the message on: a source item, or
+    an ``extract`` job in any state. The second half is what a watermarked search needs
+    that a history cursor did not. The search deliberately overlaps its previous pass, so
+    it re-lists messages — and a message extraction *skipped* (a receipt, an invite) or
+    gave up on has no source item, only a job, so without it every poll inside the overlap
+    would fetch it again. The job half is only as long as job retention; the overlap is far
+    shorter than that.
+
+    A duplicate id in ``external_ids`` comes back once, and an id queued earlier in the
+    caller's own transaction counts as queued — which is what lets one poll read several
+    pages that overlap each other.
+    """
+    if not external_ids:
+        return []
+    rows = _all(conn, UNQUEUED_MESSAGE_IDS_SQL, (list(external_ids), source_id_, source_id_))
+    out: list[str] = []
+    for row in rows:
+        if row["id"] not in out:
+            out.append(row["id"])
+    return out
+
+
 def insert_polled_source_item(
     conn: psycopg.Connection[Any],
     *,
@@ -734,6 +780,7 @@ __all__ = [
     "set_source_active",
     "set_source_sync_state",
     "source_item_exists",
+    "unqueued_message_ids",
     "start_oauth",
     "store_source_credential",
 ]

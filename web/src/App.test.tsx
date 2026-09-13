@@ -94,6 +94,10 @@ const GMAIL_SOURCE: Source = {
   last_polled_at: null,
   last_error: null,
   created_at: '2026-08-24T00:00:00Z',
+  // Polled with the default search until it has one of its own; no poll has run yet.
+  query: 'category:updates OR category:promotions',
+  first_sync_days: null,
+  last_sync: null,
 }
 
 /**
@@ -110,6 +114,10 @@ const PASTE_SOURCE: Source = {
   last_polled_at: null,
   last_error: null,
   created_at: '2026-08-24T00:00:00Z',
+  // Nothing polls it, so it has no search and no sync to report.
+  query: null,
+  first_sync_days: null,
+  last_sync: null,
 }
 
 /**
