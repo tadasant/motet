@@ -2130,6 +2130,11 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /**
+             * First Sync Days
+             * @description How many days back this source's most recent first sync reached. A first sync reads only that window, so older matching mail is not ingested. Null until a first sync has run.
+             */
+            first_sync_days: number | null;
             /** Id */
             id: string;
             /**
@@ -2141,8 +2146,15 @@ export interface components {
             last_error: string | null;
             /** Last Polled At */
             last_polled_at: string | null;
+            /** @description The most recent poll's result. Null until one has run. */
+            last_sync: components["schemas"]["SourceSyncResult"] | null;
             /** Name */
             name: string;
+            /**
+             * Query
+             * @description The search this source is polled with — its own, or the default when it has none — applied on every poll, not only the first. Null for a source that is not polled.
+             */
+            query: string | null;
             /**
              * Scopes
              * @description OAuth scopes actually granted, which may be more than were asked for.
@@ -2160,6 +2172,38 @@ export interface components {
             source_item_id: string;
             /** Start */
             start: number;
+        };
+        /**
+         * SourceSyncResult
+         * @description What the most recent poll of a connected source found — or why it gave up.
+         */
+        SourceSyncResult: {
+            /**
+             * At
+             * Format: date-time
+             * @description When that poll finished, or gave up.
+             */
+            at: string;
+            /**
+             * Caught Up
+             * @description False while the search has matching messages left to list — a first sync of a large backlog takes several polls, and each one queues the next. True once the search is exhausted and only new mail is left to find.
+             */
+            caught_up: boolean;
+            /**
+             * Error
+             * @description Why the poll gave up after its retries, or null. A poll still being retried is not reported here.
+             */
+            error: string | null;
+            /**
+             * Queued
+             * @description Messages new to Motet that it queued for extraction.
+             */
+            queued: number;
+            /**
+             * Seen
+             * @description Messages it listed that match the source's filter, including ones already ingested. Zero for a poll that gave up.
+             */
+            seen: number;
         };
         /**
          * StartLoginRequest

@@ -54,8 +54,9 @@ from motet_api.drain import (
 )
 from motet_api.main import HEALTH_PATH
 from motet_db import SourceKind, phase2, repo
-from motet_sources import FakeMailClient
+from motet_sources import FakeMailClient, RawMessage
 from motet_workers import Queue, drain
+from motet_workers.ingest import MAX_PAGES_PER_POLL
 
 TOKEN = "test-api-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -531,22 +532,22 @@ class TestOnlyAUsersRequestFiresIt:
         assert done.status_code == 200, done.text
         assert recorder.fired == [DrainReason.SOURCE_POLL], "the user's action fires once"
 
-        # A cursor the fake mailbox will declare expired, so the worker takes the branch
-        # that re-enqueues a poll on its own.
-        phase2.set_source_sync_state(db, started.json()["source_id"], {"cursor": "999"})
-        db.commit()
+        # A search longer than one run can read — one message a page, more pages than a
+        # run's bound — so the poll leaves the rest for a next poll and enqueues it on its
+        # own. The same drain claims it: a chain of two polls, only the first of them ours.
+        mailbox = [RawMessage(id=f"synth_{i:02d}", raw=b"") for i in range(MAX_PAGES_PER_POLL + 2)]
         monkeypatch.setattr(
             "motet_workers.ingest.build_mail_client",
-            lambda token, env=None: FakeMailClient(expire_cursor=True),
+            lambda token, env=None: FakeMailClient(messages=mailbox, page_size=1),
         )
 
-        assert drain(Queue.POLL, os.environ["DATABASE_URL"]) == 1
+        assert drain(Queue.POLL, os.environ["DATABASE_URL"]) == 2
         with psycopg.connect(os.environ["DATABASE_URL"]) as other:
             polls = other.execute(
-                "SELECT count(*), count(*) FILTER (WHERE state = 'ready') "
+                "SELECT count(*), count(*) FILTER (WHERE state = 'done') "
                 "FROM jobs WHERE queue = 'poll'"
             ).fetchone()
-        assert polls is not None and (polls[0], polls[1]) == (2, 1), "the worker re-armed"
+        assert polls is not None and (polls[0], polls[1]) == (2, 2), "the worker re-armed"
         assert recorder.fired == [DrainReason.SOURCE_POLL], "and nothing more fired"
         assert metric.adds == [], "no trigger implementation recorded anything either"
 

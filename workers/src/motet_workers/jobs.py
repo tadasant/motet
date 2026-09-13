@@ -131,10 +131,12 @@ DONE_RETENTION_SECONDS = 7 * 24 * 3600
 #: and the asymmetry is the decision rather than caution.
 #:
 #: **A ``failed`` row's ``last_error`` is the only copy of why a job stopped being retried,
-#: and for two queues it is the only copy of anything.** ``failure_recorders`` has no entry
-#: for ``poll`` or ``extract``, because neither has a domain object to mark: a mailbox
-#: message that could not be fetched has no ``source_items`` row, extraction is what would
-#: have written one, and ``handle_poll`` has already advanced the cursor past it. The failed
+#: and for ``extract`` it is the only copy of anything.** ``failure_recorders`` has no entry
+#: for it, because there is no domain object to mark: a mailbox message that could not be
+#: fetched has no ``source_items`` row, extraction is what would have written one, and
+#: ``handle_poll`` has already advanced the cursor past it. (``poll`` has an entry now — a
+#: poll that gave up writes its reason onto the source — so for it the row is a second
+#: copy.) The failed
 #: job row *is* the record that the message was ever seen (motet#35) — and
 #: ``repo.list_ingestion``'s extract arm, which is what puts it on the user's screen, has no
 #: time bound of its own, so a deleted row does not age out of that panel, it disappears

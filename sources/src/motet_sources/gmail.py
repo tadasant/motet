@@ -1,11 +1,10 @@
-"""The real Gmail adapter — dormant until a Google OAuth client exists.
+"""The real Gmail adapter.
 
-**Nothing here has ever run.** Tadas has not created the OAuth client, so there is no
-client id, no client secret, and no consent screen. This module is written, typed, and
-covered against a stub transport so that the day those arrive is a configuration change:
-set ``GOOGLE_OAUTH_CLIENT_ID`` and ``GOOGLE_OAUTH_CLIENT_SECRET``, flip
-``MOTET_INFERENCE_MODE=real``, and the registry hands out these classes instead of the
-fakes. That is the whole switch — see :mod:`motet_sources.registry`.
+Selected by configuration alone: set ``GOOGLE_OAUTH_CLIENT_ID`` and
+``GOOGLE_OAUTH_CLIENT_SECRET``, flip ``MOTET_INFERENCE_MODE=real``, and the registry hands
+out these classes instead of the fakes — see :mod:`motet_sources.registry`. CI covers it
+against a stub transport (``sources/tests/test_gmail.py``); it has run against a real
+mailbox in local real mode, which is where motet#94 and motet#95 were found.
 
 Raw REST over ``httpx`` rather than ``google-api-python-client``: two endpoints are needed,
 the SDK pulls in a discovery-document machine and its own auth stack, and its credential
@@ -24,9 +23,12 @@ what was asked.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlencode
 
@@ -84,10 +86,80 @@ def first_sync_days() -> int:
     return days if days > 0 else DEFAULT_FIRST_SYNC_DAYS
 
 
+#: How far behind the start of the last completed pass the next one begins. Gmail's search
+#: index can lag a message's arrival by seconds to minutes, and the pass start is read off
+#: this process's clock rather than Google's — so a watermark placed exactly at the pass
+#: start could step over a message that arrived just before it and was not yet searchable.
+#: An hour covers both with room to spare, and what it re-lists is dropped before a fetch:
+#: the poll's pre-check skips a message that already has a row or an extract job.
+WATERMARK_OVERLAP_SECONDS: Final = 3600
+
 #: The default Gmail search. Category-based rather than label-based because it needs no
 #: setup from the user — Gmail already sorts newsletters into `promotions` and `updates`.
 #: Overridable per source in ``sources.config``, which is where a user's own label goes.
 DEFAULT_QUERY: Final = "category:updates OR category:promotions"
+
+_SECONDS_PER_DAY: Final = 86_400
+
+
+def search_query(query: str, *, after: int) -> str:
+    """The ``q`` a listing sends: the source's filter, bounded below by a watermark.
+
+    The filter is parenthesised so that the bound applies to the whole of it rather than
+    to its last term — a user's own query may carry an ``OR`` of its own. ``after`` is in
+    epoch **seconds**: Gmail reads a bare date as midnight Pacific, and only a numeric
+    value is exact. (``internalDate``, on a fetched message, is milliseconds; nothing here
+    reads it.)
+    """
+    return f"({query}) after:{after}"
+
+
+@dataclass(frozen=True)
+class _SearchCursor:
+    """Where a watermarked search got to — this adapter's half of ``sync_state.cursor``.
+
+    ``after`` is the current pass's lower bound, in epoch seconds. ``started`` and
+    ``page_token`` are set only mid-pass: when the pass began (which becomes the next
+    watermark once it is exhausted) and the ``nextPageToken`` to continue it from. A cursor
+    with neither is a finished pass, and the next poll searches from ``after``.
+
+    JSON with a version, rather than a delimited string, because it is persisted and read
+    back by a later release of this code; anything that does not decode — a Gmail history
+    id from before listing moved to search, most obviously — is treated as no cursor.
+    """
+
+    after: int
+    started: int | None = None
+    page_token: str | None = None
+
+    def encode(self) -> str:
+        body: dict[str, Any] = {"v": 1, "after": self.after}
+        if self.started is not None:
+            body["started"] = self.started
+        if self.page_token is not None:
+            body["page_token"] = self.page_token
+        return json.dumps(body, separators=(",", ":"), sort_keys=True)
+
+    @classmethod
+    def decode(cls, raw: str) -> _SearchCursor | None:
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(body, dict) or body.get("v") != 1:
+            return None
+        after, started, token = body.get("after"), body.get("started"), body.get("page_token")
+        if not isinstance(after, int) or not _is_epoch(after):
+            return None
+        started = started if _is_epoch(started) else None
+        # A page token belongs to a pass, and a pass without its start could not move the
+        # watermark when it ends; dropping the token re-reads that pass from its top.
+        token = token if isinstance(token, str) and token and started is not None else None
+        return cls(after=after, started=started, page_token=token)
+
+
+def _is_epoch(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 class GmailConfigError(SourceError):
@@ -250,6 +322,7 @@ class GmailMailClient:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         base_url: str = GMAIL_API_BASE,
         transport: Any | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if not access_token:
             raise GmailConfigError("GmailMailClient needs a resolved access token")
@@ -257,89 +330,101 @@ class GmailMailClient:
         self._timeout = timeout_seconds
         self._base_url = base_url.rstrip("/")
         self._transport = transport
+        # Epoch seconds. Injected so a test can place a pass's start, which is what the
+        # watermark is read from.
+        self._clock = clock
 
     def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
-        """One page of matching message ids, oldest first.
+        """One page of the source's search, oldest first within the page.
 
-        ``cursor`` is a Gmail **history id**, and the history API is what makes an
-        incremental poll cheap: it answers "what changed since" rather than "what matches",
-        so a mailbox with ten thousand newsletters costs one small request per poll.
+        **Every page is a ``messages.list`` search carrying the source's filter**, first
+        sync or not. Incremental polls used to ask the history API instead — cheap, but it
+        has no ``q``, so from the second poll on every message added to the mailbox was
+        listed whatever the filter said (motet#95). The search is bounded below by a
+        watermark, ``after:<epoch seconds>``, so a quiet mailbox still costs one small
+        request per poll.
 
-        A first sync has no history id, so it falls back to a search bounded to the last
-        :data:`DEFAULT_FIRST_SYNC_DAYS` days — an unbounded first sync would ingest an
-        archive and bill for deduping all of it.
+        **A pass is followed to its end, one page per call.** The cursor carries the
+        pass's ``nextPageToken`` for as long as there is one, and ``more`` says so; only an
+        exhausted pass moves the watermark, and only to where that pass *began*, less
+        :data:`WATERMARK_OVERLAP_SECONDS`. The first sync used to read one page and then
+        jump to the mailbox's live history id, so whatever that page missed was never
+        listed again (motet#94). Nothing can be stepped over now: a page not yet read is a
+        page the cursor still points at.
+
+        A first sync — no cursor, or one this adapter did not write, such as a history id
+        stored before listing moved to search — is the same search bounded to the last
+        :func:`first_sync_days` days, and the page that starts it reports the window it
+        chose. An unbounded first sync would ingest an archive.
         """
-        if cursor:
-            return self._history_page(cursor=cursor, limit=limit)
-        return self._search_page(query=query, limit=limit)
+        now = int(self._clock())
+        state = _SearchCursor.decode(cursor) if cursor else None
+        window_days: int | None = None
+        if state is None:
+            if cursor:
+                # Not an error: a source connected before this adapter searched carries a
+                # Gmail history id. Re-reading the window is the repair, and the unique
+                # index makes whatever it re-lists harmless.
+                logger.info(
+                    "cursor %r is not a search watermark; starting a bounded first sync",
+                    cursor[:40],
+                )
+            window_days = first_sync_days()
+            logger.info("first sync: bounded to the last %d days", window_days)
+            state = _SearchCursor(after=now - window_days * _SECONDS_PER_DAY)
+        if state.page_token is None:
+            state = _SearchCursor(after=state.after, started=now)
 
-    def _history_page(self, *, cursor: str, limit: int) -> MessagePage:
-        response = self._get(
-            f"{self._base_url}/users/me/history",
-            {
-                "startHistoryId": cursor,
-                "historyTypes": "messageAdded",
-                "maxResults": str(limit),
-            },
-        )
-        if response.status_code == 404:
-            # Gmail expires history ids past its retention window. Not an error — it means
-            # "resync from scratch", which is a different repair from a retry, so it is
-            # reported as a distinct fact rather than raised.
-            logger.info("Gmail history id %s has expired; a full resync is needed", cursor)
-            return MessagePage(messages=(), cursor=None, cursor_expired=True)
-        body = self._json(response, "history")
-
-        seen: list[str] = []
-        for record in body.get("history") or []:
-            for added in record.get("messagesAdded") or []:
-                message = added.get("message") or {}
-                message_id = message.get("id")
-                # Deduplicated in order: one message can appear in several history records
-                # (added, then labelled), and fetching it twice is a wasted request that
-                # the unique index downstream would reject anyway.
-                if isinstance(message_id, str) and message_id not in seen:
-                    seen.append(message_id)
-
-        return MessagePage(
-            messages=tuple(MessageRef(id=message_id) for message_id in seen),
-            # `historyId` is the mailbox's current watermark and is present even when
-            # nothing matched — which is exactly when advancing it matters, or the next
-            # poll re-reads the same empty window forever.
-            cursor=str(body.get("historyId") or cursor),
-        )
-
-    def _search_page(self, *, query: str, limit: int) -> MessagePage:
-        days = first_sync_days()
-        logger.info("first sync: bounded to the last %d days", days)
-        response = self._get(
-            f"{self._base_url}/users/me/messages",
-            {
-                "q": f"{query} newer_than:{days}d",
-                "maxResults": str(limit),
-            },
-        )
+        response = self._search(query=query, state=state, limit=limit)
+        if response.status_code == 400 and state.page_token is not None:
+            # A page token Gmail no longer honours. Re-reading this pass from its first page
+            # repeats what the earlier pages listed — which the poll's pre-check drops —
+            # and loses nothing, where giving up on the pass would.
+            logger.warning(
+                "Gmail refused the stored page token (%s); restarting this pass from its "
+                "first page",
+                _error_detail(response),
+            )
+            state = _SearchCursor(after=state.after, started=state.started)
+            response = self._search(query=query, state=state, limit=limit)
         body = self._json(response, "messages")
-        messages = tuple(
-            MessageRef(id=item["id"], thread_id=item.get("threadId"))
-            for item in (body.get("messages") or [])
-            if isinstance(item.get("id"), str)
-        )
+
         # Reversed: Gmail returns newest first, and ingestion order decides what dedup
         # merges into what. Oldest first means a follow-up folds into the original story
-        # rather than the original folding into the follow-up.
-        messages = tuple(reversed(messages))
+        # rather than the original folding into the follow-up. That holds within a page;
+        # across the pages of one long pass the newer page is read first, because Gmail
+        # offers no oldest-first search.
+        messages = tuple(
+            reversed(
+                [
+                    MessageRef(id=item["id"], thread_id=item.get("threadId"))
+                    for item in (body.get("messages") or [])
+                    if isinstance(item.get("id"), str)
+                ]
+            )
+        )
 
-        # The watermark comes from the profile rather than from this response, because a
-        # search result carries no history id. Fetching it *after* the search would risk
-        # skipping a message that arrived in between; fetching it before means at worst
-        # re-seeing one, which the unique index makes harmless.
-        return MessagePage(messages=messages, cursor=self._current_history_id())
+        # Whether another page exists is Gmail's `nextPageToken` and nothing else. A page
+        # can come back *short* of `maxResults` with more behind it, so "fewer than asked
+        # for" proves nothing.
+        page_token = body.get("nextPageToken")
+        started = state.started if state.started is not None else now
+        if isinstance(page_token, str) and page_token:
+            next_state = _SearchCursor(after=state.after, started=started, page_token=page_token)
+        else:
+            next_state = _SearchCursor(after=max(state.after, started - WATERMARK_OVERLAP_SECONDS))
+        return MessagePage(
+            messages=messages,
+            cursor=next_state.encode(),
+            more=next_state.page_token is not None,
+            first_sync_days=window_days,
+        )
 
-    def _current_history_id(self) -> str | None:
-        body = self._json(self._get(f"{self._base_url}/users/me/profile", {}), "profile")
-        history_id = body.get("historyId")
-        return str(history_id) if history_id else None
+    def _search(self, *, query: str, state: _SearchCursor, limit: int) -> Any:
+        params = {"q": search_query(query, after=state.after), "maxResults": str(limit)}
+        if state.page_token is not None:
+            params["pageToken"] = state.page_token
+        return self._get(f"{self._base_url}/users/me/messages", params)
 
     def fetch_message(self, message_id: str) -> RawMessage:
         """The message as RFC 822 bytes.

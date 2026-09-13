@@ -49,17 +49,21 @@ class MessageRef:
 class MessagePage:
     """One page of a poll, plus where to resume.
 
-    ``cursor`` is opaque to everything above the adapter — it is a Gmail history id today
-    and could be a date watermark tomorrow. Persisted verbatim in ``sources.sync_state``,
+    ``cursor`` is opaque to everything above the adapter — for Gmail it is a search
+    watermark and, mid-search, a page token. Persisted verbatim in ``sources.sync_state``,
     never parsed outside the adapter that produced it.
     """
 
     messages: tuple[MessageRef, ...]
     cursor: str | None
-    #: True when the provider says the cursor is too old to resume from — a mailbox that
-    #: has moved on further than its history window. The caller's repair is a full resync
-    #: from a date watermark, which is a different action from retrying.
-    cursor_expired: bool = False
+    #: True when the provider has another page for the search this one belongs to. The
+    #: caller resumes from ``cursor`` — now, or on its next poll — and must not treat the
+    #: search as caught up until this is False.
+    more: bool = False
+    #: Set on the page that began a first sync: the window, in days, the adapter bounded
+    #: it to. ``None`` on every other page. Reported rather than returned silently so the
+    #: bound is a fact on the source instead of a constant in the adapter (motet#94).
+    first_sync_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,12 +79,14 @@ class MailClient(Protocol):
     """List and fetch newsletter messages from one connected mailbox."""
 
     def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
-        """What has arrived since ``cursor``, oldest first.
+        """One page of what matches ``query`` since ``cursor``, oldest first.
 
         ``query`` is the provider's own search syntax, carried from the source's config so
-        that "only this label" is the user's decision rather than ours. A ``cursor`` of
-        ``None`` means a first sync, which the adapter bounds itself — a first poll must
-        not ingest a decade of archive.
+        that "only this label" is the user's decision rather than ours — and it applies to
+        *every* page, not only the first sync's. A ``cursor`` of ``None`` means a first
+        sync, which the adapter bounds itself — a first poll must not ingest a decade of
+        archive. At most ``limit`` messages come back, and ``more`` says whether another
+        page is waiting behind them.
         """
         ...
 

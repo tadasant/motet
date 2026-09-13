@@ -38,7 +38,7 @@ from motet_inference import (
 )
 from motet_storage import ObjectStore, episode_audio_key
 
-from .ingest import handle_extract, handle_poll
+from .ingest import handle_extract, handle_poll, record_poll_failure
 from .jobs import enqueue
 from .queues import Queue
 
@@ -775,10 +775,12 @@ def source_item_failed(
 def failure_recorders() -> Mapping[Queue, Any]:
     """Which "this stage gave up" note to write, per queue."""
     return {
-        # `poll` and `extract` have no domain object to mark failed: a mailbox that could
-        # not be reached has its error recorded on the source by the handler itself, and a
-        # message that could not be fetched has no row to mark — extraction is what writes
-        # one.
+        # `extract` has no domain object to mark failed: a message that could not be
+        # fetched has no row to mark — extraction is what writes one. `poll` does have
+        # one, the source, and a poll that gave up puts its reason there: on
+        # `sources.last_error` and on the source's last-sync result, which is what the
+        # Sources screen reads (motet#94). The handler cannot write that itself, because
+        # the transaction it would write it in is the one that rolled back.
         #
         # **That is not the same as leaving the failure unreported, and for a while it
         # was** (motet#35). The failed job row is the only record that the message was
@@ -788,6 +790,7 @@ def failure_recorders() -> Mapping[Queue, Any]:
         # this point would have no text, would sit in the table that anchors every
         # highlight and every claim, and would be indistinguishable from a message that
         # arrived empty.
+        Queue.POLL: record_poll_failure,
         Queue.INTEGRATE: source_item_failed,
         Queue.ASSEMBLE: episode_failed,
         Queue.SCRIPT: episode_failed,
