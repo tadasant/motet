@@ -426,8 +426,9 @@ service returned Google's `hello` sample, because the infrastructure was stood u
 
 **What has not happened is a real vendor call** — not one OpenRouter completion, not one
 second of Cartesia audio — so everything downstream of the fakes is still unproven, and
-being deployed does not change that. The image pin lags this repo's `main` by however long
-the last bump was ago: a route merged here is not a route serving there, and
+being deployed does not change that. The image pin lags this repo's `main` until a bump PR
+in the private repo merges — `notify-deploy-pin.yml` asks for one on every push to `main`,
+but merging here still deploys nothing: a route merged here is not a route serving there, and
 `/internal/health` is how you tell — it reports `revision`, the commit the serving image
 was built from. **The served OpenAPI document is the weaker instrument and was the only one
 for a while**, which is motet#37: a document diff bounds the build to a *range*, and only
@@ -771,9 +772,12 @@ that differs between instances fails only there.
 context rooted at `api/` could not resolve it.
 
 **This repo builds images and never pushes them.** It is public and holds no cloud
-credential of any kind — no GCP identity, no registry login, nothing to leak. (Its one
-credential of any kind is the App Store Connect key behind `testflight.yml`, which reaches
-Apple and nothing in the infrastructure; see [Runner policy](#runner-policy).) Publishing
+credential of any kind — no GCP identity, no registry login, nothing to leak. (Its two
+credentials of any kind are the App Store Connect key behind `testflight.yml`, which reaches
+Apple and nothing in the infrastructure, and the dispatch token behind
+`notify-deploy-pin.yml`, which needs Contents: write on the private repo to send its
+notification and is fenced to `main` accordingly; see [Runner policy](#runner-policy).)
+Publishing
 and deploying belong to the private infrastructure repo. A PR that adds a push step here
 is a PR that adds a cloud credential to a public repo; the answer is the other repo.
 
@@ -836,8 +840,8 @@ Deploy workflows are a different matter — they live in the private repo, **wit
 exception: `testflight.yml`.** Asked for by Tadas on 2026-09-13 ("get it into
 TestFlight"), in Zimmer session 17604, and built in session 17805. It is here rather than in
 the private repo for the reason the `ios` job is on a hosted runner: macOS minutes are free
-on a public repo and billed at a multiplier on a private one. It is the one workflow in this
-repo that holds a credential, so it is fenced four ways and **all four have to stay**:
+on a public repo and billed at a multiplier on a private one. It is one of two workflows in
+this repo that hold a credential, so it is fenced four ways and **all four have to stay**:
 
 1. **`workflow_dispatch` is its only trigger.** No push and no pull request — from a fork or
    a branch — starts it, and a fork cannot dispatch here.
@@ -867,6 +871,30 @@ still names no host. Creating the Apple identity, the app record and the key is 
 9's human half; running the workflow afterwards is not, and an agent does it with
 `gh workflow run testflight.yml --ref main`. `ios/README.md`, "Distribution", is the
 procedure.
+
+**The other is `notify-deploy-pin.yml`, and it deploys nothing.** Staging and production run
+whatever commit the private repo pins, so a merge here used to go live only when somebody
+bumped the pin by hand — motet#116 merged and never shipped. Tadas asked for every merge to
+`main` to open a pin-bump PR there (2026-09-13); this is the sender, and the receiving
+workflow in the private repo is the half that opens the PR. On every push to `main` it sends
+a `repository_dispatch` of `motet-main-updated` carrying the SHA. The receiver also polls on
+a schedule, so the dispatch buys promptness and nothing else — which is why it is a **no-op
+while `GH_MOTET_SYNC_TOKEN_TADASANT_INTERNAL` is unset and a warning, never a failure, when
+refused.**
+
+**The token is not a notification-shaped credential, and that is why it is fenced like the
+Apple key.** GitHub's dispatch endpoint needs Contents: write on the target repository, so
+the token can push to the private infrastructure repo. It should be fine-grained, scoped to
+that one repository and to Contents alone. The same four fences as TestFlight apply, and all
+four have to stay: `push` to `main` is the only trigger; the job refuses any other ref or
+repository; the token is an **environment** secret in `deploy-pin`, whose deployment-branch
+policy admits `main` only, which is the fence that survives a branch adding a workflow that
+reads it; and it runs on a hosted runner with no checkout, passing the token to curl on
+stdin. The cost of the environment is a deployment record per push to `main`. It is its own
+workflow rather than a job gated on `all-checks-pass`, because waiting for main's CI would
+gate nothing the schedule does not bypass, and a job in `ci.yml` would put the token in a
+file pull requests run. Minting the token, and giving the environment its branch policy and
+secret, is invariant 9's human half.
 
 ---
 
