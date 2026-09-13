@@ -191,22 +191,16 @@ main.wide { max-width: 90rem; }
 .player { margin: .75rem 0 1rem; }
 .player audio { width: 100%; max-width: 46rem; display: block; }
 
-/* PROTOTYPE: held items */
-.held { border: 1px solid var(--line); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1.25rem; }
-.held h3 { margin: 0; }
-.held .row { margin-top: 0; }
-.held-table th.check, .held-table td.check { width: 1.5rem; }
-.held-table tbody tr { cursor: pointer; }
-.held-table tr.preview-row td { background: #fafafa; font-size: .85rem; cursor: default; }
-.held-table tr.preview-row:hover { background: #fafafa; }
-.linkish.hint { font-size: .8rem; }
-
-/* PROTOTYPE — the three-stage source item lifecycle (SourceItemDetail.tsx). Plain like
-   the rest: a numbered card per stage so that the empty stage 2 of a held item is still
-   visibly a stage. */
-.lifecycle { border: 1px solid var(--line); border-radius: 4px; padding: .5rem .9rem .75rem; margin: .5rem 0; background: #fafafa; font-weight: 400; color: var(--fg); }
-.lifecycle-head { margin: .25rem 0 .5rem; }
-.stage { border-top: 1px solid var(--line); padding: .5rem 0 .6rem; }
+/* PROTOTYPE — the three-stage source item lifecycle (SourceItemDetail.tsx), shown in the
+   backlog's drawer. A numbered stage per card so that the empty stage 2 of a held item is
+   still visibly a stage. */
+.lifecycle { font-weight: 400; color: var(--fg); }
+.lifecycle-head { margin: 0 0 .75rem; align-items: flex-start; }
+.lifecycle-head strong { flex: 1; min-width: 0; font-size: 1.02rem; line-height: 1.3; }
+.lifecycle-id { margin: -.5rem 0 .75rem; font-size: .75rem; }
+.lifecycle-head .close { color: var(--muted); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .6rem; font-size: .8rem; }
+.lifecycle-head .close:hover { color: var(--fg); background: var(--hover); }
+.stage { border-top: 1px solid var(--line); padding: .75rem 0 .8rem; }
 .stage h4 { margin: 0 0 .1rem; font-size: .95rem; }
 .stage-number { display: inline-block; min-width: 1.3rem; height: 1.3rem; line-height: 1.3rem; text-align: center; border: 1px solid var(--fg); border-radius: 50%; font-size: .8rem; margin-right: .2rem; }
 .stage-what { margin: 0 0 .5rem; font-size: .85rem; }
@@ -214,16 +208,14 @@ main.wide { max-width: 90rem; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
-.extracted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; border: 1px solid var(--line); padding: .5rem; font-size: .85rem; background: #fff; }
+.extracted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; border: 1px solid var(--line); padding: .5rem; font-size: .85rem; background: var(--surface); }
 .stage-status { margin: .25rem 0; }
 .stage-status.status-failed strong { color: var(--bad); }
 .stage-status.status-done strong { color: var(--good); }
 .stage-gaps { margin: .35rem 0 0; font-size: .8rem; }
 .linked-news { list-style: none; padding: 0; margin: 0; }
 .linked-news p { margin: .2rem 0; }
-/* The news item a stage-3 link points at, for a moment. */
-.items li.flash { background: #fff8d6; transition: background 1s; }
-.held-table .preview-row td { padding-top: 0; }
+.linkish.hint { font-size: .8rem; }
 
 /* PROTOTYPE — /admin "Models & spend" (05-admin-model-config-and-spend) */
 .grid.models tbody tr { cursor: default; }
@@ -235,3 +227,132 @@ main.wide { max-width: 90rem; }
 .chain { display: flex; flex-wrap: wrap; gap: .15rem .5rem; margin-top: .2rem; font-size: .7rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .chain .won { color: #06c; font-weight: 600; }
 .chain .lost { color: var(--muted); }
+
+/* ---- Backlog (PROTOTYPE, proto/design/backlog-crit.md) ------------------------------ */
+/* One column: a sticky summary with the counts and the primary action, a status strip,
+   search and sort, then two sections sharing one row shape. Neutral greys; hierarchy is
+   spacing, weight and grouping. */
+
+.backlog { position: relative; }
+.backlog-head {
+  position: sticky; top: var(--topbar-h); z-index: 4;
+  margin: -1.5rem -1.5rem 1rem; padding: .9rem 1.5rem .6rem;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.backlog-head-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.backlog-counts { margin: 0; display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; font-size: .95rem; color: var(--muted); }
+.backlog-counts .count strong { font-size: 1.25rem; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; margin-right: .1rem; }
+.backlog-counts .count.zero strong { color: #999; font-weight: 400; }
+.backlog-counts .count.emphasis { color: var(--fg); }
+.backlog-counts .sep, .status-strip .sep { color: #bbb; }
+
+/* The primary action, with the cap folded into a small toggle beside it. */
+.make-episode { position: relative; display: inline-flex; align-items: stretch; }
+.make-episode .primary { border-radius: 6px 0 0 6px; padding: .45rem .9rem; font-weight: 600; }
+.cap-toggle { border: 1px solid var(--fg); border-left: 0; border-radius: 0 6px 6px 0; background: var(--bg); color: var(--fg); font-size: .85rem; padding: .45rem .6rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cap-toggle[aria-expanded="true"], .cap-toggle:hover { background: var(--hover); }
+.make-episode .primary:disabled + .cap-toggle { border-color: var(--line); color: var(--muted); }
+.cap-popover { width: 18rem; top: calc(100% + .4rem); }
+.cap-popover label { display: block; margin-bottom: .25rem; }
+.cap-popover input[type="number"] { width: 6rem; }
+.cap-popover .hint { margin: .5rem 0 0; }
+
+/* Second line of the header: the status strip on the left, search and sort on the right. */
+.backlog-tools { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-top: .5rem; }
+.backlog-filters { display: flex; align-items: center; gap: .75rem; margin-left: auto; }
+.backlog-search { width: 16rem; max-width: 100%; padding: .3rem .6rem; border: 1px solid var(--line); border-radius: 6px; font-size: .9rem; background: var(--surface); }
+.backlog-search:focus { background: var(--bg); }
+.backlog-filters .sort { display: inline-flex; align-items: center; gap: .4rem; font-weight: 400; }
+.backlog-filters select { font: inherit; font-size: .9rem; padding: .25rem .3rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+
+/* The status strip: a dot, a sentence, and — only when something is in flight — a
+   disclosure onto the existing Processing panel. */
+.status-strip { margin: 0; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--muted); min-width: 0; }
+details.status-strip { display: block; flex: 1; }
+details.status-strip summary { display: flex; align-items: center; gap: .5rem; cursor: pointer; list-style: none; }
+details.status-strip summary::-webkit-details-marker { display: none; }
+.status-inflight { color: var(--fg); font-weight: 500; }
+.status-more { text-decoration: underline; margin-left: .25rem; }
+details.status-strip[open] .status-more { display: none; }
+.status-dot { width: .5rem; height: .5rem; border-radius: 50%; background: #bbb; flex: none; }
+.status-strip.running .status-dot { background: var(--good); }
+.status-strip.unknown .status-dot { background: transparent; border: 1px solid #999; box-sizing: border-box; }
+.status-strip.has-failed .status-inflight { color: var(--bad); }
+details.status-strip .processing { margin: .75rem 0 .25rem; color: var(--fg); font-size: .95rem; }
+details.status-strip .processing h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+.backlog-notice { margin: 0 0 .75rem; font-size: .9rem; }
+
+/* Sections. */
+.bsection { margin-top: 1.5rem; }
+.bsection-head { display: flex; align-items: baseline; gap: .75rem; padding: 0 .25rem .4rem; border-bottom: 1px solid var(--fg); }
+.bsection-head h3 { margin: 0; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--fg); }
+.bsection-head .tab-count { font-size: .75rem; letter-spacing: 0; text-transform: none; }
+.bsection-note { flex: 1; min-width: 0; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-all { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; font-size: .8rem; font-weight: 400; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.select-all input { width: auto; margin: 0; }
+.bsection-head.sub { border-bottom: 0; padding-top: .35rem; }
+.bsection-empty { margin: .6rem .25rem 0; }
+
+/* The Read fold: a <details> whose summary is the section head. */
+.read-fold summary { cursor: pointer; padding: 0 .25rem .4rem; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: .5rem; color: var(--muted); }
+.read-fold summary h3 { margin: 0; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; display: inline; }
+.read-fold summary::before { content: "▸"; font-size: .7rem; }
+.read-fold[open] summary::before { content: "▾"; }
+
+/* Rows. One anatomy for both lists. */
+.blist { list-style: none; margin: 0; padding: 0; }
+.brow { border-bottom: 1px solid var(--line); }
+.brow-main { display: flex; align-items: center; gap: .6rem; padding: .45rem .25rem; min-height: 2.2rem; }
+.brow-main:hover { background: var(--surface); }
+.brow.selected .brow-main { background: var(--hover); }
+.brow.flash { background: #fff8d6; transition: background 1s; }
+.brow-check { width: auto; margin: 0; flex: none; }
+.brow-title {
+  flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0;
+  font: inherit; font-weight: 500; color: var(--fg); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.brow-title:hover { text-decoration: underline; }
+.brow.muted .brow-title { color: var(--muted); font-weight: 400; }
+.brow.expanded .brow-title { white-space: normal; }
+.brow-meta { flex: none; display: inline-flex; gap: .6rem; font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.brow-size, .brow-sources { font-variant-numeric: tabular-nums; }
+.brow-size { min-width: 2.2rem; text-align: right; }
+.brow-age { flex: none; width: 4rem; text-align: right; font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.brow-action { flex: none; width: 5.6rem; text-align: right; }
+.row-action { font-size: .8rem; color: var(--muted); text-decoration: none; opacity: 0; }
+.brow-main:hover .row-action, .brow-main:focus-within .row-action, .brow.selected .row-action { opacity: 1; }
+.row-action:hover { color: var(--fg); text-decoration: underline; }
+.brow-detail { padding: 0 .25rem .75rem 2.2rem; }
+.brow-summary { margin: 0 0 .35rem; font-size: .95rem; max-width: 46rem; }
+.brow-source-list { margin: 0; }
+.brow-source-list .linkish.hint { font-size: .85rem; }
+
+/* The contextual action bar: fixed to the bottom of the content area while a selection exists. */
+.selection-bar {
+  position: fixed; bottom: 1.25rem; left: calc(var(--sidebar-w) + 1.5rem); right: 1.5rem; z-index: 8;
+  margin: 0 auto; width: max-content; max-width: calc(100% - 3rem);
+  display: flex; align-items: center; gap: .75rem; padding: .5rem .6rem .5rem 1rem;
+  background: var(--bg); border: 1px solid var(--fg); border-radius: 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, .12);
+}
+.selection-bar .primary { border-radius: 6px; }
+.selection-bar .linkish { color: var(--muted); text-decoration: none; }
+.selection-bar .linkish:hover { color: var(--fg); text-decoration: underline; }
+.selection-summary { font-size: .9rem; white-space: nowrap; }
+
+/* The lifecycle drawer, over the right edge of the content. */
+.drawer {
+  position: fixed; top: var(--topbar-h); right: 0; bottom: 0; z-index: 9;
+  width: min(34rem, 100vw); box-sizing: border-box; overflow-y: auto;
+  padding: 1rem 1.25rem 2rem; background: var(--bg); border-left: 1px solid var(--line);
+  box-shadow: -8px 0 28px rgba(0, 0, 0, .08);
+}
+
+@media (max-width: 800px) {
+  .backlog-head { margin: -1rem -1rem 1rem; padding: .75rem 1rem .5rem; top: 0; }
+  .selection-bar { left: 1rem; right: 1rem; }
+  .drawer { top: 0; }
+  .brow-meta { display: none; }
+  .brow-action { width: auto; }
+}
