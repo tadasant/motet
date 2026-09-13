@@ -40,6 +40,8 @@ export type HeldSourceItem = GetResponse<'/v1/source-items/held'>[number]
 export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
+export type Connector = GetResponse<'/v1/connectors'>[number]
+export type ConnectorAuthorization = PostResponse<'/v1/connectors/{connector_id}/authorize'>
 
 export class ApiError extends Error {
   constructor(
@@ -310,4 +312,27 @@ export const api = {
       '/v1/episodes/{episode_id}/listened',
       `/v1/episodes/${encodeURIComponent(id)}/listened`,
     ),
+  // PROTOTYPE: the Credentials screen. Connectors the agentic enrichment step logs in
+  // with — a site login, or an MCP server authorized over OAuth. No call here ever
+  // receives a secret back; `has_secret` is the whole of what the API says about one.
+  connectors: () => apiGet('/v1/connectors'),
+  createConnector: (body: {
+    kind: 'site' | 'mcp'
+    label: string
+    domain?: string
+    username?: string
+    password?: string
+    url?: string
+    domains?: string[]
+  }) => apiPost('/v1/connectors', body),
+  deleteConnector: (id: string) =>
+    apiDeletePath('/v1/connectors/{connector_id}', `/v1/connectors/${encodeURIComponent(id)}`),
+  authorizeConnector: (id: string, redirectUri: string) =>
+    apiPostPath(
+      '/v1/connectors/{connector_id}/authorize',
+      `/v1/connectors/${encodeURIComponent(id)}/authorize`,
+      { redirect_uri: redirectUri },
+    ),
+  completeConnectorOAuth: (state: string, code: string, iss?: string) =>
+    apiPost('/v1/connectors/oauth/callback', { state, code, iss: iss ?? null }),
 }

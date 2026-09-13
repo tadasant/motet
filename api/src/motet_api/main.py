@@ -63,7 +63,7 @@ from motet_workers import (
 from motet_workers.queues import PIPELINE
 from starlette.requests import ClientDisconnect
 
-from . import admin_llm, obs
+from . import admin_llm, connectors, obs
 from .auth import (
     ALLOWED_EMAILS_ENV,
     LOGIN_SCOPES,
@@ -93,6 +93,7 @@ from .deps import (
 )
 from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
 from .feed import FeedMetadata, feed_url, render_feed
+from .mcp_oauth import is_connector_state
 from .schemas import (
     AdminEpisodeCounts,
     AdminJobCounts,
@@ -990,6 +991,7 @@ def admin_overview(
 
 # PROTOTYPE: model configuration and spend for the admin screen, in one deletable module.
 app.include_router(admin_llm.router)
+app.include_router(connectors.router)
 
 
 @app.get("/v1/news-items", response_model=list[NewsItemResponse], tags=["backlog"])
@@ -1400,6 +1402,12 @@ def oauth_callback(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "That callback came from a sign-in. It finishes at /v1/auth/google/callback.",
+        )
+    if is_connector_state(body.state.strip()):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That callback came from a connector authorization. It finishes at "
+            "/v1/connectors/oauth/callback.",
         )
 
     pending = phase2.consume_oauth_state(conn, body.state.strip())

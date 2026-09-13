@@ -65,6 +65,8 @@ TABLES = (
     # PROTOTYPE (migration 0012): the admin screen's model overrides and its spend ledger.
     "settings",
     "llm_usage",
+    # PROTOTYPE (migration 0013): the Credentials screen's connectors.
+    "connectors",
 )
 
 #: Sources a test connected, without disturbing the seeded paste source. Cascades to that

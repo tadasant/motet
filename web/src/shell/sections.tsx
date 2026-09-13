@@ -5,7 +5,7 @@
 
 import type { ReactElement } from 'react'
 
-export type SectionId = 'backlog' | 'episodes' | 'sources' | 'paste' | 'admin'
+export type SectionId = 'backlog' | 'episodes' | 'sources' | 'paste' | 'credentials' | 'admin'
 
 export type Section = {
   id: SectionId
@@ -80,6 +80,18 @@ export const SECTIONS: Section[] = [
       <Icon>
         <rect x="6" y="5" width="12" height="16" rx="1.5" />
         <path d="M9 5V3.5h6V5M9 11h6M9 15h4" />
+      </Icon>
+    ),
+  },
+  {
+    id: 'credentials',
+    path: '/credentials',
+    label: 'Credentials',
+    group: 'system',
+    icon: (
+      <Icon>
+        <circle cx="8" cy="12" r="4" />
+        <path d="M12 12h8M17 12v3M20 12v2" />
       </Icon>
     ),
   },

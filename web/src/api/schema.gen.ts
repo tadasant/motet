@@ -263,6 +263,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Connectors */
+        get: operations["list_connectors_v1_connectors_get"];
+        put?: never;
+        /** Create Connector */
+        post: operations["create_connector_v1_connectors_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Connector Oauth Callback
+         * @description Exchange the code, seal the token set onto the connector, mark it ready.
+         *
+         *     The token set exists as a local variable and nowhere else; it is sealed under
+         *     ``user_id:connector_id:mcp`` and the API cannot read it back.
+         */
+        post: operations["connector_oauth_callback_v1_connectors_oauth_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/{connector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Connector */
+        delete: operations["delete_connector_v1_connectors__connector_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/{connector_id}/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Authorize Connector
+         * @description Discover the server's authorization server, register a client, mint a consent URL.
+         *
+         *     Discovery runs on every authorize rather than once: the row records what it found so
+         *     a *refresh* can skip it, but a human re-authorizing is the moment to notice a server
+         *     that moved. Registration is skipped when the row already carries a client id — strad's
+         *     are stateless and long-lived, and re-registering would mint one per click.
+         */
+        post: operations["authorize_connector_v1_connectors__connector_id__authorize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes": {
         parameters: {
             query?: never;
@@ -1143,6 +1226,21 @@ export interface components {
             /** User Id */
             user_id: string;
         };
+        /** AuthorizeConnectorRequest */
+        AuthorizeConnectorRequest: {
+            /**
+             * Redirect Uri
+             * @description The SPA's /oauth/callback for this origin.
+             */
+            redirect_uri: string;
+        };
+        /** AuthorizeConnectorResponse */
+        AuthorizeConnectorResponse: {
+            /** Authorization Url */
+            authorization_url: string;
+            /** State */
+            state: string;
+        };
         /**
          * ClaimModel
          * @description A reported assertion beside the span it came from (invariant 3).
@@ -1212,6 +1310,123 @@ export interface components {
              * @description The CSRF token for this authorization. Returned so a client can verify the callback it receives is the one it started.
              */
             state: string;
+        };
+        /** ConnectorOAuthCallbackRequest */
+        ConnectorOAuthCallbackRequest: {
+            /** Code */
+            code: string;
+            /**
+             * Iss
+             * @description RFC 9207 issuer identifier, when the authorization server sent one.
+             */
+            iss?: string | null;
+            /** State */
+            state: string;
+        };
+        /**
+         * ConnectorResponse
+         * @description A credential the agentic enrichment step may log in with. **Never carries the
+         *     secret** — only whether one is stored, answered without decrypting anything.
+         */
+        ConnectorResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Domain
+             * @description site: the domain the login is for, normalized.
+             */
+            domain: string | null;
+            /**
+             * Domains
+             * @description mcp: the domains this server applies to; empty means any.
+             */
+            domains: string[];
+            /**
+             * Has Secret
+             * @description Whether a sealed secret is stored. False for a passwordless site login and for an MCP server that has not been authorized yet.
+             */
+            has_secret: boolean;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @description 'site' (username/password for one domain) or 'mcp' (remote MCP server).
+             */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Last Error */
+            last_error: string | null;
+            /**
+             * Oauth Issuer
+             * @description mcp: the authorization server discovery found.
+             */
+            oauth_issuer: string | null;
+            /**
+             * Oauth Registered
+             * @description mcp: whether a client id has been registered.
+             */
+            oauth_registered: boolean;
+            /**
+             * Secret Expires At
+             * @description mcp: when the sealed access token expires. The worker refreshes past it.
+             */
+            secret_expires_at: string | null;
+            /**
+             * Status
+             * @description 'ready', 'needs_auth' or 'error'.
+             */
+            status: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Url
+             * @description mcp: the server URL as given, query string included.
+             */
+            url: string | null;
+            /**
+             * Username
+             * @description site: the login identifier. Not a secret.
+             */
+            username: string | null;
+        };
+        /** CreateConnectorRequest */
+        CreateConnectorRequest: {
+            /**
+             * Domain
+             * @description site: any spelling — a URL, with or without www. — is normalized to the host.
+             */
+            domain?: string | null;
+            /**
+             * Domains
+             * @description mcp: optional 'applies to' list.
+             */
+            domains?: string[];
+            /**
+             * Kind
+             * @description 'site' or 'mcp'.
+             */
+            kind: string;
+            /** Label */
+            label: string;
+            /**
+             * Password
+             * @description site: may be empty or omitted for a site that logs in by emailed code or magic link.
+             */
+            password?: string | null;
+            /**
+             * Url
+             * @description mcp: the server URL.
+             */
+            url?: string | null;
+            /** Username */
+            username?: string | null;
         };
         /**
          * CreateEpisodeRequest
@@ -2568,6 +2783,175 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_connectors_v1_connectors_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_connector_v1_connectors_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConnectorRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    connector_oauth_callback_v1_connectors_oauth_callback_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectorOAuthCallbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_connector_v1_connectors__connector_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    authorize_connector_v1_connectors__connector_id__authorize_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeConnectorRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorizeConnectorResponse"];
                 };
             };
             /** @description Validation Error */

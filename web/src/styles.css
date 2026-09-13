@@ -228,6 +228,30 @@ main.wide { max-width: 90rem; }
 .chain .won { color: #06c; font-weight: 600; }
 .chain .lost { color: var(--muted); }
 
+/* ---- Credentials (PROTOTYPE) ------------------------------------------------------ */
+/* Two plain lists and an add panel. Plain greys, the shell's own pills and buttons; the
+   only new shapes are the row and the kind switch. */
+.credentials h3 { margin: 1.5rem 0 .5rem; font-size: 1rem; }
+.credentials .empty { margin: 0; }
+.connectors { list-style: none; padding: 0; margin: 0; border: 1px solid var(--line); border-radius: 8px; }
+.connector { display: flex; gap: 1rem; align-items: flex-start; padding: .75rem 1rem; border-top: 1px solid var(--line); }
+.connector:first-child { border-top: 0; }
+.connector-main { flex: 1; min-width: 0; }
+.connector-title { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.connector-where { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.connector-where code { font-size: .85rem; }
+.connector-actions { display: flex; gap: .5rem; flex: none; }
+.connector-actions button { border-radius: 6px; }
+.pill-ready .pill-dot { background: var(--good); }
+.pill-needs_auth .pill-dot { background: #d9a400; }
+.add-connector form { margin-top: .75rem; }
+.add-connector form .hint { margin: 0 0 .35rem; }
+.add-connector input { background: var(--bg); }
+.kind-switch { display: flex; gap: .5rem; margin-top: .9rem; }
+.kind-switch label { display: inline-flex; align-items: center; gap: .4rem; border: 1px solid var(--line); border-radius: 999px; padding: .25rem .8rem; font-weight: 500; cursor: pointer; background: var(--bg); }
+.kind-switch label.selected { border-color: var(--fg); }
+.kind-switch input { width: auto; margin: 0; }
+
 /* ---- Backlog (PROTOTYPE, proto/design/backlog-crit.md) ------------------------------ */
 /* One column: a sticky summary with the counts and the primary action, a status strip,
    search and sort, then two sections sharing one row shape. Neutral greys; hierarchy is

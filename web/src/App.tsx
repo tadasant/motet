@@ -37,9 +37,11 @@ import {
   getToken,
   setToken,
 } from './api/client'
-import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
+import { forgetCallbackUrl, isConnectorState, isLoginState, readCallback } from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
+import { Credentials } from './screens/Credentials'
+import { ConnectorCallback } from './screens/credentials/ConnectorCallback'
 import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
 import { OAuthCallback } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
@@ -104,6 +106,9 @@ export default function App() {
   // A sign-in and a mailbox connection come back on the same path. Only `state` can tell
   // them apart, because it is the one value Google echoes back verbatim.
   const signingIn = callback !== null && callback.kind !== 'empty' && isLoginState(callback.state)
+  // The third flow on that path: an MCP connector's authorization (PROTOTYPE, Credentials).
+  const authorizingConnector =
+    callback !== null && callback.kind !== 'empty' && isConnectorState(callback.state)
 
   const saveToken = useCallback((value: string) => {
     setToken(value)
@@ -297,6 +302,8 @@ export default function App() {
           {errorLine}
           {callback && signingIn ? (
             <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />
+          ) : callback && authorizingConnector ? (
+            <ConnectorCallback callback={callback} onDone={finishCallback} />
           ) : callback ? (
             <OAuthCallback callback={callback} onDone={finishCallback} />
           ) : (
@@ -373,6 +380,7 @@ export default function App() {
           </section>
         ))}
       {section.id === 'sources' && <Sources />}
+      {section.id === 'credentials' && <Credentials />}
       {section.id === 'admin' && <Admin />}
     </Shell>
   )

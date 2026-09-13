@@ -1001,3 +1001,75 @@ class AdminCostsResponse(BaseModel):
             "Queues that map onto LLM stages: integrate → dedup + dedup_confirm, script → script."
         )
     )
+
+
+# --- PROTOTYPE: connectors -----------------------------------------------------------
+
+
+class ConnectorResponse(BaseModel):
+    """A credential the agentic enrichment step may log in with. **Never carries the
+    secret** — only whether one is stored, answered without decrypting anything."""
+
+    id: str
+    kind: str = Field(
+        description="'site' (username/password for one domain) or 'mcp' (remote MCP server)."
+    )
+    label: str
+    domain: str | None = Field(description="site: the domain the login is for, normalized.")
+    domains: list[str] = Field(
+        description="mcp: the domains this server applies to; empty means any."
+    )
+    url: str | None = Field(description="mcp: the server URL as given, query string included.")
+    username: str | None = Field(description="site: the login identifier. Not a secret.")
+    has_secret: bool = Field(
+        description=(
+            "Whether a sealed secret is stored. False for a passwordless site login and for "
+            "an MCP server that has not been authorized yet."
+        )
+    )
+    secret_expires_at: datetime | None = Field(
+        description="mcp: when the sealed access token expires. The worker refreshes past it."
+    )
+    oauth_issuer: str | None = Field(description="mcp: the authorization server discovery found.")
+    oauth_registered: bool = Field(description="mcp: whether a client id has been registered.")
+    status: str = Field(description="'ready', 'needs_auth' or 'error'.")
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreateConnectorRequest(BaseModel):
+    kind: str = Field(description="'site' or 'mcp'.")
+    label: str = Field(min_length=1, max_length=200)
+    domain: str | None = Field(
+        default=None,
+        description="site: any spelling — a URL, with or without www. — is normalized to the host.",
+    )
+    username: str | None = Field(default=None, max_length=500)
+    password: str | None = Field(
+        default=None,
+        max_length=4000,
+        description=(
+            "site: may be empty or omitted for a site that logs in by emailed code or magic link."
+        ),
+    )
+    url: str | None = Field(default=None, max_length=2000, description="mcp: the server URL.")
+    domains: list[str] = Field(default_factory=list, description="mcp: optional 'applies to' list.")
+
+
+class AuthorizeConnectorRequest(BaseModel):
+    redirect_uri: str = Field(description="The SPA's /oauth/callback for this origin.")
+
+
+class AuthorizeConnectorResponse(BaseModel):
+    authorization_url: str
+    state: str
+
+
+class ConnectorOAuthCallbackRequest(BaseModel):
+    state: str
+    code: str
+    iss: str | None = Field(
+        default=None,
+        description="RFC 9207 issuer identifier, when the authorization server sent one.",
+    )
