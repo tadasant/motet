@@ -111,15 +111,23 @@ def insert_source_item(
     title: str,
     text: str,
     source_id: str = PASTE_SOURCE_ID,
+    links: Sequence[str] = (),
 ) -> StoredSourceItem:
+    """Write one ingested document.
+
+    ``links`` are the URLs the document carried, which `text` deliberately does not: the
+    extractor throws every href away because a briefing is spoken and a tracking redirect
+    is not a sentence. Enrichment's rule — does this item link to a site the owner has
+    added (motet#102, option A2) — is answered from this column and from nothing else.
+    """
     row = _one(
         conn,
         """
-        INSERT INTO source_items (id, user_id, source_id, title, text)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO source_items (id, user_id, source_id, title, text, links)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id, user_id, source_id, title, text, state, created_at
         """,
-        (source_item_id(), user_id, source_id, title, text),
+        (source_item_id(), user_id, source_id, title, text, list(links)),
     )
     return _source_item(row)
 
@@ -151,7 +159,8 @@ SELECT * FROM (
      LEFT JOIN LATERAL (
          SELECT attempts, state, run_at, last_error
          FROM jobs
-         WHERE queue = 'integrate' AND payload ->> 'source_item_id' = si.id
+         WHERE queue IN ('integrate', 'enrich')
+           AND payload ->> 'source_item_id' = si.id
          ORDER BY id DESC
          LIMIT 1
      ) job ON true
@@ -245,9 +254,14 @@ def list_ingestion(
     mostly not newsletters, and a `done` job is not a loss. ``state <> 'done'`` below is
     what draws that line.
 
-    The join is a ``LEFT JOIN LATERAL`` onto the *newest* integrate job for each item
-    rather than an aggregate: a source item has one such job in every normal case, and
-    ``ORDER BY id DESC LIMIT 1`` is the honest answer if a re-enqueue ever gives it two.
+    The join is a ``LEFT JOIN LATERAL`` onto the *newest* ``integrate`` or ``enrich`` job
+    for each item rather than an aggregate: a source item has one open job in every normal
+    case, and ``ORDER BY id DESC LIMIT 1`` is the honest answer if a re-enqueue ever gives
+    it two. **Both queues, because an item can be waiting on either** (motet#102): an item
+    whose links reach a site the owner has added goes to ``enrich`` first and to
+    ``integrate`` afterwards, so the newest of the two is where it actually is — and asking
+    about ``integrate`` alone would have reported an item mid-agent-run as on no surface at
+    all, which is the property the held predicate and this one exist to hold between them.
 
     **A pending item with no job is *held*, and is not reported here** (motet#91). A
     connected source stops before ``integrate`` on purpose, so that combination is a
@@ -1149,12 +1163,20 @@ HELD_MAX_ITEMS: Final = 500
 #: ``INGESTION_SQL`` reports a pending item on, so every item is on one surface. The
 #: ``NOT EXISTS`` walks migration 0005's partial expression index on
 #: ``payload ->> 'source_item_id'``, exactly as ``INGESTION_SQL``'s lateral join does.
+#:
+#: **Two queues, not one, since motet#102.** An "ingest now" on an item that links to a
+#: site the owner has added writes an ``enrich`` job rather than an ``integrate`` one — the
+#: integrate job follows when the agent is finished — so asking about ``integrate`` alone
+#: would leave such an item reading as held: still on the panel, and claimable a second
+#: time into a second agent run. Migration 0022 adds 0005's twin for the second queue, so
+#: the OR is still answered off an index.
 _HELD_WHERE = """
     si.user_id = %(user_id)s
     AND si.state = 'pending'
     AND NOT EXISTS (
         SELECT 1 FROM jobs j
-        WHERE j.queue = 'integrate' AND j.payload ->> 'source_item_id' = si.id
+        WHERE j.queue IN ('integrate', 'enrich')
+          AND j.payload ->> 'source_item_id' = si.id
     )
 """
 
@@ -1381,6 +1403,25 @@ class SourceItemDecision:
 
 
 @dataclass(frozen=True)
+class SourceItemEnrichment:
+    """What the agentic fetch did for this item, off ``source_items`` (motet#102).
+
+    ``status`` is ``None`` for every item nothing was ever decided about, which is most of
+    them: a paste, an item whose links reach no site the owner added, anything ingested
+    before enrichment shipped. ``original_chars`` is the newsletter's own length once the
+    article has replaced it, so stage 1 can keep reporting what *arrived*.
+    """
+
+    status: str | None
+    article_url: str | None
+    domain: str | None
+    error: str | None
+    enriched_at: datetime | None
+    original_chars: int | None
+    links: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class SourceItemLifecycle:
     """One source item across all three stages. See the section comment above."""
 
@@ -1399,11 +1440,14 @@ class SourceItemLifecycle:
     job: SourceItemJob | None
     news_item: SourceItemNewsItem | None
     decision: SourceItemDecision | None
+    enrichment: SourceItemEnrichment
 
 
 LIFECYCLE_SQL = """
 SELECT si.id, si.title, si.text, si.state, si.last_error, si.source_id, si.external_id,
        si.received_at, si.created_at, si.integrated_at,
+       si.enrich_status, si.article_url, si.enrich_domain, si.enrich_error, si.enriched_at,
+       length(si.original_text) AS original_chars, si.links,
        src.kind AS source_kind, src.name AS source_name,
        job.id AS job_id, job.state AS job_state, job.attempts AS job_attempts,
        job.run_at AS job_run_at, job.locked_at AS job_locked_at,
@@ -1422,7 +1466,7 @@ LEFT JOIN LATERAL (
     SELECT id, state, attempts, run_at, locked_at, created_at, updated_at, last_error,
            work_committed_attempt
     FROM jobs
-    WHERE queue = 'integrate' AND payload ->> 'source_item_id' = si.id
+    WHERE queue IN ('integrate', 'enrich') AND payload ->> 'source_item_id' = si.id
     ORDER BY id DESC
     LIMIT 1
 ) job ON true
@@ -1443,8 +1487,9 @@ def source_item_lifecycle(
     **Scoped by user in the statement itself**, because the answer carries the item's full
     text — mailbox content — and "not yours" and "does not exist" must be one answer.
 
-    The job is the newest ``integrate`` row, exactly as ``list_ingestion`` joins it — a
-    source item has one in every normal case. The news item is the one row
+    The job is the newest ``integrate`` **or** ``enrich`` row, exactly as ``list_ingestion``
+    joins it — a source item has one open job in every normal case, and an item on its way
+    through the agent has an ``enrich`` one (motet#102). The news item is the one row
     ``news_item_sources`` can hold for it (the column is ``UNIQUE``); ``position`` on that
     link says *which* thing dedup did (``0`` created the story, anything higher merged
     into it), and the decision columns beside it say why — for links written since
@@ -1511,6 +1556,15 @@ def source_item_lifecycle(
         job=job,
         news_item=news_item,
         decision=decision,
+        enrichment=SourceItemEnrichment(
+            status=row["enrich_status"],
+            article_url=row["article_url"],
+            domain=row["enrich_domain"],
+            error=row["enrich_error"],
+            enriched_at=row["enriched_at"],
+            original_chars=row["original_chars"],
+            links=tuple(row["links"] or ()),
+        ),
     )
 
 

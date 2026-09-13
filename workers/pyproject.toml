@@ -5,6 +5,19 @@ description = "Ingestion and pipeline workers (Cloud Run jobs)"
 requires-python = ">=3.13"
 dependencies = [
     "motet-db",
+    # For `motet_enrich.contract` and nothing else: the request and the answer the worker
+    # and `motet-enrich` agree on are defined once, on the service's side, and imported
+    # here. A hand-written second copy would be two definitions of one HTTP contract, and
+    # the first field either of them grew would make them disagree silently. The arrow goes
+    # one way — `motet-enrich` depends on no worker-side package and its image is built
+    # with `--package motet-enrich`, so none of this tree is in it.
+    #
+    # The *import* is one module; the dependency closure is not, and pulls `fastapi` and
+    # `uvicorn` into the worker image. They were already there — `motet-api` is in the same
+    # `runtime` stage the worker is built from — so this costs nothing today, and the day
+    # the worker stops carrying the API it is a reason to move the contract into a package
+    # of its own rather than to hand-copy it.
+    "motet-enrich",
     "motet-inference",
     "motet-obs",
     "motet-sources",
@@ -19,10 +32,17 @@ dependencies = [
     # `motet_obs.configure` installs a real provider behind it.
     "opentelemetry-api>=1.44",
     "psycopg[binary]>=3.2",
+    # The worker calls `motet-enrich` over HTTP and signs the call with a Google ID token.
+    # Declared directly rather than inherited, and imported at construction rather than
+    # lazily, for the `motet-vault[kms]` reason AGENTS.md gives: a lazy import is a
+    # statement about *when*, never about *whether*.
+    "google-auth[requests]>=2.38",
+    "httpx>=0.28",
 ]
 
 [tool.uv.sources]
 motet-db = { workspace = true }
+motet-enrich = { workspace = true }
 motet-inference = { workspace = true }
 motet-obs = { workspace = true }
 motet-sources = { workspace = true }

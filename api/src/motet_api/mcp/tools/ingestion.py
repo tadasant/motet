@@ -8,6 +8,7 @@ from pydantic import Field
 
 from ...schemas import (
     DismissResponse,
+    EnrichTranscriptResponse,
     HeldSourceItemResponse,
     IngestionItemResponse,
     IntegrateResponse,
@@ -116,6 +117,27 @@ def get_source_item(
     )
 
 
+def get_enrich_transcript(
+    source_item_id: Annotated[str, Field(description="The source item's id.")],
+) -> EnrichTranscriptResponse:
+    """Get the redacted transcript of the agent run that fetched this item's full article.
+
+    Every tool call the agent made, what it cost, and whether it had to log in. Items that
+    were never enriched — a paste, or anything that links to no site you have added on the
+    Credentials screen — have no run and answer 404.
+
+    **The transcript is redacted and is meant to stay that way.** A tool result from
+    anything but the browser is stored as a note giving its size, so a mailbox search's
+    results and a sign-in email's body are not in it and cannot be recovered from it.
+    """
+    return run(
+        "get_enrich_transcript",
+        lambda c: routes.get_enrich_transcript(
+            conn=c.conn, user_id=c.user_id, source_item_id=source_item_id
+        ),
+    )
+
+
 TOOLS = (
     paste_text,
     get_ingestion_status,
@@ -123,4 +145,5 @@ TOOLS = (
     integrate_source_items,
     dismiss_source_items,
     get_source_item,
+    get_enrich_transcript,
 )

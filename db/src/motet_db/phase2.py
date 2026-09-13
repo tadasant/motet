@@ -682,6 +682,7 @@ def insert_polled_source_item(
     title: str,
     text: str,
     received_at: datetime | None = None,
+    links: Sequence[str] = (),
 ) -> str | None:
     """Store a fetched message, or return ``None`` if it was already stored.
 
@@ -694,18 +695,31 @@ def insert_polled_source_item(
     of storing. **Clamped to the database's now**, because a sender's clock is not ours:
     a message dated next week would otherwise sort after everything that arrives until
     then. ``LEAST`` ignores a NULL, which is what makes the fallback one expression.
+
+    ``links`` are the URLs the message carried, which ``text`` deliberately does not — see
+    :func:`motet_db.repo.insert_source_item`.
     """
     from .ids import source_item_id  # noqa: PLC0415
 
     row = _maybe_one(
         conn,
         """
-        INSERT INTO source_items (id, user_id, source_id, title, text, external_id, received_at)
-        VALUES (%s, %s, %s, %s, %s, %s, LEAST(%s::timestamptz, now()))
+        INSERT INTO source_items
+            (id, user_id, source_id, title, text, external_id, received_at, links)
+        VALUES (%s, %s, %s, %s, %s, %s, LEAST(%s::timestamptz, now()), %s)
         ON CONFLICT (source_id, external_id) WHERE external_id IS NOT NULL DO NOTHING
         RETURNING id
         """,
-        (source_item_id(), user_id, source_id_, title, text, external_id, received_at),
+        (
+            source_item_id(),
+            user_id,
+            source_id_,
+            title,
+            text,
+            external_id,
+            received_at,
+            list(links),
+        ),
     )
     return row["id"] if row else None
 

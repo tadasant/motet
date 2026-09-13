@@ -117,7 +117,12 @@ jobs:
   images:
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: self-hosted
-    timeout-minutes: 20
+    # Raised from 20 when `motet-enrich` joined the set (motet#102). That target is built on
+    # Playwright's own base image — a ~1.5 GiB pull the first time a runner sees a new tag —
+    # installs the agent toolchain from npm, and copies a Chromium, so a cold run is
+    # materially longer than the other four put together. The pull is cached on the shared
+    # pool afterwards; the ceiling is for the cold case.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4

@@ -156,7 +156,7 @@ a convenience. A minted session also reports the `email` it was minted for and i
 `expires_at`, which is how you tell how much of your window is left.
 
 **Nothing happens on the request thread.** `/v1` writes a row and enqueues; every stage —
-integrate, assemble, script, TTS — is a separate Cloud Run job draining a Postgres queue
+enrich, integrate, assemble, script, TTS — is a separate Cloud Run job draining a Postgres queue
 (`workers/`). So a paste that returns `201` has not been processed yet, and an episode sits
 in its queue until a job runs. Triggering those jobs in staging is a workflow dispatch in
 the private infrastructure repo, which an agent can do; the workflow's name is recorded

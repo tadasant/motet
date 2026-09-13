@@ -8,6 +8,7 @@ requires-python = ">=3.13"
 dependencies = [
     "motet-api",
     "motet-db",
+    "motet-enrich",
     "motet-inference",
     "motet-obs",
     "motet-sources",
@@ -23,11 +24,23 @@ dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["api", "db", "inference", "obs", "sources", "storage", "vault", "voice", "workers"]
+members = [
+    "api",
+    "db",
+    "enrich",
+    "inference",
+    "obs",
+    "sources",
+    "storage",
+    "vault",
+    "voice",
+    "workers",
+]
 
 [tool.uv.sources]
 motet-api = { workspace = true }
 motet-db = { workspace = true }
+motet-enrich = { workspace = true }
 motet-inference = { workspace = true }
 motet-obs = { workspace = true }
 motet-sources = { workspace = true }
@@ -76,6 +89,10 @@ select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logge
 # NOT be printed matters, so the exemption is stated here beside the other two rather
 # than sprinkled as per-line noqa where it would be easy to add one more.
 "tools/local_env.py" = ["T201"]
+# A fourth, and the same shape: `bin/build-images` copies this into the enrichment
+# container and runs it there, and its stdout *is* what the smoke test reports. It reaches
+# no logger, because the container it runs in has none configured.
+"bin/smoke/enrich-browser-probe.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -83,6 +100,7 @@ strict = true
 files = [
     "api/src",
     "db/src",
+    "enrich/src",
     "inference/src",
     "ios/tools",
     "obs/src",
@@ -117,6 +135,7 @@ ignore_missing_imports = true
 testpaths = [
     "api/tests",
     "db/tests",
+    "enrich/tests",
     "inference/tests",
     "obs/tests",
     "sources/tests",

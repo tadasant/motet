@@ -59,6 +59,11 @@ TABLES = (
     # Site logins and MCP servers for agentic enrichment (migration 0018). Before
     # `oauth_states`, whose `connector_id` references it — CASCADE handles either order.
     "connectors",
+    # Agentic enrichment's run log and its sealed browser sessions (migration 0022).
+    # `enrich_runs` references `source_items` and `browser_states` references `users`;
+    # CASCADE handles the order either way.
+    "enrich_runs",
+    "browser_states",
     "oauth_states",
     "highlights",
     "auth_sessions",

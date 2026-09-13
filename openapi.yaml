@@ -827,6 +827,184 @@ components:
       - skipped
       title: DismissResponse
       type: object
+    EnrichRunResponse:
+      description: 'One agent run: what it cost, how hard it worked, and whether it logged in.'
+      properties:
+        article_chars:
+          title: Article Chars
+          type: integer
+        cost_usd:
+          description: What the agent's own completions cost.
+          title: Cost Usd
+          type: number
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        finished_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Finished At
+        id:
+          title: Id
+          type: string
+        login_performed:
+          title: Login Performed
+          type: boolean
+        started_at:
+          format: date-time
+          title: Started At
+          type: string
+        status:
+          description: '''ok'', ''blocked'', ''capped'', ''timeout'', ''failed'' or ''skipped''.'
+          title: Status
+          type: string
+        tool_calls:
+          title: Tool Calls
+          type: integer
+      required:
+      - id
+      - status
+      - tool_calls
+      - cost_usd
+      - article_chars
+      - login_performed
+      - error
+      - started_at
+      - finished_at
+      title: EnrichRunResponse
+      type: object
+    EnrichStepResponse:
+      description: 'What the agentic fetch did for this item (motet#102).
+
+
+        Everything here comes off ``source_items`` and the newest ``enrich_runs`` row; the
+
+        transcript itself is a separate route, because it is the largest thing on the item and
+
+        nothing that lists items needs it.'
+      properties:
+        article_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The link the run was pointed at.
+          title: Article Url
+        domain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The site the article was fetched from.
+          title: Domain
+        enriched_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Enriched At
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Why there is no article, when there is none.
+          title: Error
+        original_chars:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: How long the newsletter's own body was, once the article has replaced it. Null
+            while the item still carries what arrived.
+          title: Original Chars
+        run:
+          anyOf:
+          - $ref: '#/components/schemas/EnrichRunResponse'
+          - type: 'null'
+          description: "The newest run, or null if none has finished \u2014 a queued item has none."
+        status:
+          description: '''queued'', ''running'', ''done'', ''failed'' or ''skipped'' (a cap declined it).'
+          title: Status
+          type: string
+      required:
+      - status
+      - domain
+      - article_url
+      - error
+      - enriched_at
+      - original_chars
+      - run
+      title: EnrichStepResponse
+      type: object
+    EnrichTranscriptEntryResponse:
+      description: 'One line of a run''s **redacted** transcript.
+
+
+        Redacted on the enrichment service, before it crossed the network: a tool result from
+
+        anything but the browser is replaced by a note giving its size, and what is kept has had
+
+        this run''s known secrets and the shapes a secret usually takes removed. See
+
+        ``motet_enrich.redact``.'
+      properties:
+        args:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Args
+        cost_usd:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Cost Usd
+        kind:
+          description: '''tool_call'', ''tool_result'', ''text'' or ''error''.'
+          title: Kind
+          type: string
+        ok:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Ok
+        result:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Result
+        seq:
+          title: Seq
+          type: integer
+        text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Text
+        tool:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tool
+      required:
+      - seq
+      - kind
+      title: EnrichTranscriptEntryResponse
+      type: object
+    EnrichTranscriptResponse:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/EnrichTranscriptEntryResponse'
+          title: Entries
+          type: array
+        run:
+          $ref: '#/components/schemas/EnrichRunResponse'
+      required:
+      - run
+      - entries
+      title: EnrichTranscriptResponse
+      type: object
     EpisodeResponse:
       properties:
         audio_bytes:
@@ -942,6 +1120,17 @@ components:
             \ from outside. Where the job lives is deliberately not reported; it is topology, and this\
             \ route is public."
           title: Drain Trigger
+          type: boolean
+        enrich_enabled:
+          default: false
+          description: "Whether an 'ingest now' on an item that links to a site the owner added is sent\
+            \ to the agentic-enrichment queue first (motet#102). This is the API's own routing switch,\
+            \ MOTET_ENRICH; the API never calls the enrichment service and is not told where one is, so\
+            \ this cannot report whether a run would succeed \u2014 that is the worker's copy of the switch\
+            \ plus its service URL, and a worker with neither records every queued item as skipped and\
+            \ integrates it on its preview. False is the deployed state until a human switches it on;\
+            \ production stays off longest."
+          title: Enrich Enabled
           type: boolean
         errors_configured:
           description: Whether error reporting is configured. False means errors go nowhere.
@@ -1942,7 +2131,9 @@ components:
         is logged beside the source item id and metered per stage, never stored per item.'
       properties:
         cost_recorded:
-          description: Whether this step's spend is stored. Always false.
+          description: Whether this step's spend is stored per item. True for 'enrich', which writes an
+            enrich_runs row carrying what the agent's completions cost; false for 'dedup', whose cost
+            is a metric and a log line and is not kept per item.
           title: Cost Recorded
           type: boolean
         decision:
@@ -1950,6 +2141,11 @@ components:
           - $ref: '#/components/schemas/DedupDecisionResponse'
           - type: 'null'
           description: Null until done, and for items integrated before decisions were recorded.
+        enrich:
+          anyOf:
+          - $ref: '#/components/schemas/EnrichStepResponse'
+          - type: 'null'
+          description: The agentic fetch's own detail. Present only on the 'enrich' step.
         error:
           anyOf:
           - type: string
@@ -1979,7 +2175,7 @@ components:
           title: Status
           type: string
         step:
-          description: '''dedup''.'
+          description: '''enrich'' or ''dedup''.'
           title: Step
           type: string
       required:
@@ -2292,8 +2488,8 @@ components:
           title: State
           type: string
         status:
-          description: '''held'' (pending, nobody has asked for inference), ''queued'', ''running'', ''done'',
-            ''failed'' or ''dismissed''.'
+          description: '''held'' (pending, nobody has asked for inference), ''enriching'' (an agent is
+            fetching the full article), ''queued'', ''running'', ''done'', ''failed'' or ''dismissed''.'
           title: Status
           type: string
         title:
@@ -4610,6 +4806,47 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Get Source Item Detail
+      tags:
+      - ingestion
+  /v1/source-items/{source_item_id}/enrich-transcript:
+    get:
+      description: "The newest agent run's redacted transcript for one item.\n\nIts own route rather than\
+        \ a field on the detail: a transcript is the largest thing on an\nitem and nothing that *lists*\
+        \ items needs it, so putting it on the detail would make the\nlifecycle drawer pay for it on every\
+        \ open.\n\n**Already redacted when it was stored** \u2014 on the enrichment service, before it\
+        \ crossed\nthe network (``motet_enrich.redact``). Nothing here redacts anything, and nothing here\n\
+        should start to: a second redaction pass at read time would be a second definition of\nwhat is\
+        \ safe, and the one that matters is the one that decided what got written down."
+      operationId: get_enrich_transcript_v1_source_items__source_item_id__enrich_transcript_get
+      parameters:
+      - in: path
+        name: source_item_id
+        required: true
+        schema:
+          title: Source Item Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrichTranscriptResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Enrich Transcript
       tags:
       - ingestion
   /v1/sources:

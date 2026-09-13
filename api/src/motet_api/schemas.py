@@ -148,6 +148,19 @@ class HealthResponse(BaseModel):
             "sign-in is not configured."
         )
     )
+    enrich_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether an 'ingest now' on an item that links to a site the owner added is "
+            "sent to the agentic-enrichment queue first (motet#102). This is the API's own "
+            "routing switch, MOTET_ENRICH; the API never calls the enrichment service and "
+            "is not told where one is, so this cannot report whether a run would succeed — "
+            "that is the worker's copy of the switch plus its service URL, and a worker "
+            "with neither records every queued item as skipped and integrates it on its "
+            "preview. False is the deployed state until a human switches it on; production "
+            "stays off longest."
+        ),
+    )
 
 
 class PasteRequest(BaseModel):
@@ -299,7 +312,7 @@ class ProcessingStepResponse(BaseModel):
     is logged beside the source item id and metered per stage, never stored per item.
     """
 
-    step: str = Field(description="'dedup'.")
+    step: str = Field(description="'enrich' or 'dedup'.")
     status: str = Field(description="'queued', 'running', 'done' or 'failed'.")
     job: SourceItemJobResponse | None
     finished_at: datetime | None = Field(description="When the step completed, if it has.")
@@ -315,7 +328,81 @@ class ProcessingStepResponse(BaseModel):
     decision: DedupDecisionResponse | None = Field(
         description="Null until done, and for items integrated before decisions were recorded."
     )
-    cost_recorded: bool = Field(description="Whether this step's spend is stored. Always false.")
+    enrich: EnrichStepResponse | None = Field(
+        default=None,
+        description="The agentic fetch's own detail. Present only on the 'enrich' step.",
+    )
+    cost_recorded: bool = Field(
+        description=(
+            "Whether this step's spend is stored per item. True for 'enrich', which writes "
+            "an enrich_runs row carrying what the agent's completions cost; false for "
+            "'dedup', whose cost is a metric and a log line and is not kept per item."
+        )
+    )
+
+
+class EnrichStepResponse(BaseModel):
+    """What the agentic fetch did for this item (motet#102).
+
+    Everything here comes off ``source_items`` and the newest ``enrich_runs`` row; the
+    transcript itself is a separate route, because it is the largest thing on the item and
+    nothing that lists items needs it.
+    """
+
+    status: str = Field(
+        description="'queued', 'running', 'done', 'failed' or 'skipped' (a cap declined it)."
+    )
+    domain: str | None = Field(description="The site the article was fetched from.")
+    article_url: str | None = Field(description="The link the run was pointed at.")
+    error: str | None = Field(description="Why there is no article, when there is none.")
+    enriched_at: datetime | None
+    original_chars: int | None = Field(
+        description=(
+            "How long the newsletter's own body was, once the article has replaced it. "
+            "Null while the item still carries what arrived."
+        )
+    )
+    run: EnrichRunResponse | None = Field(
+        description="The newest run, or null if none has finished — a queued item has none."
+    )
+
+
+class EnrichRunResponse(BaseModel):
+    """One agent run: what it cost, how hard it worked, and whether it logged in."""
+
+    id: str
+    status: str = Field(description="'ok', 'blocked', 'capped', 'timeout', 'failed' or 'skipped'.")
+    tool_calls: int
+    cost_usd: float = Field(description="What the agent's own completions cost.")
+    article_chars: int
+    login_performed: bool
+    error: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class EnrichTranscriptEntryResponse(BaseModel):
+    """One line of a run's **redacted** transcript.
+
+    Redacted on the enrichment service, before it crossed the network: a tool result from
+    anything but the browser is replaced by a note giving its size, and what is kept has had
+    this run's known secrets and the shapes a secret usually takes removed. See
+    ``motet_enrich.redact``.
+    """
+
+    seq: int
+    kind: str = Field(description="'tool_call', 'tool_result', 'text' or 'error'.")
+    tool: str | None = None
+    args: str | None = None
+    ok: bool | None = None
+    result: str | None = None
+    text: str | None = None
+    cost_usd: float | None = None
+
+
+class EnrichTranscriptResponse(BaseModel):
+    run: EnrichRunResponse
+    entries: list[EnrichTranscriptEntryResponse]
 
 
 class SourceItemNewsItemResponse(BaseModel):
@@ -343,8 +430,9 @@ class SourceItemDetailResponse(BaseModel):
     state: str = Field(description="'pending', 'integrated', 'failed' or 'dismissed'.")
     status: str = Field(
         description=(
-            "'held' (pending, nobody has asked for inference), 'queued', 'running', "
-            "'done', 'failed' or 'dismissed'."
+            "'held' (pending, nobody has asked for inference), 'enriching' (an agent is "
+            "fetching the full article), 'queued', 'running', 'done', 'failed' or "
+            "'dismissed'."
         )
     )
     pulled: SourceItemPulledStage

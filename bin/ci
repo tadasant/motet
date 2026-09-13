@@ -79,6 +79,14 @@ npm --prefix web run typecheck
 step "Test (vitest)"
 npm --prefix web test
 
+# The enrichment harness's navigation lock (motet#102, design option G3). Node's own test
+# runner, no dependencies and no package.json of its own: the harness is one file, and the
+# two functions under test are pure. What a browser actually does with the rule is asserted
+# against a real Chromium by `bin/build-images enrich`, which needs Docker and is therefore
+# outside this script for `bin/build-images`' usual reason.
+step "Test (node — the enrichment browser harness)"
+node --test enrich/harness/browser-mcp.test.mjs
+
 step "Build the SPA"
 npm --prefix web run build
 
