@@ -92,6 +92,12 @@ ALL_TOOLS: tuple[ToolDef, ...] = (
         idempotent=True,
     ),
     ToolDef("get_source_item", "ingestion", False, (("GET", "/v1/source-items/{source_item_id}"),)),
+    ToolDef(
+        "get_enrich_transcript",
+        "ingestion",
+        False,
+        (("GET", "/v1/source-items/{source_item_id}/enrich-transcript"),),
+    ),
     # sources
     ToolDef("list_sources", "sources", False, (("GET", "/v1/sources"),)),
     ToolDef("connect_source", "sources", True, (("POST", "/v1/sources/connect"),)),

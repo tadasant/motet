@@ -205,7 +205,12 @@ class TestWhatAConnectionSees:
             return names, await client.call_tool("paste_text", {"title": "t", "text": "x"})
 
         names, refused = with_client(BEARER, "?tool_groups=ingestion_readonly", work)
-        assert names == {"get_ingestion_status", "list_held_source_items", "get_source_item"}
+        assert names == {
+            "get_ingestion_status",
+            "list_held_source_items",
+            "get_source_item",
+            "get_enrich_transcript",
+        }
         assert refused.is_error and "Unknown tool" in text(refused)
 
     def test_admin_is_absent_by_default_and_answers_only_an_admin_when_named(

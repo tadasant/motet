@@ -36,9 +36,10 @@ from motet_inference import (
     join_audio,
     record_tts_characters,
 )
+from motet_sources.extract import find_links
 from motet_storage import ObjectStore, episode_audio_key
 
-from . import labels
+from . import enrich, labels
 from .ingest import handle_extract, handle_poll, record_poll_failure
 from .jobs import enqueue
 from .queues import Queue
@@ -99,6 +100,14 @@ class Context:
     stages: Stages
     store: ObjectStore
     after_commit: list[Callable[[], object]] = field(default_factory=list)
+    #: The seam to ``motet-enrich``, when this deployment has one (motet#102). Optional for
+    #: the same reason ``stages`` and ``store`` are optional arguments to ``drain``: a
+    #: one-shot drain and every test that builds a Context need to know none of it, and a
+    #: worker with no client queues integrate directly — which is what every deployment did
+    #: before enrichment shipped. Built once per process rather than per job so that a
+    #: missing ``google-auth`` is a startup line rather than a swallowed exception inside
+    #: the first enrichment, which is the ``motet-vault[kms]`` lesson AGENTS.md draws.
+    enrich_client: object | None = None
 
 
 # --- integrate -----------------------------------------------------------------------
@@ -694,6 +703,7 @@ def enqueue_smart_episode(
 HANDLERS = {
     Queue.POLL: handle_poll,
     Queue.EXTRACT: handle_extract,
+    Queue.ENRICH: enrich.handle_enrich,
     Queue.INTEGRATE: handle_integrate,
     Queue.ASSEMBLE: handle_assemble,
     Queue.SCRIPT: handle_script,
@@ -735,8 +745,15 @@ def enqueue_paste(
     The API calls this. Enqueueing in the same transaction that writes the row is the
     whole reason the queue lives in Postgres: with two systems there is always a window
     where the source item exists and nothing will ever pick it up.
+
+    **A paste goes straight to integrate, never to enrichment**, and that is the same line
+    motet#91 drew: pasting *is* asking, so it queues its job here rather than waiting for a
+    decision. Its links are still recorded, because the lifecycle view shows them and
+    because a future "enrich this paste" would need them and cannot recover them later.
     """
-    stored = repo.insert_source_item(conn, user_id=user_id, title=title, text=text)
+    stored = repo.insert_source_item(
+        conn, user_id=user_id, title=title, text=text, links=find_links(text)
+    )
     enqueue(conn, Queue.INTEGRATE, {"source_item_id": stored.id}, serialize_key=user_id)
     return stored
 
@@ -758,16 +775,65 @@ def enqueue_integration(
     the item is in. This is the only writer of it, so nothing automatic — a paste, a stale
     job queued before the ingest gate, a future "always ingest from this sender" — can reach
     a mailbox.
+
+    **Some items go to the ``enrich`` queue instead** (motet#102): an item whose links reach
+    a site the owner has added is fetched in full by an agent first, and the integrate job
+    is written by :func:`motet_workers.enrich.handle_enrich` when that is finished. The rule
+    is deterministic and costs nothing — see :func:`motet_workers.enrich.plan_enrichment` —
+    and a deployment with ``MOTET_ENRICH`` unset never takes that branch at all.
     """
     claimed = repo.claim_held_source_items(conn, user_id, source_item_ids)
+    config = enrich.load_config()
+    # Once for the whole request: "select all" sends up to `repo.HELD_MAX_ITEMS` ids, and
+    # the sites are the same answer for every one of them.
+    sites = enrich.enrichment_sites(conn, user_id=user_id, config=config)
     for item_id in claimed:
-        enqueue(
-            conn,
-            Queue.INTEGRATE,
-            {"source_item_id": item_id, labels.DELIBERATE_KEY: True},
-            serialize_key=user_id,
+        target = enrich.plan_enrichment(
+            conn, user_id=user_id, item_id=item_id, config=config, sites=sites
         )
+        if target is None:
+            enqueue_integrate_job(conn, user_id=user_id, item_id=item_id, deliberate=True)
+        else:
+            enrich.enqueue_enrichment(
+                conn,
+                user_id=user_id,
+                item_id=item_id,
+                target=target,
+                extra={labels.DELIBERATE_KEY: True},
+            )
     return claimed
+
+
+def enqueue_integrate_job(
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str,
+    item_id: str,
+    payload: Mapping[str, Any] | None = None,
+    deliberate: bool = False,
+    enriched: bool = False,
+) -> None:
+    """Write one integrate job, carrying the two flags that survive the enrichment detour.
+
+    The **only** writer of an integrate job for a held item, whether enrichment ran or not,
+    so the payload a job carries is decided in one place. Two flags travel on it and both
+    matter:
+
+    * ``labels.DELIBERATE_KEY`` is motet#96's label write-back trigger. An item that went
+      through enrichment was still the owner's own "ingest now", so the flag has to survive
+      the detour — dropping it would silently stop the `Newsletters → Completed` move for
+      exactly the items the owner cared most about.
+    * ``enrich.ENRICHED_KEY`` says the agent has had its turn. Nothing downstream reads it
+      today — ``handle_integrate`` does not branch on it, because by then the article is
+      simply the item's text — and it is on the payload because a *replayed* job is the one
+      case where "has this already been enriched" cannot be read off anything else.
+    """
+    body: dict[str, Any] = {"source_item_id": item_id}
+    if deliberate or (payload is not None and payload.get(labels.DELIBERATE_KEY)):
+        body[labels.DELIBERATE_KEY] = True
+    if enriched:
+        body[enrich.ENRICHED_KEY] = True
+    enqueue(conn, Queue.INTEGRATE, body, serialize_key=user_id)
 
 
 def enqueue_episode(
@@ -821,6 +887,11 @@ def failure_recorders() -> Mapping[Queue, Any]:
         # highlight and every claim, and would be indistinguishable from a message that
         # arrived empty.
         Queue.POLL: record_poll_failure,
+        # `enrich` does NOT mark the item failed, and that is the difference worth reading
+        # here: an agent that could not be reached costs the article, never the item. The
+        # recorder writes the enrichment outcome and queues integrate, so the newsletter's
+        # preview reaches the briefing exactly as it would have without enrichment.
+        Queue.ENRICH: enrich.record_enrich_failure,
         Queue.INTEGRATE: source_item_failed,
         Queue.ASSEMBLE: episode_failed,
         Queue.SCRIPT: episode_failed,

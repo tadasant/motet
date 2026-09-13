@@ -294,6 +294,7 @@ def handle_extract(context: Context, payload: Mapping[str, Any]) -> None:
         title=extracted.title,
         text=extracted.text,
         received_at=_sent_at(extracted.date),
+        links=extracted.links,
     )
     if source_item_id is None:
         # Another worker won the race. The unique index did its job; there is exactly one

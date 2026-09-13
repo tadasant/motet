@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build the four container images Cloud Run runs — motet-api, motet-worker, motet-voice,
-# motet-web — and prove each one actually serves, rather than merely that it built.
+# Build the five container images Cloud Run runs — motet-api, motet-worker, motet-voice,
+# motet-web, motet-enrich — and prove each one actually serves, rather than merely that it
+# built.
 #
 # Separate from bin/ci because it needs a Docker daemon, and bin/ci deliberately needs
 # only Postgres: a laptop without Docker must still be able to run the full check suite.
@@ -10,7 +11,7 @@
 # It does NOT push. This repo is public and holds no cloud credential of any kind (see
 # AGENTS.md); publishing is the private infrastructure repo's job.
 #
-#     bin/build-images              # build and smoke-test all four
+#     bin/build-images              # build and smoke-test all five
 #     bin/build-images api web      # a subset
 #     TAG=v1 bin/build-images       # pin the tag instead of the per-run default
 #     REVISION=<sha> bin/build-images   # name the build when git cannot be read
@@ -544,9 +545,108 @@ smoke_web_applinks() {
   echo "    /.well-known/apple-app-site-association -> webcredentials for ${app_id}"
 }
 
+
+# --- enrich ----------------------------------------------------------------
+build_enrich() {
+  IMAGES+=("motet-enrich:${TAG}")
+  docker build --target enrich -t "motet-enrich:${TAG}" -f Dockerfile .
+}
+
+smoke_enrich() {
+  local name="motet-smoke-enrich-$$" port token="smoke-enrich-token-$$"
+  CONTAINERS+=("$name")
+  # No OpenRouter key and no service URL: fake mode, which is what every check below runs
+  # against. The bearer is a throwaway string, and it is set precisely so the 401 arm can
+  # be exercised — an image whose door does not close is the one failure here that costs
+  # money rather than an article.
+  docker run -d --name "$name" -P \
+    -e "MOTET_ENRICH_SERVICE_TOKEN=${token}" \
+    -e "OTEL_RESOURCE_ATTRIBUTES=service.name=motet-enrich,service.version=${REVISION}" \
+    "motet-enrich:${TAG}" >/dev/null
+  port="$(host_port "$name")"
+
+  local body
+  body="$(wait_for_http "http://127.0.0.1:${port}${API_HEALTH_PATH}" "$name")"
+  echo "    ${API_HEALTH_PATH} -> ${body:0:220}..."
+  case "$body" in
+    *'"status":"ok"'*'"service":"motet-enrich"'*) ;;
+    *) echo "smoke: enrich ${API_HEALTH_PATH} did not report ok as motet-enrich" >&2; return 1 ;;
+  esac
+  # THE assertion this target exists for. An image whose npm half failed to install, or
+  # whose Chromium is not where Playwright's driver expects it, looks identical from
+  # outside until a real item fails to enrich — and it would be a *deployed* revision by
+  # then. The workspace's own venv cannot make this claim on the image's behalf.
+  case "$body" in
+    *'"toolchain_ready":true'*) echo "    toolchain_ready -> true (pi, the adapter, the browser server, a Chromium)" ;;
+    *) echo "smoke: the enrich image cannot run an agent — toolchain_ready is false" >&2
+       return 1 ;;
+  esac
+  case "$body" in
+    *'"authenticated":true'*) ;;
+    *) echo "smoke: enrich health does not report the bearer it was given" >&2; return 1 ;;
+  esac
+  case "$body" in
+    *"\"revision\":\"${REVISION}\""*)
+      echo "    revision -> ${REVISION} (the build this image was made from)" ;;
+    *) echo "smoke: enrich ${API_HEALTH_PATH} did not report the build's revision (${REVISION})" >&2
+       return 1 ;;
+  esac
+
+  local reserved code
+  for reserved in "${PLATFORM_RESERVED_PATHS[@]}"; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://127.0.0.1:${port}${reserved}" || true)"
+    echo "    ${reserved} -> ${code} (reserved by the platform; must not be ours)"
+    if [ "$code" != "404" ]; then
+      echo "smoke: the enrich container answers ${reserved}, which Cloud Run 404s first" >&2
+      return 1
+    fi
+  done
+
+  # The inner door. Cloud Run's IAM check is the outer one and is not in front of a
+  # `docker run`, so this is the only place the shared bearer is on trial at all.
+  local request='{"item_id":"si_smoke","title":"Smoke","candidate_urls":["https://example.com/a"],"site":{"domain":"example.com"},"caps":{"max_usd":0.5,"max_tool_calls":5,"timeout_seconds":60}}'
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
+    -H 'Content-Type: application/json' -d "$request" \
+    "http://127.0.0.1:${port}/v1/enrich" || true)"
+  echo "    POST /v1/enrich without the bearer -> ${code}"
+  if [ "$code" != "401" ]; then
+    echo "smoke: the enrich service did not refuse a caller without its bearer" >&2; return 1
+  fi
+  local answered
+  answered="$(curl -sS --max-time 20 -X POST -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${token}" -d "$request" \
+    "http://127.0.0.1:${port}/v1/enrich" || true)"
+  case "$answered" in
+    *'"status":"ok"'*) echo "    POST /v1/enrich with the bearer -> 200, fake mode answered" ;;
+    *) echo "smoke: enrich did not answer a fake-mode run: ${answered:0:300}" >&2; return 1 ;;
+  esac
+
+  # Design option D2 as a property of the artifact: this container's identity is meant to
+  # hold nothing, and there is nothing in the image that could use a database credential
+  # even if one were mounted. One interpreter that must find the service and must not find
+  # any of the four, so a broken image cannot pass as one where the modules are absent.
+  local present
+  present="$(docker run --rm --entrypoint python "motet-enrich:${TAG}" -c '
+import importlib.util as u
+assert u.find_spec("motet_enrich") is not None, "motet_enrich itself is not importable"
+print(" ".join(m for m in ("motet_db", "psycopg", "motet_vault", "motet_api", "motet_workers") if u.find_spec(m)) or "none")
+' 2>&1 || true)"
+  if [ "$present" != "none" ]; then
+    echo "smoke: the enrich image carries what design option D2 forbids, or could not be asked: ${present}" >&2
+    return 1
+  fi
+  echo "    motet_db, psycopg, motet_vault, motet_api, motet_workers are absent (option D2)"
+
+  # And the browser itself, driven for real: see bin/smoke/enrich-browser-probe.py for what
+  # the three claims are and why none of them is reachable any other way.
+  docker cp bin/smoke/enrich-browser-probe.py "${name}:/tmp/enrich-browser-probe.py" >/dev/null
+  docker exec "$name" python /tmp/enrich-browser-probe.py
+}
+
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
-  targets=(api worker voice web)
+  targets=(api worker voice web enrich)
 fi
 
 for target in "${targets[@]}"; do
@@ -560,7 +660,9 @@ for target in "${targets[@]}"; do
     web)    step "Build motet-web:${TAG}";    build_web
             step "Smoke motet-web";           smoke_web
             step "Smoke motet-web app links"; smoke_web_applinks ;;
-    *) echo "unknown image '$target' (expected: api, worker, voice, web)" >&2; exit 2 ;;
+    enrich) step "Build motet-enrich:${TAG}"; build_enrich
+            step "Smoke motet-enrich";        smoke_enrich ;;
+    *) echo "unknown image '$target' (expected: api, worker, voice, web, enrich)" >&2; exit 2 ;;
   esac
 done
 

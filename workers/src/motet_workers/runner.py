@@ -58,6 +58,9 @@ from motet_inference.llm import validate_startup as validate_llm_startup
 from motet_storage import build_store
 from motet_vault import vault_status
 
+from .enrich import ENABLED_ENV as ENRICH_ENABLED_ENV
+from .enrich import build_enrich_client
+from .enrich import load_config as enrich_config
 from .llm_context import job_overrides
 from .loop import MAX_JOBS_PER_RUN, drain, prune_jobs
 from .queues import PIPELINE, Queue
@@ -238,6 +241,17 @@ def main(argv: list[str] | None = None) -> int:
     # needs audio" to "fails at start-up", which is where this file puts everything else.
     stages = get_stages()
     store = build_store()
+    # And the enrichment seam, for the same reason plus one of its own: an image missing
+    # `google-auth` would otherwise discover it inside a swallowed call in the first agent
+    # run. `build_enrich_client` returns None where this deployment has no enrichment
+    # service, which is every deployment until a human switches one on.
+    enrich_client = build_enrich_client(enrich_config())
+    logger.info(
+        "enrich: %s",
+        "on — an item linking to an added site is fetched by the agent first"
+        if enrich_client is not None
+        else f"off ({ENRICH_ENABLED_ENV} is unset or no service URL is configured)",
+    )
 
     stop = _Stop()
     try:
@@ -250,7 +264,14 @@ def main(argv: list[str] | None = None) -> int:
             # this execution is about to write, because every window is days wide.
             prune_jobs(database_url)
             for queue in queues:
-                drain(queue, database_url, max_jobs=args.max_jobs, stages=stages, store=store)
+                drain(
+                    queue,
+                    database_url,
+                    max_jobs=args.max_jobs,
+                    stages=stages,
+                    store=store,
+                    enrich_client=enrich_client,
+                )
             return 0
 
         _install_sigterm(stop)
@@ -268,7 +289,12 @@ def main(argv: list[str] | None = None) -> int:
                 if stop.requested:
                     break
                 processed += drain(
-                    queue, database_url, max_jobs=args.max_jobs, stages=stages, store=store
+                    queue,
+                    database_url,
+                    max_jobs=args.max_jobs,
+                    stages=stages,
+                    store=store,
+                    enrich_client=enrich_client,
                 )
             # Only when the whole sweep found nothing. Sleeping after every pass would add
             # a poll interval to each stage; sleeping only when the pipeline is empty means

@@ -16,6 +16,7 @@ def test_queue_names_cover_every_pipeline_stage() -> None:
     assert [q.value for q in Queue] == [
         "poll",
         "extract",
+        "enrich",
         "integrate",
         "assemble",
         "script",
@@ -33,6 +34,7 @@ def test_the_pipeline_covers_every_queue_in_order() -> None:
     assert PIPELINE == (
         Queue.POLL,
         Queue.EXTRACT,
+        Queue.ENRICH,
         Queue.INTEGRATE,
         Queue.ASSEMBLE,
         Queue.SCRIPT,

@@ -240,6 +240,7 @@ def drain(
     max_jobs: int = MAX_JOBS_PER_RUN,
     stages: Stages | None = None,
     store: ObjectStore | None = None,
+    enrich_client: object | None = None,
 ) -> int:
     """Claim and run every ready job on ``queue``. Returns the number processed.
 
@@ -250,6 +251,11 @@ def drain(
     sticky upstream routing is *per client*, and that routing is what keeps the dedup
     prompt cache warm — the largest LLM cost lever in the system (see AGENTS.md). A client
     per pass would throw the cache away on every sweep and leak a connection pool doing it.
+
+    ``enrich_client`` is the same bargain one seam along (motet#102): built once per process
+    so that a deployment with no enrichment service, or an image missing ``google-auth``,
+    says so at startup rather than inside the first agent run — and ``None`` means the
+    handler resolves its own, which is what a one-shot drain and every test get.
 
     They stay optional so that a one-shot drain, and every test that calls this, needs to
     know none of it.
@@ -303,7 +309,17 @@ def drain(
 
             after_commit: list[Any] = []
             try:
-                _run_one(conn, database_url, job, handler, stages, store, recorders, after_commit)
+                _run_one(
+                    conn,
+                    database_url,
+                    job,
+                    handler,
+                    stages,
+                    store,
+                    recorders,
+                    after_commit,
+                    enrich_client,
+                )
             finally:
                 if job.serialize_key is not None:
                     jobs.unlock(conn, job.serialize_key)
@@ -547,6 +563,7 @@ def _run_one(
     store: Any,
     recorders: Any,
     after_commit: list[Any] | None = None,
+    enrich_client: object | None = None,
 ) -> None:
     """Run one job under a span, and record how it went as a metric.
 
@@ -570,7 +587,9 @@ def _run_one(
         # settle — a completion billed inside a job that rolled back still happened.
         llm_job_context(conn, job),
     ):
-        outcome = _execute(conn, job, handler, stages, store, recorders, after_commit)
+        outcome = _execute(
+            conn, job, handler, stages, store, recorders, after_commit, enrich_client
+        )
         span.set_attribute("motet.job.outcome", outcome)
         # `already_applied` is a success: the row was recovered and settled, and nothing
         # about *this* job went wrong. That a worker died is carried by the WARNING and by
@@ -591,6 +610,7 @@ def _execute(
     store: Any,
     recorders: Any,
     after_commit: list[Any] | None = None,
+    enrich_client: object | None = None,
 ) -> str:
     """Run one job's handler, then record the outcome in a separate transaction.
 
@@ -632,7 +652,7 @@ def _execute(
             jobs.complete(conn, job.id)
         return "already_applied"
 
-    context = Context(conn=conn, stages=stages, store=store)
+    context = Context(conn=conn, stages=stages, store=store, enrich_client=enrich_client)
     try:
         with conn.transaction():
             handler(context, job.payload)

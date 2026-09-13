@@ -1,0 +1,13 @@
+{
+  "name": "motet-enrich-toolchain",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The agent toolchain the motet-enrich image installs: pi, the MCP adapter, and a stealth Playwright MCP server.",
+  "type": "module",
+  "//": "Exact versions, no ranges. This is third-party code that drives a browser over untrusted pages inside a container; a caret here would mean the image's contents change without a commit. package-lock.json pins the whole tree, and `npm ci` is what the Dockerfile runs. Bumping any of these is a PR, and the one to read the changelog for is pi-mcp-adapter, which resolves two of its own dependencies from pkg.pr.new rather than from the registry.",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "pi-mcp-adapter": "2.33.0",
+    "playwright-stealth-mcp-server": "0.2.3"
+  }
+}

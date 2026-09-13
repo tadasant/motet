@@ -1,0 +1,34 @@
+[project]
+name = "motet-enrich"
+version = "0.1.0"
+description = "Agentic enrichment: a coding agent fetches the full article behind a newsletter preview"
+requires-python = ">=3.13"
+# NOTE THE ABSENCE, and it is the whole point of this package existing separately.
+# `motet-db`, `psycopg` and `motet-vault` are not here and must never be. Design option D2
+# (motet#102) puts this service in a container whose service account holds nothing —
+# because any process in a Cloud Run container can mint that account's token from the
+# metadata server, and the code this process shells out to is third-party npm driving a
+# browser over untrusted pages. The worker opens the credentials one run needs and sends
+# them in the request; this service holds no key path, no database URL and no schema
+# knowledge. `tests/test_no_database_access.py` asserts this list, so adding the
+# dependency fails CI rather than quietly crossing the boundary.
+#
+# `motet-inference` is a pure library — it reaches vendors, never Postgres — and it is
+# what keeps `MOTET_INFERENCE_MODE` parsed in exactly one place. It also carries the model
+# catalogue this service prices the agent's own model from.
+dependencies = [
+    "fastapi>=0.115",
+    "motet-inference",
+    # Telemetry wiring, shared with every other deployable. `motet-obs` depends on no
+    # `motet-*` package and reaches an OTLP endpoint rather than Postgres.
+    "motet-obs",
+    "pydantic>=2.10",
+    "uvicorn>=0.34",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/motet_enrich"]

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from email import message_from_bytes, policy
 from email.header import decode_header, make_header
@@ -151,6 +152,23 @@ _FOOTER_TAIL_FRACTION: Final = 0.6
 #: alternative, where every link becomes its own line of unspeakable characters.
 _BARE_URL_RE: Final = re.compile(r"^\s*<?https?://\S+>?\s*$", re.IGNORECASE)
 
+#: A URL anywhere in a plain-text document. The companion to :data:`_BARE_URL_RE`: that one
+#: decides which lines to *drop* from what will be spoken, and this one keeps what they
+#: said, because :func:`find_links` runs on the body before the cleanup throws it away.
+_BARE_URL_IN_TEXT_RE: Final = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+#: Punctuation a URL at the end of a sentence collects and does not own.
+_URL_TRAILERS: Final = ".,;:!?)]}>\"'"
+
+#: How many links one message's ``links`` column may hold. A digest is a list of a hundred
+#: stories; the rule that reads this stops at the first match, and the column is not an
+#: archive of the message.
+MAX_LINKS: Final = 200
+
+#: An ``href`` worth keeping: an absolute http(s) URL. ``mailto:``, ``tel:``, a fragment and
+#: a relative path are all links to somewhere that is not an article.
+_WEB_URL_RE: Final = re.compile(r"^https?://", re.IGNORECASE)
+
 #: Charsets that senders declare and do not mean.
 #:
 #: A mail client that labels its output `iso-8859-1` has, in practice, emitted
@@ -184,6 +202,14 @@ class ExtractedMessage:
     #: than a datetime because it travels through a JSON job payload.
     date: str
     message_id: str
+    #: Every link the message carried, in document order, deduplicated.
+    #:
+    #: **The one thing about this file that keeps a URL**, and it is a tuple beside the
+    #: text rather than anything inside it: the text is going to be spoken, and a
+    #: 600-character tracking redirect is not a sentence. Enrichment (motet#102) answers
+    #: "does this newsletter link to a site the owner has added" from here, so a href
+    #: thrown away is an article that can never be fetched.
+    links: tuple[str, ...] = ()
 
     @property
     def usable(self) -> bool:
@@ -203,7 +229,8 @@ def extract_newsletter(raw: bytes) -> ExtractedMessage:
         raise ExtractionError(f"could not parse the message: {exc}") from exc
 
     title = _decoded_header(message, "Subject")
-    body = _clean(_body_text(message))
+    raw_body, links = _body_and_links(message)
+    body = _clean(raw_body)
 
     if not title:
         # Titling from the first line would work, but a newsletter with no Subject is
@@ -221,6 +248,7 @@ def extract_newsletter(raw: bytes) -> ExtractedMessage:
         sender=_decoded_header(message, "From"),
         date=_date(message),
         message_id=_decoded_header(message, "Message-ID"),
+        links=links,
     )
 
 
@@ -278,18 +306,45 @@ def _date(message: Message) -> str:
 # --- MIME ----------------------------------------------------------------------------
 
 
-def _body_text(message: Message) -> str:
-    """The best available body, plain text preferred over HTML.
+def _body_and_links(message: Message) -> tuple[str, tuple[str, ...]]:
+    """The best available body, and every link **any** part carried.
 
-    Walks the tree rather than trusting ``get_body()``: real newsletters nest
+    The body walks the tree rather than trusting ``get_body()``: real newsletters nest
     ``multipart/mixed`` around ``multipart/alternative`` around the parts that matter, and
     some put the plain alternative *after* the HTML one in violation of the spec —
-    ``get_body`` honours document order, which picks the wrong one. Preference is decided
-    by content type here, and order only breaks ties.
+    ``get_body`` honours document order, which picks the wrong one. Preference is decided by
+    content type here, and order only breaks ties.
+
+    **The two halves deliberately read different parts.** The body prefers the plain-text
+    alternative, because it is what a human was meant to read; the links are taken from
+    every part, HTML included, because the plain alternative of a well-built newsletter
+    often carries the same links wrapped in the same tracking redirect while the HTML one is
+    where the anchors actually are. Taking links only from the winning part would mean a
+    newsletter with a plain alternative could never be enriched.
+
+    **HTML links come before plain-text ones**, so "document order" is really "the HTML
+    part's order, then the plain part's". That matters because the first link is what
+    ``motet_workers.enrich.plan_enrichment`` records as the article: the HTML alternative is
+    the one with real anchors, so preferring it is the right way round, and a message with
+    only a plain part is unaffected.
     """
+    plain, html = _text_parts(message)
+    # Parsed once, for both halves. Asking for the text and then for the links would walk
+    # the same markup twice for every HTML-only message, which is most of them.
+    parsed = [parse_html(chunk) for chunk in html]
+    body = "\n\n".join(plain) if plain else "\n\n".join(text for text, _ in parsed)
+    if not body.strip():
+        raise ExtractionError("message has no text/plain or text/html part")
+    return body, merge_links(
+        (link for _, links in parsed for link in links),
+        (link for chunk in plain for link in find_links(chunk)),
+    )
+
+
+def _text_parts(message: Message) -> tuple[list[str], list[str]]:
+    """Every readable text/plain and text/html part, decoded, in document order."""
     plain: list[str] = []
     html: list[str] = []
-
     for part in _leaves(message):
         content_type = part.get_content_type()
         if content_type not in ("text/plain", "text/html"):
@@ -300,12 +355,7 @@ def _body_text(message: Message) -> str:
         if not decoded.strip():
             continue
         (plain if content_type == "text/plain" else html).append(decoded)
-
-    if plain:
-        return "\n\n".join(plain)
-    if html:
-        return "\n\n".join(html_to_text(chunk) for chunk in html)
-    raise ExtractionError("message has no text/plain or text/html part")
+    return plain, html
 
 
 def _leaves(message: Message) -> list[Message]:
@@ -372,6 +422,7 @@ class _TextExtractor(HTMLParser):
         self._chunks: list[str] = []
         self._suppress_depth = 0
         self._hidden_stack: list[str] = []
+        self._links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _DROPPED_TAGS:
@@ -379,6 +430,18 @@ class _TextExtractor(HTMLParser):
             return
         if self._suppress_depth:
             return
+        if tag == "a" and not self._hidden_stack:
+            # Collected under exactly the visibility rules the text is: a link inside a
+            # hidden preheader is a tracking pixel's cousin, and a link inside a <script>
+            # or <style> is not a link at all. A *visible* footer link survives, which is
+            # deliberate — the footer cut happens on lines, later, and a publisher's
+            # "manage preferences" link is on the same host as its articles, so no cut here
+            # could tell them apart anyway. The agent is handed every match and picks.
+            self._links.extend(
+                value.strip()
+                for name, value in attrs
+                if name.lower() == "href" and value and _WEB_URL_RE.match(value.strip())
+            )
         if _is_hidden(attrs):
             # Tracked by tag name so the matching end tag closes it. Void elements never
             # get here with content to hide, so an unbalanced hidden `<br>` cannot wedge
@@ -411,6 +474,9 @@ class _TextExtractor(HTMLParser):
     def text(self) -> str:
         return "".join(self._chunks)
 
+    def links(self) -> list[str]:
+        return self._links
+
 
 def _is_hidden(attrs: list[tuple[str, str | None]]) -> bool:
     for name, value in attrs:
@@ -421,8 +487,8 @@ def _is_hidden(attrs: list[tuple[str, str | None]]) -> bool:
     return False
 
 
-def html_to_text(html: str) -> str:
-    """Readable text from newsletter HTML. Exposed for the golden set."""
+def parse_html(html: str) -> tuple[str, list[str]]:
+    """Readable text and every link, from one pass over newsletter HTML."""
     parser = _TextExtractor()
     try:
         parser.feed(html)
@@ -431,7 +497,34 @@ def html_to_text(html: str) -> str:
         # Malformed markup is normal in email. Whatever was parsed before the failure is
         # still worth having; losing the whole newsletter to one unbalanced tag is not.
         logger.warning("HTML parsing stopped early: %s", exc)
-    return parser.text()
+    return parser.text(), parser.links()
+
+
+def html_to_text(html: str) -> str:
+    """Readable text from newsletter HTML. Exposed for the golden set."""
+    return parse_html(html)[0]
+
+
+def find_links(text: str) -> list[str]:
+    """Every http(s) URL in a plain-text document, in order.
+
+    For the plain-text alternative, and for a paste — neither has markup to read an href
+    out of. Trailing punctuation is trimmed because a URL at the end of a sentence collects
+    the full stop, and the angle brackets RFC 3986 suggests around one are stripped for the
+    same reason.
+    """
+    return [match.group(0).rstrip(_URL_TRAILERS) for match in _BARE_URL_IN_TEXT_RE.finditer(text)]
+
+
+def merge_links(*groups: Iterable[str]) -> tuple[str, ...]:
+    """Order-preserving deduplication across several sources of links, bounded.
+
+    :data:`MAX_LINKS` is a bound on a ``text[]`` column, not a judgement: a digest with four
+    hundred anchors would otherwise write four hundred of them per row, and the rule that
+    reads this column stops at the first match anyway.
+    """
+    seen = dict.fromkeys(link for group in groups for link in group)
+    return tuple(seen)[:MAX_LINKS]
 
 
 # --- cleanup -------------------------------------------------------------------------
