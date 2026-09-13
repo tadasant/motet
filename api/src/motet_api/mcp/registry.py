@@ -113,6 +113,7 @@ PLANNED: tuple[ToolDef, ...] = (
     # admin (opt-in)
     ToolDef("logout_everywhere", "admin", True, (("POST", "/v1/auth/logout-all"),)),
     ToolDef("get_admin_overview", "admin", False, (("GET", "/v1/admin/overview"),)),
+    ToolDef("list_waitlist", "admin", False, (("GET", "/v1/admin/waitlist"),)),
 )
 """Tools owed, named and grouped as proposed on motet#111. Not callable yet."""
 
@@ -146,6 +147,14 @@ EXCLUDED: dict[Operation, str] = {
     ("GET", "/feed.xml"): (
         "Authenticated by the feed token, which is a bearer secret for one read-only document "
         "and is never an MCP credential. get_feed returns the subscription URL."
+    ),
+    ("GET", "/v1/feed/artwork.png"): (
+        "The podcast artwork image the feed's <itunes:image> points at, served without a "
+        "credential to podcast apps' image caches. Image bytes are not a tool result."
+    ),
+    ("POST", "/v1/waitlist"): (
+        "The landing page's public, credential-free signup form for people who are not users. "
+        "An MCP caller is already an authenticated user and has nothing to join."
     ),
     ("POST", "/v1/episodes/{episode_id}/voice-session"): (
         "Mints a voice socket URL and an authenticate frame that only a realtime audio client "
