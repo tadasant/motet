@@ -19,6 +19,9 @@ struct SettingsView: View {
                 listeningSection
                 offlineSection
             }
+            .brandGround()
+            .foregroundStyle(Theme.ink)
+            .font(Theme.body(16))
             .navigationTitle("Settings")
             .task {
                 let current = model.currentCredentials()
@@ -35,20 +38,27 @@ struct SettingsView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .keyboardType(.URL)
+                .listRowBackground(Theme.surface)
             SecureField("API token", text: $apiToken)
+                .listRowBackground(Theme.surface)
             Button("Save and refresh") {
                 Task { await model.saveCredentials(baseURL: baseURL, apiToken: apiToken) }
             }
+            .buttonStyle(PrimaryButtonStyle())
             .disabled(baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 4, trailing: 0))
         } header: {
-            Text("Server")
+            Text("Server").brandLabel()
         } footer: {
             Text("The token is kept in the Keychain, on this device only.")
+                .font(Theme.aside(14))
+                .foregroundStyle(Theme.inkMute)
         }
     }
 
     private var listeningSection: some View {
-        Section("Listening") {
+        Section {
             Picker("Speed", selection: rateBinding) {
                 ForEach(PlaybackSettings.rateLadder, id: \.self) { rate in
                     Text(Format.rate(rate)).tag(rate)
@@ -66,7 +76,11 @@ struct SettingsView: View {
                 in: 5...120,
                 step: 5
             )
+        } header: {
+            Text("Listening").brandLabel()
         }
+        .listRowBackground(Theme.surface)
+        .monospacedDigit()
     }
 
     private var offlineSection: some View {
@@ -78,10 +92,14 @@ struct SettingsView: View {
             )
             LabeledContent("On this device", value: Format.bytes(offlineBytes))
         } header: {
-            Text("Offline")
+            Text("Offline").brandLabel()
         } footer: {
             Text("Downloaded before you leave, so a walk with no signal still plays.")
+                .font(Theme.aside(14))
+                .foregroundStyle(Theme.inkMute)
         }
+        .listRowBackground(Theme.surface)
+        .monospacedDigit()
     }
 
     // MARK: - Bindings

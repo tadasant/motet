@@ -21,17 +21,33 @@ struct BacklogView: View {
                 ConnectionBanner(message: model.connectionMessage)
                 List {
                     if visibleItems.isEmpty {
-                        ContentUnavailableView(
-                            showingRead ? "Nothing here" : "All caught up",
-                            systemImage: "tray",
-                            description: Text("Paste something in to start a backlog.")
-                        )
+                        ContentUnavailableView {
+                            VStack(spacing: 12) {
+                                VoiceDots(size: 8)
+                                Text(showingRead ? "Nothing here" : "All caught up")
+                                    .font(Theme.display(26, relativeTo: .title2))
+                                    .foregroundStyle(Theme.ink)
+                            }
+                        } description: {
+                            Text("Paste in a newsletter, bookmark or thread to start a backlog.")
+                                .font(Theme.body(15, relativeTo: .subheadline))
+                                .foregroundStyle(Theme.inkSoft)
+                        }
+                        .listRowBackground(Theme.parchment)
+                        .listRowSeparator(.hidden)
                     }
                     ForEach(visibleItems, id: \.id) { item in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(item.title).font(.headline)
-                            Text(item.summary).font(.subheadline).foregroundStyle(.secondary)
+                            Text(item.title)
+                                .font(Theme.display(18, relativeTo: .headline))
+                                .foregroundStyle(item.read ? Theme.inkSoft : Theme.ink)
+                            Text(item.summary)
+                                .font(Theme.body(15, relativeTo: .subheadline))
+                                .foregroundStyle(item.read ? Theme.inkMute : Theme.inkSoft)
                         }
+                        .padding(.vertical, 6)
+                        .listRowBackground(Theme.parchment)
+                        .listRowSeparatorTint(Theme.rule)
                         .swipeActions(edge: .leading) {
                             Button {
                                 Task { await model.setRead(!item.read, newsItem: item) }
@@ -41,13 +57,16 @@ struct BacklogView: View {
                                     systemImage: item.read ? "envelope.badge" : "envelope.open"
                                 )
                             }
-                            .tint(item.read ? .orange : .green)
+                            // Read state is a status, so it is ink, never a voice hue.
+                            .tint(Theme.ink)
                         }
                     }
                 }
                 .listStyle(.plain)
+                .brandGround()
                 .refreshable { await model.refresh() }
             }
+            .background(Theme.parchment)
             .navigationTitle("Backlog")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
@@ -57,8 +76,7 @@ struct BacklogView: View {
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Toggle("Show read", isOn: $showingRead)
-                        .toggleStyle(.button)
-                        .font(.footnote)
+                        .toggleStyle(PillToggleStyle())
                 }
             }
             .sheet(isPresented: $isPasting) { PasteView() }
@@ -76,11 +94,23 @@ struct PasteView: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Where it came from", text: $title)
-                Section("Text") {
-                    TextEditor(text: $text).frame(minHeight: 220)
+                Section {
+                    TextField("Where it came from", text: $title)
+                        .font(Theme.body(16))
                 }
+                .listRowBackground(Theme.surface)
+                Section {
+                    TextEditor(text: $text)
+                        .font(Theme.body(16))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 220)
+                } header: {
+                    Text("Text").brandLabel()
+                }
+                .listRowBackground(Theme.surface)
             }
+            .brandGround()
+            .foregroundStyle(Theme.ink)
             .navigationTitle("Paste in")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -100,5 +130,7 @@ struct PasteView: View {
                 }
             }
         }
+        .preferredColorScheme(.light)
+        .tint(Theme.ink)
     }
 }

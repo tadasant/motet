@@ -72,9 +72,12 @@ enum BrandFont {
     ) -> UIFont {
         let face: Face = italic ? .frauncesItalic : .fraunces
         let opsz = min(max(opticalSize ?? size, 9), 144)
-        if let font = variableFont(
-            face: face, size: size, axes: [Axis.wght: weight, Axis.opsz: opsz, Axis.soft: 100]
-        ) {
+        let axes: [Int: CGFloat] = [
+            VariationAxis.wght: weight,
+            VariationAxis.opsz: opsz,
+            VariationAxis.soft: 100,
+        ]
+        if let font = variableFont(face: face, size: size, axes: axes) {
             return font
         }
         return systemFont(size: size, weight: weight, design: .serif, italic: italic)
@@ -82,7 +85,7 @@ enum BrandFont {
 
     static func sansUIFont(size: CGFloat, weight: CGFloat = 400) -> UIFont {
         if let font = variableFont(
-            face: .instrumentSans, size: size, axes: [Axis.wght: min(max(weight, 400), 700)]
+            face: .instrumentSans, size: size, axes: [VariationAxis.wght: min(max(weight, 400), 700)]
         ) {
             return font
         }
@@ -92,7 +95,7 @@ enum BrandFont {
     // MARK: - Internals
 
     /// Variation axis identifiers, as the FourCC integers Core Text expects.
-    private enum Axis {
+    private enum VariationAxis {
         static let wght = 0x7767_6874  // 'wght'
         static let opsz = 0x6F70_737A  // 'opsz'
         static let soft = 0x534F_4654  // 'SOFT'

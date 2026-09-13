@@ -12,11 +12,20 @@ struct EpisodesView: View {
                 ConnectionBanner(message: model.connectionMessage)
                 List {
                     if model.episodes.isEmpty {
-                        ContentUnavailableView(
-                            "No episodes yet",
-                            systemImage: "waveform",
-                            description: Text("Make one from everything unread in your backlog.")
-                        )
+                        ContentUnavailableView {
+                            VStack(spacing: 12) {
+                                VoiceDots(size: 8)
+                                Text("No episodes yet")
+                                    .font(Theme.display(26, relativeTo: .title2))
+                                    .foregroundStyle(Theme.ink)
+                            }
+                        } description: {
+                            Text("Make one from everything unread in your backlog.")
+                                .font(Theme.body(15, relativeTo: .subheadline))
+                                .foregroundStyle(Theme.inkSoft)
+                        }
+                        .listRowBackground(Theme.parchment)
+                        .listRowSeparator(.hidden)
                     }
                     ForEach(model.episodes, id: \.id) { episode in
                         EpisodeRow(
@@ -27,10 +36,17 @@ struct EpisodesView: View {
                     }
                 }
                 .listStyle(.plain)
+                .brandGround()
                 .refreshable { await model.refresh() }
             }
+            .background(Theme.parchment)
+            // The screen's title is the wordmark: lowercase, Fraunces italic, never the sans.
             .navigationTitle("Motet")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Wordmark(size: 26)
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         isCreating = true
@@ -51,20 +67,26 @@ struct EpisodeRow: View {
     let isDownloaded: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 14) {
             Button {
                 Task { await model.play(episode: episode) }
             } label: {
-                Image(systemName: episode.episodeState.isPlayable ? "play.circle.fill" : "clock")
-                    .font(.title)
-                    .foregroundStyle(episode.episodeState.isPlayable ? Color.accentColor : .secondary)
+                Image(systemName: episode.episodeState.isPlayable ? "play.fill" : "clock")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(episode.episodeState.isPlayable ? Theme.parchment : Theme.inkMute)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Circle().fill(episode.episodeState.isPlayable ? Theme.ink : Theme.surface)
+                    )
             }
             .buttonStyle(.plain)
             .disabled(!episode.episodeState.isPlayable)
             .accessibilityLabel("Play \(episode.title)")
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(episode.title).font(.headline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(episode.title)
+                    .font(Theme.display(19, relativeTo: .headline))
+                    .foregroundStyle(Theme.ink)
                 HStack(spacing: 6) {
                     Text(Format.duration(episode.durationMs))
                     if !episode.episodeState.isPlayable {
@@ -73,32 +95,40 @@ struct EpisodeRow: View {
                     if isDownloaded {
                         Label("Downloaded", systemImage: "arrow.down.circle.fill")
                             .labelStyle(.iconOnly)
-                            .foregroundStyle(.green)
                             .accessibilityLabel("Downloaded")
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(Theme.body(13, weight: 500, relativeTo: .caption))
+                .monospacedDigit()
+                .foregroundStyle(Theme.inkSoft)
 
                 if let position, position.spokenThroughMs > 0 {
-                    ProgressView(value: position.fraction)
-                        .tint(position.isFinished ? .secondary : .accentColor)
+                    PlayedTrack(
+                        fraction: position.fraction, height: 4, isFinished: position.isFinished
+                    )
                     Text(
                         position.isFinished
                             ? "Finished"
                             : "\(Format.time(position.spokenThroughMs)) of \(Format.time(position.durationMs))"
                     )
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.body(12, weight: 500, relativeTo: .caption2))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkMute)
                 }
 
                 if let error = episode.lastError, episode.episodeState == .failed {
-                    Text(error).font(.caption2).foregroundStyle(.red)
+                    Text(error)
+                        .font(Theme.body(12, relativeTo: .caption2))
+                        .foregroundStyle(Theme.error)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 4)
+        .padding(14)
+        .brandCard()
+        .listRowBackground(Theme.parchment)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
         .swipeActions(edge: .trailing) {
             if isDownloaded {
                 Button(role: .destructive) {
@@ -106,13 +136,14 @@ struct EpisodeRow: View {
                 } label: {
                     Label("Remove", systemImage: "trash")
                 }
+                .tint(Theme.error)
             } else if episode.episodeState.isPlayable {
                 Button {
                     Task { await model.download(episode: episode) }
                 } label: {
                     Label("Download", systemImage: "arrow.down.circle")
                 }
-                .tint(.blue)
+                .tint(Theme.ink)
             }
         }
     }
@@ -122,15 +153,23 @@ struct EpisodeRow: View {
 struct NewEpisodeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var title = "Briefing"
+    @State private var title = "Episode"
     @State private var minutes = 20
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Title", text: $title)
-                Stepper("Up to \(minutes) minutes", value: $minutes, in: 5...90, step: 5)
+                Section {
+                    TextField("Title", text: $title)
+                        .font(Theme.body(16))
+                    Stepper("Up to \(minutes) minutes", value: $minutes, in: 5...90, step: 5)
+                        .font(Theme.body(16))
+                        .monospacedDigit()
+                }
+                .listRowBackground(Theme.surface)
             }
+            .brandGround()
+            .foregroundStyle(Theme.ink)
             .navigationTitle("New episode")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -147,5 +186,7 @@ struct NewEpisodeView: View {
                 }
             }
         }
+        .preferredColorScheme(.light)
+        .tint(Theme.ink)
     }
 }

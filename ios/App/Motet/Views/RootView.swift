@@ -42,12 +42,15 @@ struct ConnectionBanner: View {
     var body: some View {
         if let message {
             Label(message, systemImage: "wifi.slash")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .font(Theme.body(13, weight: 500, relativeTo: .footnote))
+                .foregroundStyle(Theme.inkSoft)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal)
-                .padding(.vertical, 6)
-                .background(.thinMaterial)
+                .padding(.vertical, 8)
+                .background(Theme.surface)
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(Theme.rule).frame(height: 1)
+                }
         }
     }
 }
