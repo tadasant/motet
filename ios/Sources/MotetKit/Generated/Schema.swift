@@ -477,6 +477,54 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// A source item that is extracted and waiting for the owner to say "ingest now".
+///
+/// A connected source polls, fetches and extracts on its own — the deterministic, free
+/// half — and stops before ``integrate``, the first stage that spends inference. Held is
+/// ``state = 'pending'`` with no integrate job, and this is the list of those. A paste
+/// never lingers here: it queues its job on arrival.
+public struct HeldSourceItemResponse: Codable, Hashable, Sendable {
+    public var chars: Int
+    public var id: String
+    public var preview: String
+    public var receivedAt: Date
+    public var sourceId: String
+    public var sourceKind: String
+    public var sourceName: String
+    public var title: String
+
+    public init(
+        chars: Int,
+        id: String,
+        preview: String,
+        receivedAt: Date,
+        sourceId: String,
+        sourceKind: String,
+        sourceName: String,
+        title: String
+    ) {
+        self.chars = chars
+        self.id = id
+        self.preview = preview
+        self.receivedAt = receivedAt
+        self.sourceId = sourceId
+        self.sourceKind = sourceKind
+        self.sourceName = sourceName
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chars
+        case id
+        case preview
+        case receivedAt = "received_at"
+        case sourceId = "source_id"
+        case sourceKind = "source_kind"
+        case sourceName = "source_name"
+        case title
+    }
+}
+
 /// A saved passage, anchored to the span of source text it quotes.
 ///
 /// The anchor is the source span and nothing else — claims are rewritten on every script
@@ -602,6 +650,25 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// Which held source items to queue for integration.
+public struct IntegrateRequest: Codable, Hashable, Sendable {
+    public var ids: [String]
+
+    public init(ids: [String]) {
+        self.ids = ids
+    }
+}
+
+public struct IntegrateResponse: Codable, Hashable, Sendable {
+    public var queued: Int
+    public var skipped: Int
+
+    public init(queued: Int, skipped: Int) {
+        self.queued = queued
+        self.skipped = skipped
+    }
+}
+
 /// How far into an episode the listener has got.
 ///
 /// Invariant 4: we own playback position, so this is a *report* from a client that we
@@ -687,6 +754,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
     public var id: String
     public var read: Bool
     public var sourceItemIds: [String]
+    public var sources: [NewsItemSourceRef]
     public var summary: String
     public var title: String
 
@@ -695,6 +763,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         id: String,
         read: Bool,
         sourceItemIds: [String],
+        sources: [NewsItemSourceRef],
         summary: String,
         title: String
     ) {
@@ -702,6 +771,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         self.id = id
         self.read = read
         self.sourceItemIds = sourceItemIds
+        self.sources = sources
         self.summary = summary
         self.title = title
     }
@@ -711,8 +781,20 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         case id
         case read
         case sourceItemIds = "source_item_ids"
+        case sources
         case summary
         case title
+    }
+}
+
+/// A source item a news item is backed by, named so a list can show it.
+public struct NewsItemSourceRef: Codable, Hashable, Sendable {
+    public var id: String
+    public var title: String
+
+    public init(id: String, title: String) {
+        self.id = id
+        self.title = title
     }
 }
 
@@ -979,6 +1061,231 @@ public struct SmartRuleModel: Codable, Hashable, Sendable {
         case sourceIds = "source_ids"
         case unreadOnly = "unread_only"
         case windowDays = "window_days"
+    }
+}
+
+/// One source item across its three stages: pulled in, processed, news item.
+///
+/// PROTOTYPE. A read over ``source_items``, the newest ``integrate`` job and
+/// ``news_item_sources``; nothing new is stored. See ``repo.source_item_lifecycle``.
+public struct SourceItemDetailResponse: Codable, Hashable, Sendable {
+    public var id: String
+    public var newsItems: [SourceItemNewsItemResponse]
+    public var processed: SourceItemProcessedStage
+    public var pulled: SourceItemPulledStage
+    public var state: String
+    public var title: String
+
+    public init(
+        id: String,
+        newsItems: [SourceItemNewsItemResponse],
+        processed: SourceItemProcessedStage,
+        pulled: SourceItemPulledStage,
+        state: String,
+        title: String
+    ) {
+        self.id = id
+        self.newsItems = newsItems
+        self.processed = processed
+        self.pulled = pulled
+        self.state = state
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case newsItems = "news_items"
+        case processed
+        case pulled
+        case state
+        case title
+    }
+}
+
+/// The newest ``integrate`` job for a source item, as the queue holds it.
+public struct SourceItemJobResponse: Codable, Hashable, Sendable {
+    public var attempts: Int
+    public var createdAt: Date
+    public var id: Int
+    public var lastError: String?
+    public var lockedAt: Date?
+    public var maxAttempts: Int
+    public var runAt: Date
+    public var state: String
+    public var updatedAt: Date
+    public var workCommitted: Bool
+
+    public init(
+        attempts: Int,
+        createdAt: Date,
+        id: Int,
+        lastError: String? = nil,
+        lockedAt: Date? = nil,
+        maxAttempts: Int,
+        runAt: Date,
+        state: String,
+        updatedAt: Date,
+        workCommitted: Bool
+    ) {
+        self.attempts = attempts
+        self.createdAt = createdAt
+        self.id = id
+        self.lastError = lastError
+        self.lockedAt = lockedAt
+        self.maxAttempts = maxAttempts
+        self.runAt = runAt
+        self.state = state
+        self.updatedAt = updatedAt
+        self.workCommitted = workCommitted
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempts
+        case createdAt = "created_at"
+        case id
+        case lastError = "last_error"
+        case lockedAt = "locked_at"
+        case maxAttempts = "max_attempts"
+        case runAt = "run_at"
+        case state
+        case updatedAt = "updated_at"
+        case workCommitted = "work_committed"
+    }
+}
+
+/// Stage 3: the deduped news item this source item feeds.
+public struct SourceItemNewsItemResponse: Codable, Hashable, Sendable {
+    public var id: String
+    public var position: Int
+    public var read: Bool
+    public var sourceCount: Int
+    public var summary: String
+    public var title: String
+
+    public init(
+        id: String,
+        position: Int,
+        read: Bool,
+        sourceCount: Int,
+        summary: String,
+        title: String
+    ) {
+        self.id = id
+        self.position = position
+        self.read = read
+        self.sourceCount = sourceCount
+        self.summary = summary
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case position
+        case read
+        case sourceCount = "source_count"
+        case summary
+        case title
+    }
+}
+
+/// Stage 2: what processing did with the item — and, as often, what it has not done.
+///
+/// Rendered as an explicit stage even when empty, because this is where enrichment steps
+/// will be added between the scrape and the news item. ``status`` is derived from the
+/// source item's state and the newest job's: ``held`` means nobody has asked for
+/// inference yet; ``queued``, ``running`` and ``failed`` follow the job; ``done`` means
+/// the item is integrated.
+public struct SourceItemProcessedStage: Codable, Hashable, Sendable {
+    public var costRecorded: Bool
+    public var decisionRecorded: Bool
+    public var error: String?
+    public var integratedAt: Date?
+    public var job: SourceItemJobResponse?
+    public var outcome: String?
+    public var status: String
+    public var summary: String?
+    public var title: String?
+
+    public init(
+        costRecorded: Bool,
+        decisionRecorded: Bool,
+        error: String? = nil,
+        integratedAt: Date? = nil,
+        job: SourceItemJobResponse? = nil,
+        outcome: String? = nil,
+        status: String,
+        summary: String? = nil,
+        title: String? = nil
+    ) {
+        self.costRecorded = costRecorded
+        self.decisionRecorded = decisionRecorded
+        self.error = error
+        self.integratedAt = integratedAt
+        self.job = job
+        self.outcome = outcome
+        self.status = status
+        self.summary = summary
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case costRecorded = "cost_recorded"
+        case decisionRecorded = "decision_recorded"
+        case error
+        case integratedAt = "integrated_at"
+        case job
+        case outcome
+        case status
+        case summary
+        case title
+    }
+}
+
+/// Stage 1 of a source item's life: what the deterministic scrape pulled in.
+///
+/// Everything here was produced without a model — a poll, a fetch, and
+/// ``motet_sources.extract``. ``text`` is the extracted text, not the raw message: the
+/// RFC 822 bytes are never stored, which ``raw_stored`` says out loud so that the UI does
+/// not call the extracted text "the email".
+public struct SourceItemPulledStage: Codable, Hashable, Sendable {
+    public var chars: Int
+    public var externalId: String?
+    public var rawStored: Bool
+    public var receivedAt: Date
+    public var sourceId: String
+    public var sourceKind: String
+    public var sourceName: String
+    public var text: String
+
+    public init(
+        chars: Int,
+        externalId: String? = nil,
+        rawStored: Bool,
+        receivedAt: Date,
+        sourceId: String,
+        sourceKind: String,
+        sourceName: String,
+        text: String
+    ) {
+        self.chars = chars
+        self.externalId = externalId
+        self.rawStored = rawStored
+        self.receivedAt = receivedAt
+        self.sourceId = sourceId
+        self.sourceKind = sourceKind
+        self.sourceName = sourceName
+        self.text = text
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chars
+        case externalId = "external_id"
+        case rawStored = "raw_stored"
+        case receivedAt = "received_at"
+        case sourceId = "source_id"
+        case sourceKind = "source_kind"
+        case sourceName = "source_name"
+        case text
     }
 }
 
@@ -1261,6 +1568,21 @@ public enum MotetEndpoints {
     /// `GET /v1/processing` — Processing Status
     public static var processingStatus: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/processing")
+    }
+
+    /// `GET /v1/source-items/held` — List Held Source Items
+    public static var listHeldSourceItems: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/source-items/held")
+    }
+
+    /// `POST /v1/source-items/integrate` — Integrate Source Items
+    public static var integrateSourceItems: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/source-items/integrate")
+    }
+
+    /// `GET /v1/source-items/{source_item_id}` — Get Source Item Detail
+    public static func getSourceItemDetail(sourceItemId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/source-items/\(MotetPathComponent(sourceItemId))")
     }
 
     /// `GET /v1/sources` — List Sources

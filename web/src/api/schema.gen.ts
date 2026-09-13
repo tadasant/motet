@@ -678,6 +678,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/source-items/held": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Held Source Items
+         * @description Source items extracted from a connected source and waiting to be ingested.
+         *
+         *     Connecting a source does the deterministic, free work on its own — poll, fetch,
+         *     extract — and stops before ``integrate``, the first stage that spends inference. What
+         *     it leaves is a ``pending`` source item with no integrate job, and that combination is
+         *     the held state: no column records it. Oldest first, so the list reads as a queue. A
+         *     paste is never here for longer than its own transaction, because pasting is asking.
+         */
+        get: operations["list_held_source_items_v1_source_items_held_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/source-items/integrate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Integrate Source Items
+         * @description Queue held source items for integration — the owner saying "ingest now".
+         *
+         *     Each id that is the caller's, ``pending`` and without an integrate job gets one,
+         *     written exactly as a paste's is: same queue, same payload, same per-user serialization
+         *     key (invariant 6). Every other id is skipped rather than refused — an item that was
+         *     queued a moment ago by a second tab is not an error, and a response that 4xx'd on it
+         *     would make the first tab's success look like a failure.
+         */
+        post: operations["integrate_source_items_v1_source_items_integrate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/source-items/{source_item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Source Item Detail
+         * @description PROTOTYPE — one source item across its three stages.
+         *
+         *     Pulled in (the deterministic scrape), processed (the integrate job and what dedup
+         *     wrote), and the news item it feeds. Stage 2 is reported even when it is empty — held,
+         *     queued, running, failed — because that is where enrichment steps will go. What is not
+         *     persisted is said rather than omitted: ``decision_recorded`` and ``cost_recorded`` are
+         *     both false today.
+         */
+        get: operations["get_source_item_detail_v1_source_items__source_item_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources": {
         parameters: {
             query?: never;
@@ -1200,6 +1278,46 @@ export interface components {
             vault_ready: boolean;
         };
         /**
+         * HeldSourceItemResponse
+         * @description A source item that is extracted and waiting for the owner to say "ingest now".
+         *
+         *     A connected source polls, fetches and extracts on its own — the deterministic, free
+         *     half — and stops before ``integrate``, the first stage that spends inference. Held is
+         *     ``state = 'pending'`` with no integrate job, and this is the list of those. A paste
+         *     never lingers here: it queues its job on arrival.
+         */
+        HeldSourceItemResponse: {
+            /**
+             * Chars
+             * @description Length of the extracted text.
+             */
+            chars: number;
+            /** Id */
+            id: string;
+            /**
+             * Preview
+             * @description The first ~200 characters, whitespace collapsed.
+             */
+            preview: string;
+            /**
+             * Received At
+             * Format: date-time
+             * @description When the source item was stored.
+             */
+            received_at: string;
+            /** Source Id */
+            source_id: string;
+            /**
+             * Source Kind
+             * @description 'gmail' or 'paste'.
+             */
+            source_kind: string;
+            /** Source Name */
+            source_name: string;
+            /** Title */
+            title: string;
+        };
+        /**
          * HighlightResponse
          * @description A saved passage, anchored to the span of source text it quotes.
          *
@@ -1305,6 +1423,27 @@ export interface components {
             title: string;
         };
         /**
+         * IntegrateRequest
+         * @description Which held source items to queue for integration.
+         */
+        IntegrateRequest: {
+            /** Ids */
+            ids: string[];
+        };
+        /** IntegrateResponse */
+        IntegrateResponse: {
+            /**
+             * Queued
+             * @description Ids that were held and now have an integrate job.
+             */
+            queued: number;
+            /**
+             * Skipped
+             * @description Ids that did not qualify: unknown, another user's, already queued, or already integrated. Never an error.
+             */
+            skipped: number;
+        };
+        /**
          * ListenProgressRequest
          * @description How far into an episode the listener has got.
          *
@@ -1387,8 +1526,23 @@ export interface components {
             read: boolean;
             /** Source Item Ids */
             source_item_ids: string[];
+            /**
+             * Sources
+             * @description The same source items as source_item_ids, with their titles, in position order.
+             */
+            sources: components["schemas"]["NewsItemSourceRef"][];
             /** Summary */
             summary: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * NewsItemSourceRef
+         * @description A source item a news item is backed by, named so a list can show it.
+         */
+        NewsItemSourceRef: {
+            /** Id */
+            id: string;
             /** Title */
             title: string;
         };
@@ -1623,6 +1777,199 @@ export interface components {
              * @default 2
              */
             window_days: number;
+        };
+        /**
+         * SourceItemDetailResponse
+         * @description One source item across its three stages: pulled in, processed, news item.
+         *
+         *     PROTOTYPE. A read over ``source_items``, the newest ``integrate`` job and
+         *     ``news_item_sources``; nothing new is stored. See ``repo.source_item_lifecycle``.
+         */
+        SourceItemDetailResponse: {
+            /** Id */
+            id: string;
+            /**
+             * News Items
+             * @description Zero or one today — a source item belongs to at most one news item.
+             */
+            news_items: components["schemas"]["SourceItemNewsItemResponse"][];
+            processed: components["schemas"]["SourceItemProcessedStage"];
+            pulled: components["schemas"]["SourceItemPulledStage"];
+            /**
+             * State
+             * @description 'pending', 'integrated' or 'failed'.
+             */
+            state: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * SourceItemJobResponse
+         * @description The newest ``integrate`` job for a source item, as the queue holds it.
+         */
+        SourceItemJobResponse: {
+            /** Attempts */
+            attempts: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            /** Last Error */
+            last_error: string | null;
+            /**
+             * Locked At
+             * @description When a worker last touched its lease.
+             */
+            locked_at: string | null;
+            /**
+             * Max Attempts
+             * @description The ceiling the queue counts to.
+             */
+            max_attempts: number;
+            /**
+             * Run At
+             * Format: date-time
+             * @description When the job is (or was) due.
+             */
+            run_at: string;
+            /**
+             * State
+             * @description 'ready', 'running', 'done' or 'failed'.
+             */
+            state: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Work Committed
+             * @description Whether the handler's work landed durably (the work fence), even if the job row has not been completed yet.
+             */
+            work_committed: boolean;
+        };
+        /**
+         * SourceItemNewsItemResponse
+         * @description Stage 3: the deduped news item this source item feeds.
+         */
+        SourceItemNewsItemResponse: {
+            /** Id */
+            id: string;
+            /**
+             * Position
+             * @description This source item's position among them; 0 created it.
+             */
+            position: number;
+            /** Read */
+            read: boolean;
+            /**
+             * Source Count
+             * @description How many source items back this story.
+             */
+            source_count: number;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * SourceItemProcessedStage
+         * @description Stage 2: what processing did with the item — and, as often, what it has not done.
+         *
+         *     Rendered as an explicit stage even when empty, because this is where enrichment steps
+         *     will be added between the scrape and the news item. ``status`` is derived from the
+         *     source item's state and the newest job's: ``held`` means nobody has asked for
+         *     inference yet; ``queued``, ``running`` and ``failed`` follow the job; ``done`` means
+         *     the item is integrated.
+         */
+        SourceItemProcessedStage: {
+            /**
+             * Cost Recorded
+             * @description Whether this item's inference spend is persisted. Always false today: usage is logged per item and metered per stage, never stored on the row.
+             */
+            cost_recorded: boolean;
+            /**
+             * Decision Recorded
+             * @description Whether dedup's relation / reason / closest candidate are persisted. Always false today: they are logged and counted, never stored.
+             */
+            decision_recorded: boolean;
+            /**
+             * Error
+             * @description The source item's recorded error, or the job's last one while retrying.
+             */
+            error: string | null;
+            /** Integrated At */
+            integrated_at: string | null;
+            job: components["schemas"]["SourceItemJobResponse"] | null;
+            /**
+             * Outcome
+             * @description 'new' if this source item created its news item, 'merged' if it was folded into one that already existed; null until integrated. Read off news_item_sources.position, which is the only durable trace of the decision.
+             */
+            outcome: string | null;
+            /**
+             * Status
+             * @description 'held', 'queued', 'running', 'done' or 'failed'.
+             */
+            status: string;
+            /**
+             * Summary
+             * @description Likewise the summary.
+             */
+            summary: string | null;
+            /**
+             * Title
+             * @description The news item's title as it stands now — dedup wrote or rewrote it.
+             */
+            title: string | null;
+        };
+        /**
+         * SourceItemPulledStage
+         * @description Stage 1 of a source item's life: what the deterministic scrape pulled in.
+         *
+         *     Everything here was produced without a model — a poll, a fetch, and
+         *     ``motet_sources.extract``. ``text`` is the extracted text, not the raw message: the
+         *     RFC 822 bytes are never stored, which ``raw_stored`` says out loud so that the UI does
+         *     not call the extracted text "the email".
+         */
+        SourceItemPulledStage: {
+            /**
+             * Chars
+             * @description Length of the extracted text.
+             */
+            chars: number;
+            /**
+             * External Id
+             * @description The provider's own id for the message; null for a paste.
+             */
+            external_id: string | null;
+            /**
+             * Raw Stored
+             * @description Whether the raw bytes the text was extracted from are kept. Always false.
+             */
+            raw_stored: boolean;
+            /**
+             * Received At
+             * Format: date-time
+             * @description When the source item was stored.
+             */
+            received_at: string;
+            /** Source Id */
+            source_id: string;
+            /**
+             * Source Kind
+             * @description 'gmail' or 'paste'.
+             */
+            source_kind: string;
+            /** Source Name */
+            source_name: string;
+            /**
+             * Text
+             * @description The extracted text, in full.
+             */
+            text: string;
         };
         /** SourceItemResponse */
         SourceItemResponse: {
@@ -2601,6 +2948,105 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProcessingStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_held_source_items_v1_source_items_held_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeldSourceItemResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    integrate_source_items_v1_source_items_integrate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IntegrateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_source_item_detail_v1_source_items__source_item_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceItemDetailResponse"];
                 };
             };
             /** @description Validation Error */

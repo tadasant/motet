@@ -673,6 +673,24 @@ def enqueue_paste(
     return stored
 
 
+def enqueue_integration(
+    conn: psycopg.Connection[Any], *, user_id: str, source_item_ids: Sequence[str]
+) -> list[str]:
+    """Queue held source items for integration — the owner saying "ingest now".
+
+    The API calls this. A connected source's ``handle_extract`` deliberately stops short
+    of this stage (``motet_workers.ingest`` says why), so this is the *only* way a polled
+    item reaches dedup. Each id is checked to be the caller's, ``pending`` and without an
+    integrate job before a job is written for it; the rest are dropped without comment,
+    and the ids actually queued come back so the caller can count both. Same queue, same
+    payload and same serialization key as a paste — invariant 6 lives on this stage.
+    """
+    claimed = repo.claim_held_source_items(conn, user_id, source_item_ids)
+    for item_id in claimed:
+        enqueue(conn, Queue.INTEGRATE, {"source_item_id": item_id}, serialize_key=user_id)
+    return claimed
+
+
 def enqueue_episode(
     conn: psycopg.Connection[Any], *, user_id: str, title: str, max_duration_ms: int
 ) -> str:

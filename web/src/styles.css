@@ -92,3 +92,41 @@ main.wide { max-width: 90rem; }
 .badge.running { color: #06c; border-color: #06c; }
 .badge.done { color: var(--muted); }
 .admin select { font: inherit; padding: .3rem; }
+
+/* PROTOTYPE: in-page player */
+.player { margin: .75rem 0 1rem; }
+.player audio { width: 100%; max-width: 46rem; display: block; }
+
+/* PROTOTYPE: held items */
+.held { border: 1px solid var(--line); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1.25rem; }
+.held h3 { margin: 0; }
+.held .row { margin-top: 0; }
+.held-table th.check, .held-table td.check { width: 1.5rem; }
+.held-table tbody tr { cursor: pointer; }
+.held-table tr.preview-row td { background: #fafafa; font-size: .85rem; cursor: default; }
+.held-table tr.preview-row:hover { background: #fafafa; }
+.linkish.hint { font-size: .8rem; }
+
+/* PROTOTYPE — the three-stage source item lifecycle (SourceItemDetail.tsx). Plain like
+   the rest: a numbered card per stage so that the empty stage 2 of a held item is still
+   visibly a stage. */
+.lifecycle { border: 1px solid var(--line); border-radius: 4px; padding: .5rem .9rem .75rem; margin: .5rem 0; background: #fafafa; font-weight: 400; color: var(--fg); }
+.lifecycle-head { margin: .25rem 0 .5rem; }
+.stage { border-top: 1px solid var(--line); padding: .5rem 0 .6rem; }
+.stage h4 { margin: 0 0 .1rem; font-size: .95rem; }
+.stage-number { display: inline-block; min-width: 1.3rem; height: 1.3rem; line-height: 1.3rem; text-align: center; border: 1px solid var(--fg); border-radius: 50%; font-size: .8rem; margin-right: .2rem; }
+.stage-what { margin: 0 0 .5rem; font-size: .85rem; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .9rem; margin: .35rem 0; font-size: .9rem; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+.extracted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; border: 1px solid var(--line); padding: .5rem; font-size: .85rem; background: #fff; }
+.stage-status { margin: .25rem 0; }
+.stage-status.status-failed strong { color: var(--bad); }
+.stage-status.status-done strong { color: var(--good); }
+.stage-gaps { margin: .35rem 0 0; font-size: .8rem; }
+.linked-news { list-style: none; padding: 0; margin: 0; }
+.linked-news p { margin: .2rem 0; }
+/* The news item a stage-3 link points at, for a moment. */
+.items li.flash { background: #fff8d6; transition: background 1s; }
+.held-table .preview-row td { padding-top: 0; }

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 from urllib.parse import urlencode
@@ -61,6 +62,27 @@ DEFAULT_TIMEOUT_SECONDS: Final = 30.0
 #: rather than a message count, because "the last week of newsletters" is a thing a user
 #: can predict and "the last 50 messages" is not.
 DEFAULT_FIRST_SYNC_DAYS: Final = 7
+
+#: Overrides :data:`DEFAULT_FIRST_SYNC_DAYS` for one deployment. Read at the point of use
+#: rather than at import, so a local session can widen the window without a restart of
+#: anything but the worker.
+FIRST_SYNC_DAYS_ENV: Final = "MOTET_GMAIL_FIRST_SYNC_DAYS"
+
+
+def first_sync_days() -> int:
+    """How many days back a first sync reaches: the env override, else the default."""
+    raw = os.environ.get(FIRST_SYNC_DAYS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_FIRST_SYNC_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an integer; using %d", FIRST_SYNC_DAYS_ENV, raw, DEFAULT_FIRST_SYNC_DAYS
+        )
+        return DEFAULT_FIRST_SYNC_DAYS
+    return days if days > 0 else DEFAULT_FIRST_SYNC_DAYS
+
 
 #: The default Gmail search. Category-based rather than label-based because it needs no
 #: setup from the user — Gmail already sorts newsletters into `promotions` and `updates`.
@@ -288,10 +310,12 @@ class GmailMailClient:
         )
 
     def _search_page(self, *, query: str, limit: int) -> MessagePage:
+        days = first_sync_days()
+        logger.info("first sync: bounded to the last %d days", days)
         response = self._get(
             f"{self._base_url}/users/me/messages",
             {
-                "q": f"{query} newer_than:{DEFAULT_FIRST_SYNC_DAYS}d",
+                "q": f"{query} newer_than:{days}d",
                 "maxResults": str(limit),
             },
         )
