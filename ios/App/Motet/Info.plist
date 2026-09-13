@@ -8,15 +8,50 @@
     until the `com.apple.developer.carplay-audio` entitlement is granted by Apple.
   * `NSAppTransportSecurity` is deliberately absent: the API is reached over HTTPS, and an
     exception here would be a way to point the app at a plaintext host by accident.
+
+  And the ones App Store Connect reads on upload (`ios/bin/testflight` asserts each of them
+  against the archived app, because the upload is the only other place they are checked):
+
+  * The bundle identity keys, as build-setting references. `GENERATE_INFOPLIST_FILE` is off,
+    so nothing adds them for us, and an app without `CFBundleExecutable` compiles cleanly
+    and is refused at upload.
+  * `CFBundleShortVersionString` / `CFBundleVersion` come from `MARKETING_VERSION` and
+    `CURRENT_PROJECT_VERSION`, so the distribution workflow can give every upload a new
+    build number without editing this file.
+  * `ITSAppUsesNonExemptEncryption: false` — the app's only cryptography is HTTPS and the
+    Keychain, both exempt. Without the key every build waits on an export-compliance
+    question in App Store Connect before a tester can install it.
+  * `MotetDefaultBaseURL` — the server a distribution build is pointed at, filled from the
+    `MOTET_DEFAULT_API_BASE_URL` build setting. It is empty in this repo and in every CI
+    build; the TestFlight workflow passes it from a GitHub environment variable, so no
+    hostname is written here. Settings still overrides it.
 -->
 <plist version="1.0">
 <dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Motet</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>MotetDefaultBaseURL</key>
+	<string>$(MOTET_DEFAULT_API_BASE_URL)</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

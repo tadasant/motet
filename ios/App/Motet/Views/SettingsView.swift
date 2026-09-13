@@ -3,9 +3,9 @@ import SwiftUI
 
 /// Where the app is pointed, and how it behaves on a walk.
 ///
-/// The server URL and token are typed in here rather than compiled in: this repo is public,
-/// so a default hostname would be infrastructure topology in it and a default token would be
-/// a credential in a shipped binary.
+/// The token is typed in here, never compiled in: a default token would be a credential in a
+/// shipped binary. The server URL arrives prefilled on a TestFlight build (`CredentialStore`
+/// says where from) and is typed in on every other build.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var baseURL = ""

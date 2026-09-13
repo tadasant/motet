@@ -9,9 +9,12 @@ import Security
 /// an unencrypted backup; the Keychain item below is `ThisDeviceOnly`, so it does not travel
 /// in a backup at all.
 ///
-/// The base URL is not a secret and lives in `UserDefaults` — but it is still *typed in*
-/// rather than compiled in, because this repo is public and a hostname in it is
-/// infrastructure topology.
+/// The base URL is not a secret and lives in `UserDefaults`. A URL typed into Settings wins;
+/// without one, a distribution build falls back to `MotetDefaultBaseURL`, which the
+/// TestFlight workflow fills from a GitHub environment variable at build time. This repo is
+/// public, so the hostname is never written in it, and every other build ships the key empty
+/// and asks, exactly as before. The token has no such default and never will: a token in
+/// the binary would be a credential in every copy of it.
 @MainActor
 final class CredentialStore {
     private let baseURLKey = "motet.baseURL"
@@ -19,15 +22,35 @@ final class CredentialStore {
     private let service = "com.getmotet.app"
 
     func configuration() -> MotetConfiguration {
-        MotetConfiguration(
-            baseURL: UserDefaults.standard.string(forKey: baseURLKey).flatMap(URL.init(string:)),
-            apiToken: readToken()
-        )
+        MotetConfiguration(baseURL: storedBaseURL() ?? Self.buildDefaultBaseURL, apiToken: readToken())
     }
+
+    private func storedBaseURL() -> URL? {
+        guard let stored = UserDefaults.standard.string(forKey: baseURLKey), !stored.isEmpty else {
+            return nil
+        }
+        return URL(string: stored)
+    }
+
+    /// HTTPS only, so a mistyped variable cannot point a shipped build at a plaintext host.
+    /// The same reason `NSAppTransportSecurity` has no exceptions.
+    private static let buildDefaultBaseURL: URL? = {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "MotetDefaultBaseURL") as? String
+        else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("https://") else { return nil }
+        return URL(string: trimmed)
+    }()
 
     func save(baseURL: String, apiToken: String) {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(trimmed, forKey: baseURLKey)
+        // Settings shows the build's default, so saving it unchanged must not pin it: a later
+        // build pointed somewhere else would otherwise be ignored on this phone forever.
+        if trimmed == Self.buildDefaultBaseURL?.absoluteString {
+            UserDefaults.standard.removeObject(forKey: baseURLKey)
+        } else {
+            UserDefaults.standard.set(trimmed, forKey: baseURLKey)
+        }
         writeToken(apiToken.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 

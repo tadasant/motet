@@ -198,9 +198,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				// No Apple Developer Program membership yet, so there is no signing identity
-				// to use and `xcodebuild -sdk iphonesimulator` must not ask for one. Flip
-				// both of these back on — and set DEVELOPMENT_TEAM — for a device build.
+				// Signing is off in the project, so the simulator build CI runs needs no
+				// identity. Nothing signs at build time: `ios/bin/testflight` archives
+				// unsigned and Apple's cloud-managed certificate signs at export, with the
+				// team passed on the command line rather than written here.
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
@@ -214,6 +215,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
+				MOTET_DEFAULT_API_BASE_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -238,6 +240,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
+				MOTET_DEFAULT_API_BASE_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

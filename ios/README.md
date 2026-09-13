@@ -161,9 +161,10 @@ links. It says nothing about any of this.
    build fail to sign rather than merely lack CarPlay, which would take the `ios` job red
    for a reason that has nothing to do with the code. Once granted: set that build setting,
    then test with the simulator's CarPlay window and in a car.
-10. **TestFlight and device installs.** Enrolment is done, so these are now unblocked
-    rather than impossible — and both need signing, which the `ios` job deliberately does
-    not do.
+10. **Signing and the upload.** `ios/bin/testflight check` proves an unsigned device archive
+    has the shape App Store Connect wants, on every PR. Whether Apple's cloud signing accepts
+    it and processing passes is only answered by the first `testflight.yml` run, which
+    needs the Apple key — see "Distribution" below.
 11. **The brand typefaces.** Fraunces and Instrument Sans are bundled under `App/Motet/Fonts`
     and registered at runtime (`BrandFont`), with `wght`/`opsz`/`SOFT` set through a
     variation descriptor (`WONK` 0 too). A build cannot tell a registered face from the
@@ -212,7 +213,65 @@ disagree. Small, and worth doing on its own.
 
 ## Configuration
 
-Nothing is baked in. The server URL and the `/v1` token are typed into Settings on first
-run — the URL into `UserDefaults`, the token into the Keychain, on this device only. This
-repo is public: a default hostname here would be infrastructure topology in it, and a
-default token would be a credential in a shipped binary.
+The `/v1` token is typed into Settings on first run and kept in the Keychain, on this device
+only. It is never baked in, because a default token would be a credential in every copy of
+the binary.
+
+The server URL is typed in too, except on a TestFlight build, which arrives with it
+prefilled. `MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL`
+build setting, which is empty in this repo and in CI. The TestFlight workflow fills it from
+the `testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in
+this repo's files. The variable holds the product's public API name, which the public SPA
+already serves in its `config.js`. It is not masked, and it shows in the workflow's logs.
+Never set it to an internal address such as a `*.run.app` URL. Only an `https://` value is honoured, and a URL saved in Settings always wins.
+
+## Distribution: TestFlight
+
+`.github/workflows/testflight.yml` archives, signs, uploads, and waits until App Store
+Connect has *processed* the build, because an upload Xcode calls successful can still fail
+processing. It runs `ios/bin/testflight upload`. `ios/bin/testflight check` is the
+credential-free half of the same script, and the `ios` CI job runs it on every PR.
+
+```bash
+gh workflow run testflight.yml --ref main          # an agent can do this; so can the Actions tab
+gh workflow run testflight.yml --ref main -f signing=archive   # fallback, see below
+```
+
+**Signing happens in Apple's cloud, at export.** The archive is unsigned. `-exportArchive`
+with `-allowProvisioningUpdates` and an App Store Connect API key signs it with the team's
+cloud-managed distribution certificate and creates the App Store profile. So the whole
+credential is one key: no .p12, no profile, no keychain on the runner. If Apple ever refuses
+export-time signing of an unsigned archive, `signing=archive` signs during the archive
+instead. It works from the same key, but mints a development certificate per run, so it
+is the fallback rather than the default. Apple caps a team's development certificates, so
+a run of fallback builds eventually needs old ones revoked in Certificates, IDs & Profiles.
+If the first real run shows export-time signing is refused, make `archive` the default
+rather than living on the fallback.
+
+**Build numbers** are `run_number.run_attempt`, which are unique and increasing, including
+for a re-run. The marketing version is `MARKETING_VERSION` in the project. Bump it for a
+release that should read differently in TestFlight.
+
+**What a human does, once** (invariant 9). Each step unblocks the next:
+
+1. Accept any pending agreement at developer.apple.com and in App Store Connect →
+   Business. Uploads are refused while one is pending.
+2. Register the App ID `com.getmotet.app` (Certificates, IDs & Profiles → Identifiers).
+   It needs no capabilities; background audio is not one. Do **not** tick CarPlay.
+3. Create the App Store Connect app record for that bundle id.
+4. Create a Team API key with **Admin** access (Users and Access → Integrations → App Store
+   Connect API). Admin is what cloud-managed signing needs.
+5. In the `testflight` GitHub environment, add the secrets `APP_STORE_CONNECT_API_KEY_ID`,
+   `APP_STORE_CONNECT_API_ISSUER_ID` and `APP_STORE_CONNECT_API_KEY_P8` (the whole .p8
+   file), and the variable `APPLE_TEAM_ID`. `MOTET_IOS_API_BASE_URL` is already there.
+6. After the first build processes, add testers under TestFlight → Internal Testing.
+
+Before it spends ten minutes archiving, the workflow checks that the variables are set and
+that the key can see the app record (`app_store_connect.py preflight`). A pending
+agreement shows up there as a 403. A wrong team id is only caught at export.
+
+**The app icon is the brand mark** from the Polyphony restyle
+([#115](https://github.com/tadasant/motet/pull/115)),
+`App/Motet/Assets.xcassets/AppIcon.appiconset/AppIcon.png`. Whoever replaces it must keep it
+1024×1024 with no alpha channel, or App Store Connect rejects the upload. `testflight check`
+catches a missing icon, but not an alpha channel.

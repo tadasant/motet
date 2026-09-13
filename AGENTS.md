@@ -31,7 +31,9 @@ Application code reads configuration from the environment and does not know what
 behind it. If a change seems to require an infrastructure fact in this repo, that is the
 signal it belongs in the private repo instead — say so and stop rather than inlining it.
 
-Deploy workflows live in the private repo. CI in *this* repo runs on the shared
+Deploy workflows live in the private repo — with one exception, the TestFlight upload, which
+lives here for its free macOS runner and is fenced to `main` (see
+[Runner policy](#runner-policy)). CI in *this* repo runs on the shared
 self-hosted runner pool behind a fork guard, with one job on a GitHub-hosted macOS runner
 because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
 
@@ -760,7 +762,9 @@ bin/build-images api web      # a subset
 context rooted at `api/` could not resolve it.
 
 **This repo builds images and never pushes them.** It is public and holds no cloud
-credential of any kind — no GCP identity, no registry login, nothing to leak. Publishing
+credential of any kind — no GCP identity, no registry login, nothing to leak. (Its one
+credential of any kind is the App Store Connect key behind `testflight.yml`, which reaches
+Apple and nothing in the infrastructure; see [Runner policy](#runner-policy).) Publishing
 and deploying belong to the private infrastructure repo. A PR that adds a push step here
 is a PR that adds a cloud credential to a public repo; the answer is the other repo.
 
@@ -800,7 +804,8 @@ run even if a guard were dropped.
 project — which is why the iOS app went months without a compiler ever being pointed at
 it. It is free because this repo is public, and it needs no Apple Developer Program
 credential because a **simulator** build needs no identity, no certificate, no provisioning
-profile and no App Store Connect key. That is the property to preserve: adding signing, a
+profile and no App Store Connect key — and neither does the unsigned device archive it also
+runs (`ios/bin/testflight check`). That is the property to preserve: adding signing, a
 TestFlight upload, or a `CODE_SIGN_ENTITLEMENTS` pointing at
 `ios/App/Motet/Motet.entitlements` would put a credential and a human back into a job that
 currently needs neither — and the entitlement it asks for
@@ -818,7 +823,41 @@ is workflow-wide and `all-checks-pass` has to keep aggregating exactly one workf
 skipped job is already a first-class outcome for that gate, so this reuses the existing
 design rather than working around it.
 
-Deploy workflows are a different matter — they live in the private repo.
+Deploy workflows are a different matter — they live in the private repo, **with one
+exception: `testflight.yml`.** Asked for by Tadas on 2026-09-13 ("get it into
+TestFlight"), in Zimmer session 17604, and built in session 17805. It is here rather than in
+the private repo for the reason the `ios` job is on a hosted runner: macOS minutes are free
+on a public repo and billed at a multiplier on a private one. It is the one workflow in this
+repo that holds a credential, so it is fenced four ways and **all four have to stay**:
+
+1. **`workflow_dispatch` is its only trigger.** No push and no pull request — from a fork or
+   a branch — starts it, and a fork cannot dispatch here.
+2. **The job refuses any ref but `main`** and any repository but this one.
+3. **The key is an environment secret, in `testflight`, whose deployment-branch policy
+   admits `main` only.** That is the fence that survives a branch editing (2) away: GitHub
+   withholds an environment's secrets from a job on a ref the policy does not admit.
+   Never move them to repository secrets.
+4. **It runs on a GitHub-hosted, ephemeral runner**, never the self-hosted pool, where a key
+   written to disk would outlive the job on a shared machine. Its one action is pinned by
+   commit SHA, because a moved tag would run inside the job holding the key.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** The owner asked for the outcome
+(a TestFlight build), not for this placement. The alternatives, and why they lost:
+the private repo on a paid macOS runner (the same workflow at a multiplier, for a key that
+reaches no infrastructure); Xcode Cloud (its setup needs Xcode on a Mac, and no Mac exists
+anywhere in this project); and uploading by hand from Xcode (the same missing Mac, plus a
+human in a routine operation, which invariant 9 calls a defect). Merging the PR that added
+it is the owner's choice of this option, so a reversal is a move to the private repo, not a
+rewrite: the script is the workflow's whole body.
+
+What it holds is one App Store Connect API key (Admin role, so Apple's cloud-managed
+distribution certificate signs at export and there is no .p12 or profile to store) and the
+team id. No GCP identity, no registry login, nothing about the infrastructure. The server
+the build defaults to is the environment variable `MOTET_IOS_API_BASE_URL`, so this repo
+still names no host. Creating the Apple identity, the app record and the key is invariant
+9's human half; running the workflow afterwards is not, and an agent does it with
+`gh workflow run testflight.yml --ref main`. `ios/README.md`, "Distribution", is the
+procedure.
 
 ---
 

@@ -199,7 +199,7 @@ jobs:
           fi
 
           printf '%s\n' "$files" | sed 's/^/  /'
-          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/ci\.yml$)'; then
+          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/(ci|testflight)\.yml$)'; then
             echo "ios=true" >> "$GITHUB_OUTPUT"
           else
             echo "ios=false" >> "$GITHUB_OUTPUT"
@@ -213,12 +213,14 @@ jobs:
   # having to own a Mac.
   #
   # NOTHING HERE SIGNS ANYTHING, and that is the property to preserve. A simulator build
-  # needs no identity, no certificate, no provisioning profile and no App Store Connect
-  # key, so this job holds no credential and needs no human in the loop — which is the only
-  # reason it can exist at all (AGENTS.md, invariant 9). Do not add signing, a TestFlight
-  # upload, or `CODE_SIGN_ENTITLEMENTS`: `ios/App/Motet/Motet.entitlements` asks for
-  # `com.apple.developer.carplay-audio`, which Apple has not granted, and an ungranted
-  # entitlement makes a build fail to sign rather than merely lack CarPlay.
+  # and an unsigned device archive need no identity, no certificate, no provisioning profile
+  # and no App Store Connect key, so this job holds no credential and needs no human in the
+  # loop — which is the only reason it can run on every PR (AGENTS.md, invariant 9). Signing
+  # and the TestFlight upload live in `testflight.yml`, behind a `main`-only environment; do
+  # not add them here, and do not add `CODE_SIGN_ENTITLEMENTS`:
+  # `ios/App/Motet/Motet.entitlements` asks for `com.apple.developer.carplay-audio`, which
+  # Apple has not granted, and an ungranted entitlement makes a build fail to sign rather
+  # than merely lack CarPlay.
   ios:
     if: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && needs.ios-changes.outputs.ios == 'true' }}
     needs: ios-changes
@@ -241,6 +243,13 @@ jobs:
         # a check that exists only in YAML cannot be run by hand and will rot. Anyone with
         # a Mac runs exactly this.
         run: ios/bin/build-app
+
+      - name: Archive the app for a device, unsigned, and check it is uploadable in shape
+        # The credential-free half of `testflight.yml`, run by the same script: the Release
+        # configuration, the device SDK, the app icon and the Info.plist keys App Store
+        # Connect reads. Without it the first place any of those is checked is an upload,
+        # which needs the Apple key and a human to notice it failed.
+        run: ios/bin/testflight check
 
       - name: Run the MotetKit tests against Apple's toolchain
         # The same script `bin/ci` calls on Linux — it picks up whichever Swift is on PATH,
