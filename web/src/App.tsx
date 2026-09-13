@@ -32,6 +32,7 @@ import {
   setToken,
 } from './api/client'
 import { forgetCallbackUrl, isLoginState, readCallback } from './oauth'
+import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
 import { IN_PROGRESS, EpisodeScreen } from './screens/EpisodeScreen'
 import { OAuthCallback } from './screens/OAuthCallback'
@@ -54,7 +55,72 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'sources', label: 'Sources' },
 ]
 
+// /admin is a second path, read once the way /oauth/callback is. The app shell (motet#88)
+// replaces both this and the tab strip with a section per URL.
+const ADMIN_PATH = '/admin'
+
 export default function App() {
+  // Read in an initializer rather than at import, so the answer is the address the page
+  // was loaded at — and so a test can navigate before it renders.
+  const [admin] = useState(() => window.location.pathname === ADMIN_PATH)
+  if (admin) return <AdminApp />
+  return <MainApp />
+}
+
+/**
+ * The operator view, shown only to a caller the server says is an admin.
+ *
+ * The session is asked *before* the overview, so somebody who is not an admin gets a
+ * sentence rather than a failed request for every user's data. That is presentation: the
+ * API refuses `/v1/admin/*` to them regardless of what this renders.
+ */
+function AdminApp() {
+  // undefined until the server has answered; null when it says nobody.
+  const [who, setWho] = useState<SessionInfo | null | undefined>(undefined)
+  // Why the question could not be answered, when that was not a 401. "Sign in" is the
+  // wrong advice to an admin whose API is down.
+  const [sessionError, setSessionError] = useState('')
+  useEffect(() => {
+    api
+      .session()
+      .then(setWho)
+      .catch((err: unknown) => {
+        setWho(null)
+        if (!(err instanceof ApiError && err.status === 401)) {
+          setSessionError(err instanceof Error ? err.message : String(err))
+        }
+      })
+  }, [])
+
+  return (
+    <main className="wide">
+      <header>
+        <h1>Motet</h1>
+      </header>
+      {who === undefined ? (
+        <p className="hint">Checking whether this account is an admin…</p>
+      ) : who?.admin ? (
+        <Admin />
+      ) : (
+        <section aria-labelledby="admin-heading">
+          <h2 id="admin-heading">Admin</h2>
+          <p role="alert">
+            {who === null
+              ? sessionError || 'Sign in first — the admin view needs a signed-in account.'
+              : who.how === 'session'
+                ? `${who.email ?? 'This account'} is not an admin on this deployment.`
+                : who.how === 'token'
+                  ? 'The admin view needs a signed-in Google account; the shared API token is not one.'
+                  : 'The admin view needs a signed-in Google account, and this deployment has no sign-in lock at all.'}
+          </p>
+          <a href="/">← app</a>
+        </section>
+      )}
+    </main>
+  )
+}
+
+function MainApp() {
   const [tab, setTab] = useState<Tab>('paste')
   const [items, setItems] = useState<NewsItem[]>([])
   // What has been pasted and is not a news item yet. Held here rather than in the backlog
@@ -261,6 +327,14 @@ export default function App() {
             <button type="button" onClick={signOut}>
               Sign out
             </button>
+            {/* Only for a caller the server says is an admin, so nobody is offered a
+                screen the API would refuse them. */}
+            {who.admin && (
+              <>
+                {' '}
+                <a href={ADMIN_PATH}>Admin</a>
+              </>
+            )}
           </p>
         )}
         {/* Hidden during the callback, and before there is anything to navigate: there is

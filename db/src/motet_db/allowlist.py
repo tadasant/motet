@@ -48,7 +48,28 @@ def allowed_emails(env: Mapping[str, str]) -> frozenset[str]:
     after a ``+``, and folding those here would silently *widen* the allowlist to addresses
     the operator did not write down. An address is allowed if it was listed.
     """
-    raw = env.get(ALLOWED_EMAILS_ENV, "")
+    return _addresses(env.get(ALLOWED_EMAILS_ENV, ""))
+
+
+#: Who may open the operator view, ``/v1/admin/*`` — the one route family that returns
+#: data across users. Same format as :data:`ALLOWED_EMAILS_ENV`, parsed by the same
+#: function, and **a narrowing of it rather than a second door**: an admin still arrives
+#: through a signed-in session, and a session whose address is not on the sign-in list is
+#: revoked before this list is ever consulted. One flag, not a role system.
+ADMIN_EMAILS_ENV: Final = "MOTET_ADMIN_EMAILS"
+
+
+def admin_emails(env: Mapping[str, str]) -> frozenset[str]:
+    """The operator addresses, lowercased. Empty means nobody is an admin.
+
+    Here rather than beside the one route that reads it so that the two lists cannot
+    disagree about what an address *is* — a list that lowercases and a list that does not
+    would quietly admit one spelling through one door and refuse it at the other.
+    """
+    return _addresses(env.get(ADMIN_EMAILS_ENV, ""))
+
+
+def _addresses(raw: str) -> frozenset[str]:
     return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 

@@ -7,6 +7,222 @@ import Foundation
 
 // MARK: - Schemas
 
+public struct AdminEpisodeCounts: Codable, Hashable, Sendable {
+    public var failed: Int
+    public var pending: Int
+    public var ready: Int
+    public var rendering: Int
+    public var scripting: Int
+
+    public init(failed: Int, pending: Int, ready: Int, rendering: Int, scripting: Int) {
+        self.failed = failed
+        self.pending = pending
+        self.ready = ready
+        self.rendering = rendering
+        self.scripting = scripting
+    }
+}
+
+public struct AdminJobCounts: Codable, Hashable, Sendable {
+    public var done: Int
+    public var failed: Int
+    public var ready: Int
+    public var running: Int
+
+    public init(done: Int, failed: Int, ready: Int, running: Int) {
+        self.done = done
+        self.failed = failed
+        self.ready = ready
+        self.running = running
+    }
+}
+
+/// One job row, with its payload resolved to a user and a domain subject.
+public struct AdminJobResponse: Codable, Hashable, Sendable {
+    public var attempts: Int
+    public var createdAt: Date
+    public var id: Int
+    public var lastError: String?
+    public var lockedAt: Date?
+    public var queue: String
+    public var runAt: Date
+    public var state: String
+    public var subject: String?
+    public var updatedAt: Date
+    public var userId: String?
+
+    public init(
+        attempts: Int,
+        createdAt: Date,
+        id: Int,
+        lastError: String? = nil,
+        lockedAt: Date? = nil,
+        queue: String,
+        runAt: Date,
+        state: String,
+        subject: String? = nil,
+        updatedAt: Date,
+        userId: String? = nil
+    ) {
+        self.attempts = attempts
+        self.createdAt = createdAt
+        self.id = id
+        self.lastError = lastError
+        self.lockedAt = lockedAt
+        self.queue = queue
+        self.runAt = runAt
+        self.state = state
+        self.subject = subject
+        self.updatedAt = updatedAt
+        self.userId = userId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempts
+        case createdAt = "created_at"
+        case id
+        case lastError = "last_error"
+        case lockedAt = "locked_at"
+        case queue
+        case runAt = "run_at"
+        case state
+        case subject
+        case updatedAt = "updated_at"
+        case userId = "user_id"
+    }
+}
+
+public struct AdminNewsItemCounts: Codable, Hashable, Sendable {
+    public var read: Int
+    public var unread: Int
+
+    public init(read: Int, unread: Int) {
+        self.read = read
+        self.unread = unread
+    }
+}
+
+/// The whole deployment at a glance, across every user. Admins only.
+///
+/// Aggregates are always for everyone; only `jobs` is paged, and filtered when a
+/// `user_id` is asked for. Every user and every pipeline queue is present, at zero when
+/// empty.
+public struct AdminOverviewResponse: Codable, Hashable, Sendable {
+    public var generatedAt: Date
+    public var jobs: [AdminJobResponse]
+    public var jobsNextBefore: Int?
+    public var queues: [AdminQueueResponse]
+    public var users: [AdminUserResponse]
+
+    public init(
+        generatedAt: Date,
+        jobs: [AdminJobResponse],
+        jobsNextBefore: Int? = nil,
+        queues: [AdminQueueResponse],
+        users: [AdminUserResponse]
+    ) {
+        self.generatedAt = generatedAt
+        self.jobs = jobs
+        self.jobsNextBefore = jobsNextBefore
+        self.queues = queues
+        self.users = users
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case jobs
+        case jobsNextBefore = "jobs_next_before"
+        case queues
+        case users
+    }
+}
+
+/// One queue's counts per job state, plus the two liveness facts an operator wants.
+public struct AdminQueueResponse: Codable, Hashable, Sendable {
+    public var done: Int
+    public var failed: Int
+    public var lastHeartbeatAt: Date?
+    public var oldestReadyAgeS: Double?
+    public var queue: String
+    public var ready: Int
+    public var running: Int
+
+    public init(
+        done: Int,
+        failed: Int,
+        lastHeartbeatAt: Date? = nil,
+        oldestReadyAgeS: Double? = nil,
+        queue: String,
+        ready: Int,
+        running: Int
+    ) {
+        self.done = done
+        self.failed = failed
+        self.lastHeartbeatAt = lastHeartbeatAt
+        self.oldestReadyAgeS = oldestReadyAgeS
+        self.queue = queue
+        self.ready = ready
+        self.running = running
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case done
+        case failed
+        case lastHeartbeatAt = "last_heartbeat_at"
+        case oldestReadyAgeS = "oldest_ready_age_s"
+        case queue
+        case ready
+        case running
+    }
+}
+
+public struct AdminSourceItemCounts: Codable, Hashable, Sendable {
+    public var failed: Int
+    public var integrated: Int
+    public var pending: Int
+
+    public init(failed: Int, integrated: Int, pending: Int) {
+        self.failed = failed
+        self.integrated = integrated
+        self.pending = pending
+    }
+}
+
+/// One user's counts per state, across every table that carries a `user_id`.
+public struct AdminUserResponse: Codable, Hashable, Sendable {
+    public var email: String?
+    public var episodes: AdminEpisodeCounts
+    public var jobs: AdminJobCounts
+    public var newsItems: AdminNewsItemCounts
+    public var sourceItems: AdminSourceItemCounts
+    public var userId: String
+
+    public init(
+        email: String? = nil,
+        episodes: AdminEpisodeCounts,
+        jobs: AdminJobCounts,
+        newsItems: AdminNewsItemCounts,
+        sourceItems: AdminSourceItemCounts,
+        userId: String
+    ) {
+        self.email = email
+        self.episodes = episodes
+        self.jobs = jobs
+        self.newsItems = newsItems
+        self.sourceItems = sourceItems
+        self.userId = userId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case email
+        case episodes
+        case jobs
+        case newsItems = "news_items"
+        case sourceItems = "source_items"
+        case userId = "user_id"
+    }
+}
+
 /// A reported assertion beside the span it came from (invariant 3).
 ///
 /// ``text`` is what gets spoken and may paraphrase; ``source_excerpt`` is the source text
@@ -717,12 +933,20 @@ public struct SegmentResponse: Codable, Hashable, Sendable {
 /// Answers for the shared API token too, which is what lets the SPA show "signed in as
 /// …" or "using an API token" without guessing from what it has in storage.
 public struct SessionResponse: Codable, Hashable, Sendable {
+    public var admin: Bool
     public var email: String?
     public var expiresAt: Date?
     public var how: String
     public var loginConfigured: Bool
 
-    public init(email: String? = nil, expiresAt: Date? = nil, how: String, loginConfigured: Bool) {
+    public init(
+        admin: Bool,
+        email: String? = nil,
+        expiresAt: Date? = nil,
+        how: String,
+        loginConfigured: Bool
+    ) {
+        self.admin = admin
         self.email = email
         self.expiresAt = expiresAt
         self.how = how
@@ -730,6 +954,7 @@ public struct SessionResponse: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case admin
         case email
         case expiresAt = "expires_at"
         case how
@@ -917,6 +1142,15 @@ public enum MotetEndpoints {
     /// `GET /internal/health` — Health
     public static var health: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/internal/health")
+    }
+
+    /// `GET /v1/admin/overview` — Admin Overview
+    public static func adminOverview(userId: String? = nil, before: Int? = nil, limit: Int? = nil) -> HTTPEndpoint {
+        var query: [String: String] = [:]
+        if let userId { query["user_id"] = String(describing: userId) }
+        if let before { query["before"] = String(describing: before) }
+        if let limit { query["limit"] = String(describing: limit) }
+        return HTTPEndpoint(method: "GET", path: "/v1/admin/overview", query: query)
     }
 
     /// `POST /v1/auth/google/callback` — Complete Login

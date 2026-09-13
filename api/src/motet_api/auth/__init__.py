@@ -22,7 +22,13 @@ Three pieces, and the middle one is the security control:
 
 from __future__ import annotations
 
-from motet_db.allowlist import ALLOWED_EMAILS_ENV, allowed_emails, is_allowed
+from motet_db.allowlist import (
+    ADMIN_EMAILS_ENV,
+    ALLOWED_EMAILS_ENV,
+    admin_emails,
+    allowed_emails,
+    is_allowed,
+)
 
 from .fakes import FAKE_EMAIL, FakeIdentityProvider
 from .google import (
@@ -48,6 +54,7 @@ from .registry import (
 )
 
 __all__ = [
+    "ADMIN_EMAILS_ENV",
     "ALLOWED_EMAILS_ENV",
     "CLIENT_ID_ENV",
     "CLIENT_SECRET_ENV",
@@ -62,6 +69,7 @@ __all__ = [
     "IdentityProvider",
     "IdentityUnavailableError",
     "VerifiedIdentity",
+    "admin_emails",
     "allowed_emails",
     "build_identity_provider",
     "is_allowed",

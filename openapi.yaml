@@ -2,6 +2,260 @@
 # Regenerate with `bin/generate-openapi`; `bin/ci` fails if this file is stale.
 components:
   schemas:
+    AdminEpisodeCounts:
+      properties:
+        failed:
+          title: Failed
+          type: integer
+        pending:
+          title: Pending
+          type: integer
+        ready:
+          title: Ready
+          type: integer
+        rendering:
+          title: Rendering
+          type: integer
+        scripting:
+          title: Scripting
+          type: integer
+      required:
+      - pending
+      - scripting
+      - rendering
+      - ready
+      - failed
+      title: AdminEpisodeCounts
+      type: object
+    AdminJobCounts:
+      properties:
+        done:
+          title: Done
+          type: integer
+        failed:
+          title: Failed
+          type: integer
+        ready:
+          title: Ready
+          type: integer
+        running:
+          title: Running
+          type: integer
+      required:
+      - ready
+      - running
+      - done
+      - failed
+      title: AdminJobCounts
+      type: object
+    AdminJobResponse:
+      description: One job row, with its payload resolved to a user and a domain subject.
+      properties:
+        attempts:
+          title: Attempts
+          type: integer
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        id:
+          title: Id
+          type: integer
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        locked_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Locked At
+        queue:
+          title: Queue
+          type: string
+        run_at:
+          format: date-time
+          title: Run At
+          type: string
+        state:
+          title: State
+          type: string
+        subject:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'The domain id the job is about: a source item, an episode, or a source.'
+          title: Subject
+        updated_at:
+          format: date-time
+          title: Updated At
+          type: string
+        user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The user the job's subject belongs to, resolved from the payload; null if unresolvable.
+          title: User Id
+      required:
+      - id
+      - queue
+      - state
+      - attempts
+      - user_id
+      - subject
+      - last_error
+      - run_at
+      - created_at
+      - updated_at
+      - locked_at
+      title: AdminJobResponse
+      type: object
+    AdminNewsItemCounts:
+      properties:
+        read:
+          title: Read
+          type: integer
+        unread:
+          title: Unread
+          type: integer
+      required:
+      - unread
+      - read
+      title: AdminNewsItemCounts
+      type: object
+    AdminOverviewResponse:
+      description: 'The whole deployment at a glance, across every user. Admins only.
+
+
+        Aggregates are always for everyone; only `jobs` is paged, and filtered when a
+
+        `user_id` is asked for. Every user and every pipeline queue is present, at zero when
+
+        empty.'
+      properties:
+        generated_at:
+          format: date-time
+          title: Generated At
+          type: string
+        jobs:
+          description: One page of jobs in any state, newest first (by id). `limit` long at most; `user_id`
+            narrows it to jobs resolved to that user.
+          items:
+            $ref: '#/components/schemas/AdminJobResponse'
+          title: Jobs
+          type: array
+        jobs_next_before:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Pass as `before` for the next, older page; null when this page is the last.
+          title: Jobs Next Before
+        queues:
+          items:
+            $ref: '#/components/schemas/AdminQueueResponse'
+          title: Queues
+          type: array
+        users:
+          items:
+            $ref: '#/components/schemas/AdminUserResponse'
+          title: Users
+          type: array
+      required:
+      - generated_at
+      - users
+      - queues
+      - jobs
+      - jobs_next_before
+      title: AdminOverviewResponse
+      type: object
+    AdminQueueResponse:
+      description: One queue's counts per job state, plus the two liveness facts an operator wants.
+      properties:
+        done:
+          title: Done
+          type: integer
+        failed:
+          title: Failed
+          type: integer
+        last_heartbeat_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When a worker last drained this queue; null if none ever has.
+          title: Last Heartbeat At
+        oldest_ready_age_s:
+          anyOf:
+          - type: number
+          - type: 'null'
+          description: Seconds since the oldest `ready` job on this queue was created; null if none.
+          title: Oldest Ready Age S
+        queue:
+          title: Queue
+          type: string
+        ready:
+          title: Ready
+          type: integer
+        running:
+          title: Running
+          type: integer
+      required:
+      - queue
+      - ready
+      - running
+      - done
+      - failed
+      - oldest_ready_age_s
+      - last_heartbeat_at
+      title: AdminQueueResponse
+      type: object
+    AdminSourceItemCounts:
+      properties:
+        failed:
+          title: Failed
+          type: integer
+        integrated:
+          title: Integrated
+          type: integer
+        pending:
+          title: Pending
+          type: integer
+      required:
+      - pending
+      - integrated
+      - failed
+      title: AdminSourceItemCounts
+      type: object
+    AdminUserResponse:
+      description: One user's counts per state, across every table that carries a `user_id`.
+      properties:
+        email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Email
+        episodes:
+          $ref: '#/components/schemas/AdminEpisodeCounts'
+        jobs:
+          $ref: '#/components/schemas/AdminJobCounts'
+        news_items:
+          $ref: '#/components/schemas/AdminNewsItemCounts'
+        source_items:
+          $ref: '#/components/schemas/AdminSourceItemCounts'
+        user_id:
+          title: User Id
+          type: string
+      required:
+      - user_id
+      - email
+      - source_items
+      - news_items
+      - episodes
+      - jobs
+      title: AdminUserResponse
+      type: object
     ClaimModel:
       description: "A reported assertion beside the span it came from (invariant 3).\n\n``text`` is what\
         \ gets spoken and may paraphrase; ``source_excerpt`` is the source text\nthe span actually covers,\
@@ -826,6 +1080,12 @@ components:
         \ token too, which is what lets the SPA show \"signed in as\n\u2026\" or \"using an API token\"\
         \ without guessing from what it has in storage."
       properties:
+        admin:
+          description: 'Whether this caller may read /v1/admin/*: a signed-in session whose address is
+            on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open deployment, and
+            for everybody when MOTET_ADMIN_EMAILS is unset.'
+          title: Admin
+          type: boolean
         email:
           anyOf:
           - type: string
@@ -849,6 +1109,7 @@ components:
       required:
       - how
       - login_configured
+      - admin
       title: SessionResponse
       type: object
     SmartRuleModel:
@@ -1104,6 +1365,76 @@ paths:
       summary: Health
       tags:
       - ops
+  /v1/admin/overview:
+    get:
+      description: "The whole deployment at a glance, across every user. Admins only.\n\nDeployment state\
+        \ rather than user state, like ``/v1/processing``: the caller's own\naccount plays no part in\
+        \ the answer. ``user_id``, ``before`` and ``limit`` shape the\njob list only; the per-user and\
+        \ per-queue aggregates are always for everyone.\n\n**The job list is a page, newest first, keyed\
+        \ on the job id.** A keyset cursor rather\nthan an offset because the list is polled while workers\
+        \ insert at its head: an offset\nwould shift under a reader every poll, and ``id < before`` does\
+        \ not. Rather than a time\nwindow because a window does not bound the response \u2014 one Gmail\
+        \ backfill puts a\nthousand rows into the last hour."
+      operationId: admin_overview_v1_admin_overview_get
+      parameters:
+      - description: Only list jobs whose subject resolves to this user.
+        in: query
+        name: user_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Only list jobs whose subject resolves to this user.
+          title: User Id
+      - description: "Only list jobs with an id below this one \u2014 the previous page's `jobs_next_before`.\
+          \ Omit for the newest page."
+        in: query
+        name: before
+        required: false
+        schema:
+          anyOf:
+          - minimum: 1
+            type: integer
+          - type: 'null'
+          description: "Only list jobs with an id below this one \u2014 the previous page's `jobs_next_before`.\
+            \ Omit for the newest page."
+          title: Before
+      - description: How many jobs to list.
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 200
+          description: How many jobs to list.
+          maximum: 500
+          minimum: 1
+          title: Limit
+          type: integer
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminOverviewResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Admin Overview
+      tags:
+      - admin
   /v1/auth/google/callback:
     post:
       description: "Finish a sign-in: verify the ID token, check the allowlist, mint a session.\n\nThe\

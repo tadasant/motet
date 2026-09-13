@@ -37,7 +37,7 @@ from motet_db import repo
 from motet_storage import ObjectStore, build_store
 from motet_vault import DekWrapper, VaultConfigError, build_dek_wrapper
 
-from .auth import ALLOWED_EMAILS_ENV, is_allowed
+from .auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV, is_allowed
 from .config import Settings
 from .drain import DrainNudge, DrainTrigger, build_trigger
 
@@ -293,6 +293,63 @@ def require_api_token(caller: Annotated[Caller, Depends(require_caller)]) -> str
     twenty route signatures.
     """
     return caller.user_id
+
+
+def is_admin(caller: Caller, config: Settings) -> bool:
+    """Whether this caller may read the operator view — every user's data at once.
+
+    **Only a signed-in person, and only one on ``MOTET_ADMIN_EMAILS``.** Three callers are
+    refused however the list is set, and each for a reason rather than by accident:
+
+    * **The shared API token.** It belongs to no person — the feed tooling, the iOS app
+      and any script hold it — so there is no address to compare, and "unset means nobody
+      is an admin" could not be literally true if a credential with no name on it passed.
+    * **An open deployment** (``MOTET_API_TOKEN`` unset). Nobody has proved anything.
+    * **A session on an empty list.** :func:`~motet_db.allowlist.is_allowed` fails closed.
+
+    The sign-in allowlist is not re-checked here because it does not need to be:
+    :func:`require_caller` has already revoked any session whose address left it, so every
+    session that reaches this line is on both lists. The one predicate serves the guard and
+    ``/v1/auth/session``'s ``admin`` flag, so the SPA can never offer a screen the API
+    would refuse.
+    """
+    if caller.how != "session" or caller.email is None:
+        return False
+    return is_allowed(caller.email, config.admin_emails)
+
+
+def require_admin(
+    caller: Annotated[Caller, Depends(require_caller)],
+    config: Annotated[Settings, Depends(settings)],
+) -> Caller:
+    """Refuse anyone who is not an operator. Every ``/v1/admin`` route takes it via ``Admin``.
+
+    A 403 rather than a 401: the caller *is* authenticated — asking again with the same
+    credential will not help, and a 401 would make the SPA drop a perfectly good session.
+    An unauthenticated caller never gets this far; :func:`require_caller` answers 401 first.
+
+    The detail says which refusal this is, because "the deployment has no operators" and
+    "you are not one of them" are fixed in different places. It is shown to any caller
+    that got past :func:`require_caller` — which on an open deployment is anybody — so it
+    names only a public variable and whether it is set, never who is on it.
+    """
+    if is_admin(caller, config):
+        return caller
+    if not config.admin_emails:
+        detail = f"{ADMIN_EMAILS_ENV} is unset on this deployment, so nobody is an admin."
+    elif caller.how == "open":
+        detail = (
+            "The admin view needs a signed-in session, and this deployment has no sign-in "
+            "lock (MOTET_API_TOKEN is unset), so nobody is an admin."
+        )
+    elif caller.how == "token":
+        detail = "The admin view needs a signed-in session; the shared API token is not one."
+    else:
+        detail = f"This account is not on {ADMIN_EMAILS_ENV}."
+    logger.warning(
+        "refused an admin request from %s: %s", caller.email or f"<{caller.how}>", detail
+    )
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def require_feed_token(

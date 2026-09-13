@@ -880,6 +880,209 @@ def worker_heartbeats(
     return (rows[0]["now"] if rows else _now(conn)), beats
 
 
+# --- admin overview ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AdminUserOverview:
+    """One user's row on the admin overview: counts per state, across every table."""
+
+    user_id: str
+    email: str | None
+    source_items: dict[str, int]
+    news_items: dict[str, int]
+    episodes: dict[str, int]
+    jobs: dict[str, int]
+
+
+@dataclass(frozen=True)
+class AdminQueueOverview:
+    """One queue's row on the admin overview: counts per state plus liveness."""
+
+    queue: str
+    ready: int
+    running: int
+    done: int
+    failed: int
+    oldest_ready_age_s: float | None
+    last_heartbeat_at: datetime | None
+
+
+@dataclass(frozen=True)
+class AdminJob:
+    """A job row with its payload resolved to a user and a domain subject."""
+
+    id: int
+    queue: str
+    state: str
+    attempts: int
+    user_id: str | None
+    subject: str | None
+    last_error: str | None
+    run_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    locked_at: datetime | None
+
+
+#: Every job, with the payload resolved to the user it belongs to and the domain id it is
+#: about. Each queue names its subject under a different payload key — ``integrate`` a
+#: source item, ``assemble``/``script``/``tts`` an episode, ``poll``/``extract`` a source —
+#: so each is joined to the table that carries the user. ``serialize_key`` is the user id
+#: on ``integrate`` and nothing meaningful elsewhere (``poll`` uses a ``poll:`` prefix), so
+#: it is a fallback for that one queue only.
+_ADMIN_JOBS_SQL = """
+    SELECT
+        j.id, j.queue, j.state, j.attempts, j.last_error,
+        j.run_at, j.created_at, j.updated_at, j.locked_at,
+        COALESCE(
+            si.user_id, ep.user_id, src.user_id,
+            CASE WHEN j.queue = 'integrate' THEN j.serialize_key END
+        ) AS user_id,
+        COALESCE(
+            j.payload ->> 'source_item_id',
+            j.payload ->> 'episode_id',
+            j.payload ->> 'source_id'
+        ) AS subject
+    FROM jobs j
+    LEFT JOIN source_items si ON si.id = j.payload ->> 'source_item_id'
+    LEFT JOIN episodes     ep ON ep.id = j.payload ->> 'episode_id'
+    LEFT JOIN sources     src ON src.id = j.payload ->> 'source_id'
+"""
+
+JOB_STATES: Final = ("ready", "running", "done", "failed")
+SOURCE_ITEM_STATES: Final = ("pending", "integrated", "failed")
+EPISODE_STATES: Final = ("pending", "scripting", "rendering", "ready", "failed")
+
+
+def admin_overview_users(conn: psycopg.Connection[Any]) -> list[AdminUserOverview]:
+    """Every user, with per-state counts — zeros included — across all four tables.
+
+    Four grouped queries assembled in Python rather than one wide join: the counts are
+    over unrelated tables, and a single statement would either cross-multiply or need a
+    CTE per table anyway. Performance is not the concern here; readability is.
+    """
+    users = _all(conn, "SELECT id, email FROM users ORDER BY created_at, id", ())
+
+    def counts(sql: str) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for row in _all(conn, sql, ()):
+            if row["user_id"] is None:
+                continue
+            out.setdefault(row["user_id"], {})[row["state"]] = row["n"]
+        return out
+
+    source_items = counts("SELECT user_id, state, count(*) AS n FROM source_items GROUP BY 1, 2")
+    news_items = counts(
+        """
+        SELECT user_id, CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END AS state,
+               count(*) AS n
+        FROM news_items GROUP BY 1, 2
+        """
+    )
+    episodes = counts("SELECT user_id, state, count(*) AS n FROM episodes GROUP BY 1, 2")
+    jobs = counts(
+        f"SELECT user_id, state, count(*) AS n FROM ({_ADMIN_JOBS_SQL}) resolved GROUP BY 1, 2"
+    )
+
+    def filled(states: Sequence[str], found: dict[str, int]) -> dict[str, int]:
+        return {state: found.get(state, 0) for state in states}
+
+    return [
+        AdminUserOverview(
+            user_id=user["id"],
+            email=user["email"],
+            source_items=filled(SOURCE_ITEM_STATES, source_items.get(user["id"], {})),
+            news_items=filled(("unread", "read"), news_items.get(user["id"], {})),
+            episodes=filled(EPISODE_STATES, episodes.get(user["id"], {})),
+            jobs=filled(JOB_STATES, jobs.get(user["id"], {})),
+        )
+        for user in users
+    ]
+
+
+def admin_overview_queues(
+    conn: psycopg.Connection[Any], queues: Sequence[str]
+) -> list[AdminQueueOverview]:
+    """Per queue, in the order given: counts per state, the oldest ready job's age, and
+    when a worker last drained it. Every queue named is present, at zero when empty."""
+    rows = _all(
+        conn,
+        """
+        SELECT queue, state, count(*) AS n,
+               EXTRACT(EPOCH FROM now() - min(created_at)) AS oldest_age_s
+        FROM jobs GROUP BY 1, 2
+        """,
+        (),
+    )
+    by_queue: dict[str, dict[str, int]] = {}
+    oldest_ready: dict[str, float] = {}
+    for row in rows:
+        by_queue.setdefault(row["queue"], {})[row["state"]] = row["n"]
+        if row["state"] == "ready":
+            oldest_ready[row["queue"]] = float(row["oldest_age_s"])
+    _, beats = worker_heartbeats(conn)
+    heartbeat = {beat.queue: beat.last_seen_at for beat in beats}
+    return [
+        AdminQueueOverview(
+            queue=queue,
+            ready=by_queue.get(queue, {}).get("ready", 0),
+            running=by_queue.get(queue, {}).get("running", 0),
+            done=by_queue.get(queue, {}).get("done", 0),
+            failed=by_queue.get(queue, {}).get("failed", 0),
+            oldest_ready_age_s=oldest_ready.get(queue),
+            last_heartbeat_at=heartbeat.get(queue),
+        )
+        for queue in queues
+    ]
+
+
+def admin_overview_jobs(
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str | None = None,
+    before: int | None = None,
+    limit: int = 200,
+) -> list[AdminJob]:
+    """Up to ``limit`` jobs in any state, newest first, each resolved to a user and a subject.
+
+    A keyset page on ``id``: ``before`` is the last id of the previous page, and only
+    smaller ids come back. ``id`` rather than ``created_at`` because it is unique — a
+    cursor on a timestamp two jobs share would skip one of them — and because a sequence
+    orders rows the way they were enqueued anyway.
+
+    ``user_id`` filters on the *resolved* user, so a job whose payload points at a
+    deleted row (and so resolves to nobody) is only ever listed unfiltered.
+    """
+    rows = _all(
+        conn,
+        f"""
+        SELECT * FROM ({_ADMIN_JOBS_SQL}) resolved
+        WHERE (%(user_id)s::text IS NULL OR user_id = %(user_id)s)
+          AND (%(before)s::bigint IS NULL OR id < %(before)s)
+        ORDER BY id DESC
+        LIMIT %(limit)s
+        """,
+        {"user_id": user_id, "before": before, "limit": limit},
+    )
+    return [
+        AdminJob(
+            id=row["id"],
+            queue=row["queue"],
+            state=row["state"],
+            attempts=row["attempts"],
+            user_id=row["user_id"],
+            subject=row["subject"],
+            last_error=row["last_error"],
+            run_at=row["run_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            locked_at=row["locked_at"],
+        )
+        for row in rows
+    ]
+
+
 # --- row plumbing ------------------------------------------------------------------
 
 

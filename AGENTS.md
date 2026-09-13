@@ -1898,6 +1898,36 @@ The widening this does buy, said plainly: **CI can write an `auth_sessions` row 
 anybody signing in.** In staging that is not new reach — CI already applies every migration
 and replaces every revision there — but it is a real change in what CI does.
 
+### The operator view is the one read across users, and only a listed person gets it
+
+`GET /v1/admin/overview`, `deps.require_admin`, `web/src/screens/Admin.tsx` (motet#87).
+Invariant 10 is the reason it exists: with no database shell, the queues, per-user counts
+and failing jobs have to be a screen or nowhere. **It is the first route that returns
+data across users** — every address, every count, every job's `last_error` — which makes
+the check in front of it the part to get right.
+
+- **`MOTET_ADMIN_EMAILS` narrows the sign-in allowlist; it is not a second door.** Same
+  format, parsed by the same function in `motet_db.allowlist`. An admin is a *session*
+  whose address is on both lists — `require_caller` has already revoked a session whose
+  address left `MOTET_ALLOWED_EMAILS` before the admin list is consulted. One flag, not a
+  role system; if it ever grew into one, that would be invariant 12's business.
+- **Unset or empty means nobody, and the shared API token is never an admin.** The token
+  belongs to no person, so "unset means nobody" could not be literally true if it passed;
+  an open deployment (`MOTET_API_TOKEN` unset) is refused for the same reason. A refusal
+  is a 403, never a 401 — a 401 tells the SPA its session is dead.
+- **`/v1/auth/session` reports `admin` from the guard's own predicate** (`deps.is_admin`),
+  so the SPA links to `/admin` for exactly the callers the API would answer. That is
+  presentation; the 403 is the control.
+- **Every `/v1/admin` route takes `Admin`, and a test walks `app.routes` to prove it.** Not
+  an `APIRouter` with a router-level dependency: this FastAPI mounts an included router as
+  one opaque `app.routes` entry, which every route walk in the repo — the reserved-path
+  guard included — would silently stop seeing. The walk fails if one appears.
+- **The job list is a keyset page on `jobs.id`**, 200 by default and 500 at most, with
+  `jobs_next_before` as the cursor. Not an offset, because workers insert at the head of a
+  list the screen polls; not a time window, because one Gmail backfill puts a thousand rows
+  into the last hour. The aggregates are always for everyone; job → user is a join on the
+  payload per queue kind, fine while `jobs.prune` bounds the table.
+
 ### The vault is the seam to a credential that is not ours
 
 `vault/` holds the envelope-encryption path: a per-record DEK, a KEK in Cloud KMS, and an

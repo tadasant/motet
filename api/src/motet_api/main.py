@@ -18,10 +18,11 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from datetime import UTC, datetime
+from typing import Annotated, Any, Final
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from motet_db import (
@@ -57,6 +58,7 @@ from motet_workers import (
     enqueue_source_poll,
     queue_readiness,
 )
+from motet_workers.queues import PIPELINE
 from starlette.requests import ClientDisconnect
 
 from . import obs
@@ -80,7 +82,9 @@ from .deps import (
     dek_wrapper,
     drain_nudge,
     drain_trigger,
+    is_admin,
     public_base_url,
+    require_admin,
     require_api_token,
     require_caller,
     require_feed_token,
@@ -90,6 +94,14 @@ from .deps import (
 from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
 from .feed import FeedMetadata, feed_url, render_feed
 from .schemas import (
+    AdminEpisodeCounts,
+    AdminJobCounts,
+    AdminJobResponse,
+    AdminNewsItemCounts,
+    AdminOverviewResponse,
+    AdminQueueResponse,
+    AdminSourceItemCounts,
+    AdminUserResponse,
     ClaimModel,
     CompleteLoginRequest,
     ConnectSourceRequest,
@@ -135,6 +147,9 @@ User = Annotated[str, Depends(require_api_token)]
 #: unlocked deployment. Only the sign-in routes need the distinction; every other route
 #: takes ``User``, because there is one account and the answer is always the same row.
 Who = Annotated[Caller, Depends(require_caller)]
+#: A caller who may read every user's data: a signed-in session on MOTET_ADMIN_EMAILS. Every
+#: route under ``/v1/admin`` takes it, and a test walks the app to hold that true.
+Admin = Annotated[Caller, Depends(require_admin)]
 FeedUser = Annotated[str, Depends(require_feed_token)]
 Config = Annotated[Settings, Depends(settings)]
 Store = Annotated[ObjectStore, Depends(store)]
@@ -648,6 +663,9 @@ def current_session(caller: Who, config: Config) -> SessionResponse:
         email=caller.email,
         expires_at=caller.expires_at,
         login_configured=config.login_configured,
+        # The guard's own predicate, so the SPA offers the admin screen to exactly the
+        # callers `/v1/admin/*` would answer — never a link to a 403.
+        admin=is_admin(caller, config),
     )
 
 
@@ -760,6 +778,110 @@ def processing_status(conn: Conn, user_id: User) -> ProcessingStatusResponse:
             )
             for entry in queue_readiness(conn)
         ],
+    )
+
+
+# --- the operator view ----------------------------------------------------------------
+#
+# **The first route family that returns data across users** — every user's address, their
+# counts, and every job's `last_error`. Every route under `/v1/admin` takes `Admin`, and
+# `api/tests/test_admin_overview.py` walks the app's routes to prove none of them escaped
+# it. Fails closed: with MOTET_ADMIN_EMAILS unset nobody is an admin, and the shared API
+# token never is (`deps.is_admin`).
+#
+# Deliberately not an `APIRouter` with the check as a router dependency, which would have
+# been guarded-by-construction: this FastAPI mounts an included router as one opaque
+# entry in `app.routes`, so every route walk in this repo — the reserved-path guard and
+# the one above among them — would stop seeing the routes it holds.
+
+#: The jobs list's page size when the caller does not ask, and the most it may ask for. The
+#: bound on the response; ``before`` is what makes everything past it reachable.
+ADMIN_JOBS_DEFAULT_LIMIT: Final = 200
+ADMIN_JOBS_MAX_LIMIT: Final = 500
+
+
+@app.get("/v1/admin/overview", response_model=AdminOverviewResponse, tags=["admin"])
+def admin_overview(
+    conn: Conn,
+    _admin: Admin,
+    user_id: Annotated[
+        str | None,
+        Query(description="Only list jobs whose subject resolves to this user."),
+    ] = None,
+    before: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            description=(
+                "Only list jobs with an id below this one — the previous page's "
+                "`jobs_next_before`. Omit for the newest page."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=ADMIN_JOBS_MAX_LIMIT, description="How many jobs to list."),
+    ] = ADMIN_JOBS_DEFAULT_LIMIT,
+) -> AdminOverviewResponse:
+    """The whole deployment at a glance, across every user. Admins only.
+
+    Deployment state rather than user state, like ``/v1/processing``: the caller's own
+    account plays no part in the answer. ``user_id``, ``before`` and ``limit`` shape the
+    job list only; the per-user and per-queue aggregates are always for everyone.
+
+    **The job list is a page, newest first, keyed on the job id.** A keyset cursor rather
+    than an offset because the list is polled while workers insert at its head: an offset
+    would shift under a reader every poll, and ``id < before`` does not. Rather than a time
+    window because a window does not bound the response — one Gmail backfill puts a
+    thousand rows into the last hour.
+    """
+    users = repo.admin_overview_users(conn)
+    queues = repo.admin_overview_queues(conn, [queue.value for queue in PIPELINE])
+    # One more than the page, to learn whether there is a next one without a count(*).
+    page = repo.admin_overview_jobs(conn, user_id=user_id, before=before, limit=limit + 1)
+    jobs_, more = page[:limit], len(page) > limit
+    return AdminOverviewResponse(
+        generated_at=datetime.now(UTC),
+        users=[
+            AdminUserResponse(
+                user_id=user.user_id,
+                email=user.email,
+                source_items=AdminSourceItemCounts(**user.source_items),
+                news_items=AdminNewsItemCounts(**user.news_items),
+                episodes=AdminEpisodeCounts(**user.episodes),
+                jobs=AdminJobCounts(**user.jobs),
+            )
+            for user in users
+        ],
+        queues=[
+            AdminQueueResponse(
+                queue=queue.queue,
+                ready=queue.ready,
+                running=queue.running,
+                done=queue.done,
+                failed=queue.failed,
+                oldest_ready_age_s=queue.oldest_ready_age_s,
+                last_heartbeat_at=queue.last_heartbeat_at,
+            )
+            for queue in queues
+        ],
+        jobs=[
+            AdminJobResponse(
+                id=job.id,
+                queue=job.queue,
+                state=job.state,
+                attempts=job.attempts,
+                user_id=job.user_id,
+                subject=job.subject,
+                last_error=job.last_error,
+                run_at=job.run_at,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+                locked_at=job.locked_at,
+            )
+            for job in jobs_
+        ],
+        jobs_next_before=jobs_[-1].id if more else None,
     )
 
 
