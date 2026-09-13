@@ -1215,6 +1215,8 @@ class AdminWaitlistResponse(BaseModel):
     next_before: int | None = Field(
         description="Pass as `before` for the next, older page; null when this page is the last."
     )
+
+
 # --- admin: LLM models and spend (motet#92) ------------------------------------------------
 
 

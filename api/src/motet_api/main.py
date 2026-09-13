@@ -41,8 +41,8 @@ from motet_db import (
     repo,
 )
 from motet_db import auth as auth_repo
-from motet_db import waitlist as waitlist_repo
 from motet_db import settings as settings_repo
+from motet_db import waitlist as waitlist_repo
 from motet_inference.llm import LlmConfigError, LlmStage
 from motet_inference.llm import load_config as load_llm_config
 from motet_sources import (
@@ -1231,6 +1231,8 @@ def admin_waitlist(
         ],
         next_before=signups[-1].id if more else None,
     )
+
+
 # The LLM half of the operator view (motet#92): which model each stage is on and why, and
 # what the ledger says each stage, user and queue spent. Same guard, same reason — and a
 # second one on the write: `PUT` changes what every later job spends, so it is refused
