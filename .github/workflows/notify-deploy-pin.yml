@@ -6,15 +6,21 @@ name: Notify tadasant-internal that main moved
 # only makes the bump PROMPT: a run that skips or is refused costs minutes of latency, never
 # a deploy. AGENTS.md, "Runner policy", records it.
 #
-# THE TOKEN MUST NEVER REACH A PULL REQUEST, so three things fence it:
+# THE TOKEN IS MORE THAN A NOTIFICATION. GitHub's dispatch endpoint needs Contents: write on
+# the target, so whatever holds this token can push to the private infrastructure repo. It
+# must never reach a pull request or a branch, so four things fence it and all four stay:
 #
 #   1. `push` to `main` is the only trigger. There is no `pull_request`, no
 #      `pull_request_target`, no `workflow_run` and no `workflow_dispatch`, so no PR — from a
-#      fork or from a branch — can start this workflow, and no workflow that a PR does start
-#      references the secret.
+#      fork or from a branch — can start this workflow.
 #   2. The job refuses any ref but `main` and any repository but this one, so a fork that
-#      enables Actions and pushes its own `main` runs nothing (it would have no secret anyway).
-#   3. It runs on a GitHub-hosted, ephemeral runner with no checkout, never the self-hosted
+#      enables Actions and pushes its own `main` runs nothing.
+#   3. The token lives in the `deploy-pin` ENVIRONMENT, not in repository secrets, and that
+#      environment's deployment-branch policy admits `main` only. That is the fence that
+#      survives a branch adding its own workflow, or editing this one, to read the secret:
+#      GitHub withholds an environment's secrets from a job on a ref the policy does not
+#      admit. Never move it to repository secrets.
+#   4. It runs on a GitHub-hosted, ephemeral runner with no checkout, never the self-hosted
 #      pool, and hands the token to curl on stdin rather than in argv, where anything on a
 #      shared machine that can run `ps` could read it.
 #
@@ -34,8 +40,11 @@ on:
 # The job needs nothing from GITHUB_TOKEN; its only credential is the dispatch token.
 permissions: {}
 
-# Serialized, never cancelled: dispatches for two quick merges arrive in merge order, and
-# the newest SHA is the last word the receiving side hears.
+# Serialized, so dispatches for quick merges arrive in merge order and the newest SHA is the
+# last word the receiving side hears. A running dispatch is never cancelled; GitHub keeps
+# only one WAITING run per group, though, so a third merge inside a few seconds cancels the
+# waiting one. That shows as a cancelled check on the skipped commit, and is harmless: the
+# newer run dispatches a newer SHA.
 concurrency:
   group: notify-deploy-pin
   cancel-in-progress: false
@@ -44,6 +53,7 @@ jobs:
   dispatch:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'tadasant/motet' }}
     runs-on: ubuntu-latest
+    environment: deploy-pin
     timeout-minutes: 5
 
     steps:

@@ -3,8 +3,8 @@ name: TestFlight
 # Sign the iOS app and upload it to TestFlight. Started by hand (or by an agent with
 # `gh workflow run testflight.yml --ref main`), never by a push or a pull request.
 #
-# THIS IS THE ONE WORKFLOW IN A PUBLIC REPO THAT HOLDS A CREDENTIAL, so four things fence it
-# and all four have to stay:
+# THIS IS ONE OF TWO WORKFLOWS IN A PUBLIC REPO THAT HOLD A CREDENTIAL (the other is
+# `notify-deploy-pin.yml`), so four things fence it and all four have to stay:
 #
 #   1. `workflow_dispatch` is the only trigger. A fork cannot dispatch a workflow here, and
 #      no pull_request event — from a fork or from a branch — ever starts it.
@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # Pinned by SHA, not tag, in the one workflow that holds a key: a moved tag would run
+      # Pinned by SHA, not tag, in a workflow that holds a key: a moved tag would run
       # code inside this job. actions/checkout v4.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

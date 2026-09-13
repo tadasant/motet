@@ -766,8 +766,9 @@ context rooted at `api/` could not resolve it.
 credential of any kind — no GCP identity, no registry login, nothing to leak. (Its two
 credentials of any kind are the App Store Connect key behind `testflight.yml`, which reaches
 Apple and nothing in the infrastructure, and the dispatch token behind
-`notify-deploy-pin.yml`, which can only announce a commit; see
-[Runner policy](#runner-policy).) Publishing
+`notify-deploy-pin.yml`, which needs Contents: write on the private repo to send its
+notification and is fenced to `main` accordingly; see [Runner policy](#runner-policy).)
+Publishing
 and deploying belong to the private infrastructure repo. A PR that adds a push step here
 is a PR that adds a cloud credential to a public repo; the answer is the other repo.
 
@@ -870,14 +871,21 @@ workflow in the private repo is the half that opens the PR. On every push to `ma
 a `repository_dispatch` of `motet-main-updated` carrying the SHA. The receiver also polls on
 a schedule, so the dispatch buys promptness and nothing else — which is why it is a **no-op
 while `GH_MOTET_SYNC_TOKEN_TADASANT_INTERNAL` is unset and a warning, never a failure, when
-refused.** Three fences, the TestFlight ones minus the environment: `push` to `main` is its
-only trigger, so no pull request can start the one workflow that references the token; the
-job refuses any other ref or repository; and it runs on a hosted runner with no checkout,
-passing the token to curl on stdin. It is its own workflow rather than a job gated on
-`all-checks-pass`, because waiting for main's CI would gate nothing the schedule does not
-bypass, and a job in `ci.yml` would put the token in a file pull requests run. The token is a
-repository secret rather than an environment one because no step here executes this repo's
-code; minting it is invariant 9's human half.
+refused.**
+
+**The token is not a notification-shaped credential, and that is why it is fenced like the
+Apple key.** GitHub's dispatch endpoint needs Contents: write on the target repository, so
+the token can push to the private infrastructure repo. It should be fine-grained, scoped to
+that one repository and to Contents alone. The same four fences as TestFlight apply, and all
+four have to stay: `push` to `main` is the only trigger; the job refuses any other ref or
+repository; the token is an **environment** secret in `deploy-pin`, whose deployment-branch
+policy admits `main` only, which is the fence that survives a branch adding a workflow that
+reads it; and it runs on a hosted runner with no checkout, passing the token to curl on
+stdin. The cost of the environment is a deployment record per push to `main`. It is its own
+workflow rather than a job gated on `all-checks-pass`, because waiting for main's CI would
+gate nothing the schedule does not bypass, and a job in `ci.yml` would put the token in a
+file pull requests run. Minting the token, and giving the environment its branch policy and
+secret, is invariant 9's human half.
 
 ---
 
