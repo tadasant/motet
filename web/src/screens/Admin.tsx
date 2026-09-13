@@ -5,7 +5,7 @@
 // That check is presentation; the control is server-side — every /v1/admin route answers
 // 403 to anyone not on MOTET_ADMIN_EMAILS, whatever this file renders.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { type AdminOverview, ApiError, api } from '../api/client'
 
@@ -55,14 +55,22 @@ export function Admin() {
     setBefore(null)
   }
 
+  // Only the newest request may write the screen. A poll still in flight when the scope or
+  // the page changes would otherwise land after the new one and show the old page under
+  // the new heading.
+  const latest = useRef(0)
+
   const refresh = useCallback(() => {
+    const request = ++latest.current
     api
       .adminOverview({ userId: selectedUser, before })
       .then((next) => {
+        if (request !== latest.current) return
         setData(next)
         setError('')
       })
       .catch((err: unknown) => {
+        if (request !== latest.current) return
         setError(err instanceof Error ? err.message : String(err))
         // Refused, not failing: asking again every three seconds will not change the
         // answer, and a session that lost admin mid-view should not hammer the API.

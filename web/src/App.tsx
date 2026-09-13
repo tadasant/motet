@@ -77,11 +77,19 @@ export default function App() {
 function AdminApp() {
   // undefined until the server has answered; null when it says nobody.
   const [who, setWho] = useState<SessionInfo | null | undefined>(undefined)
+  // Why the question could not be answered, when that was not a 401. "Sign in" is the
+  // wrong advice to an admin whose API is down.
+  const [sessionError, setSessionError] = useState('')
   useEffect(() => {
     api
       .session()
       .then(setWho)
-      .catch(() => setWho(null))
+      .catch((err: unknown) => {
+        setWho(null)
+        if (!(err instanceof ApiError && err.status === 401)) {
+          setSessionError(err instanceof Error ? err.message : String(err))
+        }
+      })
   }, [])
 
   return (
@@ -98,7 +106,7 @@ function AdminApp() {
           <h2 id="admin-heading">Admin</h2>
           <p role="alert">
             {who === null
-              ? 'Sign in first — the admin view needs a signed-in account.'
+              ? sessionError || 'Sign in first — the admin view needs a signed-in account.'
               : who.how === 'session'
                 ? `${who.email ?? 'This account'} is not an admin on this deployment.`
                 : who.how === 'token'

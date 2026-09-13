@@ -322,21 +322,27 @@ def require_admin(
     caller: Annotated[Caller, Depends(require_caller)],
     config: Annotated[Settings, Depends(settings)],
 ) -> Caller:
-    """Refuse anyone who is not an operator. Mounted on the whole ``/v1/admin`` router.
+    """Refuse anyone who is not an operator. Every ``/v1/admin`` route takes it via ``Admin``.
 
     A 403 rather than a 401: the caller *is* authenticated — asking again with the same
     credential will not help, and a 401 would make the SPA drop a perfectly good session.
     An unauthenticated caller never gets this far; :func:`require_caller` answers 401 first.
 
-    The detail says which of the two refusals this is, because "the deployment has no
-    operators" and "you are not one of them" are fixed in different places — and this is
-    only ever shown to somebody already on the sign-in allowlist.
+    The detail says which refusal this is, because "the deployment has no operators" and
+    "you are not one of them" are fixed in different places. It is shown to any caller
+    that got past :func:`require_caller` — which on an open deployment is anybody — so it
+    names only a public variable and whether it is set, never who is on it.
     """
     if is_admin(caller, config):
         return caller
     if not config.admin_emails:
         detail = f"{ADMIN_EMAILS_ENV} is unset on this deployment, so nobody is an admin."
-    elif caller.how != "session":
+    elif caller.how == "open":
+        detail = (
+            "The admin view needs a signed-in session, and this deployment has no sign-in "
+            "lock (MOTET_API_TOKEN is unset), so nobody is an admin."
+        )
+    elif caller.how == "token":
         detail = "The admin view needs a signed-in session; the shared API token is not one."
     else:
         detail = f"This account is not on {ADMIN_EMAILS_ENV}."

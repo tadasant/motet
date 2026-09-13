@@ -135,7 +135,10 @@ class TestOnlyAnAdminGetsIn:
         """No MOTET_API_TOKEN means no lock on /v1 — and still no key to /v1/admin."""
         monkeypatch.delenv("MOTET_API_TOKEN")
         assert api.get("/v1/news-items").status_code == 200
-        assert api.get(OVERVIEW).status_code == 403
+        refused = api.get(OVERVIEW)
+        assert refused.status_code == 403
+        # Named as what it is, not mistaken for the shared token.
+        assert "no sign-in lock" in refused.json()["detail"]
 
     def test_the_admin_list_is_a_narrowing_of_the_sign_in_list_not_a_second_door(
         self,
@@ -178,7 +181,7 @@ class TestTheSessionSaysWhetherToOfferTheScreen:
 
 
 def test_every_admin_route_is_behind_the_admin_check() -> None:
-    """A route added under /v1/admin without the router's guard is a quiet disclosure.
+    """A route added under /v1/admin without `Admin` is a quiet disclosure.
 
     Walks the real app rather than trusting each declaration: a route that forgot `Admin`
     would type-check, serve, and pass every other test.
