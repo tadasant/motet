@@ -901,3 +901,103 @@ class AdminOverviewResponse(BaseModel):
     users: list[AdminUserResponse]
     queues: list[AdminQueueResponse]
     jobs: list[AdminJobResponse] = Field(description="The newest 200 jobs, any state.")
+    costs: AdminCostsResponse = Field(
+        description="PROTOTYPE: LLM spend from the `llm_usage` ledger."
+    )
+
+
+# --- admin: LLM config and spend (PROTOTYPE) ---------------------------------------------
+
+
+class LlmModelOption(BaseModel):
+    """One catalogue row, as the admin screen's dropdown needs it."""
+
+    slug: str
+    efforts: list[str] = Field(description="Reasoning efforts this slug accepts; empty if none.")
+    adaptive_thinking: bool
+    reasoning_on_by_default: bool
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    cache_read_usd_per_mtok: float
+    cache_write_usd_per_mtok: float
+
+
+class LlmStageConfigResponse(BaseModel):
+    """One stage's resolved model and effort, with the whole precedence chain beside it.
+
+    `model`/`effort` are what `load_config()` resolved; the `*_source` fields say which
+    rung won. The rungs themselves are reported so the UI can show the chain rather than
+    only its answer: `setting_*` is the settings-table row, `stage_env_*` the
+    `MOTET_LLM_*_<STAGE>` variable, `global_env_*` the `MOTET_LLM_*` variable, `default_*`
+    the committed default. `effort` values are effort names or `"off"`.
+    """
+
+    stage: str
+    model: str
+    model_source: str
+    effort: str
+    effort_source: str
+    setting_model: str | None
+    stage_env_model: str | None
+    global_env_model: str | None
+    default_model: str
+    setting_effort: str | None
+    stage_env_effort: str | None
+    global_env_effort: str | None
+    default_effort: str
+
+
+class LlmConfigResponse(BaseModel):
+    stages: list[LlmStageConfigResponse]
+    models: list[LlmModelOption]
+    precedence: list[str] = Field(
+        description="Sources from highest to lowest precedence, as `*_source` spells them."
+    )
+    applies: str = Field(
+        description=(
+            "When a change takes effect on the worker: `next_job` when the worker re-reads "
+            "settings per job, `restart` otherwise."
+        )
+    )
+
+
+class LlmStageConfigUpdate(BaseModel):
+    """Set or clear a stage's settings-table overrides.
+
+    A field left out is untouched; `null` clears that override; a string sets it. Effort
+    takes an effort name or `"off"`.
+    """
+
+    model: str | None = None
+    effort: str | None = None
+
+
+class LlmSpend(BaseModel):
+    """Summed completions and tokens for one bucket, and what they cost in USD."""
+
+    completions: int
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    usd: float
+
+
+class AdminCostsResponse(BaseModel):
+    """The `llm_usage` ledger, folded three ways.
+
+    Empty until the worker writes its first row: nothing is backfilled, and `since` is
+    when the first row landed (null if none).
+    """
+
+    since: datetime | None
+    stages: dict[str, LlmSpend] = Field(description="Every LLM stage, at zero when unused.")
+    users: dict[str, LlmSpend] = Field(
+        description="Keyed by user id; rows with no user are omitted."
+    )
+    queues: dict[str, LlmSpend] = Field(
+        description=(
+            "Queues that map onto LLM stages: integrate → dedup + dedup_confirm, script → script."
+        )
+    )

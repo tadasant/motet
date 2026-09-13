@@ -62,6 +62,9 @@ TABLES = (
     # Not user data: one row per queue saying a worker was there. Truncated all the same,
     # so a test that drains a queue cannot make a later test think one is running.
     "worker_heartbeats",
+    # PROTOTYPE (migration 0012): the admin screen's model overrides and its spend ledger.
+    "settings",
+    "llm_usage",
 )
 
 #: Sources a test connected, without disturbing the seeded paste source. Cascades to that

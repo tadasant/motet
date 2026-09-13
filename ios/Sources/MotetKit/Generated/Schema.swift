@@ -7,6 +7,24 @@ import Foundation
 
 // MARK: - Schemas
 
+/// The `llm_usage` ledger, folded three ways.
+///
+/// Empty until the worker writes its first row: nothing is backfilled, and `since` is
+/// when the first row landed (null if none).
+public struct AdminCostsResponse: Codable, Hashable, Sendable {
+    public var queues: JSONValue
+    public var since: Date?
+    public var stages: JSONValue
+    public var users: JSONValue
+
+    public init(queues: JSONValue, since: Date? = nil, stages: JSONValue, users: JSONValue) {
+        self.queues = queues
+        self.since = since
+        self.stages = stages
+        self.users = users
+    }
+}
+
 public struct AdminEpisodeCounts: Codable, Hashable, Sendable {
     public var failed: Int
     public var pending: Int
@@ -107,17 +125,20 @@ public struct AdminNewsItemCounts: Codable, Hashable, Sendable {
 /// Aggregates are always for everyone; only `jobs` is filtered when a `user_id` is asked
 /// for. Every user and every pipeline queue is present, at zero when empty.
 public struct AdminOverviewResponse: Codable, Hashable, Sendable {
+    public var costs: AdminCostsResponse
     public var generatedAt: Date
     public var jobs: [AdminJobResponse]
     public var queues: [AdminQueueResponse]
     public var users: [AdminUserResponse]
 
     public init(
+        costs: AdminCostsResponse,
         generatedAt: Date,
         jobs: [AdminJobResponse],
         queues: [AdminQueueResponse],
         users: [AdminUserResponse]
     ) {
+        self.costs = costs
         self.generatedAt = generatedAt
         self.jobs = jobs
         self.queues = queues
@@ -125,6 +146,7 @@ public struct AdminOverviewResponse: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case costs
         case generatedAt = "generated_at"
         case jobs
         case queues
@@ -707,6 +729,190 @@ public struct ListenProgressResponse: Codable, Hashable, Sendable {
         case episodeId = "episode_id"
         case listenedThroughMs = "listened_through_ms"
         case newsItemsMarkedRead = "news_items_marked_read"
+    }
+}
+
+public struct LlmConfigResponse: Codable, Hashable, Sendable {
+    public var applies: String
+    public var models: [LlmModelOption]
+    public var precedence: [String]
+    public var stages: [LlmStageConfigResponse]
+
+    public init(
+        applies: String,
+        models: [LlmModelOption],
+        precedence: [String],
+        stages: [LlmStageConfigResponse]
+    ) {
+        self.applies = applies
+        self.models = models
+        self.precedence = precedence
+        self.stages = stages
+    }
+}
+
+/// One catalogue row, as the admin screen's dropdown needs it.
+public struct LlmModelOption: Codable, Hashable, Sendable {
+    public var adaptiveThinking: Bool
+    public var cacheReadUsdPerMtok: Double
+    public var cacheWriteUsdPerMtok: Double
+    public var efforts: [String]
+    public var inputUsdPerMtok: Double
+    public var outputUsdPerMtok: Double
+    public var reasoningOnByDefault: Bool
+    public var slug: String
+
+    public init(
+        adaptiveThinking: Bool,
+        cacheReadUsdPerMtok: Double,
+        cacheWriteUsdPerMtok: Double,
+        efforts: [String],
+        inputUsdPerMtok: Double,
+        outputUsdPerMtok: Double,
+        reasoningOnByDefault: Bool,
+        slug: String
+    ) {
+        self.adaptiveThinking = adaptiveThinking
+        self.cacheReadUsdPerMtok = cacheReadUsdPerMtok
+        self.cacheWriteUsdPerMtok = cacheWriteUsdPerMtok
+        self.efforts = efforts
+        self.inputUsdPerMtok = inputUsdPerMtok
+        self.outputUsdPerMtok = outputUsdPerMtok
+        self.reasoningOnByDefault = reasoningOnByDefault
+        self.slug = slug
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case adaptiveThinking = "adaptive_thinking"
+        case cacheReadUsdPerMtok = "cache_read_usd_per_mtok"
+        case cacheWriteUsdPerMtok = "cache_write_usd_per_mtok"
+        case efforts
+        case inputUsdPerMtok = "input_usd_per_mtok"
+        case outputUsdPerMtok = "output_usd_per_mtok"
+        case reasoningOnByDefault = "reasoning_on_by_default"
+        case slug
+    }
+}
+
+/// Summed completions and tokens for one bucket, and what they cost in USD.
+public struct LlmSpend: Codable, Hashable, Sendable {
+    public var cacheReadTokens: Int
+    public var cacheWriteTokens: Int
+    public var completions: Int
+    public var inputTokens: Int
+    public var outputTokens: Int
+    public var reasoningTokens: Int
+    public var usd: Double
+
+    public init(
+        cacheReadTokens: Int,
+        cacheWriteTokens: Int,
+        completions: Int,
+        inputTokens: Int,
+        outputTokens: Int,
+        reasoningTokens: Int,
+        usd: Double
+    ) {
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
+        self.completions = completions
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.reasoningTokens = reasoningTokens
+        self.usd = usd
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cacheReadTokens = "cache_read_tokens"
+        case cacheWriteTokens = "cache_write_tokens"
+        case completions
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case reasoningTokens = "reasoning_tokens"
+        case usd
+    }
+}
+
+/// One stage's resolved model and effort, with the whole precedence chain beside it.
+///
+/// `model`/`effort` are what `load_config()` resolved; the `*_source` fields say which
+/// rung won. The rungs themselves are reported so the UI can show the chain rather than
+/// only its answer: `setting_*` is the settings-table row, `stage_env_*` the
+/// `MOTET_LLM_*_<STAGE>` variable, `global_env_*` the `MOTET_LLM_*` variable, `default_*`
+/// the committed default. `effort` values are effort names or `"off"`.
+public struct LlmStageConfigResponse: Codable, Hashable, Sendable {
+    public var defaultEffort: String
+    public var defaultModel: String
+    public var effort: String
+    public var effortSource: String
+    public var globalEnvEffort: String?
+    public var globalEnvModel: String?
+    public var model: String
+    public var modelSource: String
+    public var settingEffort: String?
+    public var settingModel: String?
+    public var stage: String
+    public var stageEnvEffort: String?
+    public var stageEnvModel: String?
+
+    public init(
+        defaultEffort: String,
+        defaultModel: String,
+        effort: String,
+        effortSource: String,
+        globalEnvEffort: String? = nil,
+        globalEnvModel: String? = nil,
+        model: String,
+        modelSource: String,
+        settingEffort: String? = nil,
+        settingModel: String? = nil,
+        stage: String,
+        stageEnvEffort: String? = nil,
+        stageEnvModel: String? = nil
+    ) {
+        self.defaultEffort = defaultEffort
+        self.defaultModel = defaultModel
+        self.effort = effort
+        self.effortSource = effortSource
+        self.globalEnvEffort = globalEnvEffort
+        self.globalEnvModel = globalEnvModel
+        self.model = model
+        self.modelSource = modelSource
+        self.settingEffort = settingEffort
+        self.settingModel = settingModel
+        self.stage = stage
+        self.stageEnvEffort = stageEnvEffort
+        self.stageEnvModel = stageEnvModel
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case defaultEffort = "default_effort"
+        case defaultModel = "default_model"
+        case effort
+        case effortSource = "effort_source"
+        case globalEnvEffort = "global_env_effort"
+        case globalEnvModel = "global_env_model"
+        case model
+        case modelSource = "model_source"
+        case settingEffort = "setting_effort"
+        case settingModel = "setting_model"
+        case stage
+        case stageEnvEffort = "stage_env_effort"
+        case stageEnvModel = "stage_env_model"
+    }
+}
+
+/// Set or clear a stage's settings-table overrides.
+///
+/// A field left out is untouched; `null` clears that override; a string sets it. Effort
+/// takes an effort name or `"off"`.
+public struct LlmStageConfigUpdate: Codable, Hashable, Sendable {
+    public var effort: String?
+    public var model: String?
+
+    public init(effort: String? = nil, model: String? = nil) {
+        self.effort = effort
+        self.model = model
     }
 }
 
@@ -1435,6 +1641,16 @@ public enum MotetEndpoints {
     /// `GET /internal/health` — Health
     public static var health: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/internal/health")
+    }
+
+    /// `GET /v1/admin/llm-config` — Get Llm Config
+    public static var getLlmConfig: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/admin/llm-config")
+    }
+
+    /// `PUT /v1/admin/llm-config/{stage}` — Put Llm Config
+    public static func putLlmConfig(stage: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "PUT", path: "/v1/admin/llm-config/\(MotetPathComponent(stage))")
     }
 
     /// `GET /v1/admin/overview` — Admin Overview

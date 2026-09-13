@@ -58,6 +58,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/llm-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Llm Config
+         * @description Every LLM stage's resolved model and effort, and where each came from.
+         */
+        get: operations["get_llm_config_v1_admin_llm_config_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/llm-config/{stage}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Llm Config
+         * @description Set or clear one stage's settings-table overrides, then return the whole config.
+         *
+         *     The candidate rows are resolved *before* they are written, through the same
+         *     ``load_config`` the worker will run: an unknown slug, an effort the slug does not
+         *     accept, or an effort on a model with none is a 400 with the resolver's own message.
+         */
+        put: operations["put_llm_config_v1_admin_llm_config__stage__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/overview": {
         parameters: {
             query?: never;
@@ -919,6 +963,38 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AdminCostsResponse
+         * @description The `llm_usage` ledger, folded three ways.
+         *
+         *     Empty until the worker writes its first row: nothing is backfilled, and `since` is
+         *     when the first row landed (null if none).
+         */
+        AdminCostsResponse: {
+            /**
+             * Queues
+             * @description Queues that map onto LLM stages: integrate → dedup + dedup_confirm, script → script.
+             */
+            queues: {
+                [key: string]: components["schemas"]["LlmSpend"];
+            };
+            /** Since */
+            since: string | null;
+            /**
+             * Stages
+             * @description Every LLM stage, at zero when unused.
+             */
+            stages: {
+                [key: string]: components["schemas"]["LlmSpend"];
+            };
+            /**
+             * Users
+             * @description Keyed by user id; rows with no user are omitted.
+             */
+            users: {
+                [key: string]: components["schemas"]["LlmSpend"];
+            };
+        };
         /** AdminEpisodeCounts */
         AdminEpisodeCounts: {
             /** Failed */
@@ -1001,6 +1077,8 @@ export interface components {
          *     for. Every user and every pipeline queue is present, at zero when empty.
          */
         AdminOverviewResponse: {
+            /** @description PROTOTYPE: LLM spend from the `llm_usage` ledger. */
+            costs: components["schemas"]["AdminCostsResponse"];
             /**
              * Generated At
              * Format: date-time
@@ -1475,6 +1553,119 @@ export interface components {
             listened_through_ms: number;
             /** News Items Marked Read */
             news_items_marked_read: number;
+        };
+        /** LlmConfigResponse */
+        LlmConfigResponse: {
+            /**
+             * Applies
+             * @description When a change takes effect on the worker: `next_job` when the worker re-reads settings per job, `restart` otherwise.
+             */
+            applies: string;
+            /** Models */
+            models: components["schemas"]["LlmModelOption"][];
+            /**
+             * Precedence
+             * @description Sources from highest to lowest precedence, as `*_source` spells them.
+             */
+            precedence: string[];
+            /** Stages */
+            stages: components["schemas"]["LlmStageConfigResponse"][];
+        };
+        /**
+         * LlmModelOption
+         * @description One catalogue row, as the admin screen's dropdown needs it.
+         */
+        LlmModelOption: {
+            /** Adaptive Thinking */
+            adaptive_thinking: boolean;
+            /** Cache Read Usd Per Mtok */
+            cache_read_usd_per_mtok: number;
+            /** Cache Write Usd Per Mtok */
+            cache_write_usd_per_mtok: number;
+            /**
+             * Efforts
+             * @description Reasoning efforts this slug accepts; empty if none.
+             */
+            efforts: string[];
+            /** Input Usd Per Mtok */
+            input_usd_per_mtok: number;
+            /** Output Usd Per Mtok */
+            output_usd_per_mtok: number;
+            /** Reasoning On By Default */
+            reasoning_on_by_default: boolean;
+            /** Slug */
+            slug: string;
+        };
+        /**
+         * LlmSpend
+         * @description Summed completions and tokens for one bucket, and what they cost in USD.
+         */
+        LlmSpend: {
+            /** Cache Read Tokens */
+            cache_read_tokens: number;
+            /** Cache Write Tokens */
+            cache_write_tokens: number;
+            /** Completions */
+            completions: number;
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+            /** Reasoning Tokens */
+            reasoning_tokens: number;
+            /** Usd */
+            usd: number;
+        };
+        /**
+         * LlmStageConfigResponse
+         * @description One stage's resolved model and effort, with the whole precedence chain beside it.
+         *
+         *     `model`/`effort` are what `load_config()` resolved; the `*_source` fields say which
+         *     rung won. The rungs themselves are reported so the UI can show the chain rather than
+         *     only its answer: `setting_*` is the settings-table row, `stage_env_*` the
+         *     `MOTET_LLM_*_<STAGE>` variable, `global_env_*` the `MOTET_LLM_*` variable, `default_*`
+         *     the committed default. `effort` values are effort names or `"off"`.
+         */
+        LlmStageConfigResponse: {
+            /** Default Effort */
+            default_effort: string;
+            /** Default Model */
+            default_model: string;
+            /** Effort */
+            effort: string;
+            /** Effort Source */
+            effort_source: string;
+            /** Global Env Effort */
+            global_env_effort: string | null;
+            /** Global Env Model */
+            global_env_model: string | null;
+            /** Model */
+            model: string;
+            /** Model Source */
+            model_source: string;
+            /** Setting Effort */
+            setting_effort: string | null;
+            /** Setting Model */
+            setting_model: string | null;
+            /** Stage */
+            stage: string;
+            /** Stage Env Effort */
+            stage_env_effort: string | null;
+            /** Stage Env Model */
+            stage_env_model: string | null;
+        };
+        /**
+         * LlmStageConfigUpdate
+         * @description Set or clear a stage's settings-table overrides.
+         *
+         *     A field left out is untouched; `null` clears that override; a string sets it. Effort
+         *     takes an effort name or `"off"`.
+         */
+        LlmStageConfigUpdate: {
+            /** Effort */
+            effort?: string | null;
+            /** Model */
+            model?: string | null;
         };
         /**
          * LoginResponse
@@ -2128,6 +2319,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    get_llm_config_v1_admin_llm_config_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConfigResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_llm_config_v1_admin_llm_config__stage__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                stage: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmStageConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConfigResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

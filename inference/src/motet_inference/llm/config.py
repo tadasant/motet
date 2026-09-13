@@ -27,14 +27,16 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, get_args
 
 from ..mode import MODE_ENV_VAR, current_mode
 from .credentials import CredentialKind
-from .types import Effort, LlmConfigError
+from .types import Effort, LlmConfigError, Usage
 
 logger = logging.getLogger("motet.llm.config")
 
@@ -49,6 +51,13 @@ TIMEOUT_ENV: Final = "MOTET_LLM_TIMEOUT_SECONDS"
 ALLOW_UNLISTED_ENV: Final = "MOTET_LLM_ALLOW_UNLISTED_MODEL"
 
 DEFAULT_TIMEOUT_SECONDS: Final = 120.0
+
+#: PROTOTYPE — the `settings` table keys that sit above the environment. One row per
+#: stage per axis: ``llm.model.dedup``, ``llm.effort.script``, and so on. The mapping the
+#: keys live in reaches :func:`load_config` either as its ``overrides`` argument or through
+#: :func:`llm_overrides`, so that this package still knows nothing about a database.
+MODEL_SETTING_PREFIX: Final = "llm.model."
+EFFORT_SETTING_PREFIX: Final = "llm.effort."
 
 _EFFORTS: Final[tuple[Effort, ...]] = get_args(Effort)
 
@@ -87,6 +96,15 @@ class LlmStage(StrEnum):
     @property
     def effort_env(self) -> str:
         return f"{EFFORT_ENV}_{self.value.upper()}"
+
+    # PROTOTYPE: the `settings` row keys that override the environment for this stage.
+    @property
+    def model_setting(self) -> str:
+        return f"{MODEL_SETTING_PREFIX}{self.value}"
+
+    @property
+    def effort_setting(self) -> str:
+        return f"{EFFORT_SETTING_PREFIX}{self.value}"
 
 
 @dataclass(frozen=True)
@@ -128,6 +146,14 @@ class ModelSpec:
     ``reasoning_on_by_default`` is drift-checked by ``bin/check-openrouter-models``;
     ``adaptive_thinking`` cannot be, because the live list says which efforts a slug takes
     and never what an effort *does* to it.
+
+    **Prices are USD per million tokens** (PROTOTYPE), read off the same endpoint's
+    ``pricing`` object on 2026-09-12 — ``prompt``, ``completion``, ``input_cache_read`` and
+    ``input_cache_write`` (the 5-minute TTL), each quoted per token there and multiplied by
+    1e6 here. Reasoning tokens bill at the ``completion`` rate, and OpenRouter already
+    counts them inside ``completion_tokens``; see :func:`usage_cost_usd`. A slug with no
+    price row costs ``0.0`` rather than raising — a zero in a spend column beside a
+    non-zero token count is visible, a crash in an admin route is not.
     """
 
     slug: str
@@ -137,6 +163,10 @@ class ModelSpec:
     supports_cache_ttl_1h: bool = False
     adaptive_thinking: bool = False
     reasoning_on_by_default: bool = False
+    input_usd_per_mtok: float = 0.0
+    output_usd_per_mtok: float = 0.0
+    cache_read_usd_per_mtok: float = 0.0
+    cache_write_usd_per_mtok: float = 0.0
 
 
 _FULL_EFFORTS: Final[tuple[Effort, ...]] = ("low", "medium", "high", "xhigh", "max")
@@ -153,6 +183,10 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
         supports_cache_ttl_1h=True,
         adaptive_thinking=True,
         reasoning_on_by_default=True,
+        input_usd_per_mtok=2.0,
+        output_usd_per_mtok=10.0,
+        cache_read_usd_per_mtok=0.2,
+        cache_write_usd_per_mtok=2.5,
     ),
     "anthropic/claude-opus-5": ModelSpec(
         "anthropic/claude-opus-5",
@@ -162,6 +196,10 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
         supports_cache_ttl_1h=True,
         adaptive_thinking=True,
         reasoning_on_by_default=True,
+        input_usd_per_mtok=5.0,
+        output_usd_per_mtok=25.0,
+        cache_read_usd_per_mtok=0.5,
+        cache_write_usd_per_mtok=6.25,
     ),
     # Adaptive like its neighbours, but reasoning is *off* until asked for — the pair of
     # facts is not one fact, and this row is the counterexample that says so.
@@ -172,6 +210,10 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
         _FULL_EFFORTS,
         supports_cache_ttl_1h=True,
         adaptive_thinking=True,
+        input_usd_per_mtok=5.0,
+        output_usd_per_mtok=25.0,
+        cache_read_usd_per_mtok=0.5,
+        cache_write_usd_per_mtok=6.25,
     ),
     "anthropic/claude-sonnet-4.6": ModelSpec(
         "anthropic/claude-sonnet-4.6",
@@ -180,12 +222,23 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
         ("low", "medium", "high", "max"),
         supports_cache_ttl_1h=True,
         adaptive_thinking=True,
+        input_usd_per_mtok=3.0,
+        output_usd_per_mtok=15.0,
+        cache_read_usd_per_mtok=0.3,
+        cache_write_usd_per_mtok=3.75,
     ),
     # No selectable effort. Kept in the catalog because it is the obvious candidate for
     # the dedup volume line — and because pairing it with an effort override is the
     # misconfiguration this catalog is here to catch.
     "anthropic/claude-haiku-4.5": ModelSpec(
-        "anthropic/claude-haiku-4.5", 200_000, 64_000, supports_cache_ttl_1h=True
+        "anthropic/claude-haiku-4.5",
+        200_000,
+        64_000,
+        supports_cache_ttl_1h=True,
+        input_usd_per_mtok=1.0,
+        output_usd_per_mtok=5.0,
+        cache_read_usd_per_mtok=0.10,
+        cache_write_usd_per_mtok=1.25,
     ),
     # The one row in this catalog with selectable effort and no adaptive thinking, which
     # is why the dropped-config guard in the OpenRouter adapter is still load-bearing
@@ -197,6 +250,12 @@ KNOWN_MODELS: Final[Mapping[str, ModelSpec]] = {
         128_000,
         ("low", "medium", "high"),
         reasoning_on_by_default=True,
+        input_usd_per_mtok=1.25,
+        output_usd_per_mtok=10.0,
+        cache_read_usd_per_mtok=0.125,
+        # OpenRouter lists no `input_cache_write` for this slug: OpenAI does not charge
+        # for writing a prefix into its cache.
+        cache_write_usd_per_mtok=0.0,
     ),
 }
 
@@ -220,13 +279,67 @@ DEFAULT_EFFORTS: Final[Mapping[LlmStage, Effort | None]] = {
 }
 
 
+class ConfigSource(StrEnum):
+    """Where a resolved value came from, lowest precedence first.
+
+    The chain is **settings > stage env var > global env var > default**, and the admin
+    screen shows it per stage so that "why is dedup on Opus" has an answer that names the
+    thing to change.
+    """
+
+    DEFAULT = "default"
+    GLOBAL_ENV = "global_env"
+    STAGE_ENV = "stage_env"
+    SETTINGS = "settings"
+
+
 @dataclass(frozen=True)
 class StageConfig:
-    """The resolved model and thinking depth for one stage."""
+    """The resolved model and thinking depth for one stage, and where each came from."""
 
     stage: LlmStage
     model: str
     effort: Effort | None
+    model_source: ConfigSource = ConfigSource.DEFAULT
+    effort_source: ConfigSource = ConfigSource.DEFAULT
+
+
+#: PROTOTYPE — settings rows the current context resolves against, when the caller did
+#: not pass them. A ``ContextVar`` for the same reason the usage ledger is one: the worker
+#: reads the rows once per job and installs them around the handler, and the stage
+#: adapters call :func:`load_config` from inside without learning what a settings table is.
+_overrides: ContextVar[Mapping[str, str] | None] = ContextVar("motet_llm_overrides", default=None)
+
+
+@contextmanager
+def llm_overrides(settings: Mapping[str, str]) -> Iterator[None]:
+    """Resolve every :func:`load_config` call inside the block against ``settings`` too."""
+    token = _overrides.set(settings)
+    try:
+        yield
+    finally:
+        _overrides.reset(token)
+
+
+def usage_cost_usd(model: str, usage: Usage) -> float:
+    """What one completion cost in USD, from the catalogue's prices (PROTOTYPE).
+
+    OpenRouter's ``prompt_tokens`` *includes* the cached tokens, and ``completion_tokens``
+    includes the reasoning tokens — both details are subsets, which is how the adapter
+    decodes them into :class:`~.types.Usage`. So the uncached input is what is left of
+    ``input_tokens`` after the two cache figures, reasoning is billed as output by being
+    already inside ``output_tokens``, and an unknown slug costs zero rather than raising.
+    """
+    spec = KNOWN_MODELS.get(model)
+    if spec is None:
+        return 0.0
+    uncached = max(0, usage.input_tokens - usage.cache_read_tokens - usage.cache_write_tokens)
+    return (
+        uncached * spec.input_usd_per_mtok
+        + usage.cache_read_tokens * spec.cache_read_usd_per_mtok
+        + usage.cache_write_tokens * spec.cache_write_usd_per_mtok
+        + usage.output_tokens * spec.output_usd_per_mtok
+    ) / 1_000_000
 
 
 @dataclass(frozen=True)
@@ -321,13 +434,20 @@ def _parse_bool(raw: str, var: str) -> bool:
     raise LlmConfigError(f"{var}={raw!r} is not a boolean")
 
 
-def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
+def load_config(
+    env: Mapping[str, str] | None = None, overrides: Mapping[str, str] | None = None
+) -> LlmConfig:
     """Read and validate the configuration. Raises on anything it cannot make sense of.
 
     Does *not* touch credentials — that is :func:`validate_startup`, so that config can
     be inspected and tested without a key anywhere near it.
+
+    ``overrides`` (PROTOTYPE) is the ``settings`` table as a mapping; ``None`` means
+    whatever :func:`llm_overrides` installed for this context, or nothing. A value there
+    outranks every environment variable and is validated exactly as one would be.
     """
     environ = os.environ if env is None else env
+    settings = overrides if overrides is not None else (_overrides.get() or {})
 
     provider = (
         _parse_enum(environ[PROVIDER_ENV], Provider, PROVIDER_ENV)
@@ -351,6 +471,7 @@ def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
         else DEFAULT_TIMEOUT_SECONDS
     )
 
+    global_model_set = bool(environ.get(MODEL_ENV, "").strip())
     global_model = environ.get(MODEL_ENV, "").strip() or DEFAULT_MODEL
     # Presence is checked directly rather than through a sentinel, because "unset" and
     # "set to off" are genuinely different answers and both are legitimate.
@@ -363,17 +484,44 @@ def load_config(env: Mapping[str, str] | None = None) -> LlmConfig:
     for stage in LlmStage:
         # Which variable supplied the model, so an error can name the one to change
         # rather than the one that happens to be stage-shaped.
-        model_source = stage.model_env if environ.get(stage.model_env, "").strip() else MODEL_ENV
-        model = environ.get(stage.model_env, "").strip() or global_model
+        model_var: str
+        model_from: ConfigSource
+        if settings.get(stage.model_setting, "").strip():
+            model, model_var, model_from = (
+                settings[stage.model_setting].strip(),
+                stage.model_setting,
+                ConfigSource.SETTINGS,
+            )
+        elif environ.get(stage.model_env, "").strip():
+            model, model_var, model_from = (
+                environ[stage.model_env].strip(),
+                stage.model_env,
+                ConfigSource.STAGE_ENV,
+            )
+        else:
+            model, model_var = global_model, MODEL_ENV
+            model_from = ConfigSource.GLOBAL_ENV if global_model_set else ConfigSource.DEFAULT
         effort: Effort | None
-        if environ.get(stage.effort_env, "").strip():
+        if settings.get(stage.effort_setting, "").strip():
+            effort = _parse_effort_setting(settings[stage.effort_setting], stage.effort_setting)
+            effort_from = ConfigSource.SETTINGS
+        elif environ.get(stage.effort_env, "").strip():
             effort = _parse_effort_setting(environ[stage.effort_env], stage.effort_env)
+            effort_from = ConfigSource.STAGE_ENV
         elif global_effort_set:
             effort = global_effort
+            effort_from = ConfigSource.GLOBAL_ENV
         else:
             effort = DEFAULT_EFFORTS[stage]
-        _check_model(model, model_source, effort, stage, allow_unlisted)
-        stages[stage] = StageConfig(stage=stage, model=model, effort=effort)
+            effort_from = ConfigSource.DEFAULT
+        _check_model(model, model_var, effort, stage, allow_unlisted)
+        stages[stage] = StageConfig(
+            stage=stage,
+            model=model,
+            effort=effort,
+            model_source=model_from,
+            effort_source=effort_from,
+        )
 
     return LlmConfig(
         provider=provider,
