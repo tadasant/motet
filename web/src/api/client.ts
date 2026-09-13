@@ -268,6 +268,16 @@ export async function apiPutPath<P extends keyof paths>(
   return parse<PutResponse<P>>(response, 'PUT', url)
 }
 
+/**
+ * A DELETE whose success is 204 and therefore has no body to parse, against a path that
+ * carries an id — `apiPostNoContent`'s shape and `apiPostPath`'s typing. The template is
+ * there so a call site names a route the contract actually has.
+ */
+export async function apiDeletePath<P extends keyof paths>(_template: P, url: string): Promise<void> {
+  const response = await send(`${apiBaseUrl()}${url}`, { method: 'DELETE', headers: headers() })
+  if (!response.ok) throw await refuse(response, 'DELETE', url)
+}
+
 export const api = {
   health: () => apiGet('/internal/health'),
   // Signing in. `startLogin` and `completeLogin` are the only two calls in this file that
@@ -320,6 +330,22 @@ export const api = {
       '/v1/source-items/{source_item_id}',
       `/v1/source-items/${encodeURIComponent(id)}`,
     ),
+  // "Sync now". Enqueues a poll and answers with the source as it stands — it does not
+  // fetch, so `last_sync` in the answer is the *previous* poll's; a caller that wants to
+  // know the sync ran watches `sources()` for `last_sync.at` to move.
+  pollSource: (id: string) =>
+    apiPostPath('/v1/sources/{source_id}/poll', `/v1/sources/${encodeURIComponent(id)}/poll`),
+  // Forget a mailbox's credential and stop polling it. The source row and everything it
+  // pulled in survive — the API says why: claims cite those source items.
+  disconnectSource: (id: string) =>
+    apiDeletePath(
+      '/v1/sources/{source_id}/credentials',
+      `/v1/sources/${encodeURIComponent(id)}/credentials`,
+    ),
+  // Dismiss a consent attempt that never finished. The API refuses (409) for anything
+  // that holds or ever held a credential, or has pulled an item in: the delete cascades.
+  removeSource: (id: string) =>
+    apiDeletePath('/v1/sources/{source_id}', `/v1/sources/${encodeURIComponent(id)}`),
   createEpisode: (title: string, maxDurationMs: number) =>
     apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
   rotateFeed: () => apiPost('/v1/feed/rotate'),

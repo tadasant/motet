@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 import psycopg
@@ -30,6 +31,7 @@ from .ids import highlight_id, new_id, source_id
 from .models import (
     Highlight,
     SourceItemState,
+    SourceKind,
     StoredNewsItem,
     StoredSource,
 )
@@ -56,7 +58,7 @@ def create_source(
         INSERT INTO sources (id, user_id, kind, name, config)
         VALUES (%s, %s, %s, %s, %s::jsonb)
         RETURNING id, user_id, kind, name, config, sync_state, active,
-                  last_polled_at, last_error, created_at
+                  last_polled_at, last_error, created_at, disconnected_at
         """,
         (source_id(), user_id, kind, name, json.dumps(config or {})),
     )
@@ -70,7 +72,7 @@ def get_source(
         conn,
         """
         SELECT id, user_id, kind, name, config, sync_state, active,
-               last_polled_at, last_error, created_at
+               last_polled_at, last_error, created_at, disconnected_at
         FROM sources WHERE id = %s AND (%s::text IS NULL OR user_id = %s)
         """,
         (source_id_, user_id, user_id),
@@ -83,7 +85,7 @@ def list_sources(conn: psycopg.Connection[Any], user_id: str) -> list[StoredSour
         conn,
         """
         SELECT id, user_id, kind, name, config, sync_state, active,
-               last_polled_at, last_error, created_at
+               last_polled_at, last_error, created_at, disconnected_at
         FROM sources WHERE user_id = %s ORDER BY created_at, id
         """,
         (user_id,),
@@ -102,7 +104,7 @@ def list_pollable_sources(conn: psycopg.Connection[Any], kind: str) -> list[Stor
         conn,
         """
         SELECT id, user_id, kind, name, config, sync_state, active,
-               last_polled_at, last_error, created_at
+               last_polled_at, last_error, created_at, disconnected_at
         FROM sources WHERE kind = %s AND active ORDER BY id
         """,
         (kind,),
@@ -137,6 +139,134 @@ def set_source_sync_state(
 
 def set_source_active(conn: psycopg.Connection[Any], source_id_: str, *, active: bool) -> None:
     conn.execute("UPDATE sources SET active = %s WHERE id = %s", (active, source_id_))
+
+
+def mark_source_disconnected(conn: psycopg.Connection[Any], source_id_: str) -> None:
+    """Record that a credential was forgotten, and stop polling.
+
+    ``COALESCE`` so that disconnecting twice keeps the first time: the second call forgot
+    nothing, and the date on the screen is the one the mailbox actually stopped on.
+    """
+    conn.execute(
+        "UPDATE sources SET active = false, disconnected_at = COALESCE(disconnected_at, now()) "
+        "WHERE id = %s",
+        (source_id_,),
+    )
+
+
+@dataclass(frozen=True)
+class SourceItemCounts:
+    """What one source has pulled in, all time: every source item, and the integrated ones."""
+
+    pulled_in: int = 0
+    integrated: int = 0
+
+
+def source_item_counts(
+    conn: psycopg.Connection[Any], source_ids: Sequence[str]
+) -> dict[str, SourceItemCounts]:
+    """Per-source totals, in one grouped query. A source with no items is absent."""
+    if not source_ids:
+        return {}
+    rows = _all(
+        conn,
+        """
+        SELECT source_id,
+               count(*)                                    AS pulled_in,
+               count(*) FILTER (WHERE state = 'integrated') AS integrated
+        FROM source_items
+        WHERE source_id = ANY(%s)
+        GROUP BY source_id
+        """,
+        (list(source_ids),),
+    )
+    return {
+        row["source_id"]: SourceItemCounts(pulled_in=row["pulled_in"], integrated=row["integrated"])
+        for row in rows
+    }
+
+
+class SourceRemoval(StrEnum):
+    """What :func:`remove_unused_source` did, or which guard refused it."""
+
+    REMOVED = "removed"
+    NOT_FOUND = "not_found"
+    BUILT_IN = "built_in"
+    HELD_A_CREDENTIAL = "held_a_credential"
+    HAS_ITEMS = "has_items"
+    CONSENT_IN_PROGRESS = "consent_in_progress"
+
+
+def remove_unused_source(
+    conn: psycopg.Connection[Any], *, user_id: str, source_id_: str
+) -> SourceRemoval:
+    """Delete a source row that was never used: an abandoned consent attempt.
+
+    **Every guard here is a data-loss guard, because the delete cascades.** ``source_items``
+    references ``sources`` with ``ON DELETE CASCADE``, and claims and highlights hang off
+    source items — so deleting a source that ever pulled anything in would take episode
+    transcripts with it, which is exactly why disconnecting keeps the row. What is left
+    that is safe is the row ``POST /v1/sources/connect`` creates before the user leaves for
+    Google and that never received a credential.
+
+    Refused, in order: another user's row (reported as not found, so this route cannot be
+    used to learn which ids exist), the built-in paste source, any row that holds or ever
+    held a credential — a stored credential, ``disconnected_at``, ``last_polled_at``, or
+    ``active`` all count, because a row that was polled once is not provably unused — any
+    row with a source item, and a row whose consent is being completed at this moment.
+
+    **The row is locked first**, and that is what makes the checks mean anything.
+    ``source_credentials`` and ``source_items`` both reference ``sources``, so a concurrent
+    insert of either holds a ``KEY SHARE`` lock on the row that ``FOR UPDATE`` waits for;
+    once it is granted, each later statement in this transaction takes a fresh snapshot
+    and sees the committed insert. Checked and deleted in one statement without the lock,
+    a callback storing a credential mid-delete would be cascaded away with the row.
+    """
+    row = _maybe_one(
+        conn,
+        """
+        SELECT kind, active, last_polled_at, disconnected_at
+        FROM sources WHERE id = %s AND user_id = %s
+        FOR UPDATE
+        """,
+        (source_id_, user_id),
+    )
+    if row is None:
+        return SourceRemoval.NOT_FOUND
+    if row["kind"] == SourceKind.PASTE.value:
+        return SourceRemoval.BUILT_IN
+    has_credential = _maybe_one(
+        conn, "SELECT 1 AS one FROM source_credentials WHERE source_id = %s LIMIT 1", (source_id_,)
+    )
+    if (
+        has_credential is not None
+        or row["active"]
+        or row["last_polled_at"] is not None
+        or row["disconnected_at"] is not None
+    ):
+        return SourceRemoval.HELD_A_CREDENTIAL
+    has_items = _maybe_one(
+        conn, "SELECT 1 AS one FROM source_items WHERE source_id = %s LIMIT 1", (source_id_,)
+    )
+    if has_items is not None:
+        return SourceRemoval.HAS_ITEMS
+    # A callback finishing this consent right now has consumed its `oauth_states` row with
+    # a `DELETE ... RETURNING` and holds that row's lock across its call to the provider;
+    # its credential insert then needs a key-share lock on the source row held here. So a
+    # delete that cascaded into the state row would wait on the callback while the callback
+    # waited on it — a deadlock, and the aborted side may be the one holding a spent
+    # authorization code. Taking the state rows with NOWAIT refuses instead. Without a
+    # callback in flight the rows are now held here, so a late callback finds nothing.
+    try:
+        with conn.transaction():
+            conn.execute(
+                "SELECT 1 FROM oauth_states WHERE source_id = %s FOR UPDATE NOWAIT",
+                (source_id_,),
+            )
+    except psycopg.errors.LockNotAvailable:
+        return SourceRemoval.CONSENT_IN_PROGRESS
+    conn.execute("DELETE FROM sources WHERE id = %s AND user_id = %s", (source_id_, user_id))
+    return SourceRemoval.REMOVED
 
 
 # --- the credential vault ------------------------------------------------------------
@@ -723,6 +853,7 @@ def _source(row: dict[str, Any]) -> StoredSource:
         last_polled_at=row["last_polled_at"],
         last_error=row["last_error"],
         created_at=row["created_at"],
+        disconnected_at=row["disconnected_at"],
     )
 
 
@@ -759,7 +890,9 @@ def _highlight(row: dict[str, Any]) -> Highlight:
 __all__ = [
     "Ranking",
     "SmartRule",
+    "SourceItemCounts",
     "SourceItemState",
+    "SourceRemoval",
     "StoredCredential",
     "consume_oauth_state",
     "create_source",
@@ -772,13 +905,16 @@ __all__ = [
     "list_pollable_sources",
     "list_sources",
     "load_source_credential",
+    "mark_source_disconnected",
     "purge_expired_oauth_states",
     "record_listen_progress",
+    "remove_unused_source",
     "save_highlight",
     "select_for_rule",
     "set_claim_timings",
     "set_source_active",
     "set_source_sync_state",
+    "source_item_counts",
     "source_item_exists",
     "unqueued_message_ids",
     "start_oauth",

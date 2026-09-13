@@ -699,6 +699,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
     public var lastError: String?
     public var maxAttempts: Int
     public var nextAttemptAt: Date?
+    public var sourceId: String
     public var sourceKind: String
     public var state: String
     public var title: String
@@ -710,6 +711,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
         lastError: String? = nil,
         maxAttempts: Int,
         nextAttemptAt: Date? = nil,
+        sourceId: String,
         sourceKind: String,
         state: String,
         title: String
@@ -720,6 +722,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
         self.lastError = lastError
         self.maxAttempts = maxAttempts
         self.nextAttemptAt = nextAttemptAt
+        self.sourceId = sourceId
         self.sourceKind = sourceKind
         self.state = state
         self.title = title
@@ -732,6 +735,7 @@ public struct IngestionItemResponse: Codable, Hashable, Sendable {
         case lastError = "last_error"
         case maxAttempts = "max_attempts"
         case nextAttemptAt = "next_attempt_at"
+        case sourceId = "source_id"
         case sourceKind = "source_kind"
         case state
         case title
@@ -1403,12 +1407,22 @@ public struct SourceItemResponse: Codable, Hashable, Sendable {
 }
 
 /// A place source items come from — pasted text, or a connected mailbox.
+///
+/// **Two rows with no credential mean different things, and ``disconnected_at`` is what
+/// tells them apart.** ``POST /v1/sources/connect`` creates a row before the user leaves
+/// for the provider, so a consent that was cancelled leaves one behind that never held a
+/// credential. A mailbox that was disconnected held one and gave it back. Both are
+/// ``connected: false, active: false``. A row disconnected before ``disconnected_at``
+/// existed has it null, and its ``last_polled_at`` is the only tell.
 public struct SourceResponse: Codable, Hashable, Sendable {
     public var active: Bool
     public var connected: Bool
     public var createdAt: Date
+    public var disconnectedAt: Date?
     public var firstSyncDays: Int?
     public var id: String
+    public var itemsIntegrated: Int
+    public var itemsPulledIn: Int
     public var kind: String
     public var lastError: String?
     public var lastPolledAt: Date?
@@ -1421,8 +1435,11 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         active: Bool,
         connected: Bool,
         createdAt: Date,
+        disconnectedAt: Date? = nil,
         firstSyncDays: Int? = nil,
         id: String,
+        itemsIntegrated: Int,
+        itemsPulledIn: Int,
         kind: String,
         lastError: String? = nil,
         lastPolledAt: Date? = nil,
@@ -1434,8 +1451,11 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         self.active = active
         self.connected = connected
         self.createdAt = createdAt
+        self.disconnectedAt = disconnectedAt
         self.firstSyncDays = firstSyncDays
         self.id = id
+        self.itemsIntegrated = itemsIntegrated
+        self.itemsPulledIn = itemsPulledIn
         self.kind = kind
         self.lastError = lastError
         self.lastPolledAt = lastPolledAt
@@ -1449,8 +1469,11 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         case active
         case connected
         case createdAt = "created_at"
+        case disconnectedAt = "disconnected_at"
         case firstSyncDays = "first_sync_days"
         case id
+        case itemsIntegrated = "items_integrated"
+        case itemsPulledIn = "items_pulled_in"
         case kind
         case lastError = "last_error"
         case lastPolledAt = "last_polled_at"
@@ -1815,6 +1838,11 @@ public enum MotetEndpoints {
     /// `POST /v1/sources/paste` — Paste Source
     public static var pasteSource: HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/sources/paste")
+    }
+
+    /// `DELETE /v1/sources/{source_id}` — Remove Source
+    public static func removeSource(sourceId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "DELETE", path: "/v1/sources/\(MotetPathComponent(sourceId))")
     }
 
     /// `DELETE /v1/sources/{source_id}/credentials` — Disconnect Source

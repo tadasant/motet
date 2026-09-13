@@ -12,10 +12,9 @@ import type {
   SessionInfo,
   Source,
 } from './api/client'
-// Imported directly for the connect tests: handing the browser to Google is the one line
+// Imported directly for the sign-in tests: handing the browser to Google is the one line
 // of that flow jsdom cannot execute, and the screen takes it as a prop for that reason.
 import { SignIn } from './screens/SignIn'
-import { Sources } from './screens/Sources'
 
 const NEWS_ITEM: NewsItem = {
   id: 'ni_1',
@@ -41,6 +40,7 @@ const QUEUED: IngestionItem = {
   last_error: null,
   created_at: '2026-08-24T00:00:00Z',
   source_kind: 'paste',
+  source_id: 'src_paste',
 }
 
 const EPISODE: Episode = {
@@ -100,6 +100,9 @@ const GMAIL_SOURCE: Source = {
   query: 'category:updates OR category:promotions',
   first_sync_days: null,
   last_sync: null,
+  disconnected_at: null,
+  items_pulled_in: 0,
+  items_integrated: 0,
 }
 
 /**
@@ -120,6 +123,9 @@ const PASTE_SOURCE: Source = {
   query: null,
   first_sync_days: null,
   last_sync: null,
+  disconnected_at: null,
+  items_pulled_in: 0,
+  items_integrated: 0,
 }
 
 /**
@@ -843,171 +849,8 @@ describe('the app shell', () => {
   })
 })
 
-describe('connecting a mailbox', () => {
-  it('lists sources and reads a pending one as waiting, not as failed', async () => {
-    mockApi()
-    render(<App />)
-    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
-
-    expect(await screen.findByText('Gmail')).toBeDefined()
-    expect(screen.getByText(/gmail . waiting for consent/)).toBeDefined()
-    // The other half of the row, asserted here because the paste case below asserts its
-    // *absence*: a poll line suppressed for everything would satisfy that one on its own.
-    expect(screen.getByText(/Never polled/)).toBeDefined()
-  })
-
-  it('gives a polled source its poll time and its scopes on one line', async () => {
-    const connected: Source = {
-      ...GMAIL_SOURCE,
-      active: true,
-      connected: true,
-      scopes: ['gmail.readonly'],
-      last_polled_at: '2026-08-24T00:00:00Z',
-    }
-    mockApi({ '/v1/sources': [connected] })
-    render(<App />)
-    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
-
-    expect(await screen.findByText(/gmail . connected/)).toBeDefined()
-    expect(screen.getByText(/^Last polled .* . gmail.readonly$/)).toBeDefined()
-  })
-
-  it('reads the paste source off `active`, because consent and polling do not apply to it', async () => {
-    // motet#39. `statusOf` branched on `connected` alone, so the one source that can
-    // never connect — and the only one actually in use — was labelled an
-    // abandoned OAuth attempt, directly under copy saying pasting in needs nothing.
-    mockApi({ '/v1/sources': [PASTE_SOURCE] })
-    render(<App />)
-    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
-
-    expect(await screen.findByText('Pasted text')).toBeDefined()
-    expect(screen.getByText(/paste . ready/)).toBeDefined()
-    // The `paste ·` prefix is what keeps this off the panel below, which quotes the
-    // phrase — correctly, because that paragraph is about mailboxes.
-    expect(screen.queryByText(/paste . waiting for consent/)).toBeNull()
-    // Nothing polls pasted text, so a poll time is not missing — it is inapplicable, and
-    // "Never polled" reads as a fetch that has never fired.
-    expect(screen.queryByText(/Never polled/)).toBeNull()
-  })
-
-  it('offers Gmail and nothing else', async () => {
-    // The API answers 400 for any other provider, because X bookmarks are not built. A
-    // button for one would be a promise the backend refuses to keep.
-    mockApi()
-    render(<App />)
-    fireEvent.click(screen.getByRole('link', { name: 'Sources' }))
-    await screen.findByText('Gmail')
-
-    expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeDefined()
-    expect(screen.queryByRole('button', { name: /Connect X/ })).toBeNull()
-  })
-
-  it('starts consent with the redirect URI this origin will come back on', async () => {
-    const calls = mockApi({
-      '/v1/sources/connect': {
-        source_id: 'src_2',
-        authorization_url: 'https://accounts.google.test/o/oauth2/v2/auth?client_id=x',
-        state: 'st_1',
-      },
-    })
-    const navigate = vi.fn()
-    render(<Sources navigate={navigate} />)
-    await screen.findByText('Gmail')
-
-    fireEvent.change(screen.getByLabelText('Gmail search (optional)'), {
-      target: { value: 'from:newsletter@example.test' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
-
-    await waitFor(() => expect(navigate).toHaveBeenCalled())
-    const connect = calls.find((call) => call.url.includes('/v1/sources/connect'))
-    expect(connect?.method).toBe('POST')
-    expect(connect?.body).toEqual({
-      provider: 'gmail',
-      name: 'Gmail',
-      query: 'from:newsletter@example.test',
-      // Registered on the OAuth client, and matched by Google as an exact string.
-      redirect_uri: `${window.location.origin}/oauth/callback`,
-    })
-    expect(navigate).toHaveBeenCalledWith(
-      'https://accounts.google.test/o/oauth2/v2/auth?client_id=x',
-    )
-    // Remembered before the redirect: after it, nothing in this tab gets to run.
-    expect(window.sessionStorage.getItem('motet.oauthState')).toBe('st_1')
-  })
-
-  it('sends a blank query as null, which is what asks for the provider default', async () => {
-    const calls = mockApi({
-      '/v1/sources/connect': {
-        source_id: 'src_2',
-        authorization_url: 'https://accounts.google.test/',
-        state: 'st_2',
-      },
-    })
-    render(<Sources navigate={vi.fn()} />)
-    await screen.findByText('Gmail')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
-
-    await waitFor(() => {
-      const connect = calls.find((call) => call.url.includes('/v1/sources/connect'))
-      expect(connect?.body).toMatchObject({ query: null })
-    })
-  })
-
-  it('shows the API own message when the OAuth client is not provisioned', async () => {
-    // The dormant case today: real mode with no Google OAuth client provisioned, which
-    // the API answers 503 to while naming the variable that is missing. That message is
-    // worth more than anything this screen could invent, so it is the one shown.
-    //
-    // Its own stub rather than mockApi: that helper answers by URL prefix and has no way
-    // to express a failure.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const failing = String(input).includes('/v1/sources/connect')
-        return {
-          ok: !failing,
-          status: failing ? 503 : 200,
-          statusText: 'Service Unavailable',
-          json: async () =>
-            failing ? { detail: 'GOOGLE_OAUTH_CLIENT_ID is not set.' } : [GMAIL_SOURCE],
-        } as Response
-      }),
-    )
-    render(<Sources navigate={vi.fn()} />)
-    await screen.findByText('Gmail')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
-
-    expect(await screen.findByText(/GOOGLE_OAUTH_CLIENT_ID is not set/)).toBeDefined()
-  })
-
-  it('says what a failed fetch means instead of showing the browser string', async () => {
-    // The bug as the user met it. A rejected `fetch` means the request never completed
-    // at the network layer, and the browser tells JavaScript nothing about why — the
-    // same `TypeError: Failed to fetch` covers a refused cross-origin response, DNS,
-    // TLS, being offline, and a server that closed the connection. That bare string was
-    // once the entire report of a broken Gmail connect. It now arrives naming the URL
-    // and saying that no answer came back from Motet at all.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        if (String(input).includes('/v1/sources/connect')) {
-          throw new TypeError('Failed to fetch')
-        }
-        return { ok: true, status: 200, json: async () => [GMAIL_SOURCE] } as Response
-      }),
-    )
-    render(<Sources navigate={vi.fn()} />)
-    await screen.findByText('Gmail')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
-
-    const shown = await screen.findByText(/never completed/)
-    expect(shown.textContent).toContain('/v1/sources/connect')
-  })
-})
+// The connecting-a-mailbox tests live in screens/Sources.test.tsx, beside the screen they
+// drive (motet#90). The callback landing below is still App-level: it replaces the shell.
 
 describe('the /oauth/callback landing', () => {
   it('exchanges the code and reports the mailbox connected', async () => {

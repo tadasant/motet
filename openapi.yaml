@@ -852,6 +852,11 @@ components:
           description: "When the next attempt is due. Null means there is nothing scheduled: it is either\
             \ being processed right now, or it is finished \u2014 see 'state'."
           title: Next Attempt At
+        source_id:
+          description: Which source it came from. With two mailboxes connected, 'source_kind' says only
+            that it was a mailbox; this says which one.
+          title: Source Id
+          type: string
         source_kind:
           description: "How this arrived: 'paste' for text pasted in, 'gmail' for a polled mailbox message.\
             \ It decides what a person can do about a failure \u2014 a failed paste can be pasted again,\
@@ -876,6 +881,7 @@ components:
       - last_error
       - created_at
       - source_kind
+      - source_id
       title: IngestionItemResponse
       type: object
     IntegrateResponse:
@@ -1649,7 +1655,12 @@ components:
       title: SourceItemResponse
       type: object
     SourceResponse:
-      description: "A place source items come from \u2014 pasted text, or a connected mailbox."
+      description: "A place source items come from \u2014 pasted text, or a connected mailbox.\n\n**Two\
+        \ rows with no credential mean different things, and ``disconnected_at`` is what\ntells them apart.**\
+        \ ``POST /v1/sources/connect`` creates a row before the user leaves\nfor the provider, so a consent\
+        \ that was cancelled leaves one behind that never held a\ncredential. A mailbox that was disconnected\
+        \ held one and gave it back. Both are\n``connected: false, active: false``. A row disconnected\
+        \ before ``disconnected_at``\nexisted has it null, and its ``last_polled_at`` is the only tell."
       properties:
         active:
           description: 'False means connected but paused: it is not polled, and nothing is lost.'
@@ -1664,6 +1675,14 @@ components:
           format: date-time
           title: Created At
           type: string
+        disconnected_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When the credential was forgotten through the disconnect route. Null for a source
+            that is connected, was never connected, or was disconnected before this was recorded.
+          title: Disconnected At
         first_sync_days:
           anyOf:
           - type: integer
@@ -1674,6 +1693,14 @@ components:
         id:
           title: Id
           type: string
+        items_integrated:
+          description: Of those, how many have been integrated into a news item, all time.
+          title: Items Integrated
+          type: integer
+        items_pulled_in:
+          description: Source items this source has produced, all time, in any state.
+          title: Items Pulled In
+          type: integer
         kind:
           description: '''paste'' or ''gmail''.'
           title: Kind
@@ -1723,6 +1750,9 @@ components:
       - query
       - first_sync_days
       - last_sync
+      - disconnected_at
+      - items_pulled_in
+      - items_integrated
       title: SourceResponse
       type: object
     SourceSpanModel:
@@ -3311,6 +3341,44 @@ paths:
       summary: Paste Source
       tags:
       - ingestion
+  /v1/sources/{source_id}:
+    delete:
+      description: "Dismiss a consent attempt that never finished.\n\n`POST /v1/sources/connect` creates\
+        \ the source row before the user leaves for the\nprovider, so every cancelled consent leaves one\
+        \ behind, forever. This removes such a\nrow and **refuses everything else with a 409**: the built-in\
+        \ paste source, any source\nthat holds or ever held a credential, and any source that has pulled\
+        \ an item in. Those\nguards are the route, not a detail of it \u2014 deleting a source cascades\
+        \ to its source\nitems and to the claims and highlights that cite them, which is why disconnecting\
+        \ keeps\nthe row. `motet_db.phase2.remove_unused_source` holds the checks, under a row lock.\n\
+        \nAnother user's source is a 404, exactly like one that does not exist."
+      operationId: remove_source_v1_sources__source_id__delete
+      parameters:
+      - in: path
+        name: source_id
+        required: true
+        schema:
+          title: Source Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Remove Source
+      tags:
+      - sources
   /v1/sources/{source_id}/credentials:
     delete:
       description: 'Forget a mailbox''s credentials and stop polling it.

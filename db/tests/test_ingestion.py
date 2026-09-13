@@ -520,6 +520,24 @@ class TestExtractJobsWithNoSourceItem:
 
         (status,) = repo.list_ingestion(db, USER)
         assert status.source_kind == SourceKind.PASTE.value
+        assert status.source_id == repo.PASTE_SOURCE_ID
+
+    def test_two_mailboxes_are_told_apart_on_both_arms(self, db: psycopg.Connection[Any]) -> None:
+        """motet#90 gap 1: ``source_kind`` says "a mailbox", and with two that is not enough.
+
+        The Sources screen counts what each mailbox has in flight. By kind alone, one
+        mailbox's failures are shown under the other as well — so each arm has to carry the
+        source it came from: a source item's own, and an extract job's payload.
+        """
+        first, second = gmail_source(db), gmail_source(db)
+        item_id = polled_item(db, first, "m-first")
+        enqueue_integrate(db, item_id)
+        enqueue_extract(db, second, "m-second", attempts=5, state="failed", last_error="boom")
+
+        by_id = {status.id: status for status in repo.list_ingestion(db, USER)}
+        assert by_id[item_id].source_id == first
+        (from_job,) = [status for status in by_id.values() if status.id.startswith("extract:")]
+        assert from_job.source_id == second
 
 
 def test_the_extract_index_covers_the_open_job_lookup(db: psycopg.Connection[Any]) -> None:

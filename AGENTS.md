@@ -2090,6 +2090,37 @@ spent code. And **`error=access_denied` is an answer, not a failure** — someon
 Cancel, which is a supported response to being asked for a mailbox, and it must not read
 like a crash.
 
+### The Sources screen is a catalog, and a source row says what it did
+
+`web/src/screens/Sources.tsx`, `web/src/screens/sources/` (motet#90). A card per
+integration — Gmail, Paste, and two honestly disabled "Coming soon" — and one panel under
+the grid for the account(s) behind the one you pick. **The catalog is static**, because
+`GET /v1/sources` lists *accounts* and something not yet connected has no row to render.
+
+The last sync's result, the filter and the first-sync window are motet#94's fields and are
+read, not re-derived: "Sync now" watches `last_sync.at` rather than `last_polled_at`,
+because an extraction that skips a message moves `last_polled_at` too, and watching it
+would call that a sync. It re-fetches on an interval while it waits — a watch re-armed
+only by a change stopped at the first unchanged answer.
+
+Two things the API grew for it are decisions rather than fields:
+
+- **`sources.disconnected_at` (migration 0016) is what separates a disconnected mailbox
+  from an abandoned consent**, which are otherwise the same row. The disconnect route sets
+  it only when it actually deleted a credential, so "disconnecting" a row that never held
+  one cannot turn it into a mailbox nobody may dismiss.
+- **`DELETE /v1/sources/{id}` dismisses an abandoned consent and refuses everything
+  else.** The delete cascades to source items and on to the claims and highlights citing
+  them, so every guard in `phase2.remove_unused_source` is a data-loss guard: another
+  user's row is a 404, and a 409 answers the paste source, a stored credential, any sign
+  one was held (`disconnected_at`, `last_polled_at`, `active`), and any source item. The
+  row is locked `FOR UPDATE` first, because a concurrent callback's credential insert
+  holds a key-share lock the delete must wait for — checked without the lock, the
+  credential would be cascaded away with the row. **The consent's `oauth_states` rows are
+  then taken `NOWAIT`**, because a callback mid-exchange holds that row from its consuming
+  `DELETE` and next wants the source row: waiting would be a deadlock, and the aborted
+  side may be the one holding a spent authorization code. A held row is a 409.
+
 ### Signing in is a second key to the same lock, not a user system
 
 `api/src/motet_api/auth/`, and the `auth_sessions` table. Tadas asked for it twice: he did

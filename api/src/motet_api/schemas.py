@@ -381,6 +381,12 @@ class IngestionItemResponse(BaseModel):
             "cursor has already moved past it."
         )
     )
+    source_id: str = Field(
+        description=(
+            "Which source it came from. With two mailboxes connected, 'source_kind' says "
+            "only that it was a mailbox; this says which one."
+        )
+    )
 
 
 class QueueHeartbeatResponse(BaseModel):
@@ -637,7 +643,15 @@ class SourceSyncResult(BaseModel):
 
 
 class SourceResponse(BaseModel):
-    """A place source items come from — pasted text, or a connected mailbox."""
+    """A place source items come from — pasted text, or a connected mailbox.
+
+    **Two rows with no credential mean different things, and ``disconnected_at`` is what
+    tells them apart.** ``POST /v1/sources/connect`` creates a row before the user leaves
+    for the provider, so a consent that was cancelled leaves one behind that never held a
+    credential. A mailbox that was disconnected held one and gave it back. Both are
+    ``connected: false, active: false``. A row disconnected before ``disconnected_at``
+    existed has it null, and its ``last_polled_at`` is the only tell.
+    """
 
     id: str
     kind: str = Field(description="'paste' or 'gmail'.")
@@ -673,6 +687,19 @@ class SourceResponse(BaseModel):
     )
     last_sync: SourceSyncResult | None = Field(
         description="The most recent poll's result. Null until one has run."
+    )
+    disconnected_at: datetime | None = Field(
+        description=(
+            "When the credential was forgotten through the disconnect route. Null for a "
+            "source that is connected, was never connected, or was disconnected before "
+            "this was recorded."
+        )
+    )
+    items_pulled_in: int = Field(
+        description="Source items this source has produced, all time, in any state."
+    )
+    items_integrated: int = Field(
+        description="Of those, how many have been integrated into a news item, all time."
     )
 
 
