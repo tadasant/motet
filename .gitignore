@@ -56,3 +56,6 @@ xcuserdata/
 .DS_Store
 .idea/
 .vscode/
+
+# proto/live_smoke.py caches synthesized questions beside itself
+proto/.live_smoke_*.wav

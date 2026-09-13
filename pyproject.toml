@@ -76,6 +76,9 @@ select = ["E", "F", "I", "B", "UP", "T20"]  # T20 bans print() — use the logge
 # NOT be printed matters, so the exemption is stated here beside the other two rather
 # than sprinkled as per-line noqa where it would be easy to add one more.
 "tools/local_env.py" = ["T201"]
+# PROTOTYPE (proto/local-ux): a hand-run driver for the voice service's live path whose
+# entire product is the transcript and latency it prints. Same exemption, same reason.
+"proto/live_smoke.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.13"

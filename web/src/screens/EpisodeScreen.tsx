@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api, apiBaseUrl } from '../api/client'
 import { ago, serverNow, workerState } from './Processing'
+import { Live } from './Live'
 
 /** States a client should keep polling through. Exported: the app polls on it too. */
 export const IN_PROGRESS = new Set(['pending', 'scripting', 'rendering'])
@@ -150,6 +151,8 @@ export function EpisodeScreen({
       {audioUrl && (
         <div className="player">
           <audio ref={player} controls preload="metadata" src={audioUrl} />
+          {/* PROTOTYPE: listen through the voice service and interrupt by voice. */}
+          <Live episode={episode} player={player} />
         </div>
       )}
 

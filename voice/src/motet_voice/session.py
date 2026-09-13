@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,7 +42,9 @@ from .contract import (
     TranscriptEvent,
     TurnPolicy,
 )
-from .realtime import ArmDormant, RealtimeArm, TurnRequest
+from .live import LiveBridge, failure_reason
+from .position import locate, position_notes
+from .realtime import ArmDormant, LiveArm, RealtimeArm, TurnRequest
 from .tools import ToolRegistry
 
 logger = logging.getLogger("motet.voice.session")
@@ -62,6 +66,18 @@ def policy_from(turn_policy: TurnPolicy, *, name: str = "session") -> BargeInPol
     )
 
 
+def _default_text_arm(arm: RealtimeArm) -> RealtimeArm | None:
+    """Who answers a typed turn when there is no live channel.
+
+    The arm itself, unless it is a :class:`LiveArm`. A realtime arm's ``respond`` opens the
+    same vendor socket its live channel does, so it is no fallback for that channel failing
+    — the app hands the session the composed arm instead (:class:`~motet_voice.app.VoiceApp`),
+    and a session built without one reports that it cannot answer rather than retrying the
+    vendor.
+    """
+    return None if isinstance(arm, LiveArm) else arm
+
+
 @dataclass
 class VoiceSession:
     """A single conversation, from ``StartSession`` to socket close."""
@@ -71,6 +87,12 @@ class VoiceSession:
     arm: RealtimeArm
     tools: ToolRegistry
     detector: TurnDetector
+    #: The arm that answers a *typed* turn when there is no live channel to send it down —
+    #: the composed arm behind a realtime arm, and the arm itself otherwise. ``None`` means
+    #: nothing in this process can answer a typed question without the live channel, and
+    #: :meth:`respond_to_text` says so instead of trying the vendor again. See
+    #: :meth:`respond_to_text` for why this is never the realtime arm's own turn path.
+    text_arm: RealtimeArm | None = None
     clock: PlaybackClock = field(default_factory=PlaybackClock)
     history: list[dict[str, str]] = field(default_factory=list)
     decisions: list[BargeInDecision] = field(default_factory=list)
@@ -82,6 +104,17 @@ class VoiceSession:
     #: Two coroutines writing to one WebSocket is a protocol violation waiting for a busy
     #: walk. The socket drains this; see :mod:`motet_voice.app`.
     outbox: asyncio.Queue[SessionEvent] = field(default_factory=asyncio.Queue)
+    #: The live, speech-to-speech channel, when the arm offers one (:class:`LiveArm`) and
+    #: it opened. ``None`` on the composed arm and on a realtime arm whose vendor socket
+    #: failed — both then run the turn-shaped path with a typed question, on
+    #: :attr:`text_arm`. See :mod:`motet_voice.live`.
+    live: LiveBridge | None = field(default=None, init=False)
+    #: Why the live channel is not there, when it is not: a short vendor-neutral code
+    #: (``insufficient_quota``, ``arm_dormant``, ``connection_closed``) and the message it
+    #: came from. Carried on ``ready`` so a client can tell "no credits" from "no key" from
+    #: "no arm" without reading a log.
+    live_failure_reason: str = field(default="", init=False)
+    live_failure_message: str = field(default="", init=False)
     _residue: bytes = field(default=b"", init=False)
     #: Frames consumed so far in this session. Audio arrives in packets that do not respect
     #: frame boundaries *or* start at zero, and every offset downstream — the refractory
@@ -102,7 +135,11 @@ class VoiceSession:
         arm: RealtimeArm,
         tools: ToolRegistry,
         clock: PlaybackClock | None = None,
+        text_arm: RealtimeArm | None = None,
     ) -> VoiceSession:
+        """Build a session. ``text_arm`` defaults to ``arm`` unless ``arm`` is a
+        :class:`LiveArm`, whose turn path opens the same vendor socket the live channel
+        does — see :meth:`respond_to_text`."""
         session_clock = clock or PlaybackClock()
         if config.context.spoken_through_ms:
             # The caller told us where the listener had got to. That is the one external
@@ -113,8 +150,138 @@ class VoiceSession:
             config=config,
             arm=arm,
             tools=tools,
+            text_arm=text_arm if text_arm is not None else _default_text_arm(arm),
             detector=arm.build_turn_detector(policy_from(config.turn_policy)),
             clock=session_clock,
+        )
+
+    # -- the live channel ---------------------------------------------------------------
+
+    async def start_live(self) -> None:
+        """Open a live conversation if the arm can hold one. Never raises.
+
+        A vendor socket that will not open is a warning and a fallback, not a refused
+        session: barge-in detection is local and a typed question still goes through
+        :meth:`respond_to_text`. ``ready().detail`` says which of the two the client got.
+        """
+        if not isinstance(self.arm, LiveArm):
+            return
+        try:
+            conversation = self.arm.open_live(self._turn_request())
+            bridge = LiveBridge.open(
+                session_id=self.session_id,
+                arm_name=self.arm.name,
+                conversation=conversation,
+                tools=self.tools,
+                clock=self.clock,
+                outbox=self.outbox,
+                history=self.history,
+                decisions=self.decisions,
+                policy=policy_from(self.config.turn_policy, name="live"),
+            )
+            await bridge.start()
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            self.live_failure_reason = failure_reason(exc)
+            self.live_failure_message = str(exc)
+            logger.warning(
+                "live conversation did not open for session %s on arm %s (reason=%s): %s",
+                self.session_id,
+                self.arm.name,
+                self.live_failure_reason,
+                exc,
+            )
+            with contextlib.suppress(Exception):
+                await conversation.aclose()
+            return
+        self.live = bridge
+
+    async def receive_audio(self, pcm: bytes) -> list[SessionEvent]:
+        """Listener audio from the socket: to the provider while they have the floor,
+        through the local detector otherwise."""
+        live = self._live_channel()
+        if live is not None:
+            live.remember(pcm)
+            if live.active:
+                return await self._on_live(live.forward(pcm), what="forwarding audio")
+        events = self.observe_audio(pcm)
+        if events and (live := self._live_channel()) is not None:
+            events.extend(await self._on_live(live.engage(self._position_notes()), what="engaging"))
+        return events
+
+    async def client_barge_in(self, *, trigger: str = "client") -> list[SessionEvent]:
+        """An explicit interruption from the client, and the live channel engaged behind it."""
+        events: list[SessionEvent] = [self.barge_in(trigger=trigger)]
+        if (live := self._live_channel()) is not None:
+            events.extend(await self._on_live(live.engage(self._position_notes()), what="engaging"))
+        return events
+
+    def _live_channel(self) -> LiveBridge | None:
+        """The live channel, if there is one and it is still up."""
+        if self.live is not None and not self.live.failed:
+            return self.live
+        return None
+
+    async def _on_live(
+        self, call: Awaitable[list[SessionEvent] | None], *, what: str
+    ) -> list[SessionEvent]:
+        """Run one call on the live channel at the session boundary.
+
+        **A vendor socket dying must never close the client's.** Every send on the live
+        channel can raise the provider's own closed-connection error — quota, an idle
+        timeout, a deploy on their side — and before this existed that exception walked
+        straight out of the WebSocket handler as an ASGI failure, taking the narration down
+        with it (the client saw a bare 1006). So the channel is marked failed, the reason is
+        kept for the next ``ready``, and the client gets an ``error`` event: ``turn_failed``
+        for a question it asked, ``live_unavailable`` for anything else. The next typed
+        question then goes to :attr:`text_arm`, which is what the fallback is for.
+        """
+        try:
+            return await call or []
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            live = self.live
+            reason = failure_reason(exc)
+            logger.warning(
+                "live conversation failed while %s for session %s on arm %s (reason=%s): %s",
+                what,
+                self.session_id,
+                self.arm.name,
+                reason,
+                exc,
+            )
+            if live is not None:
+                live.failed = live.failed or str(exc)
+                live.active = False
+            self.live_failure_reason = reason
+            self.live_failure_message = str(exc)
+            code = "turn_failed" if what == "asking" else "live_unavailable"
+            fallback = (
+                f" Typed questions are answered by the {self.text_arm.name} arm; ask again."
+                if self.text_arm is not None
+                else " No arm in this process can answer a typed question without it."
+            )
+            return [
+                ErrorEvent(
+                    at_ms=self.clock.spoken_through_ms,
+                    code=code,
+                    message=f"the live conversation ended ({reason}): {exc}.{fallback}",
+                )
+            ]
+
+    def _position_notes(self) -> str:
+        return position_notes(self.config.context.transcript, self.clock.spoken_through_ms)
+
+    def _interruption_context(self) -> dict[str, Any]:
+        return locate(self.config.context.transcript, self.clock.spoken_through_ms).to_json()
+
+    def _turn_request(self, text: str | None = None) -> TurnRequest:
+        return TurnRequest(
+            persona_instructions=self.config.persona.instructions,
+            voice=self.config.persona.voice,
+            user_text=text,
+            context_notes=self.config.context.notes,
+            position_notes=self._position_notes(),
+            history=list(self.history),
+            tools=self.tools.describe(),
         )
 
     # -- inbound audio ------------------------------------------------------------------
@@ -159,6 +326,7 @@ class VoiceSession:
             at_ms=offset,
             offset_ms=offset,
             decision={"trigger": trigger, "arm": self.arm.name},
+            context=self._interruption_context(),
         )
 
     def _interrupt(self, decision: BargeInDecision) -> InterruptedAtEvent:
@@ -167,7 +335,12 @@ class VoiceSession:
         # is the one the clock froze at, so the event carries that and the decision record
         # carries its own. They agree in practice and the event's is the one that binds.
         self.decisions.append(decision)
-        return InterruptedAtEvent(at_ms=offset, offset_ms=offset, decision=decision.to_json())
+        return InterruptedAtEvent(
+            at_ms=offset,
+            offset_ms=offset,
+            decision=decision.to_json(),
+            context=self._interruption_context(),
+        )
 
     # -- narration ----------------------------------------------------------------------
 
@@ -191,14 +364,29 @@ class VoiceSession:
         in order, and nothing runs behind them: the advisory grounding check that used to
         follow a reply was removed in motet#75.
         """
-        request = TurnRequest(
-            persona_instructions=self.config.persona.instructions,
-            voice=self.config.persona.voice,
-            user_text=text,
-            context_notes=self.config.context.notes,
-            history=list(self.history),
-            tools=self.tools.describe(),
-        )
+        if (live := self._live_channel()) is not None:
+            # The reply comes back through the live channel's reader, streamed, onto the
+            # outbox; this returns only the echo of the question.
+            return await self._on_live(live.ask(text, self._position_notes()), what="asking")
+        # No live channel — the arm has none, it never opened, or it has since died. The
+        # typed turn goes to `text_arm` and **never** to a realtime arm's own turn path:
+        # that path opens the same vendor socket the live channel just failed on, so it
+        # fails the same way, and its failure used to escape the WebSocket handler as an
+        # ASGI exception — the client's socket closed with 1006 because a vendor's did.
+        arm = self.text_arm
+        if arm is None:
+            return [
+                ErrorEvent(
+                    at_ms=self.clock.spoken_through_ms,
+                    code="arm_dormant",
+                    message=(
+                        "the live conversation is unavailable"
+                        f" ({self.live_failure_reason or 'not opened'}) and no arm in this"
+                        " process can answer a typed question without it"
+                    ),
+                )
+            ]
+        request = self._turn_request(text)
         # One block per *turn*, not one per session, and the identifier is what forces that
         # (motet#58). `collect_usage` is a `ContextVar` ledger: it holds for the duration of
         # a `with` in one task, and a voice session is a socket's lifetime spanning many
@@ -213,11 +401,23 @@ class VoiceSession:
         # to wait for, and it is not free either.
         with collect_usage() as turn_spend:
             try:
-                turn = await self.arm.respond(request)
+                turn = await arm.respond(request)
             except ArmDormant as exc:
                 return [
                     ErrorEvent(
                         at_ms=self.clock.spoken_through_ms, code="arm_dormant", message=str(exc)
+                    )
+                ]
+            except Exception as exc:  # noqa: BLE001 — a failed turn must not end the walk
+                # A vendor refusing the turn — quota, a dropped socket, a rejected request —
+                # is an answer the listener can hear about; letting it propagate closes the
+                # WebSocket with 1006 and takes the narration down with it.
+                logger.exception("conversational turn failed for session %s", self.session_id)
+                return [
+                    ErrorEvent(
+                        at_ms=self.clock.spoken_through_ms,
+                        code="turn_failed",
+                        message=f"the reply could not be produced: {exc}",
                     )
                 ]
             finally:
@@ -226,7 +426,7 @@ class VoiceSession:
                 # be motet#58's own defect one scope smaller. The metric is already safe —
                 # it is written where the call is made — but this line is the only place
                 # the session id meets the number.
-                self._record_turn_spend(turn_spend)
+                self._record_turn_spend(turn_spend, arm_name=arm.name)
 
         events: list[SessionEvent] = [
             TranscriptEvent(at_ms=self.clock.spoken_through_ms, speaker="user", text=text)
@@ -269,6 +469,8 @@ class VoiceSession:
                     pcm_base64=base64.b64encode(turn.audio.data).decode("ascii"),
                     sample_rate=TARGET_SAMPLE_RATE,
                     duration_ms=turn.audio.duration_ms,
+                    # What is actually in the field — the TTS leg hands back a container.
+                    format=turn.audio.media_type or "pcm16",
                 )
             )
             # Deliberately **not** `self.clock.deliver(...)`. This is the assistant *answering*,
@@ -281,7 +483,7 @@ class VoiceSession:
 
     # -- cost, per turn and per session --------------------------------------------------
 
-    def _record_turn_spend(self, turn_spend: Ledger) -> None:
+    def _record_turn_spend(self, turn_spend: Ledger, *, arm_name: str | None = None) -> None:
         """Fold one turn's completions into the session's running total, and log the turn.
 
         Silent for an arm with no LLM leg — the realtime arm speaks to a provider through
@@ -302,7 +504,7 @@ class VoiceSession:
             "voice turn cost %d completion(s): session=%s arm=%s turn=%d %s",
             turn_spend.requests,
             self.session_id,
-            self.arm.name,
+            arm_name or self.arm.name,
             self._turns_seen,
             turn_spend.summary(),
         )
@@ -310,11 +512,34 @@ class VoiceSession:
     # -- lifecycle ----------------------------------------------------------------------
 
     def ready(self) -> SessionStateEvent:
+        """The first frame the client gets, and the one that says what kind of session it is.
+
+        Three shapes on a :class:`LiveArm`: the live channel is open; it did not open and a
+        typed question is answered by ``text_arm`` (``reason`` names why, in a code a client
+        can branch on — ``insufficient_quota`` is not ``arm_dormant``); or it did not open
+        and nothing can answer. The composed arm reports its own capabilities as before.
+        """
         capabilities = self.arm.capabilities()
+        detail = capabilities.dormant_reason or capabilities.notes
+        reason: str | None = None
+        if self.live is not None:
+            detail = f"live conversation open · {detail}"
+        elif isinstance(self.arm, LiveArm):
+            reason = self.live_failure_reason or "not_opened"
+            if self.text_arm is not None:
+                answered_by = (
+                    f"answering typed questions with the {self.text_arm.name} arm"
+                    if self.text_arm is not self.arm
+                    else "typed questions only"
+                )
+            else:
+                answered_by = "no arm can answer a typed question"
+            detail = f"live conversation unavailable ({reason}); {answered_by} · {detail}"
         return SessionStateEvent(
             at_ms=self.clock.spoken_through_ms,
             state="ready",
-            detail=capabilities.dormant_reason or capabilities.notes,
+            detail=detail,
+            reason=reason,
         )
 
     def summary(self) -> dict[str, Any]:
@@ -322,6 +547,8 @@ class VoiceSession:
         return {
             "session_id": self.session_id,
             "arm": self.arm.name,
+            "text_arm": self.text_arm.name if self.text_arm is not None else None,
+            "live_failure_reason": self.live_failure_reason,
             "barge_ins": len(self.decisions),
             "spoken_through_ms": self.clock.spoken_through_ms,
             "max_provider_drift_ms": self.clock.max_provider_drift_ms,
@@ -342,6 +569,7 @@ class VoiceSession:
             # through the seam this measures", never as "nothing was spent".
             "llm_completions": self.spend.requests,
             "llm_tokens": self.spend.summary(),
+            **(self.live.summary() if self.live is not None else {}),
         }
 
     async def aclose(self) -> None:
@@ -352,4 +580,6 @@ class VoiceSession:
         A session closing it would take the vendor socket out from under whoever else is
         mid-conversation. The app owns the arm's lifetime; a session owns only its own state.
         """
+        if self.live is not None:
+            await self.live.aclose()
         logger.info("voice session closed: %s", self.summary())

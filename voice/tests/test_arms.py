@@ -121,9 +121,19 @@ def test_the_openai_session_update_carries_everything_and_fetches_nothing(
             tools=[{"name": "mark_read", "description": "d", "parameters": {}}],
         )
     )
-    assert "Story A funded at $12m." in payload["session"]["instructions"]
-    assert payload["session"]["turn_detection"]["type"] == "server_vad"
-    assert [tool["name"] for tool in payload["session"]["tools"]] == ["mark_read"]
+    session = payload["session"]
+    assert "Story A funded at $12m." in session["instructions"]
+    assert session["type"] == "realtime", "the GA session shape, not the beta one"
+    assert session["audio"]["input"]["turn_detection"]["type"] == "server_vad"
+    assert session["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24_000}
+    assert session["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24_000}
+    assert session["audio"]["input"]["transcription"]["model"], (
+        "without asking for a transcript the vendor never says what it heard"
+    )
+    # Our label, their id — mapped in the arm and nowhere else (invariant 1). "narrator" is
+    # not a vendor voice, and sending it as-is is a rejected session.update.
+    assert session["audio"]["output"]["voice"] != "narrator"
+    assert [tool["name"] for tool in session["tools"]] == ["mark_read"]
 
 
 def test_the_openai_client_parses_a_scripted_vendor_stream(settings: VoiceSettings) -> None:

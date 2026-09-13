@@ -23,7 +23,7 @@ That separation is the single most useful decision in this module.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -99,6 +99,11 @@ class TurnRequest:
     user_text: str | None = None
     #: Everything the session knows — passed in, never looked up. Invariant 2.
     context_notes: str = ""
+    #: Where the listener interrupted, rendered by :mod:`motet_voice.position` from the
+    #: session's own clock and the timed transcript the caller sent. Fresh per turn where
+    #: ``context_notes`` is fixed for the session; empty when no transcript was given, so
+    #: the harness and every existing test are prompted exactly as before.
+    position_notes: str = ""
     history: Sequence[Mapping[str, str]] = ()
     tools: Sequence[Mapping[str, Any]] = ()
 
@@ -129,6 +134,127 @@ class RealtimeArm(Protocol):
     async def respond(self, request: TurnRequest) -> AssistantTurn: ...
 
     async def aclose(self) -> None: ...
+
+
+# -- the live, speech-to-speech path ------------------------------------------------------
+#
+# `respond` is a *turn*: text or audio in, one answer out, and the arm holds the floor for
+# the duration. A realtime provider does not work that way — the listener's audio streams
+# in, the provider decides when the utterance ended, and the reply streams back — so an arm
+# that can do that exposes a second, optional shape: a `LiveConversation` per session. The
+# events it yields are ours, not the vendor's, so `session.py` never sees a provider frame
+# and the composed arm could one day yield the same stream from its own four legs.
+
+
+@dataclass(frozen=True)
+class SpeechStarted:
+    """The provider heard the listener start talking. Milliseconds are the provider's own
+    audio-buffer offset — evidence for the decision record, never a position (invariant 4)."""
+
+    audio_start_ms: int
+
+
+@dataclass(frozen=True)
+class SpeechStopped:
+    audio_end_ms: int
+
+
+@dataclass(frozen=True)
+class UserTranscript:
+    """What the provider heard the listener say."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class AssistantAudio:
+    """One chunk of the reply, raw little-endian 16-bit mono PCM at ``sample_rate``."""
+
+    pcm: bytes
+    sample_rate: int
+
+
+@dataclass(frozen=True)
+class AssistantTranscript:
+    """The reply's text, complete, as the provider spoke it."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ToolCallRequested:
+    call: PendingToolCall
+
+
+@dataclass(frozen=True)
+class TurnDone:
+    """The provider finished a response. ``pending_tools`` says whether it is waiting on us."""
+
+    pending_tools: bool = False
+    #: The listener talked over the reply and the provider cut it off. Not the end of a
+    #: turn from the listener's point of view — they are mid-question — so narration must
+    #: not resume on it.
+    cancelled: bool = False
+    usage: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProviderError:
+    message: str
+    code: str = "provider_error"
+
+
+LiveEvent = (
+    SpeechStarted
+    | SpeechStopped
+    | UserTranscript
+    | AssistantAudio
+    | AssistantTranscript
+    | ToolCallRequested
+    | TurnDone
+    | ProviderError
+)
+
+
+@runtime_checkable
+class LiveConversation(Protocol):
+    """One session's live channel to a provider: audio and context in, our events out."""
+
+    async def start(self) -> None:
+        """Open the channel and apply the session's persona, context and tools."""
+        ...
+
+    async def append_audio(self, pcm: bytes) -> None:
+        """Listener audio, mono 16 kHz PCM. The arm resamples if the provider wants else."""
+        ...
+
+    async def add_context(self, text: str) -> None:
+        """A fresh block of context for the next reply — the interruption position."""
+        ...
+
+    async def add_user_text(self, text: str) -> None:
+        """A typed question. The arm asks for a reply to it."""
+        ...
+
+    async def tool_output(self, call_id: str, output: Mapping[str, Any]) -> None:
+        """What a requested tool returned. The arm asks the provider to continue."""
+        ...
+
+    def events(self) -> AsyncIterator[LiveEvent]: ...
+
+    async def aclose(self) -> None: ...
+
+
+@runtime_checkable
+class LiveArm(Protocol):
+    """An arm that can hold a live, speech-to-speech conversation for a session.
+
+    Optional: the composed arm does not implement it, and a session on an arm that lacks it
+    runs the turn-shaped path (`respond`) with a typed question — which is what it did before
+    this existed.
+    """
+
+    def open_live(self, request: TurnRequest) -> LiveConversation: ...
 
 
 @runtime_checkable
