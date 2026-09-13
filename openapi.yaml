@@ -383,6 +383,30 @@ components:
       - submissions
       title: AdminWaitlistSignupResponse
       type: object
+    AuthorizeConnectorRequest:
+      properties:
+        redirect_uri:
+          description: The SPA's /oauth/callback.
+          minLength: 1
+          title: Redirect Uri
+          type: string
+      required:
+      - redirect_uri
+      title: AuthorizeConnectorRequest
+      type: object
+    AuthorizeConnectorResponse:
+      properties:
+        authorization_url:
+          title: Authorization Url
+          type: string
+        state:
+          title: State
+          type: string
+      required:
+      - authorization_url
+      - state
+      title: AuthorizeConnectorResponse
+      type: object
     ClaimModel:
       description: "A reported assertion beside the span it came from (invariant 3).\n\n``text`` is what\
         \ gets spoken and may paraphrase; ``source_excerpt`` is the source text\nthe span actually covers,\
@@ -486,6 +510,194 @@ components:
       - authorization_url
       - state
       title: ConnectSourceResponse
+      type: object
+    ConnectorOAuthCallbackRequest:
+      properties:
+        code:
+          minLength: 1
+          title: Code
+          type: string
+        iss:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: RFC 9207 issuer identifier, when the server sent one.
+          title: Iss
+        state:
+          minLength: 1
+          title: State
+          type: string
+      required:
+      - state
+      - code
+      title: ConnectorOAuthCallbackRequest
+      type: object
+    ConnectorResponse:
+      description: "A site or MCP server agentic enrichment may use. **Never carries the secret** \u2014\
+        \nonly whether one is stored, answered without decrypting anything."
+      properties:
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        domain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'site: the domain, normalized to a bare host.'
+          title: Domain
+        domains:
+          description: 'mcp: the sites this server is handed to the agent for; empty means all.'
+          items:
+            type: string
+          title: Domains
+          type: array
+        has_secret:
+          description: 'Whether a sealed secret is stored: a site''s password, or an MCP server''s token
+            set. False for a site with no password and a server not yet authorized.'
+          title: Has Secret
+          type: boolean
+        id:
+          title: Id
+          type: string
+        kind:
+          description: "'site': a domain the owner added \u2014 the opt-in to fetching articles from it\
+            \ \u2014 with an optional login. 'mcp': a remote MCP server authorized over OAuth 2.1."
+          enum:
+          - site
+          - mcp
+          title: Kind
+          type: string
+        label:
+          title: Label
+          type: string
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        oauth_issuer:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'mcp: the authorization server discovery found.'
+          title: Oauth Issuer
+        oauth_registered:
+          description: 'mcp: whether a client id has been registered.'
+          title: Oauth Registered
+          type: boolean
+        risk_acknowledged_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: 'mcp: when the owner acknowledged the risk of handing it to the agent.'
+          title: Risk Acknowledged At
+        secret_expires_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: 'mcp: when the sealed access token expires. A worker refreshes past it.'
+          title: Secret Expires At
+        status:
+          enum:
+          - ready
+          - needs_auth
+          - error
+          title: Status
+          type: string
+        updated_at:
+          format: date-time
+          title: Updated At
+          type: string
+        url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'mcp: the server URL as given, query string included.'
+          title: Url
+        username:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'site: the login identifier. Not a secret.'
+          title: Username
+      required:
+      - id
+      - kind
+      - label
+      - domain
+      - domains
+      - url
+      - username
+      - has_secret
+      - secret_expires_at
+      - oauth_issuer
+      - oauth_registered
+      - risk_acknowledged_at
+      - status
+      - last_error
+      - created_at
+      - updated_at
+      title: ConnectorResponse
+      type: object
+    CreateConnectorRequest:
+      properties:
+        acknowledge_risk:
+          default: false
+          description: 'mcp: required. The owner has read that the agent this server is handed to also
+            reads untrusted web pages, which can steer it into using the server.'
+          title: Acknowledge Risk
+          type: boolean
+        domain:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          description: "site: any spelling \u2014 a URL, with or without www. \u2014 is normalized."
+          title: Domain
+        domains:
+          items:
+            type: string
+          maxItems: 50
+          title: Domains
+          type: array
+        kind:
+          enum:
+          - site
+          - mcp
+          title: Kind
+          type: string
+        label:
+          default: ''
+          description: Defaults to the domain or host.
+          maxLength: 200
+          title: Label
+          type: string
+        password:
+          anyOf:
+          - maxLength: 4000
+            type: string
+          - type: 'null'
+          description: 'site: omitted for a site with no login or a passwordless one.'
+          title: Password
+        url:
+          anyOf:
+          - maxLength: 2000
+            type: string
+          - type: 'null'
+          description: 'mcp: an https URL.'
+          title: Url
+        username:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          title: Username
+      required:
+      - kind
+      title: CreateConnectorRequest
       type: object
     CreateEpisodeRequest:
       description: 'Phase 1 has manual episodes only: ''all unread'', capped by duration.'
@@ -2966,6 +3178,210 @@ paths:
       summary: Current Session
       tags:
       - auth
+  /v1/connectors:
+    get:
+      description: 'Every site and MCP server this user has added, with whether a secret is stored.
+
+
+        Answered without decrypting anything, for ``/v1/sources``'' reason: the API cannot open
+
+        a credential (invariant 8), so a screen that needed one opened would need the invariant
+
+        broken.'
+      operationId: list_connectors_v1_connectors_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/ConnectorResponse'
+                title: Response List Connectors V1 Connectors Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Connectors
+      tags:
+      - connectors
+    post:
+      description: "Add a site \u2014 the opt-in to fetching its articles \u2014 or an MCP server.\n\n\
+        A site needs only its domain; its username and password are for a site that needs a\nlogin, and\
+        \ the password is sealed here and never readable again from this process. An\nMCP server is refused\
+        \ without ``acknowledge_risk``, and starts ``needs_auth``: nothing\nabout it works until ``/authorize``\
+        \ and the callback have produced a token set."
+      operationId: create_connector_v1_connectors_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConnectorRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Create Connector
+      tags:
+      - connectors
+  /v1/connectors/oauth/callback:
+    post:
+      description: 'Exchange the code, seal the token set onto the connector, and mark it ready.
+
+
+        The token set exists as a local variable and nowhere else: it is sealed under
+
+        ``user_id:connector_id:mcp`` and this process cannot read it back. A state from either
+
+        other flow is refused *before* the consume, as ``/v1/sources/callback`` refuses one, so
+
+        a misrouted callback does not burn the authorization it belongs to.'
+      operationId: connector_oauth_callback_v1_connectors_oauth_callback_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorOAuthCallbackRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Connector Oauth Callback
+      tags:
+      - connectors
+  /v1/connectors/{connector_id}:
+    delete:
+      description: Forget a connector and its sealed secret. Another user's is a 404, like a missing one.
+      operationId: delete_connector_v1_connectors__connector_id__delete
+      parameters:
+      - in: path
+        name: connector_id
+        required: true
+        schema:
+          title: Connector Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Delete Connector
+      tags:
+      - connectors
+  /v1/connectors/{connector_id}/authorize:
+    post:
+      description: 'Discover the server''s authorization server, register a client, mint a consent URL.
+
+
+        Discovery runs on every authorize: the row records what it found so a *refresh* can skip
+
+        it, but a person re-authorizing is the moment to notice a server that moved.
+
+        Registration is skipped while the recorded issuer is unchanged, so pressing Authorize
+
+        twice does not mint a client per click. ``redirect_uri`` comes from the client for
+
+        ``/v1/sources/connect``''s reason, and the server validates it against the registration.'
+      operationId: authorize_connector_v1_connectors__connector_id__authorize_post
+      parameters:
+      - in: path
+        name: connector_id
+        required: true
+        schema:
+          title: Connector Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizeConnectorRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizeConnectorResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Authorize Connector
+      tags:
+      - connectors
   /v1/episodes:
     get:
       description: Every episode, newest first, whatever state it is in.

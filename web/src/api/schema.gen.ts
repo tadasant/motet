@@ -315,6 +315,110 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Connectors
+         * @description Every site and MCP server this user has added, with whether a secret is stored.
+         *
+         *     Answered without decrypting anything, for ``/v1/sources``' reason: the API cannot open
+         *     a credential (invariant 8), so a screen that needed one opened would need the invariant
+         *     broken.
+         */
+        get: operations["list_connectors_v1_connectors_get"];
+        put?: never;
+        /**
+         * Create Connector
+         * @description Add a site — the opt-in to fetching its articles — or an MCP server.
+         *
+         *     A site needs only its domain; its username and password are for a site that needs a
+         *     login, and the password is sealed here and never readable again from this process. An
+         *     MCP server is refused without ``acknowledge_risk``, and starts ``needs_auth``: nothing
+         *     about it works until ``/authorize`` and the callback have produced a token set.
+         */
+        post: operations["create_connector_v1_connectors_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Connector Oauth Callback
+         * @description Exchange the code, seal the token set onto the connector, and mark it ready.
+         *
+         *     The token set exists as a local variable and nowhere else: it is sealed under
+         *     ``user_id:connector_id:mcp`` and this process cannot read it back. A state from either
+         *     other flow is refused *before* the consume, as ``/v1/sources/callback`` refuses one, so
+         *     a misrouted callback does not burn the authorization it belongs to.
+         */
+        post: operations["connector_oauth_callback_v1_connectors_oauth_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/{connector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Connector
+         * @description Forget a connector and its sealed secret. Another user's is a 404, like a missing one.
+         */
+        delete: operations["delete_connector_v1_connectors__connector_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/{connector_id}/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Authorize Connector
+         * @description Discover the server's authorization server, register a client, mint a consent URL.
+         *
+         *     Discovery runs on every authorize: the row records what it found so a *refresh* can skip
+         *     it, but a person re-authorizing is the moment to notice a server that moved.
+         *     Registration is skipped while the recorded issuer is unchanged, so pressing Authorize
+         *     twice does not mint a client per click. ``redirect_uri`` comes from the client for
+         *     ``/v1/sources/connect``'s reason, and the server validates it against the registration.
+         */
+        post: operations["authorize_connector_v1_connectors__connector_id__authorize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes": {
         parameters: {
             query?: never;
@@ -1483,6 +1587,21 @@ export interface components {
              */
             submissions: number;
         };
+        /** AuthorizeConnectorRequest */
+        AuthorizeConnectorRequest: {
+            /**
+             * Redirect Uri
+             * @description The SPA's /oauth/callback.
+             */
+            redirect_uri: string;
+        };
+        /** AuthorizeConnectorResponse */
+        AuthorizeConnectorResponse: {
+            /** Authorization Url */
+            authorization_url: string;
+            /** State */
+            state: string;
+        };
         /**
          * ClaimModel
          * @description A reported assertion beside the span it came from (invariant 3).
@@ -1564,6 +1683,136 @@ export interface components {
              * @description The CSRF token for this authorization. Returned so a client can verify the callback it receives is the one it started.
              */
             state: string;
+        };
+        /** ConnectorOAuthCallbackRequest */
+        ConnectorOAuthCallbackRequest: {
+            /** Code */
+            code: string;
+            /**
+             * Iss
+             * @description RFC 9207 issuer identifier, when the server sent one.
+             */
+            iss?: string | null;
+            /** State */
+            state: string;
+        };
+        /**
+         * ConnectorResponse
+         * @description A site or MCP server agentic enrichment may use. **Never carries the secret** —
+         *     only whether one is stored, answered without decrypting anything.
+         */
+        ConnectorResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Domain
+             * @description site: the domain, normalized to a bare host.
+             */
+            domain: string | null;
+            /**
+             * Domains
+             * @description mcp: the sites this server is handed to the agent for; empty means all.
+             */
+            domains: string[];
+            /**
+             * Has Secret
+             * @description Whether a sealed secret is stored: a site's password, or an MCP server's token set. False for a site with no password and a server not yet authorized.
+             */
+            has_secret: boolean;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @description 'site': a domain the owner added — the opt-in to fetching articles from it — with an optional login. 'mcp': a remote MCP server authorized over OAuth 2.1.
+             * @enum {string}
+             */
+            kind: "site" | "mcp";
+            /** Label */
+            label: string;
+            /** Last Error */
+            last_error: string | null;
+            /**
+             * Oauth Issuer
+             * @description mcp: the authorization server discovery found.
+             */
+            oauth_issuer: string | null;
+            /**
+             * Oauth Registered
+             * @description mcp: whether a client id has been registered.
+             */
+            oauth_registered: boolean;
+            /**
+             * Risk Acknowledged At
+             * @description mcp: when the owner acknowledged the risk of handing it to the agent.
+             */
+            risk_acknowledged_at: string | null;
+            /**
+             * Secret Expires At
+             * @description mcp: when the sealed access token expires. A worker refreshes past it.
+             */
+            secret_expires_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "needs_auth" | "error";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Url
+             * @description mcp: the server URL as given, query string included.
+             */
+            url: string | null;
+            /**
+             * Username
+             * @description site: the login identifier. Not a secret.
+             */
+            username: string | null;
+        };
+        /** CreateConnectorRequest */
+        CreateConnectorRequest: {
+            /**
+             * Acknowledge Risk
+             * @description mcp: required. The owner has read that the agent this server is handed to also reads untrusted web pages, which can steer it into using the server.
+             * @default false
+             */
+            acknowledge_risk: boolean;
+            /**
+             * Domain
+             * @description site: any spelling — a URL, with or without www. — is normalized.
+             */
+            domain?: string | null;
+            /** Domains */
+            domains?: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "site" | "mcp";
+            /**
+             * Label
+             * @description Defaults to the domain or host.
+             * @default
+             */
+            label: string;
+            /**
+             * Password
+             * @description site: omitted for a site with no login or a passwordless one.
+             */
+            password?: string | null;
+            /**
+             * Url
+             * @description mcp: an https URL.
+             */
+            url?: string | null;
+            /** Username */
+            username?: string | null;
         };
         /**
          * CreateEpisodeRequest
@@ -3411,6 +3660,175 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_connectors_v1_connectors_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_connector_v1_connectors_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConnectorRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    connector_oauth_callback_v1_connectors_oauth_callback_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectorOAuthCallbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_connector_v1_connectors__connector_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    authorize_connector_v1_connectors__connector_id__authorize_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeConnectorRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorizeConnectorResponse"];
                 };
             };
             /** @description Validation Error */

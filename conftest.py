@@ -56,6 +56,9 @@ TABLES = (
     "segment_claims",
     "feed_tokens",
     "source_credentials",
+    # Site logins and MCP servers for agentic enrichment (migration 0018). Before
+    # `oauth_states`, whose `connector_id` references it — CASCADE handles either order.
+    "connectors",
     "oauth_states",
     "highlights",
     "auth_sessions",

@@ -1365,3 +1365,86 @@ class AdminLlmSpendResponse(BaseModel):
     retention_days: int
     total: LlmSpendBreakdown = Field(description="Everything retained, since `since`.")
     window: LlmSpendBreakdown = Field(description="The last `window_days` days.")
+
+
+# --- connectors (motet#102) ------------------------------------------------------------
+
+
+class ConnectorResponse(BaseModel):
+    """A site or MCP server agentic enrichment may use. **Never carries the secret** —
+    only whether one is stored, answered without decrypting anything."""
+
+    id: str
+    kind: Literal["site", "mcp"] = Field(
+        description=(
+            "'site': a domain the owner added — the opt-in to fetching articles from it — "
+            "with an optional login. 'mcp': a remote MCP server authorized over OAuth 2.1."
+        )
+    )
+    label: str
+    domain: str | None = Field(description="site: the domain, normalized to a bare host.")
+    domains: list[str] = Field(
+        description="mcp: the sites this server is handed to the agent for; empty means all."
+    )
+    url: str | None = Field(description="mcp: the server URL as given, query string included.")
+    username: str | None = Field(description="site: the login identifier. Not a secret.")
+    has_secret: bool = Field(
+        description=(
+            "Whether a sealed secret is stored: a site's password, or an MCP server's token "
+            "set. False for a site with no password and a server not yet authorized."
+        )
+    )
+    secret_expires_at: datetime | None = Field(
+        description="mcp: when the sealed access token expires. A worker refreshes past it."
+    )
+    oauth_issuer: str | None = Field(description="mcp: the authorization server discovery found.")
+    oauth_registered: bool = Field(description="mcp: whether a client id has been registered.")
+    risk_acknowledged_at: datetime | None = Field(
+        description="mcp: when the owner acknowledged the risk of handing it to the agent."
+    )
+    status: Literal["ready", "needs_auth", "error"]
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreateConnectorRequest(BaseModel):
+    kind: Literal["site", "mcp"]
+    label: str = Field(default="", max_length=200, description="Defaults to the domain or host.")
+    domain: str | None = Field(
+        default=None,
+        max_length=500,
+        description="site: any spelling — a URL, with or without www. — is normalized.",
+    )
+    username: str | None = Field(default=None, max_length=500)
+    password: str | None = Field(
+        default=None,
+        max_length=4000,
+        description="site: omitted for a site with no login or a passwordless one.",
+    )
+    url: str | None = Field(default=None, max_length=2000, description="mcp: an https URL.")
+    domains: list[str] = Field(default_factory=list, max_length=50)
+    acknowledge_risk: bool = Field(
+        default=False,
+        description=(
+            "mcp: required. The owner has read that the agent this server is handed to also "
+            "reads untrusted web pages, which can steer it into using the server."
+        ),
+    )
+
+
+class AuthorizeConnectorRequest(BaseModel):
+    redirect_uri: str = Field(min_length=1, description="The SPA's /oauth/callback.")
+
+
+class AuthorizeConnectorResponse(BaseModel):
+    authorization_url: str
+    state: str
+
+
+class ConnectorOAuthCallbackRequest(BaseModel):
+    state: str = Field(min_length=1)
+    code: str = Field(min_length=1)
+    iss: str | None = Field(
+        default=None, description="RFC 9207 issuer identifier, when the server sent one."
+    )

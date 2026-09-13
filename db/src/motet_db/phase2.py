@@ -518,6 +518,7 @@ def start_oauth(
     redirect_uri: str,
     scopes: Sequence[str],
     nonce: str | None = None,
+    connector_id_: str | None = None,
     ttl_seconds: int = 600,
 ) -> None:
     """Record an in-flight authorization so its callback can be believed.
@@ -527,13 +528,17 @@ def start_oauth(
     ``nonce`` is the same argument one layer up: OpenID Connect binds it into the signed
     ID token, so it is only a replay defence if what we sent is remembered here. It is
     ``None`` for the Gmail flow, which is plain OAuth 2.0 and has no ID token.
+
+    ``connector_id_`` is the third flow — authorizing an MCP connector (motet#102) — and it
+    is a column beside ``source_id`` rather than a reuse of it, because that one is a
+    foreign key to ``sources`` (migration 0018).
     """
     conn.execute(
         """
         INSERT INTO oauth_states
             (state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-             nonce, expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))
+             nonce, connector_id, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))
         """,
         (
             state,
@@ -544,6 +549,7 @@ def start_oauth(
             redirect_uri,
             " ".join(scopes),
             nonce,
+            connector_id_,
             ttl_seconds,
         ),
     )
@@ -562,7 +568,7 @@ def consume_oauth_state(conn: psycopg.Connection[Any], state: str) -> dict[str, 
         DELETE FROM oauth_states
         WHERE state = %s AND expires_at > now()
         RETURNING state, user_id, provider, source_id, code_verifier, redirect_uri, scopes,
-                  nonce
+                  nonce, connector_id
         """,
         (state,),
     )

@@ -957,6 +957,49 @@ describe('the /oauth/callback landing', () => {
     expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
   })
 
+  it('routes a connector state to the connector callback and back to Credentials', async () => {
+    // motet#102: the third flow on this path. Sent to the mailbox route it would be refused
+    // there, and its single-use state spent for nothing.
+    const calls = mockApi({
+      '/v1/connectors/oauth/callback': {
+        id: 'cn_1',
+        kind: 'mcp',
+        label: 'Mail (read-only)',
+        domain: null,
+        domains: [],
+        url: 'https://mcp.example/mcp',
+        username: null,
+        has_secret: true,
+        secret_expires_at: null,
+        oauth_issuer: 'https://mcp.example',
+        oauth_registered: true,
+        risk_acknowledged_at: '2026-09-13T00:00:00Z',
+        status: 'ready',
+        last_error: null,
+        created_at: '2026-09-13T00:00:00Z',
+        updated_at: '2026-09-13T00:00:00Z',
+      },
+      '/v1/connectors': [],
+    })
+    window.sessionStorage.setItem('motet.oauthState', 'connector.st')
+    window.history.replaceState(
+      {},
+      '',
+      '/oauth/callback?code=abc123&state=connector.st&iss=https%3A%2F%2Fmcp.example',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByText(/Mail \(read-only\) is authorized/)).toBeDefined()
+    const exchange = calls.find((call) => call.url.includes('/v1/connectors/oauth/callback'))
+    expect(exchange?.body).toEqual({ state: 'connector.st', code: 'abc123', iss: 'https://mcp.example' })
+    expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Credentials' }))
+    await screen.findByRole('region', { name: 'Credentials' })
+    expect(window.location.pathname).toBe('/credentials')
+  })
+
   it('hands the user back to the normal UI when it is done', async () => {
     mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true, active: true } })
     window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_1')

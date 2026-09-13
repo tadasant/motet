@@ -45,6 +45,12 @@ export type Source = GetResponse<'/v1/sources'>[number]
 export type LabelSync = NonNullable<Source['label_sync']>
 export type Connection = PostResponse<'/v1/sources/connect'>
 export type HeldSourceItem = GetResponse<'/v1/source-items/held'>[number]
+export type Connector = GetResponse<'/v1/connectors'>[number]
+export type ConnectorAuthorization = PostResponse<'/v1/connectors/{connector_id}/authorize'>
+/** Request body of `POST /v1/connectors`. */
+export type CreateConnector = NonNullable<
+  paths['/v1/connectors']['post']['requestBody']
+>['content']['application/json']
 export type SourceItemDetail = GetResponse<'/v1/source-items/{source_item_id}'>
 export type ProcessingStep = SourceItemDetail['processed'][number]
 export type SignInStart = PostResponse<'/v1/auth/google/start'>
@@ -316,6 +322,22 @@ export const api = {
   // the SPA names a provider is here rather than buried in a default two repos away.
   // Anything but 'gmail' is a 400: X bookmarks are not built, and there is deliberately
   // no affordance for them.
+  // Credentials (motet#102): the sites enrichment may fetch from, and the MCP servers it may
+  // use. No call here ever receives a secret back; `has_secret` is the whole of what the API
+  // says about one. Authorizing a server is a consent flow like connecting a mailbox, and
+  // comes back on the same callback path with a `connector.` state.
+  connectors: () => apiGet('/v1/connectors'),
+  createConnector: (body: CreateConnector) => apiPost('/v1/connectors', body),
+  deleteConnector: (id: string) =>
+    apiDeletePath('/v1/connectors/{connector_id}', `/v1/connectors/${encodeURIComponent(id)}`),
+  authorizeConnector: (id: string, redirectUri: string) =>
+    apiPostPath(
+      '/v1/connectors/{connector_id}/authorize',
+      `/v1/connectors/${encodeURIComponent(id)}/authorize`,
+      { redirect_uri: redirectUri },
+    ),
+  completeConnectorOAuth: (state: string, code: string, iss?: string) =>
+    apiPost('/v1/connectors/oauth/callback', { state, code, iss: iss ?? null }),
   connectSource: (name: string, query: string, redirectUri: string) =>
     apiPost('/v1/sources/connect', {
       provider: 'gmail',

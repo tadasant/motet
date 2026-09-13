@@ -329,6 +329,33 @@ public struct AdminWaitlistSignupResponse: Codable, Hashable, Sendable {
     }
 }
 
+public struct AuthorizeConnectorRequest: Codable, Hashable, Sendable {
+    public var redirectUri: String
+
+    public init(redirectUri: String) {
+        self.redirectUri = redirectUri
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case redirectUri = "redirect_uri"
+    }
+}
+
+public struct AuthorizeConnectorResponse: Codable, Hashable, Sendable {
+    public var authorizationUrl: String
+    public var state: String
+
+    public init(authorizationUrl: String, state: String) {
+        self.authorizationUrl = authorizationUrl
+        self.state = state
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case authorizationUrl = "authorization_url"
+        case state
+    }
+}
+
 /// A reported assertion beside the span it came from (invariant 3).
 ///
 /// ``text`` is what gets spoken and may paraphrase; ``source_excerpt`` is the source text
@@ -423,6 +450,136 @@ public struct ConnectSourceResponse: Codable, Hashable, Sendable {
         case authorizationUrl = "authorization_url"
         case sourceId = "source_id"
         case state
+    }
+}
+
+public struct ConnectorOAuthCallbackRequest: Codable, Hashable, Sendable {
+    public var code: String
+    public var iss: String?
+    public var state: String
+
+    public init(code: String, iss: String? = nil, state: String) {
+        self.code = code
+        self.iss = iss
+        self.state = state
+    }
+}
+
+/// A site or MCP server agentic enrichment may use. **Never carries the secret** —
+/// only whether one is stored, answered without decrypting anything.
+public struct ConnectorResponse: Codable, Hashable, Sendable {
+    public var createdAt: Date
+    public var domain: String?
+    public var domains: [String]
+    public var hasSecret: Bool
+    public var id: String
+    public var kind: String
+    public var label: String
+    public var lastError: String?
+    public var oauthIssuer: String?
+    public var oauthRegistered: Bool
+    public var riskAcknowledgedAt: Date?
+    public var secretExpiresAt: Date?
+    public var status: String
+    public var updatedAt: Date
+    public var url: String?
+    public var username: String?
+
+    public init(
+        createdAt: Date,
+        domain: String? = nil,
+        domains: [String],
+        hasSecret: Bool,
+        id: String,
+        kind: String,
+        label: String,
+        lastError: String? = nil,
+        oauthIssuer: String? = nil,
+        oauthRegistered: Bool,
+        riskAcknowledgedAt: Date? = nil,
+        secretExpiresAt: Date? = nil,
+        status: String,
+        updatedAt: Date,
+        url: String? = nil,
+        username: String? = nil
+    ) {
+        self.createdAt = createdAt
+        self.domain = domain
+        self.domains = domains
+        self.hasSecret = hasSecret
+        self.id = id
+        self.kind = kind
+        self.label = label
+        self.lastError = lastError
+        self.oauthIssuer = oauthIssuer
+        self.oauthRegistered = oauthRegistered
+        self.riskAcknowledgedAt = riskAcknowledgedAt
+        self.secretExpiresAt = secretExpiresAt
+        self.status = status
+        self.updatedAt = updatedAt
+        self.url = url
+        self.username = username
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case createdAt = "created_at"
+        case domain
+        case domains
+        case hasSecret = "has_secret"
+        case id
+        case kind
+        case label
+        case lastError = "last_error"
+        case oauthIssuer = "oauth_issuer"
+        case oauthRegistered = "oauth_registered"
+        case riskAcknowledgedAt = "risk_acknowledged_at"
+        case secretExpiresAt = "secret_expires_at"
+        case status
+        case updatedAt = "updated_at"
+        case url
+        case username
+    }
+}
+
+public struct CreateConnectorRequest: Codable, Hashable, Sendable {
+    public var acknowledgeRisk: Bool?
+    public var domain: String?
+    public var domains: [String]?
+    public var kind: String
+    public var label: String?
+    public var password: String?
+    public var url: String?
+    public var username: String?
+
+    public init(
+        acknowledgeRisk: Bool? = nil,
+        domain: String? = nil,
+        domains: [String]? = nil,
+        kind: String,
+        label: String? = nil,
+        password: String? = nil,
+        url: String? = nil,
+        username: String? = nil
+    ) {
+        self.acknowledgeRisk = acknowledgeRisk
+        self.domain = domain
+        self.domains = domains
+        self.kind = kind
+        self.label = label
+        self.password = password
+        self.url = url
+        self.username = username
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case acknowledgeRisk = "acknowledge_risk"
+        case domain
+        case domains
+        case kind
+        case label
+        case password
+        case url
+        case username
     }
 }
 
@@ -2156,6 +2313,31 @@ public enum MotetEndpoints {
     /// `GET /v1/auth/session` — Current Session
     public static var currentSession: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/auth/session")
+    }
+
+    /// `GET /v1/connectors` — List Connectors
+    public static var listConnectors: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/connectors")
+    }
+
+    /// `POST /v1/connectors` — Create Connector
+    public static var createConnector: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/connectors")
+    }
+
+    /// `POST /v1/connectors/oauth/callback` — Connector Oauth Callback
+    public static var connectorOauthCallback: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/connectors/oauth/callback")
+    }
+
+    /// `DELETE /v1/connectors/{connector_id}` — Delete Connector
+    public static func deleteConnector(connectorId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "DELETE", path: "/v1/connectors/\(MotetPathComponent(connectorId))")
+    }
+
+    /// `POST /v1/connectors/{connector_id}/authorize` — Authorize Connector
+    public static func authorizeConnector(connectorId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/connectors/\(MotetPathComponent(connectorId))/authorize")
     }
 
     /// `GET /v1/episodes` — List Episodes

@@ -41,6 +41,7 @@ from motet_db import (
     repo,
 )
 from motet_db import auth as auth_repo
+from motet_db import connectors as connector_repo
 from motet_db import settings as settings_repo
 from motet_db import waitlist as waitlist_repo
 from motet_inference.llm import LlmConfigError, LlmStage
@@ -65,6 +66,14 @@ from motet_sources.labels import (
     catalog_fetched_at,
     catalog_from_sync_state,
     pickable,
+)
+from motet_sources.mcp_oauth import PROVIDER as MCP_PROVIDER
+from motet_sources.mcp_oauth import (
+    AuthorizationServer,
+    McpOAuthError,
+    RegistrationUnsupportedError,
+    authorization_url,
+    build_mcp_oauth_client,
 )
 from motet_storage import ObjectStore, StorageError
 from motet_vault import DekWrapper, VaultError, vault_status
@@ -97,6 +106,13 @@ from .auth import (
 )
 from .auth import PROVIDER as GOOGLE_PROVIDER
 from .config import APP_BASE_URL_ENV, CALLBACK_PATH, Settings
+from .connectors import (
+    ConnectorInputError,
+    connector_response,
+    connector_spec,
+    is_connector_state,
+    new_connector_state,
+)
 from .deps import (
     Caller,
     connection,
@@ -134,10 +150,15 @@ from .schemas import (
     AdminUserResponse,
     AdminWaitlistResponse,
     AdminWaitlistSignupResponse,
+    AuthorizeConnectorRequest,
+    AuthorizeConnectorResponse,
     ClaimModel,
     CompleteLoginRequest,
+    ConnectorOAuthCallbackRequest,
+    ConnectorResponse,
     ConnectSourceRequest,
     ConnectSourceResponse,
+    CreateConnectorRequest,
     CreateEpisodeRequest,
     CreateSmartEpisodeRequest,
     DedupDecisionResponse,
@@ -1895,6 +1916,14 @@ def oauth_callback(
             status.HTTP_400_BAD_REQUEST,
             "That callback came from a sign-in. It finishes at /v1/auth/google/callback.",
         )
+    if is_connector_state(body.state.strip()):
+        # The third flow on the same path (motet#102), refused before the consume for the
+        # same reason: spending a connector's state here would burn its authorization.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That callback came from a connector authorization. It finishes at "
+            "/v1/connectors/oauth/callback.",
+        )
 
     pending = phase2.consume_oauth_state(conn, body.state.strip())
     if pending is None or pending["user_id"] != user_id or pending["provider"] != PROVIDER:
@@ -2182,6 +2211,253 @@ def remove_source(conn: Conn, user_id: User, source_id: Annotated[str, Path()]) 
     if outcome is not phase2.SourceRemoval.REMOVED:
         raise HTTPException(status.HTTP_409_CONFLICT, _REMOVAL_REFUSED[outcome])
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Credentials: connectors for agentic enrichment (motet#102) ---------------------------
+#
+# The validation and the response shape are `connectors.py`'s; the OAuth client is
+# `motet_sources.mcp_oauth`, which a worker also reaches to refresh. What lives here is the
+# HTTP surface, and one rule every route keeps: no answer ever carries a secret.
+
+
+@app.get("/v1/connectors", response_model=list[ConnectorResponse], tags=["connectors"])
+def list_connectors(conn: Conn, user_id: User) -> list[ConnectorResponse]:
+    """Every site and MCP server this user has added, with whether a secret is stored.
+
+    Answered without decrypting anything, for ``/v1/sources``' reason: the API cannot open
+    a credential (invariant 8), so a screen that needed one opened would need the invariant
+    broken.
+    """
+    return [connector_response(c) for c in connector_repo.list_connectors(conn, user_id)]
+
+
+@app.post(
+    "/v1/connectors",
+    response_model=ConnectorResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["connectors"],
+)
+def create_connector(
+    body: CreateConnectorRequest, conn: Conn, user_id: User, wrapper: Wrapper
+) -> ConnectorResponse:
+    """Add a site — the opt-in to fetching its articles — or an MCP server.
+
+    A site needs only its domain; its username and password are for a site that needs a
+    login, and the password is sealed here and never readable again from this process. An
+    MCP server is refused without ``acknowledge_risk``, and starts ``needs_auth``: nothing
+    about it works until ``/authorize`` and the callback have produced a token set.
+    """
+    try:
+        spec = connector_spec(body)
+    except ConnectorInputError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    try:
+        created = connector_repo.create_connector(
+            conn,
+            wrapper,
+            user_id=user_id,
+            kind=spec.kind,
+            label=spec.label,
+            domain=spec.domain,
+            domains=spec.domains,
+            url=spec.url,
+            username=spec.username,
+            secret=spec.secret,
+            risk_acknowledged=spec.risk_acknowledged,
+        )
+    except psycopg.errors.UniqueViolation as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{spec.domain} is already on your list. Remove it to replace its login.",
+        ) from exc
+    except VaultError as exc:
+        # Never fall back to storing the password unsealed: invariant 8 has no degraded mode.
+        logger.exception("could not seal a site password: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "This credential could not be stored securely, so it was not stored at all.",
+        ) from exc
+    return connector_response(created)
+
+
+@app.delete(
+    "/v1/connectors/{connector_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["connectors"]
+)
+def delete_connector(conn: Conn, user_id: User, connector_id: Annotated[str, Path()]) -> Response:
+    """Forget a connector and its sealed secret. Another user's is a 404, like a missing one."""
+    if not connector_repo.delete_connector(conn, user_id=user_id, connector_id=connector_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such connector.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/v1/connectors/{connector_id}/authorize",
+    response_model=AuthorizeConnectorResponse,
+    tags=["connectors"],
+)
+def authorize_connector(
+    body: AuthorizeConnectorRequest,
+    conn: Conn,
+    user_id: User,
+    connector_id: Annotated[str, Path()],
+) -> AuthorizeConnectorResponse:
+    """Discover the server's authorization server, register a client, mint a consent URL.
+
+    Discovery runs on every authorize: the row records what it found so a *refresh* can skip
+    it, but a person re-authorizing is the moment to notice a server that moved.
+    Registration is skipped while the recorded issuer is unchanged, so pressing Authorize
+    twice does not mint a client per click. ``redirect_uri`` comes from the client for
+    ``/v1/sources/connect``'s reason, and the server validates it against the registration.
+    """
+    connector = connector_repo.get_connector(conn, connector_id, user_id=user_id)
+    if connector is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such connector.")
+    if connector.kind != connector_repo.MCP or connector.url is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only an MCP server is authorized.")
+
+    client = build_mcp_oauth_client()
+    try:
+        server = client.discover(connector.url)
+    except McpOAuthError as exc:
+        raise _connector_refused(
+            conn, connector.id, "error", status.HTTP_502_BAD_GATEWAY, exc
+        ) from exc
+
+    client_id = connector.oauth_client_id if connector.oauth_issuer == server.issuer else None
+    if client_id is None:
+        try:
+            client_id = client.register(server, redirect_uri=body.redirect_uri)
+        except RegistrationUnsupportedError as exc:
+            raise _connector_refused(
+                conn, connector.id, "needs_auth", status.HTTP_409_CONFLICT, exc
+            ) from exc
+        except McpOAuthError as exc:
+            raise _connector_refused(
+                conn, connector.id, "error", status.HTTP_502_BAD_GATEWAY, exc
+            ) from exc
+    connector_repo.set_connector_oauth_client(
+        conn,
+        connector.id,
+        issuer=server.issuer,
+        client_id=client_id,
+        token_endpoint=server.token_endpoint,
+        resource=server.resource,
+    )
+
+    phase2.purge_expired_oauth_states(conn)
+    verifier, challenge = new_pkce_pair()
+    state = new_connector_state()
+    phase2.start_oauth(
+        conn,
+        state=state,
+        user_id=user_id,
+        provider=MCP_PROVIDER,
+        source_id_=None,
+        connector_id_=connector.id,
+        code_verifier=verifier,
+        redirect_uri=body.redirect_uri,
+        scopes=server.scopes,
+    )
+    url = authorization_url(
+        server,
+        client_id=client_id,
+        redirect_uri=body.redirect_uri,
+        state=state,
+        code_challenge=challenge,
+    )
+    return AuthorizeConnectorResponse(authorization_url=url, state=state)
+
+
+@app.post("/v1/connectors/oauth/callback", response_model=ConnectorResponse, tags=["connectors"])
+def connector_oauth_callback(
+    body: ConnectorOAuthCallbackRequest, conn: Conn, user_id: User, wrapper: Wrapper
+) -> ConnectorResponse:
+    """Exchange the code, seal the token set onto the connector, and mark it ready.
+
+    The token set exists as a local variable and nowhere else: it is sealed under
+    ``user_id:connector_id:mcp`` and this process cannot read it back. A state from either
+    other flow is refused *before* the consume, as ``/v1/sources/callback`` refuses one, so
+    a misrouted callback does not burn the authorization it belongs to.
+    """
+    state = body.state.strip()
+    if not is_connector_state(state):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "That callback does not belong to a connector."
+        )
+    pending = phase2.consume_oauth_state(conn, state)
+    if pending is None or pending["user_id"] != user_id or pending["provider"] != MCP_PROVIDER:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This authorization is unknown, already used, or expired. Start again.",
+        )
+    connector = connector_repo.get_connector(conn, pending["connector_id"] or "", user_id=user_id)
+    if connector is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The connector being authorized is gone.")
+    if not (
+        connector.oauth_client_id and connector.oauth_token_endpoint and connector.oauth_resource
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This connector was never sent to consent.")
+    if body.iss and connector.oauth_issuer and body.iss.rstrip("/") != connector.oauth_issuer:
+        # RFC 9207: a code delivered under another issuer is a mix-up, not a grant.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "The authorization response came from a different issuer."
+        )
+
+    server = AuthorizationServer(
+        issuer=connector.oauth_issuer or "",
+        authorization_endpoint="",
+        token_endpoint=connector.oauth_token_endpoint,
+        registration_endpoint=None,
+        resource=connector.oauth_resource,
+        scopes=tuple((pending.get("scopes") or "").split()),
+        iss_parameter_supported=False,
+    )
+    try:
+        tokens = build_mcp_oauth_client().exchange_code(
+            server,
+            client_id=connector.oauth_client_id,
+            code=body.code,
+            redirect_uri=pending["redirect_uri"],
+            code_verifier=pending["code_verifier"],
+        )
+    except McpOAuthError as exc:
+        raise _connector_refused(
+            conn, connector.id, "needs_auth", status.HTTP_400_BAD_REQUEST, exc
+        ) from exc
+
+    try:
+        stored = connector_repo.store_connector_secret(
+            conn,
+            wrapper,
+            connector_id=connector.id,
+            secret=tokens.to_json(),
+            expires_at=tokens.expires_at,
+        )
+    except VaultError as exc:
+        logger.exception("could not seal the token set for connector %s: %s", connector.id, exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "This credential could not be stored securely, so it was not stored at all.",
+        ) from exc
+    return connector_response(stored)
+
+
+def _connector_refused(
+    conn: psycopg.Connection[Any],
+    connector_id: str,
+    outcome: connector_repo.ConnectorStatus,
+    http_status: int,
+    exc: McpOAuthError,
+) -> HTTPException:
+    """Write the reason onto the row and *commit it* before the request fails.
+
+    ``deps.connection`` rolls back on the exception about to be raised, which would undo the
+    very ``last_error`` the screen needs to explain the pill — the same reason
+    ``require_caller`` commits its revoke before raising.
+    """
+    connector_repo.set_connector_status(conn, connector_id, status=outcome, last_error=str(exc))
+    conn.commit()
+    return HTTPException(http_status, str(exc))
 
 
 # --- Phase 2: smart episodes ---------------------------------------------------------
