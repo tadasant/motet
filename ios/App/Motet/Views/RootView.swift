@@ -1,7 +1,12 @@
 import MotetKit
 import SwiftUI
 
-/// Three tabs, and a player that stays put across all of them.
+/// The sign-in screen until a session exists; then three tabs, and a player that stays put
+/// across all of them.
+///
+/// The gate is the whole of the app, not a tab: nothing but `SignInView` renders until
+/// somebody has signed in (Tadas, 2026-09-19), so no screen ever loads against a server it
+/// has no session for.
 ///
 /// The mini-player is not decoration: a listener who taps into the backlog mid-episode must
 /// still be able to pause without finding their way back.
@@ -16,6 +21,24 @@ struct RootView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
+        Group {
+            if model.isSignedIn {
+                tabs
+            } else {
+                SignInView()
+            }
+        }
+        .id(dynamicTypeSize)
+        .sheet(isPresented: $showingPlayer) { PlayerView().id(dynamicTypeSize) }
+        .onChange(of: scenePhase) { _, phase in
+            // Signed out there is nothing to flush and nobody to refresh for.
+            if phase == .active, model.isSignedIn {
+                Task { await model.handleForeground() }
+            }
+        }
+    }
+
+    private var tabs: some View {
         VStack(spacing: 0) {
             TabView {
                 EpisodesView()
@@ -28,13 +51,6 @@ struct RootView: View {
             if model.playback.hasEpisode {
                 MiniPlayerView(onExpand: { showingPlayer = true })
                     .transition(.move(edge: .bottom))
-            }
-        }
-        .id(dynamicTypeSize)
-        .sheet(isPresented: $showingPlayer) { PlayerView().id(dynamicTypeSize) }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
-                Task { await model.handleForeground() }
             }
         }
     }

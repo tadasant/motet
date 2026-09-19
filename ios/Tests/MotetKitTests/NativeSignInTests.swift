@@ -50,6 +50,18 @@ final class NativeSignInTests: XCTestCase {
         }
     }
 
+    func testAnInstantCancellationIsARefusalRatherThanAPerson() {
+        // The report this exists for: the sheet refused before it was shown, iOS called it
+        // `canceledLogin`, and the app said nothing.
+        XCTAssertEqual(NativeSignIn.classifyCancellation(after: .milliseconds(30)), .refusedBeforeShown)
+        XCTAssertEqual(NativeSignIn.classifyCancellation(after: .milliseconds(999)), .refusedBeforeShown)
+    }
+
+    func testACancellationAfterThePageCouldBeSeenIsAPerson() {
+        XCTAssertEqual(NativeSignIn.classifyCancellation(after: .seconds(1)), .dismissedByPerson)
+        XCTAssertEqual(NativeSignIn.classifyCancellation(after: .seconds(40)), .dismissedByPerson)
+    }
+
     func testAHandoffWithoutACodeSaysSo() throws {
         for raw in ["motet://signed-in", "motet://signed-in?code="] {
             let link = try XCTUnwrap(URL(string: raw))

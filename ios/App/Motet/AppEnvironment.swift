@@ -59,11 +59,11 @@ final class AppEnvironment {
         try? audioSession.configure()
     }
 
-    /// Rebuild the API-facing half after the server URL or token changes in Settings.
+    /// Rebuild the API-facing half after the server or the session changes.
     ///
     /// Both halves have to be re-established afterwards: `activate()` re-points the engine
     /// and the command centre at the *new* controller, and the caller re-subscribes to
-    /// `controller.snapshots()`. `AppModel.saveCredentials` does both.
+    /// `controller.snapshots()`. `AppModel.applyCredentialChange` does both.
     func reconfigure() async {
         await controller.unload()
         let wired = Self.wire(

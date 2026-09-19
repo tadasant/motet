@@ -9,12 +9,16 @@ import Security
 /// an unencrypted backup; the Keychain item below is `ThisDeviceOnly`, so it does not travel
 /// in a backup at all.
 ///
-/// The base URL is not a secret and lives in `UserDefaults`. A URL typed into Settings wins;
-/// without one, a distribution build falls back to `MotetDefaultBaseURL`, which the
-/// TestFlight workflow fills from a GitHub environment variable at build time. This repo is
-/// public, so the hostname is never written in it, and every other build ships the key empty
-/// and asks, exactly as before. The token has no such default and never will: a token in
-/// the binary would be a credential in every copy of it.
+/// The token slot holds a signed-in session and nothing else. Earlier builds also let
+/// somebody paste `MOTET_API_TOKEN` here — a non-expiring, owner-equivalent credential on a
+/// device that can be lost — and that path is gone (Tadas, 2026-09-19): `reconcile()`
+/// removes one left behind by an upgrade.
+///
+/// The base URL is not a secret and lives in `UserDefaults`. One set under Settings →
+/// Advanced wins; without one, a distribution build falls back to `MotetDefaultBaseURL`,
+/// which the TestFlight workflow fills from a GitHub environment variable at build time.
+/// This repo is public, so the hostname is never written in it. The token has no such
+/// default and never will: a token in the binary would be a credential in every copy of it.
 @MainActor
 final class CredentialStore {
     private let baseURLKey = "motet.baseURL"
@@ -38,6 +42,59 @@ final class CredentialStore {
     func clearSession() {
         writeToken("")
         UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+    }
+
+    /// Make the two halves agree at launch, and say whether a pasted token was removed.
+    ///
+    /// A token with no address is one an earlier build let somebody paste; it is removed,
+    /// because the app no longer offers that path and it never expired. An address with no
+    /// token is a session that did not survive: the Keychain item is `ThisDeviceOnly` and
+    /// `UserDefaults` is not, so a phone restored from a backup arrives with the address and
+    /// without the session. Forgetting the address puts the sign-in screen in front, which
+    /// is the truth — rather than tabs that silently load nothing.
+    @discardableResult
+    func reconcile() -> Bool {
+        let hasToken = !(readToken() ?? "").isEmpty
+        if signedInEmail != nil, !hasToken {
+            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+        }
+        guard signedInEmail == nil, hasToken else { return false }
+        writeToken("")
+        return true
+    }
+
+    /// The server the app talks to: one set under Advanced, else the build's own.
+    var serverURL: String { (storedBaseURL() ?? Self.buildDefaultBaseURL)?.absoluteString ?? "" }
+
+    /// The build's own server, offered as "Use the default"; nil on a build that ships none.
+    var defaultServerURL: String? { Self.buildDefaultBaseURL?.absoluteString }
+
+    /// Whether `baseURL`, as Advanced would save it, is a different server from the current.
+    /// An empty field means the build's own, so saving it where that is current changes
+    /// nothing and must not sign anyone out.
+    func isDifferentServer(_ baseURL: String) -> Bool {
+        effectiveURL(baseURL) != (storedBaseURL() ?? Self.buildDefaultBaseURL)
+    }
+
+    /// Point the app at a server. A session belongs to the server that issued it, so a real
+    /// change forgets it here — the caller revokes it on the old server first.
+    func saveServer(_ baseURL: String) {
+        if isDifferentServer(baseURL) {
+            clearSession()
+        }
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The build's own is stored as nothing, so a later build pointed elsewhere is not
+        // ignored on this phone forever.
+        if trimmed.isEmpty || trimmed == Self.buildDefaultBaseURL?.absoluteString {
+            UserDefaults.standard.removeObject(forKey: baseURLKey)
+        } else {
+            UserDefaults.standard.set(trimmed, forKey: baseURLKey)
+        }
+    }
+
+    private func effectiveURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.buildDefaultBaseURL : URL(string: trimmed)
     }
 
     func configuration() -> MotetConfiguration {
@@ -71,27 +128,6 @@ final class CredentialStore {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }()
-
-    func save(baseURL: String, apiToken: String) {
-        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if URL(string: trimmed) != (storedBaseURL() ?? Self.buildDefaultBaseURL) {
-            // A session belongs to one server; pointed at another, "signed in as" would be false.
-            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
-        }
-        // Settings shows the build's default, so saving it unchanged must not pin it: a later
-        // build pointed somewhere else would otherwise be ignored on this phone forever.
-        if trimmed == Self.buildDefaultBaseURL?.absoluteString {
-            UserDefaults.standard.removeObject(forKey: baseURLKey)
-        } else {
-            UserDefaults.standard.set(trimmed, forKey: baseURLKey)
-        }
-        let token = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if token != readToken() {
-            // A pasted token is not the session the recorded address belongs to.
-            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
-        }
-        writeToken(token)
-    }
 
     private func readToken() -> String? {
         let query: [String: Any] = [

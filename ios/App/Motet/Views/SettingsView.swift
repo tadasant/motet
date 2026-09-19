@@ -1,37 +1,33 @@
-import AuthenticationServices
 import MotetKit
 import SwiftUI
 
-/// Where the app is pointed, who it is signed in as, and how it behaves on a walk.
+/// Who the app is signed in as, which server it talks to, and how it behaves on a walk.
 ///
-/// Signing in goes through the web sign-in in the system sheet and ends in a session this
-/// device keeps (AGENTS.md, "The phone signs in through the web sign-in"). An API token can
-/// still be pasted instead; it is never compiled in, because a default token would be a
-/// credential in a shipped binary. The server URL arrives prefilled on a TestFlight build
-/// (`CredentialStore` says where from) and is typed in on every other build.
+/// Signing in happens on `SignInView`, which is all that renders until a session exists
+/// (AGENTS.md, "The phone signs in through the web sign-in"). There is no pasted API token
+/// any more (Tadas, 2026-09-19); the server is the build's own unless changed under
+/// Advanced, and changing it signs the phone out, because a session belongs to the server
+/// that issued it.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
-    @State private var baseURL = ""
-    @State private var apiToken = ""
+    @State private var server = ""
+    @State private var showingAdvanced = false
     @State private var offlineBytes = 0
 
     var body: some View {
         NavigationStack {
             Form {
                 accountSection
-                serverSection
                 listeningSection
                 offlineSection
+                advancedSection
             }
             .brandGround()
             .foregroundStyle(Theme.ink)
             .font(Theme.body(16))
             .navigationTitle("Settings")
             .task {
-                let current = model.currentCredentials()
-                baseURL = current.baseURL
-                apiToken = current.apiToken
+                server = model.serverURL
                 offlineBytes = (try? await model.library.offlineBytes()) ?? 0
             }
         }
@@ -39,135 +35,34 @@ struct SettingsView: View {
 
     private var accountSection: some View {
         Section {
-            if let email = model.signedInEmail {
-                LabeledContent("Signed in as", value: email)
-                    .listRowBackground(Theme.surface)
-                Button("Sign out", role: .destructive) {
-                    Task {
-                        await model.signOut()
-                        apiToken = model.currentCredentials().apiToken
-                    }
-                }
+            LabeledContent("Signed in as", value: model.signedInEmail ?? "—")
                 .listRowBackground(Theme.surface)
-            } else {
-                Button(model.isSigningIn ? "Signing in…" : "Sign in with Google") {
-                    Task { await signIn() }
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(model.isSigningIn || baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 4, trailing: 0))
+            Button("Sign out", role: .destructive) {
+                Task { await model.signOut() }
             }
-            if let message = model.signInMessage {
-                Text(message)
-                    .font(Theme.aside(14))
-                    .foregroundStyle(Theme.inkSoft)
-                    .listRowBackground(Color.clear)
-            }
+            .listRowBackground(Theme.surface)
         } header: {
             Text("Account").brandLabel()
         } footer: {
-            Text("Signs in with a Google account this Motet allows. The session is kept in the Keychain, on this device only.")
+            Text("The session is kept in the Keychain, on this device only. Signing out revokes it on the server too.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }
     }
 
-    /// The system sheet opens the web sign-in and closes on the API's handoff link.
-    private func signIn() async {
-        let server = baseURL
-        guard let started = await model.beginSignIn(baseURL: server) else { return }
-        do {
-            let callback = try await open(started)
-            await model.finishSignIn(
-                callback: callback,
-                pkce: started.pkce,
-                baseURL: server,
-                appLinkHost: started.appLinkHost
-            )
-            apiToken = model.currentCredentials().apiToken
-        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
-            model.abandonSignIn(nil)
-        } catch is CancellationError {
-            model.abandonSignIn(nil)
-        } catch {
-            if started.appLinkHost != nil {
-                // The https callback is refused when the entitlement is not in force — the
-                // association file not fetched yet, a build that lost it at export, the
-                // capability not ticked on the App ID — and it is refused when the sheet
-                // *opens*, so nothing has happened yet and retrying costs one round trip.
-                // The server committed to the https link for this sign-in, so the retry has
-                // to start a new one rather than reuse it.
-                await signInWithTheScheme(server: server)
-                return
-            }
-            model.abandonSignIn(error)
-        }
-    }
-
-    /// Second attempt, with the custom scheme both sides always support.
-    private func signInWithTheScheme(server: String) async {
-        guard let started = await model.beginSignIn(baseURL: server, allowAppLink: false) else {
-            return
-        }
-        do {
-            let callback = try await webAuthenticationSession.authenticate(
-                using: started.url, callbackURLScheme: started.callbackScheme
-            )
-            await model.finishSignIn(callback: callback, pkce: started.pkce, baseURL: server)
-            apiToken = model.currentCredentials().apiToken
-        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
-            model.abandonSignIn(nil)
-        } catch is CancellationError {
-            model.abandonSignIn(nil)
-        } catch {
-            model.abandonSignIn(error)
-        }
-    }
-
-    /// Open the sheet, waiting for whichever callback this sign-in was started for.
-    ///
-    /// The https callback needs iOS 17.4, an entitlement for the host, and an
-    /// app-site-association file Apple has fetched from it. `beginSignIn` has already
-    /// agreed which one with the server, so this only carries out that decision.
-    private func open(_ started: AppModel.StartedSignIn) async throws -> URL {
-        if #available(iOS 17.4, *), let host = started.appLinkHost, let path = started.appLinkPath {
-            // `additionalHeaderFields` is spelled out because the overload taking a
-            // `callback:` declares no default for it, unlike the `callbackURLScheme:` one
-            // below. Empty: the sign-in is a plain web sign-in and needs no extra headers.
-            return try await webAuthenticationSession.authenticate(
-                using: started.url,
-                callback: .https(host: host, path: path),
-                additionalHeaderFields: [:]
-            )
-        }
-        return try await webAuthenticationSession.authenticate(
-            using: started.url, callbackURLScheme: started.callbackScheme
-        )
-    }
-
-    private var serverSection: some View {
+    /// Last, and folded: the server is set once by the build and almost never changed.
+    private var advancedSection: some View {
         Section {
-            TextField("https://…", text: $baseURL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .keyboardType(.URL)
-                .listRowBackground(Theme.surface)
-            DisclosureGroup("Use an API token instead") {
-                SecureField("API token", text: $apiToken)
+            DisclosureGroup("Advanced", isExpanded: $showingAdvanced) {
+                ServerField(server: $server, defaultServer: model.defaultServerURL)
+                Button("Save server") {
+                    Task { await model.saveServer(server) }
+                }
+                .disabled(server.trimmingCharacters(in: .whitespacesAndNewlines) == model.serverURL)
             }
             .listRowBackground(Theme.surface)
-            Button("Save and refresh") {
-                Task { await model.saveCredentials(baseURL: baseURL, apiToken: apiToken) }
-            }
-            .buttonStyle(PrimaryButtonStyle())
-            .disabled(baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 4, trailing: 0))
-        } header: {
-            Text("Server").brandLabel()
         } footer: {
-            Text("The token is kept in the Keychain, on this device only.")
+            Text("The server this app talks to. Changing it signs you out, because a session belongs to the server that issued it.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }
