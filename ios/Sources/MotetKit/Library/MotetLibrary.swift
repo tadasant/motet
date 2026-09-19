@@ -196,6 +196,17 @@ public actor MotetLibrary {
         return info.token
     }
 
+    /// Why an episode's audio would not load, from the route — with a fresh feed token when
+    /// the cached one is what was refused, so the answer is about the file and not the token.
+    public func audioProblem(episodeId: String) async -> AudioProblem? {
+        guard let token = try? await feedToken() else { return nil }
+        let problem = await api.audioProblem(episodeId: episodeId, feedToken: token)
+        guard problem == .feedTokenRefused else { return problem }
+        try? invalidateFeedToken()
+        guard let fresh = try? await feedToken() else { return problem }
+        return await api.audioProblem(episodeId: episodeId, feedToken: fresh)
+    }
+
     /// Drop the cached feed token — after a rotation, or a 401 on the audio route.
     public func invalidateFeedToken() throws {
         cachedFeedToken = nil

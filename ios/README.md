@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     130 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     134 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/Motet.xcodeproj/     the app target
   bin/                     toolchain install + the two CI entry points
@@ -105,7 +105,7 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 130 tests
+strict concurrency checking, and 134 tests
 pass — segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
 in flight), the download policy, position resume across a simulated relaunch, interruption
@@ -233,10 +233,14 @@ cannot read episodes from an API revision older than it — ship the API first a
 
 The controller always knew when audio failed to load and when it was still loading; the
 player showed neither, so an episode whose audio would not load was a play button that did
-nothing. The player now says "This episode's audio could not be loaded", with the detail and
-**Try again**. A failure also forgets the cached feed token: it authenticates the audio route
-and used to be cached until the app was reinstalled, so a token rotated on the web broke
-streaming on the phone for good. The next attempt asks the API for the current one.
+nothing. The player now says so — and says **why**, because `AVPlayer`'s error carries no
+HTTP status: it asks the audio route for two bytes (`MotetHTTPClient.audioProblem`), as the
+web player does since motet#129. A 410 is the API's own sentence — the file was rendered and
+has since been removed from storage, which no retry fixes, so the player offers none; a
+served file means the phone could not play it, and **Try again** stays. A refused feed token
+is replaced and the question asked again: the token authenticates the audio route and used
+to be cached until the app was reinstalled, so a token rotated on the web broke streaming on
+the phone for good.
 
 ## Configuration
 

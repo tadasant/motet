@@ -25,6 +25,35 @@ public protocol MotetAPI: Sendable {
 
     /// Where an episode's audio lives, for the downloader.
     func audioURL(episodeId: String, feedToken: String) throws -> URL
+
+    /// Why an episode's audio would not load, asked of the audio route itself — the player's
+    /// own error carries no HTTP status, so "gone" and "this phone can't play it" look the
+    /// same from there. Nil when the route could not be asked.
+    func audioProblem(episodeId: String, feedToken: String) async -> AudioProblem?
+}
+
+/// What the audio route says about audio that would not play.
+public enum AudioProblem: Equatable, Sendable {
+    /// The file is gone — the API's 410 since motet#129, or a signed URL into a 404 before
+    /// it. `reason` is the API's own sentence when it sent one.
+    case gone(reason: String?)
+    /// The feed token was refused: it was rotated since this phone cached it.
+    case feedTokenRefused
+    /// The route serves the file, so it was the player that could not play it.
+    case unplayable
+
+    public var sentence: String {
+        switch self {
+        case .gone(let reason?): return reason
+        case .gone(nil): return "This episode's audio is no longer in storage. Its stories are still in your backlog."
+        case .feedTokenRefused: return "The feed link changed since this phone last asked. Try again."
+        case .unplayable: return "The audio is there, but this phone could not play it."
+        }
+    }
+}
+
+extension MotetAPI {
+    public func audioProblem(episodeId: String, feedToken: String) async -> AudioProblem? { nil }
 }
 
 /// The HTTP implementation.
@@ -111,6 +140,27 @@ public struct MotetHTTPClient: MotetAPI {
             throw MotetError.notConfigured
         }
         return url
+    }
+
+    /// Two bytes of the audio, redirects followed: enough to learn the status without
+    /// downloading an episode.
+    public func audioProblem(episodeId: String, feedToken: String) async -> AudioProblem? {
+        guard let url = try? audioURL(episodeId: episodeId, feedToken: feedToken),
+              let response = try? await transport.send(
+                  HTTPRequest(url: url, method: "GET", headers: ["Range": "bytes=0-1"])
+              )
+        else { return nil }
+        switch response.statusCode {
+        case 200..<300:
+            return .unplayable
+        case 401, 403:
+            return .feedTokenRefused
+        case 404, 410:
+            let detail = (try? decoder.decode(AudioDetail.self, from: response.body))?.detail
+            return .gone(reason: detail.flatMap { $0.isEmpty ? nil : $0 })
+        default:
+            return nil
+        }
     }
 
     // MARK: - Signing in
@@ -237,4 +287,9 @@ public struct MotetHTTPClient: MotetAPI {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (text?.isEmpty ?? true) ? nil : text
     }
+}
+
+/// The API's `{"detail": "<sentence>"}` on the audio route's 410.
+private struct AudioDetail: Decodable {
+    let detail: String
 }

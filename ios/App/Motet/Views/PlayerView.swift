@@ -138,13 +138,18 @@ struct PlayerView: View {
                 Text("This episode’s audio could not be loaded.")
                     .font(Theme.body(14, weight: 600, relativeTo: .footnote))
                     .foregroundStyle(Theme.errorText)
-                Text(error)
+                    .multilineTextAlignment(.center)
+                // The route's answer when there is one — "no longer in storage" is not a
+                // retry away — and the player's own words only when there is not.
+                Text(model.playbackProblem?.sentence ?? error)
                     .font(Theme.body(12, relativeTo: .caption))
                     .foregroundStyle(Theme.inkSoft)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .multilineTextAlignment(.center)
-                Button("Try again") { Task { await model.retryPlayback() } }
-                    .font(Theme.body(14, weight: 600))
+                if !isGone {
+                    Button("Try again") { Task { await model.retryPlayback() } }
+                        .font(Theme.body(14, weight: 600))
+                }
             }
             .padding(.top, 4)
         } else if model.playback.isLoading {
@@ -155,6 +160,11 @@ struct PlayerView: View {
                     .foregroundStyle(Theme.inkSoft)
             }
         }
+    }
+
+    private var isGone: Bool {
+        if case .gone = model.playbackProblem { return true }
+        return false
     }
 
     /// The speed pill and the mic pill, as the brand's transport draws them.

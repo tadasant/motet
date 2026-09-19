@@ -24,6 +24,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var signInMessage: String?
     /// Play Live, as its session last published it.
     @Published private(set) var live = LiveSnapshot()
+    /// Why the loaded episode's audio would not load, as the audio route answered — nil
+    /// until it has been asked, and whenever nothing is wrong.
+    @Published private(set) var playbackProblem: AudioProblem?
 
     private let environment: AppEnvironment
     private var snapshotTask: Task<Void, Never>?
@@ -68,11 +71,14 @@ final class AppModel: ObservableObject {
                 let previousError = self.playback.errorMessage
                 self.playback = snapshot
                 nowPlaying.update(with: snapshot)
-                // A streamed episode that will not load may be carrying a feed token that was
-                // rotated since it was cached, and a cached token is never re-read otherwise.
-                // Forget it, so the next attempt asks the API for the current one.
-                if snapshot.errorMessage != nil, previousError == nil, !snapshot.isOffline {
-                    try? await self.library.invalidateFeedToken()
+                // The player's error says nothing about *why*; the audio route does — a file
+                // that is gone (a 410 since motet#129), or a feed token rotated since this
+                // phone cached it, which asking also replaces. The web player asks the same.
+                if snapshot.errorMessage != nil, previousError == nil, !snapshot.isOffline,
+                   let episodeId = snapshot.episodeId {
+                    self.playbackProblem = await self.library.audioProblem(episodeId: episodeId)
+                } else if snapshot.errorMessage == nil, self.playbackProblem != nil {
+                    self.playbackProblem = nil
                 }
                 await self.forwardToLive(snapshot)
             }
@@ -121,6 +127,7 @@ final class AppModel: ObservableObject {
 
     func play(episode: EpisodeResponse) async {
         guard episode.episodeState.isPlayable else { return }
+        playbackProblem = nil
         do {
             try environment.audioSession.activate()
             let source = try await library.source(forEpisode: episode)

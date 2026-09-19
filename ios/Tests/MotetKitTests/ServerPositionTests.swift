@@ -283,3 +283,96 @@ final class MarkListenedTests: XCTestCase {
         XCTAssertEqual(position?.isFinished, true)
     }
 }
+
+final class AudioProblemTests: XCTestCase {
+    private func client(_ transport: StubTransport) -> MotetHTTPClient {
+        MotetHTTPClient(
+            configuration: MotetConfiguration(baseURL: URL(string: "https://api.example.invalid")!, apiToken: "s"),
+            transport: transport
+        )
+    }
+
+    func testAudioThatIsGoneSaysSoInTheAPIsWords() async throws {
+        let transport = StubTransport()
+        transport.enqueueJSON(#"{"detail":"This episode's audio is no longer in storage."}"#, status: 410)
+
+        let problem = await client(transport).audioProblem(episodeId: "ep-1", feedToken: "feed")
+
+        XCTAssertEqual(problem, .gone(reason: "This episode's audio is no longer in storage."))
+        let request = try XCTUnwrap(transport.recordedRequests().first)
+        XCTAssertEqual(request.headers["Range"], "bytes=0-1", "two bytes, never the episode")
+        XCTAssertNil(request.headers["Authorization"], "the audio route takes the feed token, not the session")
+        XCTAssertTrue(request.url.absoluteString.contains("token=feed"))
+    }
+
+    func testAnOlderAPIsRedirectIntoA404IsStillGone() async {
+        let transport = StubTransport()
+        transport.enqueue(.init(status: 404, body: Data("<Error><Code>NoSuchKey</Code></Error>".utf8)))
+        let problem = await client(transport).audioProblem(episodeId: "ep-1", feedToken: "feed")
+        XCTAssertEqual(problem, .gone(reason: nil))
+    }
+
+    func testAServedFileMeansThePlayerCouldNotPlayIt() async {
+        let transport = StubTransport()
+        transport.enqueue(.init(status: 206, body: Data([0xFF, 0xFB])))
+        let problem = await client(transport).audioProblem(episodeId: "ep-1", feedToken: "feed")
+        XCTAssertEqual(problem, .unplayable)
+    }
+
+    func testARotatedFeedTokenIsReplacedAndAskedAgain() async throws {
+        let store = InMemoryKeyValueStore()
+        let clock = TestClock()
+        let api = ProbeAPI(answers: [.feedTokenRefused, .unplayable])
+        let library = MotetLibrary(
+            api: api, cache: store,
+            offline: try OfflineLibrary(
+                store: store,
+                directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+                downloader: FakeDownloader()
+            ),
+            positions: ListeningPositionStore(store: store, clock: clock),
+            readState: ReadStateCoordinator(api: api, outbox: Outbox(store: store, clock: clock)),
+            clock: clock
+        )
+
+        let problem = await library.audioProblem(episodeId: "ep-1")
+
+        XCTAssertEqual(problem, .unplayable)
+        let feeds = await api.successfulCalls().filter { $0.name == "feedInfo" }.count
+        XCTAssertEqual(feeds, 2, "the refused token is forgotten and the current one fetched")
+    }
+}
+
+/// A FakeAPI whose audio route answers from a script.
+actor ProbeAPI: MotetAPI {
+    private let fake = FakeAPI()
+    private var answers: [AudioProblem]
+
+    init(answers: [AudioProblem]) { self.answers = answers }
+
+    func successfulCalls() async -> [FakeAPI.Call] { await fake.successfulCalls() }
+    func audioProblem(episodeId: String, feedToken: String) async -> AudioProblem? {
+        answers.isEmpty ? nil : answers.removeFirst()
+    }
+
+    func listEpisodes() async throws -> [EpisodeResponse] { try await fake.listEpisodes() }
+    func episode(id: String) async throws -> EpisodeResponse { try await fake.episode(id: id) }
+    func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
+        try await fake.createEpisode(title: title, maxDurationMs: maxDurationMs)
+    }
+    func markEpisodeListened(id: String) async throws -> MarkListenedResponse { try await fake.markEpisodeListened(id: id) }
+    func setPlaybackPosition(episodeId: String, listenedThroughMs: Int) async throws -> ListenProgressResponse {
+        try await fake.setPlaybackPosition(episodeId: episodeId, listenedThroughMs: listenedThroughMs)
+    }
+    func listNewsItems() async throws -> [NewsItemResponse] { try await fake.listNewsItems() }
+    func setNewsItemRead(id: String, read: Bool) async throws -> NewsItemResponse {
+        try await fake.setNewsItemRead(id: id, read: read)
+    }
+    func pasteSource(title: String, text: String) async throws -> SourceItemResponse {
+        try await fake.pasteSource(title: title, text: text)
+    }
+    func feedInfo() async throws -> FeedInfoResponse { try await fake.feedInfo() }
+    nonisolated func audioURL(episodeId: String, feedToken: String) throws -> URL {
+        URL(string: "https://api.example.invalid/v1/episodes/\(episodeId)/audio?token=\(feedToken)")!
+    }
+}
