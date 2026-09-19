@@ -538,12 +538,9 @@ public actor LiveSession {
         send(.playbackPosition(spokenThroughMs: position))
         pausedByUs = false
         await narration.resumeNarration()
-        guard generation == mine else {
-            // Stopped while narration was starting: a session that is gone must not leave
-            // the briefing playing on its account.
-            _ = await narration.suspendNarration()
-            return
-        }
+        // Stopped while narration was starting: nothing to do here. A Stop pauses after its
+        // teardown, which lands behind this resume; an episode change deliberately does not.
+        guard generation == mine else { return }
         setPhase(.narrating)
     }
 

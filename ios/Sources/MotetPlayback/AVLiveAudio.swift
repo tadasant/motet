@@ -179,12 +179,18 @@ public final class AVLiveAudio: LiveAudio, @unchecked Sendable {
             return (engine, player, sinks)
         }
         guard let (engine, player, sinks) = current, !engine.isRunning else { return }
-        // What was queued is gone with the old configuration.
+        // What was queued is gone with the old configuration. Stopping the node runs the
+        // completions of anything it still held, which report "not played" — so a composed
+        // reply waiting on its buffer is released rather than left waiting forever.
         lock.withLock {
             pendingSeconds = 0
             flushGeneration += 1
         }
+        player.stop()
         do {
+            // An interruption — a phone call — leaves the session inactive, and an engine on
+            // an inactive session will not start.
+            try AVAudioSession.sharedInstance().setActive(true)
             try configure(engine: engine, player: player, sinks: sinks)
             Self.logger.notice("live audio engine restarted after a configuration change")
         } catch {
