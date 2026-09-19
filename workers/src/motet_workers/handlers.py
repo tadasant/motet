@@ -682,6 +682,7 @@ def enqueue_smart_episode(
     title: str,
     max_duration_ms: int,
     rule: SmartRule,
+    keep_in_backlog: bool = False,
 ) -> str:
     """Create a rule-selected episode and queue its assembly.
 
@@ -696,6 +697,7 @@ def enqueue_smart_episode(
         max_duration_ms=max_duration_ms,
         kind=EpisodeKind.SMART,
         rule=rule.to_json(),
+        keep_in_backlog=keep_in_backlog,
     )
     enqueue(conn, Queue.ASSEMBLE, {"episode_id": episode_id})
     return episode_id
@@ -853,11 +855,20 @@ def enqueue_integrate_job(
 
 
 def enqueue_episode(
-    conn: psycopg.Connection[Any], *, user_id: str, title: str, max_duration_ms: int
+    conn: psycopg.Connection[Any],
+    *,
+    user_id: str,
+    title: str,
+    max_duration_ms: int,
+    keep_in_backlog: bool = False,
 ) -> str:
     """Create a manual episode and queue its assembly."""
     episode_id = repo.create_episode(
-        conn, user_id=user_id, title=title, max_duration_ms=max_duration_ms
+        conn,
+        user_id=user_id,
+        title=title,
+        max_duration_ms=max_duration_ms,
+        keep_in_backlog=keep_in_backlog,
     )
     enqueue(conn, Queue.ASSEMBLE, {"episode_id": episode_id})
     return episode_id

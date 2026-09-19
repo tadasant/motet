@@ -38,8 +38,21 @@ def list_episodes() -> list[EpisodeResponse]:
 def create_episode(
     title: Annotated[str, _TITLE],
     max_duration_ms: Annotated[int, _MAX_DURATION],
+    news_item_ids: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Only these news items (ids from list_news_items), read or not. Omit for "
+                "every unread item."
+            )
+        ),
+    ] = None,
+    keep_in_backlog: Annotated[
+        bool,
+        Field(description="Listening to this episode leaves its stories unread."),
+    ] = False,
 ) -> EpisodeResponse:
-    """Make an episode from every unread news item, oldest first, up to a duration cap.
+    """Make an episode from every unread news item — or only the ones named — up to a cap.
 
     Returns immediately in state `pending`; assembling, scripting and narration run on the
     queue over several minutes and spend inference and text-to-speech. Poll `get_episode`
@@ -48,7 +61,12 @@ def create_episode(
     return run(
         "create_episode",
         lambda c: routes.create_episode(
-            body=CreateEpisodeRequest(title=title, max_duration_ms=max_duration_ms),
+            body=CreateEpisodeRequest(
+                title=title,
+                max_duration_ms=max_duration_ms,
+                news_item_ids=news_item_ids,
+                keep_in_backlog=keep_in_backlog,
+            ),
             conn=c.conn,
             user_id=c.user_id,
             nudge=c.nudge,

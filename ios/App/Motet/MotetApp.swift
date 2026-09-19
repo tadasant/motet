@@ -24,14 +24,35 @@ struct MotetApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            root
                 .environmentObject(model)
                 // Dark mode is not designed (brand/GUIDELINES.md), so hold the app in light
                 // mode rather than let the system invert a palette nobody chose.
                 .preferredColorScheme(.light)
                 .tint(Theme.ink)
-                .task { await model.start() }
+                .task {
+                    #if DEBUG
+                    if ScreenshotFixture.current != nil { return }
+                    #endif
+                    await model.start()
+                }
         }
+    }
+}
+
+extension MotetApp {
+    @ViewBuilder
+    private var root: some View {
+        #if DEBUG
+        if let fixture = ScreenshotFixture.current {
+            BacklogView(fixture: fixture)
+                .task { model.showScreenshotFixture() }
+        } else {
+            RootView()
+        }
+        #else
+        RootView()
+        #endif
     }
 }
 

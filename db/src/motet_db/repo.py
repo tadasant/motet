@@ -559,6 +559,20 @@ def set_news_item_read(
     return _attach_sources(conn, [row])[0]
 
 
+def news_items_owned(
+    conn: psycopg.Connection[Any], *, user_id: str, item_ids: Sequence[str]
+) -> set[str]:
+    """Which of these ids are news items belonging to this user."""
+    if not item_ids:
+        return set()
+    rows = _all(
+        conn,
+        "SELECT id FROM news_items WHERE user_id = %s AND id = ANY(%s)",
+        (user_id, list(item_ids)),
+    )
+    return {row["id"] for row in rows}
+
+
 def mark_news_items_read(
     conn: psycopg.Connection[Any], *, user_id: str, item_ids: Sequence[str]
 ) -> int:
@@ -587,18 +601,22 @@ def create_episode(
     max_duration_ms: int,
     kind: EpisodeKind = EpisodeKind.MANUAL,
     rule: dict[str, Any] | None = None,
+    keep_in_backlog: bool = False,
 ) -> str:
     """Create an episode. ``rule`` is a snapshot, stored on the row and never referenced.
 
     A smart episode must carry one — the schema has a CHECK saying so, because an episode
     that claimed to be smart with nothing to select by would fail at assembly, hours after
     the mistake was made.
+
+    ``keep_in_backlog`` makes listening to this episode leave read state alone (migration
+    0023): the stories stay on the backlog however far the listener gets.
     """
     new_id = episode_id()
     conn.execute(
         """
-        INSERT INTO episodes (id, user_id, title, max_duration_ms, kind, rule)
-        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+        INSERT INTO episodes (id, user_id, title, max_duration_ms, kind, rule, keep_in_backlog)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
         """,
         (
             new_id,
@@ -607,6 +625,7 @@ def create_episode(
             max_duration_ms,
             kind.value,
             json.dumps(rule) if rule is not None else None,
+            keep_in_backlog,
         ),
     )
     return new_id
@@ -620,7 +639,7 @@ def get_episode(
         """
         SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
                audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
-               created_at, published_at
+               keep_in_backlog, created_at, published_at
         FROM episodes
         WHERE id = %s AND (%s::text IS NULL OR user_id = %s)
         """,
@@ -637,7 +656,7 @@ def list_episodes(conn: psycopg.Connection[Any], user_id: str) -> list[StoredEpi
         """
         SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
                audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
-               created_at, published_at
+               keep_in_backlog, created_at, published_at
         FROM episodes
         WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
@@ -655,7 +674,7 @@ def list_published_episodes(conn: psycopg.Connection[Any], user_id: str) -> list
         """
         SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
                audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
-               created_at, published_at
+               keep_in_backlog, created_at, published_at
         FROM episodes
         WHERE user_id = %s AND state = 'ready' AND audio_key IS NOT NULL
         ORDER BY published_at DESC, id DESC
@@ -1727,6 +1746,7 @@ def _episode(row: dict[str, Any], segments: tuple[StoredSegment, ...]) -> Stored
         audio_media_type=row["audio_media_type"],
         last_error=row["last_error"],
         listened_through_ms=row["listened_through_ms"],
+        keep_in_backlog=row["keep_in_backlog"],
         created_at=row["created_at"],
         published_at=row["published_at"],
         segments=segments,

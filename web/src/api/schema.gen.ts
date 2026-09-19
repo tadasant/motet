@@ -531,11 +531,17 @@ export interface paths {
         put?: never;
         /**
          * Create Episode
-         * @description Assemble a manual episode from unread news items, capped by duration.
+         * @description Assemble an episode from unread news items — or from the ones picked — capped by duration.
          *
          *     Returns immediately, in ``pending``. Assembly, scripting and TTS happen on the queue
          *     afterwards — so the episode a client polls for moves through states rather than
          *     appearing finished.
+         *
+         *     A pick is stored as a smart episode whose rule is :meth:`SmartRule.picked`, so it goes
+         *     through the one selector every other episode does. The ids are checked here, at
+         *     creation, for the reason the smart route checks its rule: an id that is not the
+         *     caller's would otherwise surface minutes later as an episode that failed on a queue,
+         *     or as one quietly shorter than what was picked.
          */
         post: operations["create_episode_v1_episodes_post"];
         delete?: never;
@@ -666,6 +672,9 @@ export interface paths {
          *     2's iOS app reports ``spoken_through_ms`` and this becomes automatic — but the fact it
          *     writes is the same one, on the same column, which is why swapping the trigger later
          *     changes nothing about read state.
+         *
+         *     An episode made with ``keep_in_backlog`` marks nothing: that is the promise it was
+         *     made with, and a player that reports reaching the end is not asking to break it.
          */
         post: operations["mark_episode_listened_v1_episodes__episode_id__listened_post"];
         delete?: never;
@@ -1952,11 +1961,22 @@ export interface components {
         };
         /**
          * CreateEpisodeRequest
-         * @description Phase 1 has manual episodes only: 'all unread', capped by duration.
+         * @description 'All unread', capped by duration — or exactly the stories somebody picked.
          */
         CreateEpisodeRequest: {
+            /**
+             * Keep In Backlog
+             * @description Listening to this episode leaves read state alone, so its stories stay on the backlog however far the listener gets. The position is still recorded. Off by default, which is what every episode has always done: a story you listen past is read (invariant 5).
+             * @default false
+             */
+            keep_in_backlog: boolean;
             /** Max Duration Ms */
             max_duration_ms: number;
+            /**
+             * News Item Ids
+             * @description Only these news items, in backlog order (oldest first), whether or not they are read. Omit for every unread item. Every id must be one of your news items, or the request is refused with a 422 and nothing is created. The duration cap still applies: a story that does not fit is left out.
+             */
+            news_item_ids?: string[] | null;
             /** Title */
             title: string;
         };
@@ -2163,6 +2183,12 @@ export interface components {
             duration_ms: number;
             /** Id */
             id: string;
+            /**
+             * Keep In Backlog
+             * @description Listening to this episode does not mark its stories read. A client that marks stories read from playback itself must skip it for this episode; the server's own position and listened routes already do. Optional in the contract, absent meaning false, so a client decoding a response from an API older than this field — or its own offline cache of one — still decodes.
+             * @default false
+             */
+            keep_in_backlog: boolean;
             /** Last Error */
             last_error: string | null;
             /**

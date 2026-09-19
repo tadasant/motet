@@ -9,7 +9,11 @@ import Foundation
 public protocol MotetAPI: Sendable {
     func listEpisodes() async throws -> [EpisodeResponse]
     func episode(id: String) async throws -> EpisodeResponse
-    func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse
+    /// `newsItemIds` nil is "every unread item"; a list is exactly those stories.
+    /// `keepInBacklog` makes listening to the episode leave their read state alone.
+    func createEpisode(
+        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+    ) async throws -> EpisodeResponse
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse
 
     func listNewsItems() async throws -> [NewsItemResponse]
@@ -22,6 +26,15 @@ public protocol MotetAPI: Sendable {
 
     /// Where an episode's audio lives, for the downloader.
     func audioURL(episodeId: String, feedToken: String) throws -> URL
+}
+
+extension MotetAPI {
+    /// Every unread item, consumed as it is heard — what "New episode" has always made.
+    public func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
+        try await createEpisode(
+            title: title, maxDurationMs: maxDurationMs, newsItemIds: nil, keepInBacklog: false
+        )
+    }
 }
 
 /// The HTTP implementation.
@@ -53,8 +66,17 @@ public struct MotetHTTPClient: MotetAPI {
         try await send(MotetEndpoints.getEpisode(episodeId: id), as: EpisodeResponse.self)
     }
 
-    public func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
-        let body = CreateEpisodeRequest(maxDurationMs: maxDurationMs, title: title)
+    public func createEpisode(
+        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+    ) async throws -> EpisodeResponse {
+        // `keep_in_backlog` is sent only when it is on, so the whole-backlog request is
+        // byte-for-byte what it was before picking existed.
+        let body = CreateEpisodeRequest(
+            keepInBacklog: keepInBacklog ? true : nil,
+            maxDurationMs: maxDurationMs,
+            newsItemIds: newsItemIds,
+            title: title
+        )
         return try await send(MotetEndpoints.createEpisode, body: body, as: EpisodeResponse.self)
     }
 

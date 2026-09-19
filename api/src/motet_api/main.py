@@ -1753,15 +1753,46 @@ def set_news_item_read(
 def create_episode(
     body: CreateEpisodeRequest, conn: Conn, user_id: User, nudge: Nudge
 ) -> EpisodeResponse:
-    """Assemble a manual episode from unread news items, capped by duration.
+    """Assemble an episode from unread news items — or from the ones picked — capped by duration.
 
     Returns immediately, in ``pending``. Assembly, scripting and TTS happen on the queue
     afterwards — so the episode a client polls for moves through states rather than
     appearing finished.
+
+    A pick is stored as a smart episode whose rule is :meth:`SmartRule.picked`, so it goes
+    through the one selector every other episode does. The ids are checked here, at
+    creation, for the reason the smart route checks its rule: an id that is not the
+    caller's would otherwise surface minutes later as an episode that failed on a queue,
+    or as one quietly shorter than what was picked.
     """
-    episode_id = enqueue_episode(
-        conn, user_id=user_id, title=body.title.strip(), max_duration_ms=body.max_duration_ms
-    )
+    title = body.title.strip()
+    if body.news_item_ids is None:
+        episode_id = enqueue_episode(
+            conn,
+            user_id=user_id,
+            title=title,
+            max_duration_ms=body.max_duration_ms,
+            keep_in_backlog=body.keep_in_backlog,
+        )
+    else:
+        unknown = set(body.news_item_ids) - repo.news_items_owned(
+            conn, user_id=user_id, item_ids=body.news_item_ids
+        )
+        if unknown:
+            # How many rather than which: an id that is somebody else's is not this
+            # caller's to have confirmed or denied.
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"{len(unknown)} of the picked news items do not exist.",
+            )
+        episode_id = enqueue_smart_episode(
+            conn,
+            user_id=user_id,
+            title=title,
+            max_duration_ms=body.max_duration_ms,
+            rule=SmartRule.picked(body.news_item_ids),
+            keep_in_backlog=body.keep_in_backlog,
+        )
     nudge.arm(DrainReason.EPISODE)
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     assert episode is not None
@@ -1798,10 +1829,15 @@ def mark_episode_listened(
     2's iOS app reports ``spoken_through_ms`` and this becomes automatic — but the fact it
     writes is the same one, on the same column, which is why swapping the trigger later
     changes nothing about read state.
+
+    An episode made with ``keep_in_backlog`` marks nothing: that is the promise it was
+    made with, and a player that reports reaching the end is not asking to break it.
     """
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     if episode is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.")
+    if episode.keep_in_backlog:
+        return MarkListenedResponse(episode_id=episode.id, news_items_marked_read=0)
     marked = repo.mark_news_items_read(
         conn, user_id=user_id, item_ids=[s.news_item_id for s in episode.segments]
     )
@@ -2233,6 +2269,7 @@ def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeRe
         created_at=episode.created_at,
         published_at=episode.published_at,
         listened_through_ms=episode.listened_through_ms,
+        keep_in_backlog=episode.keep_in_backlog,
         segments=segments,
     )
 

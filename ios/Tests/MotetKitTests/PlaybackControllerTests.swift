@@ -295,7 +295,8 @@ final class PlaybackControllerTests: XCTestCase {
 /// a seek, so a high-water mark treated a skip as listening and emptied the backlog.
 final class SkippingDoesNotCountAsListeningTests: XCTestCase {
     private func makeHarness(
-        store: InMemoryKeyValueStore = InMemoryKeyValueStore()
+        store: InMemoryKeyValueStore = InMemoryKeyValueStore(),
+        episode: EpisodeResponse = Fixture.episode()
     ) async -> (engine: ScriptedEngine, controller: PlaybackController, api: FakeAPI,
                 positions: ListeningPositionStore) {
         let clock = TestClock()
@@ -311,7 +312,7 @@ final class SkippingDoesNotCountAsListeningTests: XCTestCase {
         )
         await controller.activate()
         try? await controller.load(
-            episode: Fixture.episode(),
+            episode: episode,
             source: PlaybackController.Source(url: URL(string: "file:///tmp/ep.mp3")!, isLocal: true),
             autoplay: true
         )
@@ -370,6 +371,27 @@ final class SkippingDoesNotCountAsListeningTests: XCTestCase {
         XCTAssertEqual(calls, ["news-a:true", "news-b:true", "news-c:true"])
         let names = await harness.api.recordedCalls().map(\.name)
         XCTAssertTrue(names.contains("markEpisodeListened"))
+    }
+
+    func testAnEpisodeMadeToKeepItsStoriesMarksNothingHeardAllTheWayThrough() async throws {
+        let harness = await makeHarness(episode: Fixture.episode(keepInBacklog: true))
+        await harness.engine.listen(toMs: 300_000, stepMs: 5_000)
+        await harness.engine.finish()
+
+        let calls = await readCalls(harness.api)
+        XCTAssertEqual(calls, [], "the listener asked for these to stay on the backlog")
+        let names = await harness.api.recordedCalls().map(\.name)
+        XCTAssertFalse(names.contains("markEpisodeListened"))
+        let stored = try await harness.positions.position(for: "ep-1")
+        XCTAssertEqual(stored?.isFinished, true, "the position is still ours to keep")
+    }
+
+    func testAnEpisodeFromAnOlderAPIWithNoFlagStillMarksRead() async throws {
+        let harness = await makeHarness(episode: Fixture.episode(keepInBacklog: nil))
+        await harness.engine.listen(toMs: 90_000)
+
+        let calls = await readCalls(harness.api)
+        XCTAssertEqual(calls, ["news-a:true"])
     }
 
     func testASkippedStoryIsStillUnreadAfterARelaunch() async throws {

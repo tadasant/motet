@@ -176,6 +176,9 @@ class StoredEpisode:
     #: (invariant 4) and this is written by our own API from a client's report — never
     #: read back out of a vendor SDK. Its only job is deciding which news items are read.
     listened_through_ms: int
+    #: Listening to this episode leaves read state alone (migration 0023). The position
+    #: still advances — it is where to resume — but no story is marked read by it.
+    keep_in_backlog: bool
     created_at: datetime
     published_at: datetime | None
     segments: tuple[StoredSegment, ...]

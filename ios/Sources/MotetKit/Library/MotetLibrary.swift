@@ -110,8 +110,18 @@ public actor MotetLibrary {
         try await readState.setRead(read, newsItemId: newsItemId)
     }
 
-    public func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
-        try await api.createEpisode(title: title, maxDurationMs: maxDurationMs)
+    public func createEpisode(
+        title: String,
+        maxDurationMs: Int,
+        newsItemIds: [String]? = nil,
+        keepInBacklog: Bool = false
+    ) async throws -> EpisodeResponse {
+        try await api.createEpisode(
+            title: title,
+            maxDurationMs: maxDurationMs,
+            newsItemIds: newsItemIds,
+            keepInBacklog: keepInBacklog
+        )
     }
 
     public func paste(title: String, text: String) async throws -> SourceItemResponse {

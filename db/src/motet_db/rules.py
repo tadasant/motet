@@ -21,6 +21,7 @@ change under a listener who already heard it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
@@ -81,6 +82,13 @@ class SmartRule:
     window_days: int = DEFAULT_WINDOW_DAYS
     ranking: Ranking = Ranking.OLDEST_FIRST
     max_items: int = MAX_ITEMS
+    #: Only these stories. Empty means no such restriction. This is what "make an episode
+    #: from the ones I picked" is — a narrowing like ``source_ids``, not a second selection
+    #: path, so a picked episode is assembled, capped and scripted exactly as any other.
+    #: Ownership is checked by whoever builds the rule; the selector's ``user_id``
+    #: predicate still applies, so a foreign id selects nothing rather than a stranger's
+    #: story.
+    news_item_ids: tuple[str, ...] = ()
 
     @classmethod
     def manual(cls) -> SmartRule:
@@ -93,6 +101,27 @@ class SmartRule:
         return cls(unread_only=True, window_days=0, ranking=Ranking.OLDEST_FIRST)
 
     @classmethod
+    def picked(cls, news_item_ids: Sequence[str]) -> SmartRule:
+        """Exactly the stories somebody picked, in backlog order, read or not.
+
+        ``unread_only`` is off because a pick is a decision about *these* stories: one
+        already read is still one the listener asked to hear, and silently dropping it
+        would make the episode shorter than the selection with nothing saying why.
+        """
+        ids = tuple(sorted(set(news_item_ids)))
+        if not ids:
+            raise RuleError("pick at least one news item")
+        if len(ids) > MAX_ITEMS:
+            raise RuleError(f"news_item_ids may name at most {MAX_ITEMS} stories")
+        return cls(
+            unread_only=False,
+            window_days=0,
+            ranking=Ranking.OLDEST_FIRST,
+            max_items=len(ids),
+            news_item_ids=ids,
+        )
+
+    @classmethod
     def from_json(cls, raw: Any) -> SmartRule:
         """Parse a rule from a request body or a stored snapshot.
 
@@ -103,7 +132,14 @@ class SmartRule:
         if not isinstance(raw, dict):
             raise RuleError(f"a rule must be an object, got {type(raw).__name__}")
 
-        known = {"unread_only", "source_ids", "window_days", "ranking", "max_items"}
+        known = {
+            "unread_only",
+            "source_ids",
+            "window_days",
+            "ranking",
+            "max_items",
+            "news_item_ids",
+        }
         unknown = sorted(set(raw) - known)
         if unknown:
             raise RuleError(f"unknown rule field(s): {', '.join(unknown)}")
@@ -128,6 +164,12 @@ class SmartRule:
         if not isinstance(raw_sources, list) or any(not isinstance(s, str) for s in raw_sources):
             raise RuleError("source_ids must be a list of strings")
 
+        raw_items = raw.get("news_item_ids", [])
+        if not isinstance(raw_items, list) or any(not isinstance(i, str) for i in raw_items):
+            raise RuleError("news_item_ids must be a list of strings")
+        if len(set(raw_items)) > MAX_ITEMS:
+            raise RuleError(f"news_item_ids may name at most {MAX_ITEMS} stories")
+
         unread_only = raw.get("unread_only", True)
         if not isinstance(unread_only, bool):
             raise RuleError("unread_only must be a boolean")
@@ -141,6 +183,7 @@ class SmartRule:
             window_days=window_days,
             ranking=ranking,
             max_items=max_items,
+            news_item_ids=tuple(sorted(set(raw_items))),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -151,6 +194,7 @@ class SmartRule:
             "window_days": self.window_days,
             "ranking": self.ranking.value,
             "max_items": self.max_items,
+            "news_item_ids": list(self.news_item_ids),
         }
 
 
