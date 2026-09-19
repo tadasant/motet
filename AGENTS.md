@@ -33,8 +33,7 @@ signal it belongs in the private repo instead — say so and stop rather than in
 
 Deploy workflows live in the private repo — with one exception, the TestFlight upload, which
 lives here for its free macOS runner, runs on every merge that touches `ios/`, and is
-fenced to `main` (see
-[Runner policy](#runner-policy)). CI in *this* repo runs on the shared
+fenced to `main` (see [Runner policy](#runner-policy)). CI in *this* repo runs on the shared
 self-hosted runner pool behind a fork guard, with one job on a GitHub-hosted macOS runner
 because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
 
@@ -910,21 +909,23 @@ team id. No GCP identity, no registry login, nothing about the infrastructure. T
 the build defaults to is the environment variable `MOTET_IOS_API_BASE_URL`, so this repo
 still names no host. Creating the Apple identity, the app record and the key is invariant
 9's human half; running the workflow afterwards is not, and nobody has to: **every push
-to `main` that touches `ios/**` (or the workflow) uploads a build**, the way every merge
-ships the web app. Tadas asked for it on 2026-09-19 — three iOS PRs had merged and none
-reached his phone, because the only trigger was a hand-run dispatch — and that request is
-the sign-off for the trigger. `openapi.yaml` is deliberately not in the path filter: the app
+to `main` that touches the app under `ios/` (or the workflow) uploads a build**, where a
+merge on the web side asks the private repo for a pin bump. Tadas asked for it on
+2026-09-19 in Zimmer session 19132 — three iOS PRs had merged and none reached his phone,
+because the only trigger was a hand-run dispatch — and that request is the sign-off for the
+trigger. `openapi.yaml` is deliberately not in the path filter: the app
 compiles the committed Swift client under `ios/`, and `bin/ci` fails a commit where the two
 disagree. A burst of merges uploads the run in flight plus the newest commit: GitHub keeps
 one pending run per concurrency group and replaces it, and a started upload is never
 cancelled. A dispatch (`gh workflow run testflight.yml --ref main`) still works, for a
-re-upload or `-f signing=archive`. `ios/README.md`, "Distribution", is the procedure.
+re-upload (never Re-run an old run: it rebuilds that run's commit under a lower build
+number) or `-f signing=archive`. `ios/README.md`, "Distribution", is the procedure.
 
 **The consequence to hold on to is ordering.** A build now reaches TestFlight minutes after
-its PR merges, while production serves whatever the private repo pins, and nothing makes a
-TestFlight build wait for that. So an iOS change that needs a new API field has to decode an
-older API — optional-with-default, as `keep_in_backlog` is — or it fails on the phone until
-production is deployed. "Ship the API first" is no longer a step anybody performs; it is a
+its PR merges, while the API it defaults to (`MOTET_IOS_API_BASE_URL`) serves whatever the
+private repo pins, and nothing makes a TestFlight build wait for that. So an iOS change that
+needs a new API field has to decode an older API — optional-with-default, as
+`keep_in_backlog` is — or it fails on the phone until that API is deployed. "Ship the API first" is no longer a step anybody performs; it is a
 property the Swift client has to have.
 
 **The other is `notify-deploy-pin.yml`, and it deploys nothing.** Staging and production run
@@ -940,8 +941,8 @@ refused.**
 **The token is not a notification-shaped credential, and that is why it is fenced like the
 Apple key.** GitHub's dispatch endpoint needs Contents: write on the target repository, so
 the token can push to the private infrastructure repo. It should be fine-grained, scoped to
-that one repository and to Contents alone. The same four fences as TestFlight apply, and all
-four have to stay: `push` to `main` is the only trigger; the job refuses any other ref or
+that one repository and to Contents alone. The same four kinds of fence as TestFlight apply,
+and all four have to stay: `push` to `main` is the only trigger; the job refuses any other ref or
 repository; the token is an **environment** secret in `deploy-pin`, whose deployment-branch
 policy admits `main` only, which is the fence that survives a branch adding a workflow that
 reads it; and it runs on a hosted runner with no checkout, passing the token to curl on

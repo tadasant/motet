@@ -25,17 +25,19 @@ name: TestFlight
 # repo and billed at a multiplier on a private one. AGENTS.md, "Runner policy", records it.
 
 on:
-  # Every merge to `main` that can change the app ships a build, the way every merge ships
-  # the web app (notify-deploy-pin.yml). The whole app is under ios/: the Xcode project's
-  # only package reference is `..` (ios/), and the Swift client it compiles is the committed
+  # Every merge to `main` that can change the app ships a build. The app is built from
+  # ios/ alone: the Xcode project's only package reference is `..` (ios/), Package.swift
+  # has no remote dependency, and the Swift client it compiles is the committed
   # ios/Sources/MotetKit/Generated/Schema.swift. openapi.yaml is deliberately NOT listed:
-  # it is not a build input, and bin/ci fails any commit where it and Schema.swift disagree,
-  # so a contract change that reaches the app lands a change under ios/ in the same commit —
-  # and one that does not would upload a byte-identical app.
+  # the upload never reads it, and bin/ci fails any commit where it and Schema.swift
+  # disagree, so a contract change that reaches the app lands under ios/ in the same commit.
+  # The README and the SwiftPM tests are excluded because they are not in the app.
   push:
     branches: [main]
     paths:
       - "ios/**"
+      - "!ios/README.md"
+      - "!ios/Tests/**"
       - ".github/workflows/testflight.yml"
   workflow_dispatch:
     inputs:
@@ -56,6 +58,8 @@ permissions:
 # That is the right coalescing here: every run builds `main` at its own head, so the newest
 # commit contains everything the cancelled one would have shipped. Keyed by ref so that a
 # dispatch from a branch — which the job below refuses — cannot cancel a pending `main` run.
+# Push and dispatch runs on `main` do share it, so a pending `signing=archive` dispatch is
+# replaced by the next push; a replaced run shows as "cancelled", which is not a failure.
 concurrency:
   group: testflight-${{ github.ref }}
   cancel-in-progress: false
@@ -89,8 +93,10 @@ jobs:
           # The web app's host, whose app-site-association file names this app. Unset, the
           # build ships the custom-scheme handoff and signs no entitlement.
           MOTET_IOS_APP_DOMAIN: ${{ vars.MOTET_IOS_APP_DOMAIN }}
-          # Unique and increasing per upload, including a re-run of the same run. run_number
-          # is one counter per workflow, shared by push and dispatch runs.
+          # Unique per upload, including a re-run of the same run; increasing in the order runs
+          # are created, since run_number is one counter shared by push and dispatch runs. A
+          # Re-run of an OLD run rebuilds that run's commit under a lower number, so re-upload
+          # with a dispatch instead.
           MOTET_BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
           # A push carries no inputs, so it takes the dispatch default.
           MOTET_SIGNING: ${{ inputs.signing || 'export' }}

@@ -230,9 +230,11 @@ each written with `POST /v1/news-items/{id}/read` — the same fact the web back
 * **Mark listened** (swipe an episode right) is the SPA's: every story read through the
   outbox, then the position at the end.
 
-**Ordering constraint, unchanged:** `listened_through_ms` is a required field, so a build
-cannot read episodes from an API revision older than it — ship the API first and check
-`/internal/health`'s `revision`.
+**Ordering constraint:** `listened_through_ms` is a required field, so a build cannot read
+episodes from an API revision older than it. Since a merge uploads a TestFlight build on its
+own (see "Distribution"), nothing enforces that order any more: a new field the app decodes
+has to be optional with a default, as `keep_in_backlog` is, or the build fails until the API
+behind `MOTET_IOS_API_BASE_URL` serves it — check its `/internal/health` `revision`.
 
 ## Audio that will not load is said out loud
 
@@ -329,25 +331,29 @@ Connect has *processed* the build, because an upload Xcode calls successful can 
 processing. It runs `ios/bin/testflight upload`. `ios/bin/testflight check` is the
 credential-free half of the same script, and the `ios` CI job runs it on every PR.
 
-**It runs on every push to `main` that touches `ios/**` or the workflow itself**, so a
-merged iOS PR is on TestFlight about twenty minutes later with nobody dispatching anything.
-A commit that touches nothing under `ios/` uploads nothing: the app is built entirely from
-this directory, including the generated Swift client, which `bin/ci` keeps in step with
-`openapi.yaml`. Several merges in a row upload the one already building plus the newest —
-GitHub replaces a pending run with the next one and never cancels an upload in progress.
+**It runs on every push to `main` that touches the app under `ios/` or the workflow
+itself**, so a merged iOS PR reaches TestFlight once the run and Apple's processing finish,
+with nobody dispatching anything. This README and `Tests/` are excluded; a commit that
+touches nothing else here uploads nothing. The app is built entirely from this directory,
+including the generated Swift client, which `bin/ci` keeps in step with `openapi.yaml`.
+Several merges in a row upload the one already building plus the newest: GitHub replaces a
+pending run with the next one (it shows as "cancelled") and never cancels an upload in
+progress.
 
-A dispatch still works, for a re-upload of the same commit or for the signing fallback:
+A dispatch still works — to re-upload after a failure, after changing a `testflight`
+environment variable, or for the signing fallback. Re-upload with a dispatch rather than
+Re-run on an old run, which rebuilds that run's commit under a lower build number:
 
 ```bash
 gh workflow run testflight.yml --ref main          # an agent can do this; so can the Actions tab
 gh workflow run testflight.yml --ref main -f signing=archive   # fallback, see below
 ```
 
-**A build can now land before the API it needs.** Production runs whatever the private
-repo pins, and a TestFlight build no longer waits for anybody to check. A field the app
-adds to what it decodes must therefore be optional with a default, or the build fails on
-the phone until production is deployed — see the ordering constraint under "Playback
-position is cross-device".
+**A build can now land before the API it needs.** The API behind `MOTET_IOS_API_BASE_URL`
+runs whatever the private repo pins, and a TestFlight build no longer waits for anybody to
+check. A field the app adds to what it decodes must therefore be optional with a default, or
+the build fails on the phone until that API is deployed — see the ordering constraint under
+"Playback position is cross-device".
 
 **Signing happens in Apple's cloud, at export.** The archive is unsigned. `-exportArchive`
 with `-allowProvisioningUpdates` and an App Store Connect API key signs it with the team's
@@ -360,8 +366,9 @@ a run of fallback builds eventually needs old ones revoked in Certificates, IDs 
 If the first real run shows export-time signing is refused, make `archive` the default
 rather than living on the fallback.
 
-**Build numbers** are `run_number.run_attempt`, which are unique and increasing, including
-for a re-run. `run_number` is one counter per workflow, shared by push and dispatch runs. The marketing version is `MARKETING_VERSION` in the project. Bump it for a
+**Build numbers** are `run_number.run_attempt`: unique, including for a re-run, and
+increasing in the order runs are created — `run_number` is one counter per workflow, shared
+by push and dispatch runs. The marketing version is `MARKETING_VERSION` in the project. Bump it for a
 release that should read differently in TestFlight.
 
 **What a human does, once** (invariant 9). Each step unblocks the next:
