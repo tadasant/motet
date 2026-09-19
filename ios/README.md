@@ -242,12 +242,14 @@ registration: the sheet watches for it itself, and nothing else in the app handl
 
 The server URL is under **Advanced**, on the sign-in screen and in Settings, and is rarely
 touched: a TestFlight build arrives with it prefilled, and other builds ask for it there.
-Changing it signs the phone out, because a session belongs to the server that issued it. `MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL`
-build setting, which is empty in this repo and in CI. The TestFlight workflow fills it from
-the `testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in
-this repo's files. The variable holds the product's public API name, which the public SPA
-already serves in its `config.js`. It is not masked, and it shows in the workflow's logs.
-Never set it to an internal address such as a `*.run.app` URL. Only an `https://` value is honoured, and a URL saved in Settings always wins.
+Changing it signs the phone out, because a session belongs to the server that issued it.
+`MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL` build
+setting, which is empty in this repo and in CI. The TestFlight workflow fills it from the
+`testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in this
+repo's files. The variable holds the product's public API name, which the public SPA already
+serves in its `config.js`. It is not masked, and it shows in the workflow's logs. Never set
+it to an internal address such as a `*.run.app` URL. Only an `https://` value is honoured,
+and a URL saved in Settings always wins.
 
 ## Distribution: TestFlight
 

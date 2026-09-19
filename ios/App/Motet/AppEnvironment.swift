@@ -8,9 +8,9 @@ import MotetPlayback
 /// background-download callback and the CarPlay scene, neither of which can be handed an
 /// environment object.
 ///
-/// The token is typed into Settings on first run, because a baked-in token would be a
-/// credential in a binary. The server URL is typed in too, except on a distribution build,
-/// which is handed a default at build time; `CredentialStore` owns both.
+/// The credential is a session from the web sign-in, never a baked-in token, because a
+/// baked-in token would be a credential in a binary. The server is the build's own unless
+/// changed under Advanced; `CredentialStore` owns both.
 @MainActor
 final class AppEnvironment {
     static let shared = AppEnvironment()
@@ -31,9 +31,17 @@ final class AppEnvironment {
     /// when the server changes, but replacing the engine would drop whatever is playing.
     private let engine = AVPlayerPlaybackEngine()
 
+    /// Set when this launch found an API token an earlier build let somebody paste, and
+    /// removed it. Read by `AppModel` to say so, once.
+    let removedPastedToken: Bool
+
     private init() {
         let downloader = BackgroundEpisodeDownloader()
         self.downloader = downloader
+        // Before anything is wired from the credentials, and here rather than in `AppModel`,
+        // because CarPlay can launch the process with no window scene and no `AppModel` at
+        // all — and a token reconciled away after wiring would still be in the controller.
+        self.removedPastedToken = credentials.reconcile()
         let wired = Self.wire(
             configuration: credentials.configuration(), downloader: downloader, engine: engine
         )

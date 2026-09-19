@@ -22,8 +22,8 @@ import Security
 @MainActor
 final class CredentialStore {
     private let baseURLKey = "motet.baseURL"
-    /// Which Google account the stored token is a session for. Not a secret, so not in the
-    /// Keychain; nil when the token was pasted rather than signed in for.
+    /// Which Google account the stored session belongs to. Not a secret, so not in the
+    /// Keychain; nil when nobody is signed in.
     private let signedInEmailKey = "motet.signedInEmail"
     private let tokenAccount = "motet.api-token"
     private let service = "com.getmotet.app"
@@ -52,15 +52,27 @@ final class CredentialStore {
     /// `UserDefaults` is not, so a phone restored from a backup arrives with the address and
     /// without the session. Forgetting the address puts the sign-in screen in front, which
     /// is the truth — rather than tabs that silently load nothing.
+    ///
+    /// **Only a definite answer from the Keychain is acted on.** Before the first unlock
+    /// after a restart the item is unreadable rather than absent — it is
+    /// `AfterFirstUnlockThisDeviceOnly` — and a launch in that window (a background download
+    /// finishing, say) that read "unreadable" as "no session" would sign the person out for
+    /// good while their session stayed live on the server.
     @discardableResult
     func reconcile() -> Bool {
-        let hasToken = !(readToken() ?? "").isEmpty
-        if signedInEmail != nil, !hasToken {
-            UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+        switch tokenState() {
+        case .unreadable:
+            return false
+        case .absent:
+            if signedInEmail != nil {
+                UserDefaults.standard.removeObject(forKey: signedInEmailKey)
+            }
+            return false
+        case .present:
+            guard signedInEmail == nil else { return false }
+            writeToken("")
+            return true
         }
-        guard signedInEmail == nil, hasToken else { return false }
-        writeToken("")
-        return true
     }
 
     /// The server the app talks to: one set under Advanced, else the build's own.
@@ -71,9 +83,16 @@ final class CredentialStore {
 
     /// Whether `baseURL`, as Advanced would save it, is a different server from the current.
     /// An empty field means the build's own, so saving it where that is current changes
-    /// nothing and must not sign anyone out.
+    /// nothing and must not sign anyone out — and neither must a trailing slash or a
+    /// capital letter in the host, which name the same server.
     func isDifferentServer(_ baseURL: String) -> Bool {
-        effectiveURL(baseURL) != (storedBaseURL() ?? Self.buildDefaultBaseURL)
+        Self.canonical(effectiveURL(baseURL)) != Self.canonical(storedBaseURL() ?? Self.buildDefaultBaseURL)
+    }
+
+    /// Whether Advanced may save `baseURL`: something with a host, or empty on a build that
+    /// has a default of its own. Anything else would sign the person out onto nothing.
+    func isValidServer(_ baseURL: String) -> Bool {
+        effectiveURL(baseURL)?.host != nil
     }
 
     /// Point the app at a server. A session belongs to the server that issued it, so a real
@@ -83,13 +102,26 @@ final class CredentialStore {
             clearSession()
         }
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canonical = Self.canonical(URL(string: trimmed))
         // The build's own is stored as nothing, so a later build pointed elsewhere is not
         // ignored on this phone forever.
-        if trimmed.isEmpty || trimmed == Self.buildDefaultBaseURL?.absoluteString {
+        if trimmed.isEmpty || canonical == Self.canonical(Self.buildDefaultBaseURL) {
             UserDefaults.standard.removeObject(forKey: baseURLKey)
         } else {
-            UserDefaults.standard.set(trimmed, forKey: baseURLKey)
+            UserDefaults.standard.set(canonical ?? trimmed, forKey: baseURLKey)
         }
+    }
+
+    /// One spelling per server: scheme and host lowercased, trailing slashes dropped.
+    private static func canonical(_ url: URL?) -> String? {
+        guard let url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        while components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
+        return components.string
     }
 
     private func effectiveURL(_ raw: String) -> URL? {
@@ -129,7 +161,15 @@ final class CredentialStore {
         return trimmed.isEmpty ? nil : trimmed
     }()
 
-    private func readToken() -> String? {
+    /// What the Keychain said, kept three ways: "no item" and "could not ask" are different
+    /// answers, and only the first is safe to act on (`reconcile()` says why).
+    private enum TokenState {
+        case present(String)
+        case absent
+        case unreadable
+    }
+
+    private func tokenState() -> TokenState {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -138,9 +178,18 @@ final class CredentialStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return .absent }
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let token = String(data: data, encoding: .utf8)
+        else { return .unreadable }
+        return token.isEmpty ? .absent : .present(token)
+    }
+
+    private func readToken() -> String? {
+        if case .present(let token) = tokenState() { return token }
+        return nil
     }
 
     private func writeToken(_ token: String) {

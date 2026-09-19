@@ -35,7 +35,7 @@ struct SignInView: View {
                         Task { await signIn() }
                     }
                     .buttonStyle(PrimaryButtonStyle())
-                    .disabled(model.isSigningIn || trimmedServer.isEmpty)
+                    .disabled(model.isSigningIn || !model.isValidServer(server))
                     if let message = model.signInMessage {
                         Text(message)
                             .font(Theme.aside(15))
@@ -59,7 +59,12 @@ struct SignInView: View {
             .padding(.bottom, 32)
         }
         .background(Theme.parchment.ignoresSafeArea())
-        .onAppear { server = model.serverURL }
+        .onAppear {
+            server = model.serverURL
+            // A build with no server of its own (anything but TestFlight) needs one typed in
+            // before the button can work, so the place to type it starts open.
+            if server.isEmpty { showingAdvanced = true }
+        }
     }
 
     private var trimmedServer: String {
@@ -132,6 +137,11 @@ struct SignInView: View {
             let elapsed = opened.duration(to: clock.now)
             switch NativeSignIn.classifyCancellation(after: elapsed) {
             case .dismissedByPerson:
+                // Logged too, so a threshold that is wrong for some device shows up as a run of
+                // these rather than as the silence this code exists to end.
+                Self.logger.notice(
+                    "sign-in sheet dismissed \(String(describing: elapsed), privacy: .public) after opening"
+                )
                 return .dismissed
             case .refusedBeforeShown:
                 Self.logger.error(

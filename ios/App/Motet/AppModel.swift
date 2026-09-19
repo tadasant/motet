@@ -16,7 +16,7 @@ final class AppModel: ObservableObject {
     /// cache underneath it, so this is a banner rather than an error screen.
     @Published private(set) var connectionMessage: String?
     @Published var settings = PlaybackSettings()
-    /// The Google account the app is signed in as, or nil for a pasted token or none.
+    /// The Google account the app is signed in as, or nil when nobody is.
     @Published private(set) var signedInEmail: String?
     @Published private(set) var isSigningIn = false
     /// Why the last sign-in did not finish. Shown under the button, never as a modal.
@@ -24,13 +24,10 @@ final class AppModel: ObservableObject {
 
     private let environment: AppEnvironment
     private var snapshotTask: Task<Void, Never>?
-    /// Set when launch found an API token an earlier build let somebody paste, and removed it.
-    private let removedPastedToken: Bool
 
     init(environment: AppEnvironment) {
         self.environment = environment
-        // Before the address is read, so the sign-in gate sees the reconciled answer.
-        self.removedPastedToken = environment.credentials.reconcile()
+        // `AppEnvironment` has already reconciled the Keychain with the address.
         self.signedInEmail = environment.credentials.signedInEmail
     }
 
@@ -43,13 +40,10 @@ final class AppModel: ObservableObject {
     var isConfigured: Bool { environment.credentials.configuration().isConfigured }
 
     func start() async {
-        if removedPastedToken {
+        if environment.removedPastedToken {
             signInMessage = "Motet now signs in with Google. The API token this phone held has been removed."
-            // The environment was wired from the token before `reconcile()` removed it.
-            await environment.reconfigure()
-        } else {
-            await environment.activate()
         }
+        await environment.activate()
         settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
         observeSnapshots()
         await refresh()
@@ -338,6 +332,10 @@ final class AppModel: ObservableObject {
     /// The server the app talks to, and the build's own, for Settings → Advanced.
     var serverURL: String { environment.credentials.serverURL }
     var defaultServerURL: String? { environment.credentials.defaultServerURL }
+
+    /// Whether Advanced may save `baseURL`, and whether saving it would change anything.
+    func isValidServer(_ baseURL: String) -> Bool { environment.credentials.isValidServer(baseURL) }
+    func isDifferentServer(_ baseURL: String) -> Bool { environment.credentials.isDifferentServer(baseURL) }
 
     /// Coming back to the foreground: send whatever the walk queued, and pick playback up
     /// if the system interrupted it politely.

@@ -2586,8 +2586,9 @@ Four things about it are load-bearing:
   and the CORS policy is untouched and still does not allow credentials. The trade is that
   the token sits in `localStorage` rather than in an `HttpOnly` cookie — which is exactly
   where the shared secret already sat, except this one expires and can be revoked.
-- **`MOTET_API_TOKEN` still works against the API.** The RSS feed, any script. (The iOS
-  app stopped taking it on 2026-09-19 — see "The phone signs in through the web sign-in".) It stopped being something a *human types into a browser*; it did not
+- **`MOTET_API_TOKEN` still works against the API.** The RSS feed, any script. The iOS
+  app stopped taking it on 2026-09-19 (see "The phone signs in through the web
+  sign-in"). It stopped being something a *human types into a browser*; it did not
   stop being accepted.
 
 Sessions are **rows, not signed tokens**, and only their SHA-256 is stored. Rows are what

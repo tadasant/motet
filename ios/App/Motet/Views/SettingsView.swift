@@ -56,9 +56,12 @@ struct SettingsView: View {
             DisclosureGroup("Advanced", isExpanded: $showingAdvanced) {
                 ServerField(server: $server, defaultServer: model.defaultServerURL)
                 Button("Save server") {
-                    Task { await model.saveServer(server) }
+                    Task {
+                        await model.saveServer(server)
+                        server = model.serverURL
+                    }
                 }
-                .disabled(server.trimmingCharacters(in: .whitespacesAndNewlines) == model.serverURL)
+                .disabled(!model.isValidServer(server) || !model.isDifferentServer(server))
             }
             .listRowBackground(Theme.surface)
         } footer: {
