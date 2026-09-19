@@ -201,6 +201,11 @@ links. It says nothing about any of this.
     session comes back after Stop Live, lock screen and all. The mic meter's dBFS is the
     number the service's detector compares against its noise floor, so a session that
     never barges in is diagnosable from the screen.
+14. **A consent caught on its way to the web app.** Connecting a mailbox, label sync's
+    re-consent and authorizing an MCP server all rely on the sheet intercepting Google's
+    redirect to the web app's `/oauth/callback` (see "Sources and connectors on the phone").
+    Only a signed build on a phone that has verified the association can do that; the first
+    real mailbox connected from the phone is the evidence.
 
 ## Playback position is cross-device
 
@@ -241,6 +246,37 @@ served file means the phone could not play it, and **Try again** stays. A refuse
 is replaced and the question asked again: the token authenticates the audio route and used
 to be cached until the app was reinstalled, so a token rotated on the web broke streaming on
 the phone for good.
+
+## Sources and connectors on the phone
+
+The **Sources** tab is the SPA's Sources and Credentials screens (motet#90, motet#102) on the
+phone: every mailbox with its status, last sync and what it pulled in; Sync now; label sync
+and its re-consent (motet#96); Disconnect, and removing a consent that never finished; the
+built-in Paste source; and the sites and MCP servers enrichment may use — added, authorized
+and removed. It calls the same routes the SPA does and adds none. The rules — what a row
+means, what a card says, which counts belong to which mailbox — are `SourceStatus` and
+`ConnectorStatus` in MotetKit, ported from the SPA's `status.ts` and tested on Linux.
+
+**A consent comes back to the phone by being caught on its way to the web app.** Google
+returns every consent to the one address registered on Motet's OAuth client, the web app's
+`/oauth/callback`, and it refuses a custom scheme on a web client — so there is no
+`motet://` for a mailbox consent to come back on, and a second registration would be a
+human step (invariant 9) and a second OAuth client. Instead the app asks the API for that
+same web address and opens the consent in the system sign-in sheet, told to finish on an
+**https callback for the web app's host and `/oauth/callback`**. That is the same
+shared-web-credentials association the sign-in handoff uses: iOS closes the sheet as Google
+redirects there and hands the URL to the app *before the page loads*, so the SPA never
+spends the code, and the app finishes the consent with its own session at the route the SPA
+would have called (`/v1/sources/callback`, or `/v1/connectors/oauth/callback` for an MCP
+server). `ConsentCallback` checks the host, the path and the `state` before anything is
+spent.
+
+That needs what the https sign-in needs — `MOTET_IOS_APP_DOMAIN` signed into the build,
+iOS 17.4, and the association verified on the device — and it needs nothing on the server:
+`/v1/sources/connect` has always taken the redirect URI from its caller. Where any of it is
+missing the screen says so and offers the web app's Sources screen instead, because nothing
+else can bring the consent back; a refusal is told apart from a person's Cancel by the same
+one-second rule the sign-in uses.
 
 ## Configuration
 

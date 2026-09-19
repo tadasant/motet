@@ -296,7 +296,9 @@ public struct MotetHTTPClient: MotetAPI {
         return .http(status: response.statusCode, detail: validationDetail(response, decoder: decoder))
     }
 
-    /// FastAPI's 422 body is a list of field errors; anything else is shown verbatim.
+    /// FastAPI's 422 body is a list of field errors, and every other refusal it raises is
+    /// `{"detail": "<sentence>"}` — the API's own words, which a screen should show rather
+    /// than the JSON around them. Anything else is shown verbatim.
     private static func validationDetail(_ response: HTTPResponse, decoder: JSONDecoder) -> String? {
         if let error = try? decoder.decode(HTTPValidationError.self, from: response.body),
            let detail = error.detail, !detail.isEmpty {
@@ -304,6 +306,10 @@ public struct MotetHTTPClient: MotetAPI {
                 let field = entry.loc.map(\.displayText).joined(separator: ".")
                 return field.isEmpty ? entry.msg : "\(field): \(entry.msg)"
             }.joined(separator: "; ")
+        }
+        if let error = try? decoder.decode(DetailMessage.self, from: response.body),
+           !error.detail.isEmpty {
+            return error.detail
         }
         let text = String(data: response.body, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -313,5 +319,10 @@ public struct MotetHTTPClient: MotetAPI {
 
 /// The API's `{"detail": "<sentence>"}` on the audio route's 410.
 private struct AudioDetail: Decodable {
+    let detail: String
+}
+
+/// The body of every `HTTPException` the API raises: one sentence, meant for a person.
+private struct DetailMessage: Decodable {
     let detail: String
 }

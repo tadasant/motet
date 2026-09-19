@@ -2440,6 +2440,16 @@ registrations live in the private repo and nothing in this one can tell you it b
 Google matches the string exactly, so in dev the app has to be reached at `localhost` and
 not `127.0.0.1`.
 
+**The phone uses the same registered path, and catches it before the page loads.** The iOS
+Sources tab connects a mailbox, re-consents for label sync and authorizes an MCP server by
+passing the web app's `/oauth/callback` as the redirect URI and opening the consent in the
+system sign-in sheet with an https callback on that host and path — the `webcredentials`
+association the sign-in handoff already needs. iOS hands the redirect to the app instead of
+loading it, and the app finishes the consent at the same API route with its own session. No
+redirect URI is registered for the app and no route was added for it; where the association
+is not in force the app sends the person to the web app. `ios/README.md`, "Sources and
+connectors on the phone".
+
 Two things there are load-bearing rather than defensive. The **authorization code is
 exchanged exactly once** — StrictMode double-invokes effects, the API consumes the state
 row with a `DELETE ... RETURNING`, and a second exchange would overwrite a success with

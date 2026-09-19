@@ -51,6 +51,15 @@ final class AppModel: ObservableObject {
 
     var isConfigured: Bool { environment.credentials.configuration().isConfigured }
 
+    /// The Sources screen's client, built from the session in force now — so a sign-out or
+    /// a server change is picked up on the next call rather than held in a stale copy.
+    var sourcesAPI: any SourcesAPI {
+        MotetHTTPClient(configuration: environment.credentials.configuration())
+    }
+
+    /// The web app's host, where this build can receive a consent (`ConsentCallback`).
+    var appLinkDomain: String? { environment.credentials.appLinkDomain }
+
     func start() async {
         if environment.removedPastedToken {
             signInMessage = "Motet now signs in with Google. The API token this phone held has been removed."
