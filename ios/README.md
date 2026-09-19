@@ -329,10 +329,25 @@ Connect has *processed* the build, because an upload Xcode calls successful can 
 processing. It runs `ios/bin/testflight upload`. `ios/bin/testflight check` is the
 credential-free half of the same script, and the `ios` CI job runs it on every PR.
 
+**It runs on every push to `main` that touches `ios/**` or the workflow itself**, so a
+merged iOS PR is on TestFlight about twenty minutes later with nobody dispatching anything.
+A commit that touches nothing under `ios/` uploads nothing: the app is built entirely from
+this directory, including the generated Swift client, which `bin/ci` keeps in step with
+`openapi.yaml`. Several merges in a row upload the one already building plus the newest —
+GitHub replaces a pending run with the next one and never cancels an upload in progress.
+
+A dispatch still works, for a re-upload of the same commit or for the signing fallback:
+
 ```bash
 gh workflow run testflight.yml --ref main          # an agent can do this; so can the Actions tab
 gh workflow run testflight.yml --ref main -f signing=archive   # fallback, see below
 ```
+
+**A build can now land before the API it needs.** Production runs whatever the private
+repo pins, and a TestFlight build no longer waits for anybody to check. A field the app
+adds to what it decodes must therefore be optional with a default, or the build fails on
+the phone until production is deployed — see the ordering constraint under "Playback
+position is cross-device".
 
 **Signing happens in Apple's cloud, at export.** The archive is unsigned. `-exportArchive`
 with `-allowProvisioningUpdates` and an App Store Connect API key signs it with the team's
@@ -346,7 +361,7 @@ If the first real run shows export-time signing is refused, make `archive` the d
 rather than living on the fallback.
 
 **Build numbers** are `run_number.run_attempt`, which are unique and increasing, including
-for a re-run. The marketing version is `MARKETING_VERSION` in the project. Bump it for a
+for a re-run. `run_number` is one counter per workflow, shared by push and dispatch runs. The marketing version is `MARKETING_VERSION` in the project. Bump it for a
 release that should read differently in TestFlight.
 
 **What a human does, once** (invariant 9). Each step unblocks the next:
@@ -366,6 +381,9 @@ release that should read differently in TestFlight.
    host, e.g. `app.example.com`). `MOTET_IOS_API_BASE_URL` is already there. Leaving
    `MOTET_IOS_APP_DOMAIN` unset is supported and ships the `motet://` handoff instead.
 6. After the first build processes, add testers under TestFlight → Internal Testing.
+   Internal testers are offered every processed build automatically. An *external* group
+   needs each build added to it, and its first build reviewed by Apple, so it does not
+   follow `main` on its own.
 
 Before it spends ten minutes archiving, the workflow checks that the variables are set and
 that the key can see the app record (`app_store_connect.py preflight`). A pending

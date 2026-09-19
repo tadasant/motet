@@ -1,13 +1,16 @@
 name: TestFlight
 
-# Sign the iOS app and upload it to TestFlight. Started by hand (or by an agent with
-# `gh workflow run testflight.yml --ref main`), never by a push or a pull request.
+# Sign the iOS app and upload it to TestFlight. Started by every push to `main` that can
+# change the app, and by hand (or by an agent with `gh workflow run testflight.yml --ref
+# main`). Never by a pull request.
 #
 # THIS IS ONE OF TWO WORKFLOWS IN A PUBLIC REPO THAT HOLD A CREDENTIAL (the other is
 # `notify-deploy-pin.yml`), so four things fence it and all four have to stay:
 #
-#   1. `workflow_dispatch` is the only trigger. A fork cannot dispatch a workflow here, and
-#      no pull_request event — from a fork or from a branch — ever starts it.
+#   1. `push` to `main` and `workflow_dispatch` are the only triggers. A fork cannot push to
+#      this repository's `main` or dispatch a workflow here, and no pull_request event —
+#      from a fork or from a branch — ever starts it. Never add `pull_request` or
+#      `pull_request_target`.
 #   2. The job refuses any ref but `main`, and any repository but this one.
 #   3. The Apple key lives in the `testflight` ENVIRONMENT, not in repository secrets, and
 #      that environment's deployment-branch policy admits `main` only. So a branch that
@@ -22,6 +25,18 @@ name: TestFlight
 # repo and billed at a multiplier on a private one. AGENTS.md, "Runner policy", records it.
 
 on:
+  # Every merge to `main` that can change the app ships a build, the way every merge ships
+  # the web app (notify-deploy-pin.yml). The whole app is under ios/: the Xcode project's
+  # only package reference is `..` (ios/), and the Swift client it compiles is the committed
+  # ios/Sources/MotetKit/Generated/Schema.swift. openapi.yaml is deliberately NOT listed:
+  # it is not a build input, and bin/ci fails any commit where it and Schema.swift disagree,
+  # so a contract change that reaches the app lands a change under ios/ in the same commit —
+  # and one that does not would upload a byte-identical app.
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/testflight.yml"
   workflow_dispatch:
     inputs:
       signing:
@@ -34,8 +49,15 @@ permissions:
   contents: read
 
 # One upload at a time: two concurrent runs would race for build numbers and profiles.
+# `cancel-in-progress: false` never kills a run that has started — it may be mid-upload,
+# and a build Apple has received but not processed is left half-done. GitHub keeps at most
+# ONE pending run per group and cancels the older pending one when a newer run arrives, so a
+# burst of merges uploads the build in flight plus the newest commit, not one per merge.
+# That is the right coalescing here: every run builds `main` at its own head, so the newest
+# commit contains everything the cancelled one would have shipped. Keyed by ref so that a
+# dispatch from a branch — which the job below refuses — cannot cancel a pending `main` run.
 concurrency:
-  group: testflight
+  group: testflight-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -67,7 +89,9 @@ jobs:
           # The web app's host, whose app-site-association file names this app. Unset, the
           # build ships the custom-scheme handoff and signs no entitlement.
           MOTET_IOS_APP_DOMAIN: ${{ vars.MOTET_IOS_APP_DOMAIN }}
-          # Unique and increasing per upload, including a re-run of the same run.
+          # Unique and increasing per upload, including a re-run of the same run. run_number
+          # is one counter per workflow, shared by push and dispatch runs.
           MOTET_BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
-          MOTET_SIGNING: ${{ inputs.signing }}
+          # A push carries no inputs, so it takes the dispatch default.
+          MOTET_SIGNING: ${{ inputs.signing || 'export' }}
         run: ios/bin/testflight upload

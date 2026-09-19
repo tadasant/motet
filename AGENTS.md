@@ -32,7 +32,8 @@ behind it. If a change seems to require an infrastructure fact in this repo, tha
 signal it belongs in the private repo instead — say so and stop rather than inlining it.
 
 Deploy workflows live in the private repo — with one exception, the TestFlight upload, which
-lives here for its free macOS runner and is fenced to `main` (see
+lives here for its free macOS runner, runs on every merge that touches `ios/`, and is
+fenced to `main` (see
 [Runner policy](#runner-policy)). CI in *this* repo runs on the shared
 self-hosted runner pool behind a fork guard, with one job on a GitHub-hosted macOS runner
 because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
@@ -882,8 +883,9 @@ the private repo for the reason the `ios` job is on a hosted runner: macOS minut
 on a public repo and billed at a multiplier on a private one. It is one of two workflows in
 this repo that hold a credential, so it is fenced four ways and **all four have to stay**:
 
-1. **`workflow_dispatch` is its only trigger.** No push and no pull request — from a fork or
-   a branch — starts it, and a fork cannot dispatch here.
+1. **A push to `main` and `workflow_dispatch` are its only triggers.** No pull request —
+   from a fork or a branch — starts it, a fork can neither push to this `main` nor dispatch
+   here, and `pull_request` / `pull_request_target` must never be added.
 2. **The job refuses any ref but `main`** and any repository but this one.
 3. **The key is an environment secret, in `testflight`, whose deployment-branch policy
    admits `main` only.** That is the fence that survives a branch editing (2) away: GitHub
@@ -907,9 +909,23 @@ distribution certificate signs at export and there is no .p12 or profile to stor
 team id. No GCP identity, no registry login, nothing about the infrastructure. The server
 the build defaults to is the environment variable `MOTET_IOS_API_BASE_URL`, so this repo
 still names no host. Creating the Apple identity, the app record and the key is invariant
-9's human half; running the workflow afterwards is not, and an agent does it with
-`gh workflow run testflight.yml --ref main`. `ios/README.md`, "Distribution", is the
-procedure.
+9's human half; running the workflow afterwards is not, and nobody has to: **every push
+to `main` that touches `ios/**` (or the workflow) uploads a build**, the way every merge
+ships the web app. Tadas asked for it on 2026-09-19 — three iOS PRs had merged and none
+reached his phone, because the only trigger was a hand-run dispatch — and that request is
+the sign-off for the trigger. `openapi.yaml` is deliberately not in the path filter: the app
+compiles the committed Swift client under `ios/`, and `bin/ci` fails a commit where the two
+disagree. A burst of merges uploads the run in flight plus the newest commit: GitHub keeps
+one pending run per concurrency group and replaces it, and a started upload is never
+cancelled. A dispatch (`gh workflow run testflight.yml --ref main`) still works, for a
+re-upload or `-f signing=archive`. `ios/README.md`, "Distribution", is the procedure.
+
+**The consequence to hold on to is ordering.** A build now reaches TestFlight minutes after
+its PR merges, while production serves whatever the private repo pins, and nothing makes a
+TestFlight build wait for that. So an iOS change that needs a new API field has to decode an
+older API — optional-with-default, as `keep_in_backlog` is — or it fails on the phone until
+production is deployed. "Ship the API first" is no longer a step anybody performs; it is a
+property the Swift client has to have.
 
 **The other is `notify-deploy-pin.yml`, and it deploys nothing.** Staging and production run
 whatever commit the private repo pins, so a merge here used to go live only when somebody
