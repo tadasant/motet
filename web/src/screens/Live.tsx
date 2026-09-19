@@ -321,6 +321,7 @@ export function Live({
    * path. Unhandled, the refusal left the pill on "connecting" with nothing playing.
    */
   const startPlayer = (el: HTMLAudioElement) => {
+    const mine = generation.current
     const played = el.play()
     if (!played) {
       setPhaseBoth('narrating')
@@ -329,7 +330,8 @@ export function Live({
     played.then(
       () => setPhaseBoth('narrating'),
       () => {
-        if (!ws.current) return
+        // A refusal that lands after a stop, or after a newer Play Live, is not this session's.
+        if (!ws.current || generation.current !== mine) return
         send({ type: 'narration_paused', spoken_through_ms: position() })
         setPhaseBoth('paused')
         push({ kind: 'event', text: 'the browser would not start the narration — press play' })
@@ -595,7 +597,7 @@ export function Live({
       void audio.resume().catch(() => undefined)
       const session = await api.startVoiceSession(episode.id, position())
       if (abandoned()) {
-        void audio.close()
+        void audio.close().catch(() => undefined)
         return
       }
       setArm(`${session.arm}${session.conversational ? '' : ' (text turns only)'}`)
@@ -604,7 +606,7 @@ export function Live({
         // Stopped or unmounted while the mic permission was pending: release what we took.
         opened.node.disconnect()
         opened.stream.getTracks().forEach((track) => track.stop())
-        void audio.close()
+        void audio.close().catch(() => undefined)
         return
       }
       ctx.current = audio

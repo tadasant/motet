@@ -1953,8 +1953,9 @@ def episode_audio(
     which an ``<audio>`` element reports as nothing more specific than "could not load" —
     and the episode screen then blamed the browser. A 410 here, with a sentence, is what
     lets the player say the audio is gone rather than broken. It costs one metadata read
-    per load, and a media element asks this route once per load; its range requests go to
-    the signed URL.
+    per request to this route: Chrome asks it once per load and sends its range requests to
+    the signed URL, and WebKit may come back to it on a seek, which then pays the read
+    beside the signing it already paid for.
     """
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     if episode is None or not episode.has_audio or episode.audio_key is None:
@@ -1977,8 +1978,8 @@ def episode_audio(
 
 
 AUDIO_GONE_DETAIL: Final = (
-    "This episode's audio is no longer in storage. It was rendered, and has since been "
-    "removed; make a new episode to hear these stories."
+    "This episode's audio is no longer in storage: it was rendered, and has since been "
+    "removed. Its stories are still in your backlog."
 )
 
 
@@ -1999,7 +2000,9 @@ def _audio_present(blobs: ObjectStore, episode_id: str, key: str) -> bool:
     return present
 
 
-_RANGE = re.compile(r"^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$")
+# Bounded, and ASCII: `int()` refuses a string of more than 4300 digits, and `\d` alone would
+# also match digits from other scripts. Eighteen is a byte offset far past any audio file.
+_RANGE = re.compile(r"^\s*bytes\s*=\s*([0-9]{0,18})\s*-\s*([0-9]{0,18})\s*$", re.ASCII)
 
 
 def _byte_range_response(data: bytes, media_type: str, range_header: str | None) -> Response:
@@ -2019,6 +2022,10 @@ def _byte_range_response(data: bytes, media_type: str, range_header: str | None)
     total = len(data)
     headers = {"Accept-Ranges": "bytes"}
     match = _RANGE.match(range_header) if range_header else None
+    if match is not None and match.group(1) and match.group(2):
+        # `last < first` is not a range at all (RFC 9110 §14.1.1): ignored, like a malformed one.
+        if int(match.group(2)) < int(match.group(1)):
+            match = None
     if match is None or (not match.group(1) and not match.group(2)):
         headers["Content-Length"] = str(total)
         return Response(content=data, media_type=media_type, headers=headers)

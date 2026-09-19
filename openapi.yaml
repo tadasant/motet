@@ -4000,8 +4000,9 @@ paths:
         \ deleted: the browser followed it into the store's 404,\nwhich an ``<audio>`` element reports\
         \ as nothing more specific than \"could not load\" \u2014\nand the episode screen then blamed\
         \ the browser. A 410 here, with a sentence, is what\nlets the player say the audio is gone rather\
-        \ than broken. It costs one metadata read\nper load, and a media element asks this route once\
-        \ per load; its range requests go to\nthe signed URL."
+        \ than broken. It costs one metadata read\nper request to this route: Chrome asks it once per\
+        \ load and sends its range requests to\nthe signed URL, and WebKit may come back to it on a seek,\
+        \ which then pays the read\nbeside the signing it already paid for."
       operationId: episode_audio_v1_episodes__episode_id__audio_get
       parameters:
       - in: path

@@ -753,6 +753,27 @@ class TestEpisodeAudio:
         assert response.status_code == 416
         assert response.headers["content-range"] == f"bytes */{size}"
 
+    @pytest.mark.parametrize("header", ["bytes=5-3", "bytes=" + "9" * 5000 + "-", "items=0-1"])
+    def test_an_invalid_range_is_ignored_not_an_error(
+        self, api: TestClient, _migrated: str, header: str
+    ) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        response = api.get(
+            f"/v1/episodes/{episode_id}/audio", params={"token": token}, headers={"Range": header}
+        )
+        assert response.status_code == 200
+        assert len(response.content) == size
+
+    def test_an_empty_suffix_is_unsatisfiable(self, api: TestClient, _migrated: str) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        response = api.get(
+            f"/v1/episodes/{episode_id}/audio",
+            params={"token": token},
+            headers={"Range": "bytes=-0"},
+        )
+        assert response.status_code == 416
+        assert response.headers["content-range"] == f"bytes */{size}"
+
     def test_a_multi_range_request_gets_the_whole_body(
         self, api: TestClient, _migrated: str
     ) -> None:

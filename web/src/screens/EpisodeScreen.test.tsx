@@ -394,6 +394,13 @@ describe('the player transport (motet#110)', () => {
     expect(screen.getByRole('alert').textContent).toBe(COULD_NOT_PLAY)
   })
 
+  it('says the feed link changed when the route refuses its token, rather than blaming the browser', async () => {
+    mockApi({ status: 401 })
+    renderScreen()
+    fireEvent.error(await findAudio())
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('feed link has changed'))
+  })
+
   it("shows the API's reason when the audio is gone from storage, not a browser fault", async () => {
     // Staging's bucket deletes audio after its retention window; the route says 410.
     mockApi({ status: 410, detail: "This episode's audio is no longer in storage." })

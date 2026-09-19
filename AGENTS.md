@@ -2040,7 +2040,9 @@ desk, with the transcript beside it.
   `<audio>` error carries no status, so on one the player asks the route itself
   (`api.audioProblem`, `redirect: 'manual'`) and shows the API's sentence, or says the
   browser could not play a file that is there. An existence check that cannot be answered
-  falls through to the redirect: it may only make a failure clearer, never cause one.
+  falls through to the redirect: it may only make a failure clearer, never cause one. It is
+  a metadata read per request to the route — once per load in Chrome, and possibly again on
+  a seek in WebKit, which may return to the route rather than the signed URL.
 - **It resumes from `listened_through_ms` and writes `PUT …/position`**, the position
   resource a syncing player wants, so listening here moves the shelf and marks stories
   read as their segments pass. It is the first client to write the position from real

@@ -236,7 +236,7 @@ export function EpisodeScreen({
 
 /** The element failed and the route did not refuse: the file is there, this browser balked. */
 export const COULD_NOT_PLAY =
-  'This browser could not play this episode\u2019s audio. The podcast feed below has the same file.'
+  'This episode\u2019s audio is there, but this browser could not load or play it just now. The podcast feed below has the same file.'
 
 /** What the speed pill steps through, in order, from 1×. */
 const SPEEDS = [1, 1.2, 1.5, 2, 0.8]

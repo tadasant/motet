@@ -611,8 +611,9 @@ export interface paths {
          *     which an ``<audio>`` element reports as nothing more specific than "could not load" —
          *     and the episode screen then blamed the browser. A 410 here, with a sentence, is what
          *     lets the player say the audio is gone rather than broken. It costs one metadata read
-         *     per load, and a media element asks this route once per load; its range requests go to
-         *     the signed URL.
+         *     per request to this route: Chrome asks it once per load and sends its range requests to
+         *     the signed URL, and WebKit may come back to it on a seek, which then pays the read
+         *     beside the signing it already paid for.
          */
         get: operations["episode_audio_v1_episodes__episode_id__audio_get"];
         put?: never;
