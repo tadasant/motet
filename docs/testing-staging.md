@@ -36,8 +36,9 @@ anywhere an agent can read.
 > a Terraform apply plus three document corrections, and it would exist only to serve
 > agents. The mint deletes the human step instead of documenting it, which is what
 > [invariant 9](../AGENTS.md#9-one-time-setup-boundaries-are-human-owned-everything-inside-them-is-not)
-> asks for. The bearer still works for everything it worked for before — the RSS feed, the
-> iOS app, a script with the value already in hand. It simply is not obtainable from here.
+> asks for. The bearer still works against the API — the RSS feed, a script with the value
+> already in hand (the iOS app stopped taking it on 2026-09-19). It simply is not obtainable
+> from here.
 
 ### Minting one
 

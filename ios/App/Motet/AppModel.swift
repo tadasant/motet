@@ -16,7 +16,7 @@ final class AppModel: ObservableObject {
     /// cache underneath it, so this is a banner rather than an error screen.
     @Published private(set) var connectionMessage: String?
     @Published var settings = PlaybackSettings()
-    /// The Google account the app is signed in as, or nil for a pasted token or none.
+    /// The Google account the app is signed in as, or nil when nobody is.
     @Published private(set) var signedInEmail: String?
     @Published private(set) var isSigningIn = false
     /// Why the last sign-in did not finish. Shown under the button, never as a modal.
@@ -27,8 +27,12 @@ final class AppModel: ObservableObject {
 
     init(environment: AppEnvironment) {
         self.environment = environment
+        // `AppEnvironment` has already reconciled the Keychain with the address.
         self.signedInEmail = environment.credentials.signedInEmail
     }
+
+    /// The gate `RootView` asks: nothing but the sign-in screen renders until this is true.
+    var isSignedIn: Bool { signedInEmail != nil }
 
     var library: MotetLibrary { environment.library }
     var controller: PlaybackController { environment.controller }
@@ -36,6 +40,9 @@ final class AppModel: ObservableObject {
     var isConfigured: Bool { environment.credentials.configuration().isConfigured }
 
     func start() async {
+        if environment.removedPastedToken {
+            signInMessage = "Motet now signs in with Google. The API token this phone held has been removed."
+        }
         await environment.activate()
         settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
         observeSnapshots()
@@ -182,16 +189,16 @@ final class AppModel: ObservableObject {
 
     // MARK: - Settings
 
-    func saveCredentials(baseURL: String, apiToken: String) async {
-        let previous = environment.credentials.configuration()
-        let token = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if signedInEmail != nil, let old = previous.apiToken, !old.isEmpty, old != token {
-            // Replacing a signed-in session: revoke it on the server rather than leave it
-            // valid for the rest of its thirty days on a phone that no longer uses it.
-            try? await MotetHTTPClient(configuration: previous).signOut()
+    /// Point the app at another server, from Settings → Advanced. A session belongs to the
+    /// server that issued it, so a real change revokes it there and signs this phone out —
+    /// which puts the sign-in screen back in front.
+    func saveServer(_ baseURL: String) async {
+        let credentials = environment.credentials
+        if signedInEmail != nil, credentials.isDifferentServer(baseURL) {
+            try? await MotetHTTPClient(configuration: credentials.configuration()).signOut()
         }
-        environment.credentials.save(baseURL: baseURL, apiToken: apiToken)
-        signedInEmail = environment.credentials.signedInEmail
+        credentials.saveServer(baseURL)
+        signedInEmail = credentials.signedInEmail
         await applyCredentialChange()
     }
 
@@ -212,7 +219,7 @@ final class AppModel: ObservableObject {
     func beginSignIn(baseURL: String, allowAppLink: Bool = true) async -> StartedSignIn? {
         signInMessage = nil
         guard let base = Self.server(baseURL) else {
-            signInMessage = "Set the server first."
+            signInMessage = "Set the server under Advanced first."
             return nil
         }
         // iOS 17.4 is where `ASWebAuthenticationSession` learned to wait for an https
@@ -265,7 +272,7 @@ final class AppModel: ObservableObject {
             guard let token = session.token else { throw NativeSignIn.Failure.noSession }
             // The server the session belongs to is saved with it, so a typed-but-unsaved URL
             // cannot leave the app holding one server's session against another.
-            environment.credentials.save(baseURL: baseURL, apiToken: token)
+            environment.credentials.saveServer(baseURL)
             environment.credentials.saveSession(token: token, email: session.email)
             signedInEmail = session.email
             await applyCredentialChange()
@@ -294,6 +301,14 @@ final class AppModel: ObservableObject {
         signInMessage = error.map(Self.describe)
     }
 
+    /// The sheet was refused, or failed before anyone could use it. Never silent: a button
+    /// that says "Signing in…" and returns to itself with nothing said is the report that led
+    /// here (2026-09-19). The detail is in the `signin` log; this is what a person can act on.
+    func signInWindowFailed() {
+        isSigningIn = false
+        signInMessage = "The sign-in window didn't open. Try again."
+    }
+
     /// Revoke the session on the server where possible, and forget it here regardless.
     func signOut() async {
         try? await MotetHTTPClient(configuration: environment.credentials.configuration()).signOut()
@@ -314,10 +329,13 @@ final class AppModel: ObservableObject {
         return error.localizedDescription
     }
 
-    func currentCredentials() -> (baseURL: String, apiToken: String) {
-        let configuration = environment.credentials.configuration()
-        return (configuration.baseURL?.absoluteString ?? "", configuration.apiToken ?? "")
-    }
+    /// The server the app talks to, and the build's own, for Settings → Advanced.
+    var serverURL: String { environment.credentials.serverURL }
+    var defaultServerURL: String? { environment.credentials.defaultServerURL }
+
+    /// Whether Advanced may save `baseURL`, and whether saving it would change anything.
+    func isValidServer(_ baseURL: String) -> Bool { environment.credentials.isValidServer(baseURL) }
+    func isDifferentServer(_ baseURL: String) -> Bool { environment.credentials.isDifferentServer(baseURL) }
 
     /// Coming back to the foreground: send whatever the walk queued, and pick playback up
     /// if the system interrupted it politely.

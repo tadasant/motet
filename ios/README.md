@@ -213,25 +213,43 @@ disagree. Small, and worth doing on its own.
 
 ## Configuration
 
-**Settings → Sign in with Google** is how the app gets its `/v1` credential. It opens the web
-sign-in in the system sign-in sheet. That returns a one-time code on a `motet://signed-in`
-link, which the app redeems with its PKCE verifier for an ordinary thirty-day session
-(AGENTS.md, "The phone signs in through the web sign-in"). The session is kept in the
-Keychain, on this device only, and **Sign out** revokes it on the server. Pasting an API
-token still works, under "Use an API token instead". No token is ever baked in, because a
-default token would be a credential in every copy of the binary.
+**Sign in with Google is the app's front door, and the only way in.** Nothing but the
+sign-in screen renders until a session exists (Tadas, 2026-09-19). It opens the web sign-in
+in the system sign-in sheet, which returns a one-time code — on the verified https link
+where the deployment serves one, else on `motet://signed-in` — and the app redeems it with
+its PKCE verifier for an ordinary thirty-day session (AGENTS.md, "The phone signs in through
+the web sign-in"). The session is kept in the Keychain, on this device only, and **Sign
+out** revokes it on the server.
+
+**There is no pasted API token any more.** It was a non-expiring, owner-equivalent
+credential on a device that can be lost; the first launch of a build without it removes
+one an earlier build stored, and says so on the sign-in screen. `MOTET_API_TOKEN` still
+works against the API — the feed, scripts — just not typed into the phone. No token is ever
+baked in either, because a default token would be a credential in every copy of the binary.
+
+**A sign-in window iOS refuses is never silent.** `ASWebAuthenticationSession` reports a
+refusal with the same `canceledLogin` code as a person pressing Cancel, so a "cancel" inside
+`NativeSignIn.refusalWindow` (one second — nobody loads Google's page and dismisses it that
+fast) is treated as a refusal: the https attempt falls back to a fresh sign-in on the scheme,
+and a scheme attempt says "The sign-in window didn't open". The detail is in the `signin`
+log category. The case that surfaced it: a build installed before the web app served its
+association file, which iOS checks at install and update time, so the https callback stays
+refused on that device until the next install.
 
 The sign-in needs the deployment's web app to exist (`MOTET_APP_BASE_URL`), because Google
 returns to the web app's registered callback. The `motet` scheme needs no `Info.plist`
 registration: the sheet watches for it itself, and nothing else in the app handles it.
 
-The server URL is typed in too, except on a TestFlight build, which arrives with it
-prefilled. `MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL`
-build setting, which is empty in this repo and in CI. The TestFlight workflow fills it from
-the `testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in
-this repo's files. The variable holds the product's public API name, which the public SPA
-already serves in its `config.js`. It is not masked, and it shows in the workflow's logs.
-Never set it to an internal address such as a `*.run.app` URL. Only an `https://` value is honoured, and a URL saved in Settings always wins.
+The server URL is under **Advanced**, on the sign-in screen and in Settings, and is rarely
+touched: a TestFlight build arrives with it prefilled, and other builds ask for it there.
+Changing it signs the phone out, because a session belongs to the server that issued it.
+`MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL` build
+setting, which is empty in this repo and in CI. The TestFlight workflow fills it from the
+`testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in this
+repo's files. The variable holds the product's public API name, which the public SPA already
+serves in its `config.js`. It is not masked, and it shows in the workflow's logs. Never set
+it to an internal address such as a `*.run.app` URL. Only an `https://` value is honoured,
+and a URL saved in Settings always wins.
 
 ## Distribution: TestFlight
 

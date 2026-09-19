@@ -39,6 +39,30 @@ public enum NativeSignIn {
         }
     }
 
+    /// How a sign-in sheet that reported "cancelled" actually ended.
+    ///
+    /// `ASWebAuthenticationSession` uses one error code, `canceledLogin`, both for a person
+    /// dismissing the sheet and for the system refusing to show it — which it does for an
+    /// https callback on a domain this device has not verified the app's association with,
+    /// among other reasons. Treating both as a person's Cancel is what made "Sign in with
+    /// Google" flash "Signing in…" and return to itself with nothing said (2026-09-19): a
+    /// refusal is the one outcome that must never be silent.
+    public enum SheetEnding: Equatable, Sendable {
+        /// Somebody saw the sign-in page and dismissed it. Say nothing.
+        case dismissedByPerson
+        /// The system ended it before anyone could have used it. Fall back, or say so.
+        case refusedBeforeShown
+    }
+
+    /// Below this, a "cancelled" sheet was not cancelled by a person: nobody loads Google's
+    /// page and presses Cancel inside a second, and a refusal arrives in milliseconds.
+    public static let refusalWindow: Duration = .seconds(1)
+
+    /// Which of the two a `canceledLogin` that arrived `elapsed` after opening was.
+    public static func classifyCancellation(after elapsed: Duration) -> SheetEnding {
+        elapsed < refusalWindow ? .refusedBeforeShown : .dismissedByPerson
+    }
+
     /// The one-time code out of the link the web app navigated to.
     ///
     /// Two shapes are the API's: `motet://signed-in?code=…`, and — where the deployment

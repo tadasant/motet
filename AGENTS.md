@@ -2586,8 +2586,9 @@ Four things about it are load-bearing:
   and the CORS policy is untouched and still does not allow credentials. The trade is that
   the token sits in `localStorage` rather than in an `HttpOnly` cookie — which is exactly
   where the shared secret already sat, except this one expires and can be revoked.
-- **`MOTET_API_TOKEN` still works, everywhere it worked before.** The RSS feed, the iOS
-  app, any script. It stopped being something a *human types into a browser*; it did not
+- **`MOTET_API_TOKEN` still works against the API.** The RSS feed, any script. The iOS
+  app stopped taking it on 2026-09-19 (see "The phone signs in through the web
+  sign-in"). It stopped being something a *human types into a browser*; it did not
   stop being accepted.
 
 Sessions are **rows, not signed tokens**, and only their SHA-256 is stored. Rows are what
@@ -2752,9 +2753,15 @@ rather than falling back. `api/tests/test_native_sign_in.py` pins it from both s
 **An https callback that is refused still falls back.** The entitlement can be signed in
 and not yet in force — Apple's CDN has not fetched the file, the capability is not ticked,
 an export dropped it — and the refusal happens when the sheet *opens*, before anything has
-happened. `SettingsView` starts one fresh sign-in on the scheme rather than leaving a dead
-Settings screen; it has to be a fresh one, because the server has already committed this
-one to the https shape.
+happened. `SignInView` starts one fresh sign-in on the scheme rather than leaving a dead
+sign-in screen; it has to be a fresh one, because the server has already committed this
+one to the https shape. **iOS reports that refusal with `canceledLogin`, the same code as a
+person pressing Cancel**, and the first build treated it as one — silently, with no
+fallback, so "Sign in with Google" flashed "Signing in…" and returned to itself
+(2026-09-19). `NativeSignIn.classifyCancellation` tells them apart by time: a "cancel"
+inside a second is a refusal, because nobody loads Google's page and dismisses it that fast.
+The case that surfaced it was a build installed before the web app served its association
+file; iOS checks the association at install and update, so the device kept refusing.
 
 **The web container writes the association file at start** from `MOTET_IOS_APP_ID`
 (`web/docker-entrypoint.d/`), beside the `config.js` rewrite and for the same reason: one
@@ -2789,7 +2796,9 @@ real sign-in on a phone is the evidence.
 What this adds under invariant 12: two routes on the existing API, one table used the way
 `oauth_states` and `auth_sessions` are already used, and a nullable column on `oauth_states`.
 It adds no vendor, no second OAuth client, and nothing in the private infrastructure repo.
-`MOTET_API_TOKEN` still works in the app, behind "Use an API token instead". As with every
+The app no longer takes a pasted `MOTET_API_TOKEN` (Tadas, 2026-09-19): sign-in is its
+front door and the only way in, and a launch removes a token an earlier build stored. The
+API still accepts the token everywhere else. As with every
 change to sign-in, a green CI run proves nothing about the real consent screen, so a human
 signs in on a phone once after this ships.
 
