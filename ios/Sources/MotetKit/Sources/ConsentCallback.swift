@@ -26,9 +26,9 @@ import Foundation
 /// verification.
 ///
 /// **A code in a custom-scheme URL is safe here, where a sign-in's needed PKCE.** Another
-/// app may register `motet`, but finishing a consent needs the Motet session of the person
-/// who began it — the API checks the state row's user — and the PKCE verifier never leaves
-/// the API. A code taken by another app is worth nothing to it.
+/// app may register `motet`, but finishing a consent needs an allowlisted Motet session, and
+/// the code is redeemed with a PKCE verifier (and, for Google, a client secret) that never
+/// leaves the API. A code taken by another app is worth nothing to it.
 public enum ConsentCallback {
     /// The path the web app serves the callback on. Keep in step with `CALLBACK_PATH` in
     /// `web/src/oauth.ts` and `motet_api`: it is the registered string, and it must not drift.

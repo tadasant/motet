@@ -2461,8 +2461,8 @@ not `127.0.0.1`.
 Sources tab connects a mailbox, re-consents for label sync and authorizes an MCP server by
 passing the web app's `/oauth/callback` as the redirect URI and opening the consent in the
 system sign-in sheet, told to finish on `motet://consent`. The callback page, loaded inside
-the sheet, remembers no state in its empty sessionStorage — which is how it knows the
-consent is the app's (`consentBegunElsewhere`) — so it exchanges nothing and forwards
+the sheet on an iPhone, remembers no state in its empty sessionStorage — which is how it
+knows the consent is the app's (`consentBegunElsewhere`) — so it exchanges nothing and forwards
 Google's query to that link (`AppConsentHandoff`); the app finishes the consent at the same
 API route with its own session. A tab that remembers a *different* state keeps the old
 refusal, and a person who really did begin it in another tab can press "Finish here
@@ -2474,8 +2474,8 @@ phone** (Tadas, 2026-09-19: "the iOS app can't do it at all"): iOS honours one o
 only after verifying the `webcredentials` association, and only if it catches Google's
 cross-site redirect — and where it did not, the page loaded in a sheet with no Motet session
 and the consent died on a 401 the app never saw. The custom scheme that sign-in declined is
-safe here because **a consent's code is worthless without the Motet session of the person
-who began it** (the API checks the state row's user) and a PKCE verifier that never leaves
+safe here because **a consent's code is worthless without an allowlisted Motet session**
+to finish it with and a PKCE verifier (and, for Google, a client secret) that never leaves
 the API; sign-in's code *becomes* a session, which is why it needed more. The invariant-12
 reading: a second use of the app's existing scheme and one branch on an existing page — no
 route, table, vendor or registration.
@@ -2605,8 +2605,10 @@ not being a job, stated rather than discovered.
 ### The Sources screen is a catalog, and a source row says what it did
 
 `web/src/screens/Sources.tsx`, `web/src/screens/sources/` (motet#90). A card per
-integration — Gmail, Paste, and two honestly disabled "Coming soon" — and one panel under
-the grid for the account(s) behind the one you pick. **The catalog is static**, because
+integration — Gmail, Paste, and two honestly disabled "Coming soon" — and one panel for
+the account(s) behind the one you pick, opened in the grid directly under its card and
+scrolled into view (it used to follow the whole grid, which put the connect form off-screen
+on a phone, 2026-09-19). **The catalog is static**, because
 `GET /v1/sources` lists *accounts* and something not yet connected has no row to render.
 
 The last sync's result, the filter and the first-sync window are motet#94's fields and are

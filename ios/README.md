@@ -280,8 +280,8 @@ sheet — which holds no Motet session, by design — and the consent died there
 app never heard about. A custom scheme is caught on every iOS, with no verification.
 
 **The custom scheme is safe for a consent in a way it was not for sign-in.** Any app may
-register `motet`, but a consent's code is finished with the Motet session of the person who
-began it (the API checks the state row's user) and a PKCE verifier that never leaves the
+register `motet`, but a consent's code is finished only with an allowlisted Motet session,
+and redeemed with a PKCE verifier (and, for Google, a client secret) that never leaves the
 API — so a code another app intercepted is worth nothing to it.
 
 It needs `MOTET_IOS_APP_DOMAIN` signed into the build (the web app whose callback page does

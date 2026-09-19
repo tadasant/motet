@@ -153,9 +153,9 @@ export default function App() {
   const authorizingMcp =
     callback !== null && callback.kind !== 'empty' && isMcpState(callback.state)
   // A mailbox or connector consent this tab did not begin: the iOS app's, finishing in the
-  // system sign-in sheet, which has an empty sessionStorage. It goes back to the app rather
-  // than being exchanged here (`AppConsentHandoff`). Decided once, at boot, because the
-  // callback screen that would otherwise run takes the remembered state.
+  // system sign-in sheet (`consentBegunElsewhere`). It goes back to the app rather than
+  // being exchanged here (`AppConsentHandoff`). Decided once, at boot, because the callback
+  // screen that would otherwise run takes the remembered state.
   const [consentForApp, setConsentForApp] = useState(
     () =>
       callback !== null &&
@@ -466,7 +466,8 @@ export default function App() {
             so it gets a reading column. */}
         <main className={`door-main${callback ? ' narrow' : ''}`}>
           {errorLine}
-          {/* The MCP branch first: its state is neither a sign-in's nor a mailbox's, and
+          {/* The app's handoff first: exchanging its code here would spend it without the
+              app's session. Then MCP: its state is neither a sign-in's nor a mailbox's, and
               sending it to either route would burn it. */}
           {callback && callback.kind !== 'empty' && consentForApp ? (
             <AppConsentHandoff callback={callback} onFinishHere={() => setConsentForApp(false)} />

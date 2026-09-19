@@ -236,21 +236,35 @@ export function stateMatches(expected: string, received: string): boolean {
 }
 
 /**
- * Whether this tab remembers no authorization at all — read without forgetting anything,
- * because the callback screen that runs next still takes the state.
+ * Whether a mailbox or connector consent landing here was begun by the iOS app rather than
+ * by this tab — read without forgetting anything, because the callback screen that runs
+ * next still takes the state.
  *
- * `true` is the signal that a mailbox or connector consent was begun somewhere else, and in
- * practice that somewhere is the iOS app: it opens Google in the system sign-in sheet,
- * which is a fresh browsing context with nothing in sessionStorage. See
- * `appConsentHandoffUrl`. A tab that remembers a *different* state began something itself,
- * and keeps the refusal `stateMatches` gives it.
+ * Two things have to hold. This is an iPhone or iPad, since the app's system sign-in sheet
+ * is the only place such a consent is begun somewhere other than a browser tab; a desktop
+ * browser that lost its storage keeps exactly the exchange it always made. And this tab
+ * remembers no state at all: the sheet is a fresh browsing context with an empty
+ * sessionStorage, while a tab that remembers a *different* state began something itself
+ * and keeps the refusal `stateMatches` gives it. Storage that throws answers `false` for
+ * the same reason — the sheet's storage works, so a browser whose storage does not is not
+ * the sheet. See `appConsentHandoffUrl`.
  */
-export function consentBegunElsewhere(): boolean {
+export function consentBegunElsewhere(userAgent: string = window.navigator.userAgent): boolean {
+  if (!isAppleMobile(userAgent)) return false
   try {
     return !window.sessionStorage.getItem(STATE_STORAGE_KEY)
   } catch {
-    return true
+    return false
   }
+}
+
+/**
+ * iPhone, iPod or iPad. iPadOS asks for the desktop site by default and says "Macintosh",
+ * so an iPad is told apart from a Mac by having a touch screen.
+ */
+function isAppleMobile(userAgent: string): boolean {
+  if (/iPhone|iPad|iPod/.test(userAgent)) return true
+  return /Macintosh/.test(userAgent) && (window.navigator.maxTouchPoints ?? 0) > 1
 }
 
 /**
@@ -265,9 +279,10 @@ export function consentBegunElsewhere(): boolean {
  *
  * **A code in a custom-scheme URL is safe to hand over here, where a sign-in's was not.**
  * Another app can register `motet`, but finishing a consent is `POST
- * /v1/sources/callback` (or the connectors' route) with the Motet session of the person
- * who started it — the API checks the state row's user — and the PKCE verifier never
- * leaves the API. An intercepted code is therefore worth nothing to the app that took it.
+ * /v1/sources/callback` (or the connectors' route), which needs an allowlisted Motet
+ * session, and the code is redeemed with a PKCE verifier (and, for Google, a client secret)
+ * that never leaves the API. An intercepted code is therefore worth nothing to the app that
+ * took it. Sign-in's code *becomes* a session, which is why it needed more.
  *
  * Keep the scheme and host in step with `ConsentCallback` in the iOS app's MotetKit.
  */

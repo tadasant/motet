@@ -162,7 +162,8 @@ export function Sources({
   useEffect(() => {
     if (!selected || !scrollToPanel.current) return
     scrollToPanel.current = false
-    panelRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    panelRef.current?.scrollIntoView?.({ behavior: still ? 'auto' : 'smooth', block: 'start' })
   }, [selected])
 
   return (
