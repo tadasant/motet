@@ -225,21 +225,22 @@ final class ConsentCallbackTests: XCTestCase {
     }
 
     func testAGrantedConsentCarriesItsCodeStateAndIssuer() throws {
-        let url = URL(string: "https://app.example.test/oauth/callback?state=s1&code=c1&scope=x&iss=https%3A%2F%2Fas.example")!
+        // What the web app's callback page hands back (`appConsentHandoffUrl`).
+        let url = URL(string: "motet://consent?code=c1&state=s1&iss=https%3A%2F%2Fas.example")!
         XCTAssertEqual(
-            try ConsentCallback.outcome(from: url, appDomain: domain, expectedState: "s1"),
+            try ConsentCallback.outcome(from: url, expectedState: "s1"),
             .granted(code: "c1", state: "s1", iss: "https://as.example")
         )
-        let google = URL(string: "https://app.example.test/oauth/callback/?code=c2&state=s2")!
+        let google = URL(string: "motet://consent?code=c%2F2&state=s2")!
         XCTAssertEqual(
-            try ConsentCallback.outcome(from: google, appDomain: domain, expectedState: "s2"),
-            .granted(code: "c2", state: "s2", iss: nil)
+            try ConsentCallback.outcome(from: google, expectedState: "s2"),
+            .granted(code: "c/2", state: "s2", iss: nil)
         )
     }
 
     func testCancelOnGooglesPageIsAnAnswerNotAFailure() throws {
-        let url = URL(string: "https://app.example.test/oauth/callback?error=access_denied&state=s1")!
-        let outcome = try ConsentCallback.outcome(from: url, appDomain: domain, expectedState: "s1")
+        let url = URL(string: "motet://consent?error=access_denied&state=s1")!
+        let outcome = try ConsentCallback.outcome(from: url, expectedState: "s1")
         XCTAssertEqual(outcome, .denied(error: "access_denied", description: ""))
         XCTAssertEqual(
             ConsentCallback.describeDenial(error: "access_denied", description: "", what: "your mailbox"),
@@ -248,27 +249,28 @@ final class ConsentCallbackTests: XCTestCase {
     }
 
     func testACallbackForAnotherAttemptIsRefusedBeforeItIsSpent() {
-        let url = URL(string: "https://app.example.test/oauth/callback?code=c&state=other")!
-        XCTAssertThrowsError(try ConsentCallback.outcome(from: url, appDomain: domain, expectedState: "mine")) {
+        let url = URL(string: "motet://consent?code=c&state=other")!
+        XCTAssertThrowsError(try ConsentCallback.outcome(from: url, expectedState: "mine")) {
             XCTAssertEqual($0 as? ConsentCallback.Failure, .stateMismatch)
         }
     }
 
-    func testOnlyTheWebAppsCallbackIsAccepted() {
+    func testOnlyTheWebAppsHandoffIsAccepted() {
+        XCTAssertEqual(ConsentCallback.callbackScheme, "motet")
+        XCTAssertEqual(ConsentCallback.callbackHost, "consent")
         for raw in [
-            "https://elsewhere.example/oauth/callback?code=c&state=s",
-            "http://app.example.test/oauth/callback?code=c&state=s",
-            "https://app.example.test/app/signed-in?code=c&state=s",
-            "motet://oauth/callback?code=c&state=s",
+            // Google's redirect itself: the sheet no longer waits for it.
+            "https://app.example.test/oauth/callback?code=c&state=s",
+            // Sign-in's handoff shares the scheme; the host tells them apart.
+            "motet://signed-in?code=c&state=s",
+            "other://consent?code=c&state=s",
         ] {
             XCTAssertThrowsError(
-                try ConsentCallback.outcome(from: URL(string: raw)!, appDomain: domain, expectedState: "s"), raw
+                try ConsentCallback.outcome(from: URL(string: raw)!, expectedState: "s"), raw
             ) { XCTAssertEqual($0 as? ConsentCallback.Failure, .notTheCallback) }
         }
         XCTAssertThrowsError(
-            try ConsentCallback.outcome(
-                from: URL(string: "https://app.example.test/oauth/callback")!, appDomain: domain, expectedState: "s"
-            )
+            try ConsentCallback.outcome(from: URL(string: "motet://consent")!, expectedState: "s")
         ) { XCTAssertEqual($0 as? ConsentCallback.Failure, .empty) }
     }
 }
@@ -438,7 +440,7 @@ final class ConsentFlowTests: XCTestCase {
         _ api: FakeSourcesAPI, _ presentation: ConsentFlow.Presentation
     ) async -> ConsentFlow.Outcome {
         await ConsentFlow.run(
-            api: api, appDomain: domain, what: "your mailbox",
+            api: api, what: "your mailbox",
             start: { api in
                 let started = try await api.connectSource(name: "Mail", query: nil, redirectURI: "https://app.example.test/oauth/callback")
                 return .init(url: started.authorizationUrl, state: started.state, createdSourceId: started.sourceId)
@@ -453,7 +455,7 @@ final class ConsentFlowTests: XCTestCase {
 
     func testAGrantedConsentFinishesAtTheAPIWithItsCode() async {
         let api = FakeSourcesAPI()
-        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?code=c1&state=s1")!))
+        let outcome = await connect(api, .callback(URL(string: "motet://consent?code=c1&state=s1")!))
         XCTAssertEqual(outcome, .finished("connected"))
         let completed = await api.completed
         XCTAssertEqual(completed, ["c1:s1"])
@@ -477,13 +479,13 @@ final class ConsentFlowTests: XCTestCase {
 
     func testCancelOnTheProvidersPageIsSaidAsAnAnswer() async {
         let api = FakeSourcesAPI()
-        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?error=access_denied&state=s1")!))
+        let outcome = await connect(api, .callback(URL(string: "motet://consent?error=access_denied&state=s1")!))
         XCTAssertEqual(outcome, .notFinished("You didn’t grant access to your mailbox. Nothing was changed."))
     }
 
     func testACallbackForAnotherAttemptIsNeverSpent() async {
         let api = FakeSourcesAPI()
-        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?code=c&state=other")!))
+        let outcome = await connect(api, .callback(URL(string: "motet://consent?code=c&state=other")!))
         XCTAssertEqual(outcome, .notFinished(ConsentCallback.Failure.stateMismatch.description))
         let completed = await api.completed
         XCTAssertTrue(completed.isEmpty)
@@ -492,7 +494,7 @@ final class ConsentFlowTests: XCTestCase {
     func testAFinishTheAPIRefusedIsSaidInItsOwnWords() async {
         let api = FakeSourcesAPI()
         await api.setFinishFailure(.http(status: 400, detail: "The provider returned no refresh token."))
-        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?code=c1&state=s1")!))
+        let outcome = await connect(api, .callback(URL(string: "motet://consent?code=c1&state=s1")!))
         XCTAssertEqual(outcome, .notFinished("The provider returned no refresh token."))
     }
 

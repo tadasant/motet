@@ -575,6 +575,41 @@ describe('an abandoned consent', () => {
 })
 
 describe('connecting a mailbox', () => {
+  it('opens the connect form right under the Gmail card and brings it into view', async () => {
+    // Tadas, 2026-09-19: "Web app just toggles with 'close' and 'connect'." The panel was
+    // rendered after the whole grid, so on a phone it opened below three more cards and
+    // nothing on screen changed but the button's label. An earlier attempt that never
+    // finished is the realistic state to be in by then.
+    mockApi({ '/v1/sources': [PASTE_SOURCE, PENDING_GMAIL] })
+    const scrolled: Element[] = []
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this)
+    }
+    try {
+      render(<Sources navigate={vi.fn()} now={NOW} />)
+      await screen.findByRole('form', { name: 'Connect Gmail' })
+      // The automatic open on first load does not move the page.
+      expect(scrolled).toEqual([])
+
+      const gmail = card('Gmail')
+      fireEvent.click(within(gmail).getByRole('button', { name: 'Close' }))
+      expect(screen.queryByRole('region', { name: 'Gmail details' })).toBeNull()
+      fireEvent.click(within(gmail).getByRole('button', { name: 'Connect' }))
+
+      const panel = screen.getByRole('region', { name: 'Gmail details' })
+      expect(gmail.nextElementSibling).toBe(panel)
+      expect(scrolled).toEqual([panel])
+      // With nothing connected the form is the thing to do, so it comes before the
+      // abandoned attempt's detail rather than a screen and a half below it.
+      const form = within(panel).getByRole('form', { name: 'Connect Gmail' })
+      const attempt = within(panel).getByRole('list')
+      expect(form.compareDocumentPosition(attempt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
+
   it('starts consent with the redirect URI this origin will come back on', async () => {
     const calls = mockApi({
       '/v1/sources/connect': {

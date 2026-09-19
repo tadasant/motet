@@ -8,22 +8,37 @@ import Foundation
 /// `/oauth/callback` (AGENTS.md, "Gmail is the seam to the mailbox"). Registering a second
 /// one is a human step under invariant 9, and an iOS-type client would be a second OAuth
 /// client besides. So the app asks for that same web address and opens the consent in the
-/// system sign-in sheet, told to finish on an **https callback for the web app's own host
-/// and path** — the shared-web-credentials association the phone's sign-in already relies
-/// on ("The handoff comes back on a verified https link"). iOS closes the sheet the moment
-/// Google redirects there and hands the URL to the app, *before the page loads*, so the SPA
-/// never sees the code and the app finishes the consent with its own session, at the same
-/// route the SPA would have called.
+/// system sign-in sheet.
 ///
-/// Where that association is not in force — a build with no `MotetAppLinkDomain`, an iOS
-/// older than 17.4, or a device that has not verified the domain yet — there is no way for
-/// the consent to come back to the app, and the screen says so and offers the web app
-/// instead. A custom-scheme redirect would need a new registration on Google's side and
-/// Google refuses custom schemes on a web client anyway.
+/// **The sheet waits for `motet://consent`, not for Google's redirect.** Google's redirect
+/// loads the web app's callback page inside the sheet; that page sees a consent its own tab
+/// did not begin (the sheet's storage is empty) and hands exactly what Google sent to
+/// `motet://consent`, where the sheet closes and the app finishes the consent with its own
+/// session, at the route the SPA would have called (`web/src/oauth.ts`,
+/// `appConsentHandoffUrl`).
+///
+/// The first version waited for an **https** callback on the web app's host and path
+/// instead, which iOS honours only on 17.4 and later, only once the device has verified
+/// the `webcredentials` association, and only if it catches Google's cross-site redirect.
+/// When any of that did not hold, the web app loaded in the sheet with no session and the
+/// consent failed there, where the app could not see it — "the iOS app can't do it at all"
+/// (2026-09-19). A custom scheme is the one callback every iOS version catches with no
+/// verification.
+///
+/// **A code in a custom-scheme URL is safe here, where a sign-in's needed PKCE.** Another
+/// app may register `motet`, but finishing a consent needs the Motet session of the person
+/// who began it — the API checks the state row's user — and the PKCE verifier never leaves
+/// the API. A code taken by another app is worth nothing to it.
 public enum ConsentCallback {
     /// The path the web app serves the callback on. Keep in step with `CALLBACK_PATH` in
     /// `web/src/oauth.ts` and `motet_api`: it is the registered string, and it must not drift.
     public static let callbackPath = "/oauth/callback"
+
+    /// Where the web app's callback page hands a consent back to the app. Keep in step with
+    /// `APP_CONSENT_URL` in `web/src/oauth.ts`. The scheme is sign-in's (`NativeSignIn`);
+    /// the host tells the two apart.
+    public static let callbackScheme = NativeSignIn.callbackScheme
+    public static let callbackHost = "consent"
 
     /// The redirect URI to hand the API: the web app's registered callback.
     ///
@@ -73,18 +88,14 @@ public enum ConsentCallback {
         }
     }
 
-    /// Read the callback URL the sheet returned.
+    /// Read the callback URL the sheet returned: `motet://consent?…`, carrying what Google
+    /// put on the web app's callback page.
     ///
     /// `expectedState` is the state the API minted for this consent. The host is checked as
-    /// well as the path: in practice the system hands back only the host the sheet was told
-    /// to wait for, but this is a public entry point and `NativeSignIn` checks its host too.
-    public static func outcome(
-        from url: URL, appDomain: String?, expectedState: String
-    ) throws -> Outcome {
-        guard let redirect = redirectURI(appDomain: appDomain).flatMap(URL.init(string:)),
-              url.scheme?.lowercased() == "https",
-              url.host?.lowercased() == redirect.host,
-              url.path.trimmingTrailingSlashes == callbackPath,
+    /// well as the scheme, because sign-in's `motet://signed-in` shares the scheme.
+    public static func outcome(from url: URL, expectedState: String) throws -> Outcome {
+        guard url.scheme?.lowercased() == callbackScheme,
+              url.host?.lowercased() == callbackHost,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { throw Failure.notTheCallback }
         let items = components.queryItems ?? []
@@ -108,13 +119,5 @@ public enum ConsentCallback {
         }
         let detail = description.isEmpty ? error : "\(error): \(description)"
         return "The provider refused (\(detail)). Nothing was changed."
-    }
-}
-
-extension String {
-    fileprivate var trimmingTrailingSlashes: String {
-        var copy = self
-        while copy.count > 1, copy.hasSuffix("/") { copy.removeLast() }
-        return copy
     }
 }

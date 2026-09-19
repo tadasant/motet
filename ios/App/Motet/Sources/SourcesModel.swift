@@ -29,10 +29,11 @@ final class SourcesModel: ObservableObject {
     private var api: any SourcesAPI { app.sourcesAPI }
     var appLinkDomain: String? { app.appLinkDomain }
     var webSourcesURL: URL? { ConsentCallback.webSourcesURL(appDomain: appLinkDomain) }
-    /// Whether a consent can come back to this phone. Besides the build and the iOS being
-    /// able to catch it, the server has to be the build's own: `appLinkDomain` is the web
-    /// app of the deployment this build was made for, and a server changed under Advanced
-    /// has a different web app, whose registered callback this build cannot know.
+    /// Whether a consent can come back to this phone: the build has to know its web app, whose
+    /// callback page hands the consent back (`ConsentCallback`), and the server has to be the
+    /// build's own — `appLinkDomain` is the web app of the deployment this build was made
+    /// for, and a server changed under Advanced has a different web app, whose registered
+    /// callback this build cannot know.
     var canConsentHere: Bool {
         ConsentSheet.isAvailable(appDomain: appLinkDomain) && app.isOnBuildServer
     }
@@ -200,7 +201,7 @@ final class SourcesModel: ObservableObject {
         consentNeedsWebApp = false
         defer { busy = false }
         let outcome = await ConsentFlow.run(
-            api: api, appDomain: appLinkDomain, what: what,
+            api: api, what: what,
             start: start, present: { await present($0) }, finish: finish
         )
         await refresh()

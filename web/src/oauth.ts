@@ -234,3 +234,55 @@ export function takeState(): string {
 export function stateMatches(expected: string, received: string): boolean {
   return expected === '' || expected === received
 }
+
+/**
+ * Whether this tab remembers no authorization at all — read without forgetting anything,
+ * because the callback screen that runs next still takes the state.
+ *
+ * `true` is the signal that a mailbox or connector consent was begun somewhere else, and in
+ * practice that somewhere is the iOS app: it opens Google in the system sign-in sheet,
+ * which is a fresh browsing context with nothing in sessionStorage. See
+ * `appConsentHandoffUrl`. A tab that remembers a *different* state began something itself,
+ * and keeps the refusal `stateMatches` gives it.
+ */
+export function consentBegunElsewhere(): boolean {
+  try {
+    return !window.sessionStorage.getItem(STATE_STORAGE_KEY)
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Where a consent the iOS app began is handed back to it: `motet://consent`, carrying
+ * exactly what Google put on this page.
+ *
+ * Google returns every consent to this web page — the one redirect URI registered on the
+ * OAuth client — and the app's sheet waits for this custom-scheme link rather than for
+ * Google's redirect itself. A custom scheme is the callback every iOS version catches
+ * with no associated-domain verification, which is what the https callback the app first
+ * used depended on, and what nobody could see failing on a phone (2026-09-19).
+ *
+ * **A code in a custom-scheme URL is safe to hand over here, where a sign-in's was not.**
+ * Another app can register `motet`, but finishing a consent is `POST
+ * /v1/sources/callback` (or the connectors' route) with the Motet session of the person
+ * who started it — the API checks the state row's user — and the PKCE verifier never
+ * leaves the API. An intercepted code is therefore worth nothing to the app that took it.
+ *
+ * Keep the scheme and host in step with `ConsentCallback` in the iOS app's MotetKit.
+ */
+export const APP_CONSENT_URL = 'motet://consent'
+
+export function appConsentHandoffUrl(callback: Exclude<OAuthCallback, { kind: 'empty' }>): string {
+  const params = new URLSearchParams()
+  if (callback.kind === 'denied') {
+    params.set('error', callback.error)
+    if (callback.description) params.set('error_description', callback.description)
+    params.set('state', callback.state)
+  } else {
+    params.set('code', callback.code)
+    params.set('state', callback.state)
+    if (callback.iss) params.set('iss', callback.iss)
+  }
+  return `${APP_CONSENT_URL}?${params.toString()}`
+}

@@ -1,7 +1,7 @@
 // One card in the integrations catalog: icon, name, what it pulls in, a status pill and
 // a single primary action.
 //
-// The card is a summary and the panel under the grid is the detail, so a card never
+// The card is a summary and the panel it opens beneath it is the detail, so a card never
 // carries a form or a fact list of its own — it says how many accounts are behind it and
 // hands off. The one exception to "one action" is deliberate: a card that is *selected*
 // changes its label to "Close", because a Manage button that keeps reading "Manage" while

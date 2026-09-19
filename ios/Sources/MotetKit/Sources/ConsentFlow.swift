@@ -45,7 +45,6 @@ public enum ConsentFlow {
     public static func run(
         isolation: isolated (any Actor)? = #isolation,
         api: any SourcesAPI,
-        appDomain: String?,
         what: String,
         start: (any SourcesAPI) async throws -> Started,
         present: (URL) async -> Presentation,
@@ -72,7 +71,7 @@ public enum ConsentFlow {
             return .needsWebApp
         case .callback(let callback):
             do {
-                switch try ConsentCallback.outcome(from: callback, appDomain: appDomain, expectedState: started.state) {
+                switch try ConsentCallback.outcome(from: callback, expectedState: started.state) {
                 case .denied(let error, let description):
                     return .notFinished(ConsentCallback.describeDenial(error: error, description: description, what: what))
                 case .granted(let code, let state, let iss):
