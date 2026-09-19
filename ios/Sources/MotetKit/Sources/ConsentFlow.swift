@@ -97,6 +97,6 @@ public enum ConsentFlow {
             }
         }
         if let error = error as? ConsentCallback.Failure { return error.description }
-        return String(describing: error)
+        return error.localizedDescription
     }
 }
