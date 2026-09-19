@@ -4,15 +4,17 @@
 // The live counts are derived — `/v1/source-items/held` and `/v1/ingestion`, each by
 // `source_id` (`status.ts`, `countsFor`). The rest is read off the source row itself: the
 // last sync's result, the filter and the first-sync window (motet#94), and the all-time
-// totals.
+// totals. A sync in flight is `sync_progress`, which the API assembles from the worker's
+// running totals and the job queue; the screen re-fetches while one is in flight
+// (`Sources.tsx`), so this panel only renders what it is handed.
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
-import { ApiError, type ProcessingStatus, type Source, api } from '../../api/client'
+import { ApiError, type Source, api } from '../../api/client'
 import { LabelSync } from '../LabelSync'
-import { workerState } from '../Processing'
 import { DEFAULT_QUERY } from './ConnectGmail'
 import { StatusPill } from './IntegrationCard'
+import { SyncProgress } from './SyncProgress'
 import {
   type SourceCounts,
   describeLastSync,
@@ -20,19 +22,11 @@ import {
   isPollable,
   relativeTime,
   rowStatus,
+  syncInFlight,
 } from './status'
 
-/** How long "Sync now" watches for the poll to land before saying it is still queued. */
-const SYNC_WATCH_MS = 120_000
-const SYNC_POLL_MS = 2_000
-
-type Sync =
-  | { kind: 'idle' }
-  /** The poll is enqueued; `before` is the `lastSyncedAt` it has to move past. */
-  | { kind: 'queued'; before: string | null; startedAt: number }
-  | { kind: 'done'; at: string; queued: number }
-  | { kind: 'slow' }
-  | { kind: 'error'; message: string }
+/** "Sync now" itself: the request, not the sync. The sync is `source.sync_progress`. */
+type Sync = { kind: 'idle' } | { kind: 'requesting' } | { kind: 'error'; message: string }
 
 type Disconnect = { kind: 'idle' } | { kind: 'confirm' } | { kind: 'busy' } | { kind: 'error'; message: string }
 
@@ -40,22 +34,19 @@ type Remove = { kind: 'idle' } | { kind: 'busy' } | { kind: 'error'; message: st
 
 /**
  * When the last sync ran, for display: `last_sync.at`, or `last_polled_at` for a row polled
- * before the API recorded a result. Not what "Sync now" watches — see `syncedAt` below.
+ * before the API recorded a result.
  */
 const lastSyncedAt = (source: Source): string | null => source.last_sync?.at ?? source.last_polled_at
 
 export function SourceDetail({
   source,
   counts,
-  processing,
   onRefresh,
   onGoToBacklog,
   now = Date.now(),
 }: {
   source: Source
   counts: SourceCounts
-  /** The worker heartbeat, so "queued" can say whether anything will pick it up. */
-  processing: ProcessingStatus | null
   /** Re-fetch everything this panel is derived from. Resolves when the fetch settles. */
   onRefresh: () => Promise<void>
   onGoToBacklog: () => void
@@ -66,43 +57,18 @@ export function SourceDetail({
   const [disconnect, setDisconnect] = useState<Disconnect>({ kind: 'idle' })
   const [remove, setRemove] = useState<Remove>({ kind: 'idle' })
   const status = rowStatus(source)
-  // What "Sync now" watches: only `last_sync.at`, which a poll writes and nothing else
-  // does. `last_polled_at` also moves when extraction skips a message, so watching it
-  // would call a skip a sync.
-  const syncedAt = source.last_sync?.at ?? null
   const shownSyncAt = lastSyncedAt(source)
+  const progress = source.sync_progress ?? null
 
-  // The poll route enqueues and answers at once; the sync has *run* when the row's last
-  // sync time moves. So a queued sync re-fetches the sources list on an interval until it
-  // does, and gives up on the watch — not on the sync — after a bound. An interval rather
-  // than a timeout re-armed by a change: a re-fetch that comes back unchanged changes
-  // nothing, so a watch that waited for a change to schedule the next one stopped after it.
-  useEffect(() => {
-    if (sync.kind !== 'queued') return
-    const timer = window.setInterval(() => {
-      if (Date.now() - sync.startedAt > SYNC_WATCH_MS) setSync({ kind: 'slow' })
-      else void onRefresh()
-    }, SYNC_POLL_MS)
-    return () => window.clearInterval(timer)
-  }, [sync, onRefresh])
-
-  // A poll that gave up records its error on `last_sync` and moves its time too, so a
-  // moved time is "it ran", not "it worked".
-  const syncError = source.last_sync?.error ?? null
-  const syncQueued = source.last_sync?.queued ?? 0
-  useEffect(() => {
-    if (sync.kind !== 'queued' || !syncedAt || syncedAt === sync.before) return
-    setSync(
-      syncError
-        ? { kind: 'error', message: `The sync gave up: ${syncError}` }
-        : { kind: 'done', at: syncedAt, queued: syncQueued },
-    )
-  }, [sync, syncedAt, syncError, syncQueued])
-
+  // The poll route enqueues and answers at once, with the progress already saying
+  // "queued"; re-fetching the list is what hands this panel that answer, and the screen's
+  // own poll carries it from there until the sync settles.
   const syncNow = async () => {
-    setSync({ kind: 'queued', before: syncedAt, startedAt: Date.now() })
+    setSync({ kind: 'requesting' })
     try {
       await api.pollSource(source.id)
+      await onRefresh()
+      setSync({ kind: 'idle' })
     } catch (err) {
       setSync({ kind: 'error', message: err instanceof ApiError ? err.message : String(err) })
     }
@@ -131,8 +97,7 @@ export function SourceDetail({
     }
   }
 
-  const worker = workerState(processing)
-  const syncing = sync.kind === 'queued'
+  const syncing = sync.kind === 'requesting' || syncInFlight(progress)
 
   return (
     <div className={`source-detail row-status-${status}`} aria-label={source.name}>
@@ -262,9 +227,14 @@ export function SourceDetail({
           >
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
-          <SyncStatus sync={sync} worker={worker} now={now} />
+          {sync.kind === 'error' && (
+            <span className="error" role="alert">
+              {sync.message}
+            </span>
+          )}
         </div>
       )}
+      {isPollable(source) && progress && <SyncProgress progress={progress} />}
 
       {status === 'awaiting_consent' && (
         <div className="row danger-zone">
@@ -341,48 +311,4 @@ function Stat({
       <span className="stat-label">{label}</span>
     </div>
   )
-}
-
-/**
- * What "Sync now" is doing, in words that do not promise more than the queue does.
- *
- * "Queued" and "a worker has it" are different sentences, and the heartbeat is what tells
- * them apart (motet#38): a queued poll with no worker alive is a poll nothing will run,
- * and saying "syncing…" over it would be the never-infer-"no errors"-from-"no data" trap.
- */
-function SyncStatus({ sync, worker, now }: { sync: Sync; worker: ReturnType<typeof workerState>; now: number }) {
-  switch (sync.kind) {
-    case 'idle':
-      return null
-    case 'queued':
-      return (
-        <span className="hint" role="status">
-          {worker === 'running'
-            ? 'Queued — a worker is running and will pick it up.'
-            : worker === 'unknown'
-              ? 'Queued. Whether a worker is running could not be checked.'
-              : 'Queued — but no worker has run in the last five minutes, so nothing will pick it up until one does.'}
-        </span>
-      )
-    case 'done':
-      return (
-        <span className="ok" role="status">
-          Synced {relativeTime(sync.at, Math.max(now, Date.now()))}.{' '}
-          {sync.queued > 0 ? 'New items are held for you to ingest.' : 'Nothing new.'}
-        </span>
-      )
-    case 'slow':
-      return (
-        <span className="hint" role="status">
-          Still queued after two minutes. It runs when a worker gets to it; this panel stops
-          watching, and Last sync updates when you come back.
-        </span>
-      )
-    case 'error':
-      return (
-        <span className="error" role="alert">
-          {sync.message}
-        </span>
-      )
-  }
 }

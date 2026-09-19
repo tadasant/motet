@@ -21,7 +21,7 @@ import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
-from typing import Annotated, Any, Final
+from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlencode, urlsplit
 
 import psycopg
@@ -214,6 +214,7 @@ from .schemas import (
     SourceItemResponse,
     SourceResponse,
     SourceSpanModel,
+    SourceSyncProgress,
     SourceSyncResult,
     StartLoginRequest,
     StartLoginResponse,
@@ -225,6 +226,7 @@ from .schemas import (
     WaitlistJoinResponse,
 )
 from .shownotes import SourceExcerpt, chapters_json, transcript_vtt
+from .sync_progress import run_started_at, sync_progress
 from .voice import (
     VoiceConfig,
     VoiceStarter,
@@ -2287,13 +2289,46 @@ def list_sources(conn: Conn, user_id: User) -> list[SourceResponse]:
     """
     sources = repo_sources(conn, user_id)
     counts = phase2.source_item_counts(conn, [source.id for source in sources])
-    return [_source_response(conn, source, counts.get(source.id)) for source in sources]
+    progress = _sync_progress(conn, sources)
+    return [
+        _source_response(conn, source, counts.get(source.id), progress=progress.get(source.id))
+        for source in sources
+    ]
+
+
+def _sync_progress(
+    conn: psycopg.Connection[Any], sources: Sequence[StoredSource]
+) -> dict[str, SourceSyncProgress | None]:
+    """Each polled source's sync progress, from one job-queue read and one heartbeat read.
+
+    An inactive source has none to report: pausing or disconnecting stops the chain, and
+    the row already says it is paused. Its run record is left as it was.
+    """
+    polled = [s for s in sources if s.kind == SourceKind.GMAIL.value and s.active]
+    if not polled:
+        return {}
+    jobs = phase2.source_sync_jobs(
+        conn, [(source.id, run_started_at(source.sync_state)) for source in polled]
+    )
+    now, beats = repo.worker_heartbeats(conn)
+    seen = beats[0].last_seen_at if beats else None
+    return {
+        source.id: sync_progress(
+            source.sync_state,
+            jobs.get(source.id, phase2.SourceSyncJobs()),
+            now=now,
+            worker_last_seen_at=seen,
+        )
+        for source in polled
+    }
 
 
 def _source_response(
     conn: psycopg.Connection[Any],
     source: StoredSource,
     counts: phase2.SourceItemCounts | None = None,
+    *,
+    progress: SourceSyncProgress | None | Literal[False] = False,
 ) -> SourceResponse:
     """One source as every route reports it, so the three that return one cannot disagree.
 
@@ -2306,6 +2341,8 @@ def _source_response(
     if counts is None:
         counts = phase2.source_item_counts(conn, [source.id]).get(source.id)
     counts = counts or phase2.SourceItemCounts()
+    if progress is False:
+        progress = _sync_progress(conn, [source]).get(source.id)
     return SourceResponse(
         id=source.id,
         kind=source.kind,
@@ -2320,6 +2357,7 @@ def _source_response(
         items_pulled_in=counts.pulled_in,
         items_integrated=counts.integrated,
         **sync_facts(source),
+        sync_progress=progress,
         label_sync=_label_sync(conn, source, credential.scopes if credential else ()),
     )
 

@@ -799,6 +799,65 @@ class SourceSyncResult(BaseModel):
     )
 
 
+class SourceSyncProgress(BaseModel):
+    """Where a mailbox sync is right now, from "Sync now" to the last message extracted.
+
+    A sync is a chain of polls, each listing a bounded slice of the search and queueing
+    what is new for extraction (motet#94), so a large first sync is many jobs over minutes.
+    This is that chain added up and joined to the job queue, so a screen can show which
+    step it is on and how far through it is instead of a bare "Syncing…".
+
+    ``stage`` is the one field to branch on:
+
+    - ``queued`` — a poll is waiting for a worker to pick it up.
+    - ``retrying`` — a poll failed and is waiting to try again; ``error`` says why.
+    - ``connecting`` — a worker has the poll and is reaching the mailbox; nothing listed yet.
+    - ``listing`` — paging through the search. ``found`` is a lower bound until it ends.
+    - ``fetching`` — the search is exhausted; ``found`` is final and messages are still
+      being fetched and extracted.
+    - ``done`` — every message found has been through extraction. Reported for an hour.
+    - ``failed`` — the sync gave up; ``error`` says why. Reported for an hour.
+
+    Counts are of messages this sync found that were **new to Motet**, not of everything the
+    search matched (that is ``listed``). ``pulled_in`` is found messages that have been
+    through extraction — including a receipt it read and skipped as not a newsletter — so
+    it is progress through the work rather than a count of items held for you.
+    """
+
+    stage: Literal["queued", "retrying", "connecting", "listing", "fetching", "done", "failed"]
+    started_at: datetime | None = Field(
+        description="When this sync's first poll ran. Null while the first poll is still queued."
+    )
+    listed: int = Field(
+        description="Messages matching the filter the search has listed so far, new or not."
+    )
+    found: int = Field(description="Of those, messages new to Motet, queued for extraction.")
+    found_is_lower_bound: bool = Field(
+        description=(
+            "True while the search still has pages to list, so more may be found. Say "
+            "'at least' beside ``found`` when it is."
+        )
+    )
+    pulled_in: int = Field(
+        description="Found messages that have been through extraction, skipped ones included."
+    )
+    remaining: int = Field(
+        description="Found messages still waiting to be fetched and extracted, or in flight."
+    )
+    failed: int = Field(description="Found messages whose extraction gave up after its retries.")
+    pages: int = Field(description="Search result pages read so far.")
+    error: str | None = Field(
+        description="Why the sync gave up (``failed``) or why its poll is retrying, else null."
+    )
+    waiting_on_worker: bool = Field(
+        description=(
+            "True when work is waiting and no worker has run in the last five minutes and "
+            "none is running any of it — so nothing will move until one runs. A queued "
+            "sync that is merely waiting its turn is false."
+        )
+    )
+
+
 class LabelSyncResponse(BaseModel):
     """One mailbox's label-sync settings, whether they can act, and what they have done.
 
@@ -886,6 +945,13 @@ class SourceResponse(BaseModel):
     )
     last_sync: SourceSyncResult | None = Field(
         description="The most recent poll's result. Null until one has run."
+    )
+    sync_progress: SourceSyncProgress | None = Field(
+        default=None,
+        description=(
+            "Where a sync in flight has got to, or how the latest one ended for an hour "
+            "after. Null when no sync is running or recent, and for a source nothing polls."
+        ),
     )
     disconnected_at: datetime | None = Field(
         description=(

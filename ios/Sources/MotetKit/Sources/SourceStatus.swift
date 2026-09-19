@@ -230,15 +230,11 @@ public enum SourceStatus {
         return last.caughtUp ? looked : "\(looked) Still catching up: each sync queues the next."
     }
 
-    /// When the last sync ran, for display. Not what "Sync now" watches — see `syncedAt`.
+    /// When the last sync ran, for display: `last_sync.at`, or `last_polled_at` for a row
+    /// polled before the API recorded a result. What a sync in flight is doing is
+    /// `syncProgress` — see `describeSyncProgress`.
     public static func lastSyncedAt(_ source: SourceResponse) -> Date? {
         source.lastSync?.at ?? source.lastPolledAt
-    }
-
-    /// What "Sync now" watches: only `last_sync.at`, which a poll writes and nothing else
-    /// does. `last_polled_at` also moves when extraction skips a message.
-    public static func syncedAt(_ source: SourceResponse) -> Date? {
-        source.lastSync?.at
     }
 
     /// OAuth scopes as short names.
@@ -253,31 +249,121 @@ public enum SourceStatus {
         }
     }
 
-    /// Whether a worker is draining the queues, from the heartbeat (motet#38). A queued
-    /// poll with no worker alive is a poll nothing will run.
-    public enum Worker: Hashable, Sendable {
-        case running
-        case idle
-        case never
-        /// The route answered nothing. Not "no worker": an outage must not read as idle.
-        case unknown
+    // MARK: - Sync progress
+
+    /// Stages in which something is still happening, so the screen keeps asking.
+    static let syncInFlightStages: Set<String> = ["queued", "retrying", "connecting", "listing", "fetching"]
+
+    /// Whether a sync is running or waiting to — the button is busy and the screen polls.
+    public static func syncInFlight(_ progress: SourceSyncProgress?) -> Bool {
+        guard let progress else { return false }
+        return syncInFlightStages.contains(progress.stage)
     }
 
-    /// How recent a heartbeat counts as a worker running. The SPA's `WORKER_FRESH_MS`.
-    public static let workerFreshSeconds: TimeInterval = 5 * 60
-
-    public static func worker(_ processing: ProcessingStatusResponse?) -> Worker {
-        guard let processing else { return .unknown }
-        guard let seen = processing.workerLastSeenAt else { return .never }
-        return processing.now.timeIntervalSince(seen) <= workerFreshSeconds ? .running : .idle
+    /// Whether it is worth re-reading every two seconds: in flight, and something is on it.
+    /// A sync no worker will run moves when a worker appears, so the watch slows down rather
+    /// than polling a stall forever. The SPA's `syncMoving`.
+    public static func syncMoving(_ progress: SourceSyncProgress?) -> Bool {
+        syncInFlight(progress) && progress?.waitingOnWorker == false
     }
 
-    public static func describeQueuedSync(_ worker: Worker) -> String {
-        switch worker {
-        case .running: return "Queued — a worker is running and will pick it up."
-        case .unknown: return "Queued. Whether a worker is running could not be checked."
-        case .idle, .never:
-            return "Queued — but no worker has run in the last five minutes, so nothing will pick it up until one does."
+    /// A sync in flight in words and a bar. The SPA's `describeSyncProgress`, rule for rule:
+    /// the step it is on, then pulled-in-of-found with "at least" while the search is still
+    /// listing, an indeterminate bar (`fraction == nil`) until there is a count, and
+    /// `stalled` when the API says nothing will run it.
+    public struct SyncDescription: Hashable, Sendable {
+        public enum Tone: Hashable, Sendable { case working, stalled, done, error }
+        public var headline: String
+        public var count: String?
+        public var detail: String?
+        public var fraction: Double?
+        public var tone: Tone
+    }
+
+    static let noWorker = "No worker has run in the last five minutes, so this will not move until one does."
+
+    /// `1,480`, as the SPA's `toLocaleString('en-US')` writes it. By hand rather than a
+    /// FormatStyle so the Linux build and the phone cannot disagree about a separator.
+    static func number(_ value: Int) -> String {
+        let digits = String(abs(value))
+        var out = ""
+        for (index, digit) in digits.enumerated() {
+            if index > 0, (digits.count - index) % 3 == 0 { out.append(",") }
+            out.append(digit)
+        }
+        return value < 0 ? "-" + out : out
+    }
+
+    private static func messages(_ value: Int) -> String {
+        "\(number(value)) message\(value == 1 ? "" : "s")"
+    }
+
+    public static func describeSyncProgress(_ progress: SourceSyncProgress) -> SyncDescription {
+        let stalled = progress.waitingOnWorker
+        let atLeast = progress.foundIsLowerBound ? "at least " : ""
+        let count = progress.found > 0
+            ? "Pulled in \(number(progress.pulledIn)) of \(atLeast)\(number(progress.found)) · \(number(progress.remaining)) left"
+            : nil
+        let fraction = progress.found > 0 ? min(1, Double(progress.pulledIn) / Double(progress.found)) : nil
+        let failedNote = progress.failed > 0
+            ? "\(messages(progress.failed)) could not be fetched and \(progress.failed == 1 ? "was" : "were") left out."
+            : nil
+        func working(_ headline: String, _ detail: String?, bar: Double?) -> SyncDescription {
+            SyncDescription(
+                headline: headline, count: count, detail: stalled ? noWorker : detail,
+                fraction: bar, tone: stalled ? .stalled : .working
+            )
+        }
+
+        switch progress.stage {
+        case "queued":
+            return working("Waiting for a worker to start the sync", nil, bar: nil)
+        case "retrying":
+            return working(
+                "Could not reach the mailbox — trying again",
+                progress.error.map { "Last attempt: \($0)" }, bar: nil
+            )
+        case "connecting":
+            return working("Connecting to the mailbox", nil, bar: nil)
+        case "listing":
+            return working(
+                progress.found > 0
+                    ? "Listing messages · found \(atLeast)\(number(progress.found)) new so far"
+                    : "Listing messages",
+                progress.error.map { "A page failed and is being retried. Last attempt: \($0)" }
+                    ?? (progress.listed > 0
+                        ? "Looked through \(messages(progress.listed)) matching the filter; more pages to go."
+                        : nil),
+                bar: fraction
+            )
+        case "fetching":
+            return working(
+                "Fetching and extracting · \(messages(progress.found)) found",
+                failedNote ?? "The search is finished; each message is fetched and its article extracted.",
+                bar: fraction
+            )
+        case "done":
+            return SyncDescription(
+                headline: progress.pulledIn > 0
+                    ? "Sync finished · \(messages(progress.pulledIn)) pulled in" : "Sync finished · nothing new",
+                count: nil,
+                detail: failedNote ?? (progress.found > 0 ? "New items are held for you to ingest." : nil),
+                fraction: progress.found > 0 ? 1 : nil,
+                tone: .done
+            )
+        case "failed":
+            var tally: String?
+            if progress.found > 0 {
+                tally = "Pulled in \(number(progress.pulledIn)) of \(number(progress.found)) found before it stopped"
+                    + (progress.remaining > 0 ? " · \(number(progress.remaining)) still being fetched" : "")
+            }
+            return SyncDescription(
+                headline: "The sync gave up", count: tally, detail: progress.error,
+                fraction: fraction, tone: .error
+            )
+        default:
+            // A stage this build does not know — a newer API. Said plainly, not guessed at.
+            return working("Syncing", nil, bar: nil)
         }
     }
 

@@ -2488,6 +2488,55 @@ spent code. And **`error=access_denied` is an answer, not a failure** — someon
 Cancel, which is a supported response to being asked for a mailbox, and it must not read
 like a crash.
 
+#### A sync in flight reports its step and its count, from the server
+
+`SourceResponse.sync_progress`, `motet_api.sync_progress`, `sync_state.sync_run`,
+`phase2.source_sync_jobs`. Tadas pressed "Sync now" on a production mailbox (2026-09-19) and
+watched "Syncing…" for as long as he cared to, because the only thing the screens could
+watch was `last_sync.at` moving — one link of a chain that can be dozens long — and they
+gave up after two minutes whatever was happening. The production cause that day was that
+nothing drains production's queue at all, which the screen could not tell apart from a slow
+mailbox.
+
+**The worker adds the chain up; the API joins it to the job queue.** Each poll link adds
+what it listed, queued and paged onto `sync_state.sync_run`, in the transaction that writes
+the cursor; a run is continued while its search has pages left and started afresh otherwise,
+and `record_poll_failure` — or a poll finding the source paused — ends it as `failed`. A link
+does not re-arm the chain when a poll is already waiting: a "Sync now" pressed mid-chain *is*
+the next link, and a second would run the rest of the search twice and end on an empty
+"fresh" run. The API reads the source's newest open poll job — spelled `state = 'ready' OR
+state = 'running'` so `jobs_ready_idx` and `jobs_stale_idx` answer it, which an `IN` list
+does not — and its open and failed extract jobs created since the run began, on migration
+0008's index, so the `done` rows that grow without bound are never scanned. From those it
+derives one `stage`:
+`queued`, `retrying`, `connecting`, `listing`, `fetching`, `done` or `failed`. Pulled in is
+what the run queued less what is still open or failed. `found_is_lower_bound` is true while
+listing, and both clients say "at least" beside it.
+
+**`waiting_on_worker` is computed server-side** from the newest heartbeat and whether any of
+the sync's jobs is running, with the Processing panel's five minutes — so a sync nothing will
+run says so instead of animating. Both clients poll every two seconds for as long as a sync
+is in flight and moving, rather than for a fixed window, and drop to ten seconds while it
+waits on a worker. `done` and `failed` are reported for an hour.
+
+**The run and the job rows are two statements, so a snapshot can straddle the last link's
+commit** and show a `listing` run beside no open poll. That is a sync finishing, so a
+`listing` run with no poll reads as stopped only once it is two minutes stale
+(`BROKEN_CHAIN_GRACE`); read as `failed` at once, it stopped both clients' watch mid-sync.
+
+**The run's timestamps are the database's transaction time**, not the worker's clock: the
+extract jobs of the run's first page are stamped by the same transaction's `now()`, and a
+Python timestamp a few milliseconds later would leave them out of every count; `updated_at`
+is aged against the database's clock too.
+
+**Extraction's skip note is a merged key** (`merge_source_sync_state`), not a rewrite of the
+document it read. Extraction is not serialized against the poll, so the rewrite could put
+back a cursor and a run total that a poll of the same mailbox had committed in between.
+
+**The invariant-12 reading:** a key in `sync_state` used as that column is already used, a
+read of the job table as `list_ingestion` already reads it, and an optional field on an
+existing response. No deployable, table, migration, queue mechanism, stage or model call.
+
 #### Label sync is the connector's one write, and it is opt-in per mailbox
 
 `motet_workers.labels`, `motet_sources.labels`, `PUT /v1/sources/{id}/label-sync`, `POST
@@ -2612,10 +2661,10 @@ on a phone, 2026-09-19). **The catalog is static**, because
 `GET /v1/sources` lists *accounts* and something not yet connected has no row to render.
 
 The last sync's result, the filter and the first-sync window are motet#94's fields and are
-read, not re-derived: "Sync now" watches `last_sync.at` rather than `last_polled_at`,
-because an extraction that skips a message moves `last_polled_at` too, and watching it
-would call that a sync. It re-fetches on an interval while it waits — a watch re-armed
-only by a change stopped at the first unchanged answer.
+read, not re-derived. What "Sync now" shows while a sync runs is `sync_progress`, the
+server's reading of the whole poll chain, re-fetched on an interval for as long as it is in
+flight — see "A sync in flight reports its step and its count" above. It used to watch
+`last_sync.at` move for two minutes, which is one link of the chain and gave up on long ones.
 
 Two things the API grew for it are decisions rather than fields:
 

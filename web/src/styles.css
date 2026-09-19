@@ -755,6 +755,31 @@ details > summary:hover { color: var(--ink); }
 .waiting-hint .linkish { color: var(--ink); font-weight: 600; }
 
 .source-detail .actions { margin: 1rem 0 0; }
+/* A sync in flight: the step, then pulled-in-of-found with a bar (sources/SyncProgress.tsx).
+   The bar wears the voices, like every other progress bar; a stalled or failed sync drops
+   them for ink and the error red, because a moving rainbow over "nothing will run this"
+   would be the lie the words are there to avoid. Indeterminate until there is a count. */
+.sync-progress { margin: .85rem 0 0; padding: .7rem .9rem; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); }
+.sync-progress p { margin: 0; }
+.sync-headline { font-weight: 600; }
+.sync-count { margin-top: .45rem !important; font-variant-numeric: tabular-nums; }
+.sync-detail { margin-top: .3rem !important; color: var(--ink-soft); font-size: 14px; }
+.sync-bar { position: relative; height: 6px; margin-top: .55rem; background: var(--rule); border-radius: 6px; overflow: hidden; }
+.sync-bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--voices); border-radius: 6px; transition: width .6s ease; }
+.sync-bar.indeterminate .sync-bar-fill { width: 30%; animation: sync-sweep 1.6s ease-in-out infinite; }
+@keyframes sync-sweep { from { left: -30%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .sync-bar.indeterminate .sync-bar-fill { animation: none; left: 0; width: 100%; opacity: .35; }
+  .sync-bar-fill { transition: none; }
+}
+.sync-stalled .sync-bar-fill { background: var(--ink-soft); }
+.sync-stalled .sync-bar.indeterminate .sync-bar-fill { animation: none; left: 0; width: 100%; opacity: .25; }
+.sync-stalled.sync-progress { border-color: var(--ink); }
+.sync-error.sync-progress { border-color: var(--vermilion); }
+.sync-error .sync-headline, .sync-error .sync-detail { color: var(--error-text); }
+.sync-error .sync-bar-fill { background: var(--vermilion); }
+.sync-done .sync-headline { color: var(--ink); }
+
 .danger-zone { margin-top: .6rem; font-size: 14px; }
 .danger-zone .linkish { color: var(--ink-soft); }
 

@@ -1,0 +1,280 @@
+"""Where a mailbox sync has got to: the pure stage function, and the route that reports it.
+
+The first half is ``motet_api.sync_progress`` over values, one test per stage and per edge a
+screen would otherwise lie about. The second half drives a real poll chain and real
+extraction through ``GET /v1/sources``, because "the run's start is the clock its jobs are
+stamped with" and "the open count comes off migration 0008's index" are claims about
+Postgres rather than about a function.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+from motet_api import app
+from motet_api.deps import reset_store
+from motet_api.sync_progress import (
+    BROKEN_CHAIN_GRACE,
+    SETTLED_VISIBLE,
+    WORKER_FRESH,
+    sync_progress,
+)
+from motet_db import repo
+from motet_db.phase2 import SourceSyncJobs
+from motet_sources import FakeMailClient, RawMessage
+from motet_workers import Queue, drain
+
+NOW = datetime(2026, 9, 19, 16, 0, tzinfo=UTC)
+ALIVE = NOW - timedelta(seconds=20)
+GONE = NOW - WORKER_FRESH - timedelta(seconds=1)
+NO_JOBS = SourceSyncJobs()
+
+
+def run(
+    status: str, *, queued: int = 0, listed: int = 0, ago: timedelta = timedelta(0), **extra: Any
+) -> dict[str, Any]:
+    at = (NOW - ago).isoformat()
+    return {
+        "sync_run": {
+            "started_at": at,
+            "updated_at": at,
+            "listed": listed,
+            "queued": queued,
+            "pages": 3,
+            "status": status,
+            "error": None,
+            **extra,
+        }
+    }
+
+
+def progress(
+    state: dict[str, Any], jobs: SourceSyncJobs = NO_JOBS, seen: datetime | None = ALIVE
+) -> Any:
+    return sync_progress(state, jobs, now=NOW, worker_last_seen_at=seen)
+
+
+# --- before anything is found ---------------------------------------------------------
+
+
+def test_no_run_and_no_poll_is_nothing_to_report() -> None:
+    assert progress({}) is None
+
+
+def test_a_waiting_poll_is_queued_and_says_whether_a_worker_will_take_it() -> None:
+    queued = SourceSyncJobs(poll_state="ready")
+    assert progress({}, queued).stage == "queued"
+    assert progress({}, queued).waiting_on_worker is False
+    # Tadas's production sync: the poll sat there, and no worker exists to run it.
+    stuck = progress({}, queued, seen=None)
+    assert (stuck.stage, stuck.waiting_on_worker) == ("queued", True)
+    assert progress({}, queued, seen=GONE).waiting_on_worker is True
+
+
+def test_a_claimed_poll_with_nothing_listed_yet_is_connecting() -> None:
+    shown = progress({}, SourceSyncJobs(poll_state="running"), seen=GONE)
+    assert shown.stage == "connecting"
+    assert shown.waiting_on_worker is False, "a running job is a worker"
+
+
+def test_a_poll_backing_off_after_a_failure_is_retrying_and_says_why() -> None:
+    shown = progress(
+        {}, SourceSyncJobs(poll_state="ready", poll_attempts=1, poll_error="429 rate limited")
+    )
+    assert (shown.stage, shown.error) == ("retrying", "429 rate limited")
+
+
+def test_a_new_poll_after_a_finished_sync_does_not_show_the_old_numbers() -> None:
+    shown = progress(run("listed", queued=480), SourceSyncJobs(poll_state="ready"))
+    assert (shown.stage, shown.found, shown.started_at) == ("queued", 0, None)
+
+
+# --- while the search is listing -------------------------------------------------------
+
+
+def test_a_chain_still_listing_is_a_lower_bound_with_progress_through_what_it_found() -> None:
+    shown = progress(
+        run("listing", queued=480, listed=600),
+        SourceSyncJobs(poll_state="ready", extract_open=360, extract_running=4),
+    )
+    assert shown.stage == "listing"
+    assert shown.found_is_lower_bound is True
+    assert (shown.found, shown.pulled_in, shown.remaining, shown.listed) == (480, 120, 360, 600)
+
+
+def test_the_next_link_running_is_still_listing_not_a_new_sync() -> None:
+    shown = progress(run("listing", queued=60), SourceSyncJobs(poll_state="running"))
+    assert (shown.stage, shown.found) == ("listing", 60)
+
+
+def test_a_chain_that_lost_its_next_poll_is_reported_stopped_not_listing_forever() -> None:
+    stale = BROKEN_CHAIN_GRACE + timedelta(seconds=1)
+    shown = progress(run("listing", queued=60, ago=stale), SourceSyncJobs())
+    assert shown.stage == "failed"
+    assert shown.error is not None and "Sync now" in shown.error
+
+
+def test_a_final_link_committing_between_the_two_reads_is_not_a_failure() -> None:
+    """The run and the jobs are two statements: a snapshot can show the old ``listing`` run
+    beside no open poll because the last link finished in between. That is a sync ending."""
+    shown = progress(run("listing", queued=60, ago=timedelta(seconds=5)), SourceSyncJobs())
+    assert shown.stage == "listing"
+
+
+# --- after the search is exhausted ------------------------------------------------------
+
+
+def test_a_finished_search_with_extraction_left_is_fetching_with_an_exact_total() -> None:
+    shown = progress(run("listed", queued=480), SourceSyncJobs(extract_open=30, extract_failed=2))
+    assert shown.stage == "fetching"
+    assert shown.found_is_lower_bound is False
+    assert (shown.found, shown.pulled_in, shown.remaining, shown.failed) == (480, 448, 30, 2)
+
+
+def test_fetching_with_nobody_extracting_and_no_worker_says_so() -> None:
+    shown = progress(run("listed", queued=10), SourceSyncJobs(extract_open=10), seen=GONE)
+    assert shown.waiting_on_worker is True
+    working = progress(
+        run("listed", queued=10), SourceSyncJobs(extract_open=10, extract_running=1), seen=GONE
+    )
+    assert working.waiting_on_worker is False
+
+
+def test_nothing_left_in_flight_is_done_and_shown_for_an_hour() -> None:
+    shown = progress(run("listed", queued=480, ago=timedelta(minutes=5)))
+    assert (shown.stage, shown.pulled_in, shown.remaining) == ("done", 480, 0)
+    assert progress(run("listed", queued=480, ago=SETTLED_VISIBLE + timedelta(minutes=1))) is None
+
+
+def test_a_sync_that_gave_up_says_why_and_stops_spinning() -> None:
+    shown = progress(
+        run("failed", queued=60, error="Gmail refused the credential"),
+        SourceSyncJobs(extract_open=5),
+    )
+    assert (shown.stage, shown.error, shown.found, shown.remaining) == (
+        "failed",
+        "Gmail refused the credential",
+        60,
+        5,
+    )
+    assert shown.waiting_on_worker is False
+    assert progress(run("failed", ago=SETTLED_VISIBLE + timedelta(minutes=1))) is None
+
+
+def test_an_unreadable_run_record_is_nothing_rather_than_a_500() -> None:
+    assert progress({"sync_run": {"started_at": "yesterday", "queued": "lots"}}) is None
+    assert progress({"sync_run": "garbage"}) is None
+
+
+# --- through the route ------------------------------------------------------------------
+
+TOKEN = "test-api-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+REDIRECT = "https://app.example.invalid/oauth/callback"
+
+
+@pytest.fixture
+def api(
+    db: psycopg.Connection[Any], _migrated: str, object_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> Any:
+    monkeypatch.setenv("MOTET_API_TOKEN", TOKEN)
+    monkeypatch.setenv("DATABASE_URL", _migrated)
+    monkeypatch.setenv("MOTET_INFERENCE_MODE", "fake")
+    monkeypatch.setenv("MOTET_VAULT_BACKEND", "local")
+    reset_store()
+    with TestClient(app) as started:
+        yield started
+    reset_store()
+
+
+def gmail_progress(api: TestClient, source_id: str) -> dict[str, Any] | None:
+    listed = api.get("/v1/sources", headers=AUTH).json()
+    found = next(source for source in listed if source["id"] == source_id)
+    shown: dict[str, Any] | None = found["sync_progress"]
+    return shown
+
+
+def test_a_sync_reports_each_stage_as_its_jobs_run(
+    api: TestClient, db: psycopg.Connection[Any], _migrated: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queued → listing (at least 60) → fetching (exactly 130) → done, off real job rows."""
+    mailbox = FakeMailClient(
+        messages=[RawMessage(id=f"m{i:03d}", raw=b"") for i in range(130)], page_size=20
+    )
+    monkeypatch.setattr("motet_workers.ingest.build_mail_client", lambda token, env=None: mailbox)
+    started = api.post(
+        "/v1/sources/connect",
+        json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+        headers=AUTH,
+    ).json()
+    source_id = started["source_id"]
+    api.post(
+        "/v1/sources/callback",
+        json={"state": started["state"], "code": "fake-auth-code"},
+        headers=AUTH,
+    )
+
+    # The callback queued the first poll and no worker has ever run.
+    shown = gmail_progress(api, source_id)
+    assert shown is not None
+    assert (shown["stage"], shown["waiting_on_worker"]) == ("queued", True)
+
+    # One link of the chain: a worker ran (a heartbeat), found 60 and queued the next.
+    drain(Queue.POLL, _migrated, max_jobs=1)
+    shown = gmail_progress(api, source_id)
+    assert shown is not None
+    assert (shown["stage"], shown["found"], shown["found_is_lower_bound"]) == ("listing", 60, True)
+    assert (shown["pulled_in"], shown["remaining"], shown["waiting_on_worker"]) == (0, 60, False)
+
+    drain(Queue.POLL, _migrated)
+    shown = gmail_progress(api, source_id)
+    assert shown is not None
+    assert (shown["stage"], shown["found"], shown["found_is_lower_bound"]) == (
+        "fetching",
+        130,
+        False,
+    )
+    assert shown["remaining"] == 130
+
+    # The synthesized messages are empty, so extraction skips every one — which is still
+    # progress through the work, and nothing is left in flight.
+    drain(Queue.EXTRACT, _migrated)
+    shown = gmail_progress(api, source_id)
+    assert shown is not None
+    assert (shown["stage"], shown["pulled_in"], shown["remaining"], shown["failed"]) == (
+        "done",
+        130,
+        0,
+        0,
+    )
+
+
+def test_the_paste_source_reports_no_progress(api: TestClient) -> None:
+    listed = api.get("/v1/sources", headers=AUTH).json()
+    paste = next(source for source in listed if source["id"] == repo.PASTE_SOURCE_ID)
+    assert paste["sync_progress"] is None
+
+
+def test_the_poll_half_of_the_job_read_is_answered_by_the_partial_indexes(
+    db: psycopg.Connection[Any], _migrated: str
+) -> None:
+    """Polled every two seconds during a sync: an ``IN`` list scanned the whole table."""
+    db.execute("SET enable_seqscan = off")
+    plan = "\n".join(
+        row["QUERY PLAN"]
+        for row in db.execute(
+            "EXPLAIN SELECT 1 FROM jobs WHERE queue = 'poll' "
+            "AND (state = 'ready' OR state = 'running') AND payload ->> 'source_id' = 'x'"
+        ).fetchall()
+    )
+    db.execute("RESET enable_seqscan")
+    assert "jobs_ready_idx" in plan and "jobs_stale_idx" in plan, plan
+    import inspect  # noqa: PLC0415
+
+    from motet_db import phase2  # noqa: PLC0415
+
+    assert "(state = 'ready' OR state = 'running')" in inspect.getsource(phase2.source_sync_jobs)

@@ -33,6 +33,7 @@ from motet_workers.handlers import Context, PermanentFailure
 from motet_workers.ingest import (
     MAX_PAGES_PER_POLL,
     POLL_PAGE_SIZE,
+    SYNC_RUN_KEY,
     _sent_at,
     handle_extract,
     handle_poll,
@@ -274,6 +275,104 @@ def test_a_chain_of_polls_drains_the_whole_search_exactly_once(
     assert source.sync_state["cursor"] == "fake:170", "the watermark, once and only once exhausted"
 
 
+def test_a_chain_of_polls_adds_up_to_one_sync_run(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``last_sync`` is one link; ``sync_run`` is the whole chain, which is what a screen shows.
+
+    Three links of 60, 60 and 50 read as "looked at 50" on ``last_sync`` at the end. The run
+    says 170 found over nine pages, and says the search is exhausted only on the last link.
+    """
+    mailbox = FakeMailClient(messages=synthesized_mailbox(170), page_size=20)
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+
+    runs: list[dict[str, Any]] = []
+    while True:
+        handle_poll(context(db), {"source_id": source_id})
+        source = phase2.get_source(db, source_id)
+        assert source is not None
+        runs.append(source.sync_state[SYNC_RUN_KEY])
+        rearmed = _jobs(db, Queue.POLL)
+        _clear(db, Queue.POLL)
+        if not rearmed:
+            break
+
+    assert [run["status"] for run in runs] == ["listing", "listing", "listed"]
+    assert [run["queued"] for run in runs] == [60, 120, 170]
+    assert runs[-1]["listed"] == 170 and runs[-1]["pages"] == 9
+    assert len({run["started_at"] for run in runs}) == 1, "one sync, one start"
+    assert source.sync_state["last_sync"]["queued"] == 50, "the last link alone"
+
+
+def test_a_sync_now_pressed_mid_chain_does_not_double_the_chain(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queued "Sync now" is the next link; re-arming beside it would run the search twice."""
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(170), page_size=20))
+    source_id = connected_source(db)
+    enqueue_source_poll(db, source_id)  # pressed while the first link is running
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    assert len(_jobs(db, Queue.POLL)) == 1, "one next link, not two"
+
+
+def test_pausing_mid_chain_ends_the_sync_run(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming later starts a fresh count rather than continuing a stale one."""
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(170), page_size=20))
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    phase2.set_source_active(db, source_id, active=False)
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    run = source.sync_state[SYNC_RUN_KEY]
+    assert (run["status"], run["queued"]) == ("failed", 60)
+    assert "paused" in run["error"]
+
+
+def test_a_poll_after_a_finished_sync_starts_a_fresh_count(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tuesday's three new messages are not added to Monday's 170."""
+    mailbox = FakeMailClient(messages=synthesized_mailbox(5), page_size=20)
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    first = phase2.get_source(db, source_id)
+    assert first is not None and first.sync_state[SYNC_RUN_KEY]["queued"] == 5
+    db.commit()
+
+    handle_poll(context(db), {"source_id": source_id})
+    second = phase2.get_source(db, source_id)
+    assert second is not None
+    run = second.sync_state[SYNC_RUN_KEY]
+    assert (run["queued"], run["status"]) == (0, "listed")
+    assert run["started_at"] != first.sync_state[SYNC_RUN_KEY]["started_at"]
+
+
+def test_a_sync_runs_start_is_the_clock_its_extract_jobs_are_stamped_with(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The API counts a run's jobs by ``created_at >= started_at``; the first page must count."""
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(3), page_size=20))
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    started = source.sync_state[SYNC_RUN_KEY]["started_at"]
+    row = db.execute(
+        "SELECT count(*) AS n FROM jobs WHERE queue = 'extract' AND created_at >= %s::timestamptz",
+        (started,),
+    ).fetchone()
+    assert row is not None and row["n"] == 3
+
+
 def test_a_run_of_already_queued_pages_is_bounded_by_pages_not_only_by_messages(
     db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -432,6 +531,78 @@ def test_a_poll_that_gives_up_says_why_on_the_source_and_keeps_its_place(
     assert last["error"] is not None and "reconnecting" in last["error"]
     assert (last["seen"], last["queued"], last["caught_up"]) == (0, 0, False)
     assert source.sync_state["cursor"] == "fake:0:170:60", "nothing read, nothing skipped"
+    run = source.sync_state[SYNC_RUN_KEY]
+    assert run["status"] == "failed", "a sync that gave up must not read as one still listing"
+    assert "reconnecting" in run["error"]
+
+
+def test_a_failed_link_keeps_what_the_sync_found_before_it(
+    db: psycopg.Connection[Any], database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Messages queued by earlier links are still being extracted; the count must not vanish."""
+
+    class Revoked:
+        def refresh(self, *, refresh_token: str) -> Any:
+            raise SourceAuthError("invalid_grant")
+
+    source_id = connected_source(db)
+    phase2.set_source_sync_state(
+        db,
+        source_id,
+        {
+            "cursor": "fake:0:170:60",
+            SYNC_RUN_KEY: {
+                "started_at": "2026-09-19T10:00:00+00:00",
+                "listed": 60,
+                "queued": 60,
+                "pages": 3,
+                "status": "listing",
+                "error": None,
+            },
+        },
+    )
+    enqueue_source_poll(db, source_id)
+    db.commit()
+    monkeypatch.setattr("motet_workers.ingest.build_oauth_client", lambda env=None: Revoked())
+
+    drain(Queue.POLL, database_url)
+    db.commit()
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    run = source.sync_state[SYNC_RUN_KEY]
+    assert (run["status"], run["queued"], run["started_at"]) == (
+        "failed",
+        60,
+        "2026-09-19T10:00:00+00:00",
+    )
+
+
+def test_a_skipped_message_does_not_rewrite_the_rest_of_the_sync_state(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extraction runs beside the poll, so the skip note is merged as one key.
+
+    Rewriting the whole document from its own snapshot put back a cursor and a sync run a
+    poll of the same mailbox had committed in between. The race needs two transactions to
+    show, so what is pinned is the mechanism: extraction never calls the writer that
+    replaces the document.
+    """
+    source_id = connected_source(db)
+    phase2.set_source_sync_state(db, source_id, {"cursor": "fake:9", SYNC_RUN_KEY: {"queued": 9}})
+
+    def whole_document(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("extraction must not replace sync_state")
+
+    monkeypatch.setattr(phase2, "set_source_sync_state", whole_document)
+
+    handle_extract(context(db), {"source_id": source_id, "message_id": "04_receipt_too_short"})
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.sync_state["cursor"] == "fake:9"
+    assert source.sync_state[SYNC_RUN_KEY] == {"queued": 9}
+    assert source.sync_state["last_skipped"]["message_id"] == "04_receipt_too_short"
 
 
 # --- extract -------------------------------------------------------------------------

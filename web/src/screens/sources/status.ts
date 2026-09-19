@@ -201,3 +201,121 @@ export function relativeTime(iso: string, now: number = Date.now()): string {
   const days = Math.round(hours / 24)
   return `${days} day${days === 1 ? '' : 's'} ago`
 }
+
+export type SyncProgress = NonNullable<Source['sync_progress']>
+
+/** Stages in which something is still happening, so the screen keeps asking. */
+const IN_FLIGHT = new Set(['queued', 'retrying', 'connecting', 'listing', 'fetching'])
+
+/** Whether a sync is running or waiting to — the button is busy and the screen polls. */
+export const syncInFlight = (progress: SyncProgress | null | undefined): boolean =>
+  !!progress && IN_FLIGHT.has(progress.stage)
+
+/**
+ * Whether it is worth re-reading every two seconds: in flight, and something is on it. A
+ * sync no worker will run moves when a worker appears, which is not a two-second question —
+ * so the screen drops back to its ordinary interval rather than polling a stall forever.
+ */
+export const syncMoving = (progress: SyncProgress | null | undefined): boolean =>
+  syncInFlight(progress) && !progress?.waiting_on_worker
+
+/**
+ * A sync in flight, in words and a bar — `SourceSyncProgress` on the API, which adds up
+ * the whole poll chain and joins it to the job queue (motet#94's chain made visible).
+ *
+ * - `headline` is the step: where the sync is, never a bare "Syncing…".
+ * - `count` is ingested-vs-left once there is a count to state, and says "at least" while
+ *   the search is still listing, because the total can only grow until it ends.
+ * - `fraction` drives a determinate bar; `null` is an indeterminate one, for the steps
+ *   before anything has been found. A bar with no denominator would be a made-up number.
+ * - `tone` is `stalled` when the API says nothing will run it — the one case where a
+ *   moving bar would be the never-infer-"no errors"-from-"no data" trap (motet#38).
+ */
+export type SyncDescription = {
+  headline: string
+  count: string | null
+  detail: string | null
+  fraction: number | null
+  tone: 'working' | 'stalled' | 'done' | 'error'
+}
+
+const n = (value: number): string => value.toLocaleString('en-US')
+const messages = (value: number): string => `${n(value)} message${value === 1 ? '' : 's'}`
+
+export function describeSyncProgress(progress: SyncProgress): SyncDescription {
+  const stalled = progress.waiting_on_worker
+  const noWorker =
+    'No worker has run in the last five minutes, so this will not move until one does.'
+  const atLeast = progress.found_is_lower_bound ? 'at least ' : ''
+  const count =
+    progress.found > 0
+      ? `Pulled in ${n(progress.pulled_in)} of ${atLeast}${n(progress.found)} · ${n(progress.remaining)} left`
+      : null
+  const fraction = progress.found > 0 ? Math.min(1, progress.pulled_in / progress.found) : null
+  const failedNote =
+    progress.failed > 0
+      ? `${messages(progress.failed)} could not be fetched and ${progress.failed === 1 ? 'was' : 'were'} left out.`
+      : null
+  const working = (headline: string, detail: string | null, bar: number | null = fraction): SyncDescription => ({
+    headline,
+    count,
+    detail: stalled ? noWorker : detail,
+    fraction: bar,
+    tone: stalled ? 'stalled' : 'working',
+  })
+
+  switch (progress.stage) {
+    case 'queued':
+      return working('Waiting for a worker to start the sync', null, null)
+    case 'retrying':
+      return working(
+        'Could not reach the mailbox — trying again',
+        progress.error ? `Last attempt: ${progress.error}` : null,
+        null,
+      )
+    case 'connecting':
+      return working('Connecting to the mailbox', null, null)
+    case 'listing':
+      return working(
+        progress.found > 0
+          ? `Listing messages · found ${atLeast}${n(progress.found)} new so far`
+          : 'Listing messages',
+        progress.error
+          ? `A page failed and is being retried. Last attempt: ${progress.error}`
+          : progress.listed > 0
+            ? `Looked through ${messages(progress.listed)} matching the filter; more pages to go.`
+            : null,
+      )
+    case 'fetching':
+      return working(
+        `Fetching and extracting · ${messages(progress.found)} found`,
+        failedNote ?? 'The search is finished; each message is fetched and its article extracted.',
+      )
+    case 'done':
+      return {
+        headline:
+          progress.pulled_in > 0
+            ? `Sync finished · ${messages(progress.pulled_in)} pulled in`
+            : 'Sync finished · nothing new',
+        count: null,
+        detail: failedNote ?? (progress.found > 0 ? 'New items are held for you to ingest.' : null),
+        fraction: progress.found > 0 ? 1 : null,
+        tone: 'done',
+      }
+    case 'failed':
+      return {
+        headline: 'The sync gave up',
+        count:
+          progress.found > 0
+            ? `Pulled in ${n(progress.pulled_in)} of ${n(progress.found)} found before it stopped` +
+              (progress.remaining > 0 ? ` · ${n(progress.remaining)} still being fetched` : '')
+            : null,
+        detail: progress.error,
+        fraction,
+        tone: 'error',
+      }
+    default:
+      // A stage this build does not know — a newer API. Said plainly rather than guessed at.
+      return working('Syncing', null, null)
+  }
+}

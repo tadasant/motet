@@ -20,7 +20,6 @@ import {
   ApiError,
   type HeldSourceItem,
   type IngestionItem,
-  type ProcessingStatus,
   type Source,
   api,
 } from '../api/client'
@@ -30,7 +29,7 @@ import { IntegrationCard } from './sources/IntegrationCard'
 import { SourceDetail } from './sources/SourceDetail'
 import { CATALOG, type Integration, type IntegrationId, integrationById } from './sources/catalog'
 import { IntegrationIcon } from './sources/icons'
-import { countsFor, rowStatus } from './sources/status'
+import { countsFor, rowStatus, syncInFlight, syncMoving } from './sources/status'
 
 /**
  * Move to another section the way the shell does — `pushState` plus a `popstate` — so
@@ -44,6 +43,9 @@ function navigateTo(path: string): void {
 
 /** How often the derived counts refresh while something is in flight. */
 const REFRESH_MS = 10_000
+
+/** How often while a mailbox sync is running, so its progress bar moves as the work does. */
+const SYNC_REFRESH_MS = 2_000
 
 export function Sources({
   /**
@@ -65,7 +67,6 @@ export function Sources({
   const [sources, setSources] = useState<Source[] | null>(null)
   const [held, setHeld] = useState<HeldSourceItem[]>([])
   const [ingestion, setIngestion] = useState<IngestionItem[]>([])
-  const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<IntegrationId | null>(null)
   const [connectAnother, setConnectAnother] = useState(false)
@@ -78,12 +79,12 @@ export function Sources({
 
   /**
    * The sources list is the primary fetch and the only one that can blank the screen.
-   * Held, ingestion and processing are what the detail panel is *derived* from, and each
+   * Held and ingestion are what the detail panel's counts are *derived* from, and each
    * is best-effort: a 404 from an older API loses a count, never the catalog.
    */
   const refresh = useCallback(async () => {
     let loaded = false
-    const [list, heldItems, ingestionItems, processingStatus] = await Promise.all([
+    const [list, heldItems, ingestionItems] = await Promise.all([
       api.sources().then(
         (next) => {
           setError('')
@@ -97,7 +98,6 @@ export function Sources({
       ),
       api.heldSourceItems().catch(() => [] as HeldSourceItem[]),
       api.ingestion().catch(() => [] as IngestionItem[]),
-      api.processing().catch(() => null),
     ])
     // A failed re-fetch keeps the rows already on screen. Replacing them with nothing
     // would read as a fresh account — Gmail highlighted, every panel unmounted — on one
@@ -105,7 +105,6 @@ export function Sources({
     setSources((previous) => (loaded ? list : (previous ?? [])))
     setHeld(heldItems)
     setIngestion(ingestionItems)
-    setProcessing(processingStatus)
     // Open Gmail's panel on its own when there is exactly one thing it could show: a
     // fresh account gets the connect form without a click, and one connected mailbox gets
     // its detail. Two connected mailboxes, or anything the person has closed, stay closed. Decided
@@ -124,12 +123,18 @@ export function Sources({
 
   // Keep the counts honest while work is moving: a panel saying "3 processing" for ten
   // minutes after they landed is the same small lie the ingestion panel exists to remove.
+  // A sync in flight polls faster and for as long as it runs: the progress is the server's,
+  // so a twenty-minute first sync is watched to the end rather than given up on (motet#94).
   const inFlight = ingestion.some((item) => item.state === 'pending')
+  // A sync nothing will run is still watched, at the ordinary interval: it moves when a
+  // worker appears, and a tab left open on a stalled sync must not poll every two seconds.
+  const syncing = (sources ?? []).some((row) => syncInFlight(row.sync_progress))
+  const moving = (sources ?? []).some((row) => syncMoving(row.sync_progress))
   useEffect(() => {
-    if (!inFlight) return
-    const timer = window.setInterval(() => void refresh(), REFRESH_MS)
+    if (!inFlight && !syncing) return
+    const timer = window.setInterval(() => void refresh(), moving ? SYNC_REFRESH_MS : REFRESH_MS)
     return () => window.clearInterval(timer)
-  }, [inFlight, refresh])
+  }, [inFlight, syncing, moving, refresh])
 
   const rowsFor = useCallback(
     (integration: Integration): Source[] =>
@@ -229,7 +234,6 @@ export function Sources({
                       rows={selectedRows}
                       held={held}
                       ingestion={ingestion}
-                      processing={processing}
                       onRefresh={refresh}
                       navigate={navigate}
                       connectAnother={connectAnother}
@@ -243,7 +247,6 @@ export function Sources({
                       rows={selectedRows}
                       held={held}
                       ingestion={ingestion}
-                      processing={processing}
                       onRefresh={refresh}
                       {...(now === undefined ? {} : { now })}
                     />
@@ -270,7 +273,6 @@ function GmailPanel({
   rows,
   held,
   ingestion,
-  processing,
   onRefresh,
   navigate,
   connectAnother,
@@ -280,7 +282,6 @@ function GmailPanel({
   rows: Source[]
   held: HeldSourceItem[]
   ingestion: IngestionItem[]
-  processing: ProcessingStatus | null
   onRefresh: () => Promise<void>
   navigate: (url: string) => void
   connectAnother: boolean
@@ -306,7 +307,6 @@ function GmailPanel({
           <SourceDetail
             source={source}
             counts={countsFor(source, held, ingestion)}
-            processing={processing}
             onRefresh={onRefresh}
             onGoToBacklog={() => navigateTo('/backlog')}
             {...(now === undefined ? {} : { now })}
@@ -358,14 +358,12 @@ function PastePanel({
   rows,
   held,
   ingestion,
-  processing,
   onRefresh,
   now,
 }: {
   rows: Source[]
   held: HeldSourceItem[]
   ingestion: IngestionItem[]
-  processing: ProcessingStatus | null
   onRefresh: () => Promise<void>
   now?: number
 }) {
@@ -376,7 +374,6 @@ function PastePanel({
           key={source.id}
           source={source}
           counts={countsFor(source, held, ingestion)}
-          processing={processing}
           onRefresh={onRefresh}
           onGoToBacklog={() => navigateTo('/backlog')}
           {...(now === undefined ? {} : { now })}

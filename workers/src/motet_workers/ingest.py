@@ -86,6 +86,13 @@ POLL_PAGE_SIZE = 50
 #: overlap of those must not keep one job listing for longer than its lease is worth.
 MAX_PAGES_PER_POLL = 10
 
+#: The ``sync_state`` key a sync's running totals live under, across every link of its chain.
+#: ``last_sync`` is one *run's* result and is overwritten by the next link, so a 480-message
+#: first sync read as "looked at 60" on each of eight polls; this is what adds them up, so a
+#: screen can say "found 480, pulled in 120" rather than a spinner (see
+#: :func:`advance_sync_run` and ``motet_api.sync_progress``).
+SYNC_RUN_KEY = "sync_run"
+
 
 class IngestError(RuntimeError):
     """Ingestion failed in a way worth retrying."""
@@ -116,6 +123,7 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         raise _permanent(f"source {source_id} no longer exists")
     if not source.active:
         logger.info("source %s is paused; not polling", source_id)
+        _end_sync_run(context.conn, source, "The mailbox was paused before the sync finished.")
         return
     if source.kind != SourceKind.GMAIL.value:
         raise _permanent(f"source {source_id} is a {source.kind!r} source and cannot be polled")
@@ -137,6 +145,7 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
     cursor = stored if isinstance(stored, str) else None
     query = source_query(source.config)
 
+    run_before = continuing_sync_run(source.sync_state)
     seen = queued = pages = 0
     window_days: int | None = None
     more = True
@@ -187,6 +196,14 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
             "caught_up": not more,
             "error": None,
         },
+        SYNC_RUN_KEY: advance_sync_run(
+            run_before,
+            now=_transaction_now(context.conn),
+            listed=seen,
+            queued=queued,
+            pages=pages,
+            more=more,
+        ),
     }
     if window_days is not None:
         # The window of the most recent first sync, as a fact on the source. Recorded only
@@ -199,9 +216,11 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         sync_state[CATALOG_KEY] = catalog
     phase2.set_source_sync_state(context.conn, source_id, sync_state)
 
-    if more:
+    if more and not phase2.poll_waiting(context.conn, source_id):
         # No delay: a drain claims it as soon as this job's lock is released, so one
-        # execution reads the whole window as a chain of bounded jobs.
+        # execution reads the whole window as a chain of bounded jobs. Not when a poll is
+        # already waiting — a "Sync now" pressed mid-chain — because that one is the next
+        # link, and a second would run the rest of the search twice over.
         enqueue_source_poll(context.conn, source_id)
     logger.info(
         "polled source %s: %d message(s) seen over %d page(s), %d queued for extraction; %s",
@@ -211,6 +230,81 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         queued,
         "more waiting, next poll queued" if more else "caught up",
     )
+
+
+def continuing_sync_run(sync_state: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The sync this poll is a further link of, or ``None`` when it starts a new one.
+
+    A run continues while its search has pages left (``listing``). One that finished listing
+    or gave up is over, and the next poll — a schedule, a "Sync now" — begins a fresh count:
+    adding a Tuesday poll's three new messages to Monday's 480 would report a sync nobody
+    is watching.
+    """
+    run = sync_state.get(SYNC_RUN_KEY)
+    if isinstance(run, dict) and run.get("status") == "listing":
+        return run
+    return None
+
+
+def advance_sync_run(
+    run: Mapping[str, Any] | None,
+    *,
+    now: datetime,
+    listed: int,
+    queued: int,
+    pages: int,
+    more: bool,
+) -> dict[str, Any]:
+    """Add one poll's totals to the sync it belongs to.
+
+    ``now`` is the database's transaction time: the start when this poll begins the run,
+    and ``updated_at`` either way. That clock rather than this process's, because the API
+    counts the run's extract jobs by ``created_at >= started_at`` — rows stamped by the
+    same transaction's ``now()``, so a Python timestamp a few milliseconds later would leave
+    the first page's jobs out — and ages ``updated_at`` against the database's clock too.
+    """
+
+    def total(key: str) -> int:
+        value = run.get(key) if run is not None else 0
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    begun = run.get("started_at") if run is not None else None
+    return {
+        "started_at": begun if isinstance(begun, str) else now.isoformat(),
+        "updated_at": now.isoformat(),
+        "listed": total("listed") + listed,
+        "queued": total("queued") + queued,
+        "pages": total("pages") + pages,
+        "status": "listing" if more else "listed",
+        "error": None,
+    }
+
+
+def _end_sync_run(conn: psycopg.Connection[Any], source: StoredSource, reason: str) -> None:
+    """Close a run still listing, so a later poll starts a fresh count rather than resuming
+    one whose totals and start belong to a sync nobody is watching any more."""
+    run = source.sync_state.get(SYNC_RUN_KEY)
+    if not (isinstance(run, dict) and run.get("status") == "listing"):
+        return
+    phase2.merge_source_sync_state(
+        conn,
+        source.id,
+        SYNC_RUN_KEY,
+        {
+            **run,
+            "updated_at": _transaction_now(conn).isoformat(),
+            "status": "failed",
+            "error": reason,
+        },
+    )
+
+
+def _transaction_now(conn: psycopg.Connection[Any]) -> datetime:
+    row = conn.execute("SELECT now() AS now").fetchone()
+    assert row is not None
+    value = row["now"] if isinstance(row, dict) else row[0]
+    assert isinstance(value, datetime)
+    return value
 
 
 def source_query(config: Mapping[str, Any]) -> str:
@@ -246,6 +340,23 @@ def record_poll_failure(
             "caught_up": caught_up,
             "error": error[:2000],
         },
+    }
+    # The run ends here, and says so: a sync that gave up must not be reported as one still
+    # listing, which is the spinner that never stops. What it found before failing stays,
+    # because those messages were queued and extraction carries on with them. A run that
+    # never began (the first link failed) is recorded as a failed one with nothing found.
+    run = source.sync_state.get(SYNC_RUN_KEY)
+    base = run if isinstance(run, dict) and run.get("status") == "listing" else {}
+    now = _transaction_now(conn).isoformat()
+    sync_state[SYNC_RUN_KEY] = {
+        "started_at": now,
+        "listed": 0,
+        "queued": 0,
+        "pages": 0,
+        **base,
+        "updated_at": now,
+        "status": "failed",
+        "error": error[:2000],
     }
     phase2.set_source_sync_state(conn, source.id, sync_state, error=error[:2000])
 
@@ -604,12 +715,13 @@ def _record_skip(
     is mostly not newsletters, and treating every receipt as an error would make the
     source permanently red.
     """
-    source = phase2.get_source(conn, source_id)
-    if source is None:
-        return
-    skipped = dict(source.sync_state)
-    skipped["last_skipped"] = {"message_id": message_id, "reason": reason[:200]}
-    phase2.set_source_sync_state(conn, source_id, skipped)
+    # One key, merged. Extraction is not serialized against the poll, so rewriting the whole
+    # document from a snapshot read here would put back a cursor and a sync run that a poll
+    # of the same mailbox committed in between — a rewound cursor and a progress count that
+    # jumps backwards. :func:`~motet_db.phase2.merge_source_sync_state` says why that matters.
+    phase2.merge_source_sync_state(
+        conn, source_id, "last_skipped", {"message_id": message_id, "reason": reason[:200]}
+    )
 
 
 def _require(payload: Mapping[str, Any], key: str) -> str:

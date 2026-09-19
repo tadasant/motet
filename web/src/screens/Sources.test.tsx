@@ -15,6 +15,7 @@ import {
   cardStatus,
   countsFor,
   describeLastSync,
+  describeSyncProgress,
   relativeTime,
   rowStatus,
 } from './sources/status'
@@ -77,6 +78,26 @@ const CONNECTED_GMAIL: Source = {
   items_pulled_in: 41,
   items_integrated: 30,
 }
+
+type SyncProgress = NonNullable<Source['sync_progress']>
+
+/** A sync's progress as the API reports it: nothing found yet unless the test says so. */
+const progress = (overrides: Partial<SyncProgress>): SyncProgress => ({
+  stage: 'queued',
+  started_at: '2026-09-12T23:59:00Z',
+  listed: 0,
+  found: 0,
+  found_is_lower_bound: false,
+  pulled_in: 0,
+  remaining: 0,
+  failed: 0,
+  pages: 0,
+  error: null,
+  waiting_on_worker: false,
+  ...overrides,
+})
+
+const withProgress = (sync_progress: SyncProgress): Source => ({ ...CONNECTED_GMAIL, sync_progress })
 
 const HELD: HeldSourceItem[] = [
   {
@@ -265,57 +286,18 @@ describe('the catalog', () => {
     expect(window.location.pathname).toBe('/backlog')
   })
 
-  it('queues a poll on Sync now and reports it synced once the last sync moves', async () => {
-    let polled = false
-    const later: Source = {
-      ...CONNECTED_GMAIL,
-      last_polled_at: '2026-09-13T00:00:30Z',
-      last_sync: { at: '2026-09-13T00:00:30Z', seen: 50, queued: 1, error: null, caught_up: true },
-    }
-    const calls = mockApi({
-      '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
-      'POST /v1/sources/src_2/poll': CONNECTED_GMAIL,
-    })
-    // After the poll is queued, the next sources fetch reports the poll having run.
-    const fetchMock = vi.mocked(fetch)
-    const original = fetchMock.getMockImplementation()!
-    fetchMock.mockImplementation(async (input, init) => {
-      const url = String(input)
-      if (url.endsWith('/poll')) polled = true
-      if (polled && url.endsWith('/v1/sources') && (init?.method ?? 'GET') === 'GET') {
-        return { ok: true, status: 200, json: async () => [PASTE_SOURCE, later] } as Response
-      }
-      return original(input, init)
-    })
-
-    render(<Sources navigate={vi.fn()} now={NOW} />)
-    const detail = await screen.findByRole('region', { name: 'Gmail details' })
-    fireEvent.click(within(detail).getByRole('button', { name: 'Sync now' }))
-
-    expect(await within(detail).findByRole('button', { name: 'Syncing…' })).toBeDefined()
-    expect(within(detail).getByText(/Queued — a worker is running/)).toBeDefined()
-    await waitFor(
-      () => expect(calls.find((c) => c.method === 'POST' && c.url.endsWith('/v1/sources/src_2/poll'))).toBeDefined(),
-    )
-    // The watcher re-fetches every two seconds; the fixture answers with the moved stamp.
-    expect(await within(detail).findByText(/^Synced /, {}, { timeout: 4_000 })).toBeDefined()
-    expect(within(detail).getByRole('button', { name: 'Sync now' })).toBeDefined()
-    expect(within(detail).getByText('Looked at 50 messages; 1 was new.')).toBeDefined()
-  })
-
-  it('keeps watching when a re-fetch comes back unchanged, and reports the sync when it lands', async () => {
-    // The first re-fetch after queueing answers with the old sync; only a later one has
-    // moved. A watch that re-armed only on a change stopped at the first answer.
-    const later: Source = {
-      ...CONNECTED_GMAIL,
-      last_polled_at: '2026-09-13T00:00:30Z',
-      last_sync: { at: '2026-09-13T00:00:30Z', seen: 0, queued: 0, error: null, caught_up: true },
-    }
+  it('shows the sync step by step after Sync now, with pulled-in against left, until it finishes', async () => {
+    // The poll route answers with the sync queued; each later re-fetch has moved it on.
+    const steps: SyncProgress[] = [
+      progress({ stage: 'fetching', found: 480, pulled_in: 120, remaining: 360, listed: 612 }),
+      progress({ stage: 'done', found: 480, pulled_in: 480, remaining: 0, listed: 612 }),
+    ]
+    const queued = withProgress(progress({ stage: 'queued' }))
     let polled = false
     let refetches = 0
-    mockApi({
+    const calls = mockApi({
       '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
-      'POST /v1/sources/src_2/poll': CONNECTED_GMAIL,
+      'POST /v1/sources/src_2/poll': queued,
     })
     const fetchMock = vi.mocked(fetch)
     const original = fetchMock.getMockImplementation()!
@@ -323,9 +305,9 @@ describe('the catalog', () => {
       const url = String(input)
       if (url.endsWith('/poll')) polled = true
       if (polled && url.endsWith('/v1/sources') && (init?.method ?? 'GET') === 'GET') {
+        const row = refetches === 0 ? queued : withProgress(steps[Math.min(refetches - 1, steps.length - 1)]!)
         refetches += 1
-        const rows = refetches >= 2 ? [PASTE_SOURCE, later] : [PASTE_SOURCE, CONNECTED_GMAIL]
-        return { ok: true, status: 200, json: async () => rows } as Response
+        return { ok: true, status: 200, json: async () => [PASTE_SOURCE, row] } as Response
       }
       return original(input, init)
     })
@@ -334,38 +316,50 @@ describe('the catalog', () => {
     const detail = await screen.findByRole('region', { name: 'Gmail details' })
     fireEvent.click(within(detail).getByRole('button', { name: 'Sync now' }))
 
-    expect(await within(detail).findByText(/^Synced /, {}, { timeout: 7_000 })).toBeDefined()
-    expect(refetches).toBeGreaterThanOrEqual(2)
-  }, 10_000)
-
-  it('does not call it synced when only an extraction moved last_polled_at', async () => {
-    // `_record_skip` moves `last_polled_at` too. The poll has run when `last_sync.at` moves.
-    const skipped: Source = { ...CONNECTED_GMAIL, last_polled_at: '2026-09-13T00:00:10Z' }
-    let polled = false
-    mockApi({
-      '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
-      'POST /v1/sources/src_2/poll': CONNECTED_GMAIL,
-    })
-    const fetchMock = vi.mocked(fetch)
-    const original = fetchMock.getMockImplementation()!
-    fetchMock.mockImplementation(async (input, init) => {
-      const url = String(input)
-      if (url.endsWith('/poll')) polled = true
-      if (polled && url.endsWith('/v1/sources') && (init?.method ?? 'GET') === 'GET') {
-        return { ok: true, status: 200, json: async () => [PASTE_SOURCE, skipped] } as Response
-      }
-      return original(input, init)
-    })
-
-    render(<Sources navigate={vi.fn()} now={NOW} />)
-    const detail = await screen.findByRole('region', { name: 'Gmail details' })
-    fireEvent.click(within(detail).getByRole('button', { name: 'Sync now' }))
-    await within(detail).findByRole('button', { name: 'Syncing…' })
-    // Two watcher ticks with the skip's timestamp and no new sync: still queued.
-    await new Promise((resolve) => setTimeout(resolve, 4_500))
+    // Never a bare "Syncing…": the step it is on, with an indeterminate bar before a count.
+    expect(await within(detail).findByText('Waiting for a worker to start the sync')).toBeDefined()
     expect(within(detail).getByRole('button', { name: 'Syncing…' })).toBeDefined()
-    expect(within(detail).queryByText(/^Synced /)).toBeNull()
-  }, 10_000)
+    expect(within(detail).getByRole('progressbar').getAttribute('aria-valuenow')).toBeNull()
+    expect(calls.find((c) => c.method === 'POST' && c.url.endsWith('/v1/sources/src_2/poll'))).toBeDefined()
+
+    // The screen polls every two seconds while a sync is in flight.
+    expect(await within(detail).findByText('Pulled in 120 of 480 · 360 left', {}, { timeout: 4_000 })).toBeDefined()
+    expect(within(detail).getByRole('progressbar').getAttribute('aria-valuenow')).toBe('25')
+
+    expect(await within(detail).findByText('Sync finished · 480 messages pulled in', {}, { timeout: 4_000 })).toBeDefined()
+    expect(within(detail).getByRole('button', { name: 'Sync now' })).toBeDefined()
+  }, 12_000)
+
+  it('shows a sync already in flight when the page opens, and calls a still-growing total a lower bound', async () => {
+    const listing = withProgress(progress({ stage: 'listing', found: 60, pulled_in: 12, remaining: 48, listed: 60, found_is_lower_bound: true }))
+    mockApi({ '/v1/sources': [PASTE_SOURCE, listing] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    expect(within(detail).getByText('Listing messages · found at least 60 new so far')).toBeDefined()
+    expect(within(detail).getByText('Pulled in 12 of at least 60 · 48 left')).toBeDefined()
+    expect(within(detail).getByRole('button', { name: 'Syncing…' })).toHaveProperty('disabled', true)
+  })
+
+  it('does not poll a stalled sync every two seconds', async () => {
+    const stuck = withProgress(progress({ stage: 'queued', waiting_on_worker: true }))
+    const calls = mockApi({ '/v1/sources': [PASTE_SOURCE, stuck] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('region', { name: 'Gmail details' })
+    await new Promise((resolve) => setTimeout(resolve, 2_600))
+    expect(calls.filter((c) => c.method === 'GET' && c.url.endsWith('/v1/sources'))).toHaveLength(1)
+  }, 6_000)
+
+  it('says so when a queued sync has no worker to run it, rather than spinning', async () => {
+    // Tadas's production sync (2026-09-19): the poll was queued and nothing drains prod.
+    const stuck = withProgress(progress({ stage: 'queued', waiting_on_worker: true }))
+    mockApi({ '/v1/sources': [PASTE_SOURCE, stuck] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    const box = within(detail).getByRole('region', { name: 'Sync progress' })
+    expect(within(box).getByText(/No worker has run in the last five minutes/)).toBeDefined()
+    expect(box.className).toContain('sync-stalled')
+    expect(within(box).getByRole('alert').textContent).toBe('Waiting for a worker to start the sync')
+  })
 
   it('says the last sync gave up when it records an error', async () => {
     const expired: Source = {
@@ -413,42 +407,31 @@ describe('the catalog', () => {
 })
 
 describe('when something goes wrong', () => {
-  it('reports a sync that gave up as a failure, not as synced', async () => {
-    // A poll that gave up moves `last_sync.at` too, and records why on `last_sync.error`.
-    const gaveUp: Source = {
-      ...CONNECTED_GMAIL,
-      last_sync: {
-        at: '2026-09-13T00:00:30Z',
-        seen: 0,
-        queued: 0,
-        caught_up: false,
-        error: 'SourceAuthError: invalid_grant',
-      },
-    }
-    let polled = false
+  it('reports a sync that gave up as a failure with its reason, and stops spinning', async () => {
+    const gaveUp = withProgress(
+      progress({ stage: 'failed', found: 60, pulled_in: 60, error: 'SourceAuthError: invalid_grant' }),
+    )
+    mockApi({ '/v1/sources': [PASTE_SOURCE, gaveUp] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    const box = within(detail).getByRole('region', { name: 'Sync progress' })
+    expect(within(box).getByRole('alert').textContent).toBe('The sync gave up')
+    expect(within(box).getByText('SourceAuthError: invalid_grant')).toBeDefined()
+    expect(within(box).getByText('Pulled in 60 of 60 found before it stopped')).toBeDefined()
+    expect(within(detail).getByRole('button', { name: 'Sync now' })).toHaveProperty('disabled', false)
+  })
+
+  it('reports a Sync now the API refused', async () => {
     mockApi({
       '/v1/sources': [PASTE_SOURCE, CONNECTED_GMAIL],
-      'POST /v1/sources/src_2/poll': CONNECTED_GMAIL,
+      'POST /v1/sources/src_2/poll': { status: 409, detail: 'This source is paused or not connected yet.' },
     })
-    const fetchMock = vi.mocked(fetch)
-    const original = fetchMock.getMockImplementation()!
-    fetchMock.mockImplementation(async (input, init) => {
-      const url = String(input)
-      if (url.endsWith('/poll')) polled = true
-      if (polled && url.endsWith('/v1/sources') && (init?.method ?? 'GET') === 'GET') {
-        return { ok: true, status: 200, json: async () => [PASTE_SOURCE, gaveUp] } as Response
-      }
-      return original(input, init)
-    })
-
     render(<Sources navigate={vi.fn()} now={NOW} />)
     const detail = await screen.findByRole('region', { name: 'Gmail details' })
     fireEvent.click(within(detail).getByRole('button', { name: 'Sync now' }))
-
-    const alert = await within(detail).findByText(/The sync gave up: SourceAuthError/, {}, { timeout: 4_000 })
-    expect(alert.getAttribute('role')).toBe('alert')
-    expect(within(detail).queryByText(/^Synced /)).toBeNull()
-  }, 10_000)
+    expect(await within(detail).findByText(/This source is paused or not connected yet/)).toBeDefined()
+    expect(within(detail).getByRole('button', { name: 'Sync now' })).toBeDefined()
+  })
 
   it('keeps the rows on screen when a re-fetch fails', async () => {
     // One transient error during a watch must not read as a fresh account.
@@ -783,5 +766,66 @@ describe('the pure half', () => {
     expect(relativeTime('2026-09-12T23:30:00Z', NOW)).toBe('30 minutes ago')
     expect(relativeTime('2026-09-12T20:00:00Z', NOW)).toBe('4 hours ago')
     expect(relativeTime('2026-09-10T00:00:00Z', NOW)).toBe('3 days ago')
+  })
+})
+
+describe('describeSyncProgress', () => {
+  it('names the step before there is a count, with no bar value to make up', () => {
+    for (const [stage, headline] of [
+      ['queued', 'Waiting for a worker to start the sync'],
+      ['connecting', 'Connecting to the mailbox'],
+      ['listing', 'Listing messages'],
+    ] as const) {
+      const shown = describeSyncProgress(progress({ stage }))
+      expect(shown.headline).toBe(headline)
+      expect(shown.count).toBeNull()
+      expect(shown.fraction).toBeNull()
+      expect(shown.tone).toBe('working')
+    }
+  })
+
+  it('says "at least" while listing and states an exact total once the search is done', () => {
+    const listing = describeSyncProgress(
+      progress({ stage: 'listing', found: 480, pulled_in: 120, remaining: 360, found_is_lower_bound: true, listed: 600 }),
+    )
+    expect(listing.headline).toBe('Listing messages · found at least 480 new so far')
+    expect(listing.count).toBe('Pulled in 120 of at least 480 · 360 left')
+    expect(listing.detail).toBe('Looked through 600 messages matching the filter; more pages to go.')
+    const fetching = describeSyncProgress(progress({ stage: 'fetching', found: 1480, pulled_in: 370, remaining: 1110 }))
+    expect(fetching.count).toBe('Pulled in 370 of 1,480 · 1,110 left')
+    expect(fetching.fraction).toBe(0.25)
+  })
+
+  it('says a mid-chain page is being retried, and why', () => {
+    const shown = describeSyncProgress(
+      progress({ stage: 'listing', found: 60, remaining: 60, found_is_lower_bound: true, error: 'HTTP 429' }),
+    )
+    expect(shown.detail).toBe('A page failed and is being retried. Last attempt: HTTP 429')
+  })
+
+  it('counts only what was pulled in when a sync finishes with failures', () => {
+    const shown = describeSyncProgress(progress({ stage: 'done', found: 480, pulled_in: 477, failed: 3 }))
+    expect(shown.headline).toBe('Sync finished · 477 messages pulled in')
+    expect(shown.detail).toBe('3 messages could not be fetched and were left out.')
+  })
+
+  it('carries a retry reason and the extraction failures into the detail', () => {
+    expect(describeSyncProgress(progress({ stage: 'retrying', error: 'HTTP 429' })).detail).toBe('Last attempt: HTTP 429')
+    const fetching = describeSyncProgress(progress({ stage: 'fetching', found: 10, pulled_in: 7, remaining: 2, failed: 1 }))
+    expect(fetching.detail).toBe('1 message could not be fetched and was left out.')
+  })
+
+  it('turns stalled when nothing will run it, whatever the step', () => {
+    const shown = describeSyncProgress(progress({ stage: 'fetching', found: 10, remaining: 10, waiting_on_worker: true }))
+    expect(shown.tone).toBe('stalled')
+    expect(shown.detail).toMatch(/No worker has run in the last five minutes/)
+  })
+
+  it('finishes with a sentence, not a bar', () => {
+    expect(describeSyncProgress(progress({ stage: 'done', found: 1, pulled_in: 1 })).headline).toBe(
+      'Sync finished · 1 message pulled in',
+    )
+    const empty = describeSyncProgress(progress({ stage: 'done' }))
+    expect([empty.headline, empty.tone, empty.detail]).toEqual(['Sync finished · nothing new', 'done', null])
   })
 })
