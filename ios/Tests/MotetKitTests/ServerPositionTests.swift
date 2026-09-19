@@ -357,8 +357,12 @@ actor ProbeAPI: MotetAPI {
 
     func listEpisodes() async throws -> [EpisodeResponse] { try await fake.listEpisodes() }
     func episode(id: String) async throws -> EpisodeResponse { try await fake.episode(id: id) }
-    func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
-        try await fake.createEpisode(title: title, maxDurationMs: maxDurationMs)
+    func createEpisode(
+        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+    ) async throws -> EpisodeResponse {
+        try await fake.createEpisode(
+            title: title, maxDurationMs: maxDurationMs, newsItemIds: newsItemIds, keepInBacklog: keepInBacklog
+        )
     }
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse { try await fake.markEpisodeListened(id: id) }
     func setPlaybackPosition(episodeId: String, listenedThroughMs: Int) async throws -> ListenProgressResponse {
