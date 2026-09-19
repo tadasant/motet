@@ -1,7 +1,7 @@
 import MotetKit
 import SwiftUI
 
-/// The sign-in screen until a session exists; then three tabs, and a player that stays put
+/// The sign-in screen until a session exists; then four tabs, and a player that stays put
 /// across all of them.
 ///
 /// The gate is the whole of the app, not a tab: nothing but `SignInView` renders until
@@ -45,6 +45,8 @@ struct RootView: View {
                     .tabItem { Label("Episodes", systemImage: "waveform") }
                 BacklogView()
                     .tabItem { Label("Backlog", systemImage: "tray.full") }
+                SourcesView()
+                    .tabItem { Label("Sources", systemImage: "point.3.connected.trianglepath.dotted") }
                 SettingsView()
                     .tabItem { Label("Settings", systemImage: "gearshape") }
             }
