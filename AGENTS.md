@@ -2029,9 +2029,18 @@ desk, with the transcript beside it.
   answers `GET /v1/episodes/{id}/audio` with a 307 to a signed URL on the object store's
   origin; a media element follows that without CORS and gets range requests from the
   store, while a `fetch` would need CORS on the bucket, which nothing grants. The prototype
-  fetched a blob because the local backend serves no `Range` — so locally, seeking is
-  limited to what has buffered, and that is the dev path only. The route takes the feed
-  token in the query because a media element cannot send a header.
+  fetched a blob because the local backend served no `Range`; it serves one range now,
+  because iOS Safari will not play media from a server that ignores `Range`, so the dev
+  path could not be tried on a phone. The route takes the feed token in the query because
+  a media element cannot send a header.
+- **The route asks the store before it signs, and a missing object is a 410.** A signed URL
+  is minted without touching the object, so audio a bucket's retention rule had deleted was
+  still redirected to, and the element reported the store's 404 as "could not load" — which
+  is what the owner saw on every staging episode, on a phone, and read as a mobile bug. An
+  `<audio>` error carries no status, so on one the player asks the route itself
+  (`api.audioProblem`, `redirect: 'manual'`) and shows the API's sentence, or says the
+  browser could not play a file that is there. An existence check that cannot be answered
+  falls through to the redirect: it may only make a failure clearer, never cause one.
 - **It resumes from `listened_through_ms` and writes `PUT …/position`**, the position
   resource a syncing player wants, so listening here moves the shelf and marks stories
   read as their segments pass. It is the first client to write the position from real
@@ -2114,6 +2123,13 @@ who calls it anyway. Turning it on is configuration, listed in the PR.
   whole loop can be felt in a browser for free: `bin/dev --voice` with
   `MOTET_VOICE_ARM=openai_realtime`. Real mode without `OPENAI_API_KEY` is dormant and
   says why; `MOTET_VOICE_ARM` still defaults to `composed`.
+- **What a browser allows only inside a tap happens before the first `await`.** iOS
+  Safari starts an `AudioContext` made outside a gesture suspended — no reply audio, and no
+  mic frames, because a suspended context never runs the processor — and refuses the
+  narration's `play()` when `ready` arrives over the socket. So the tap makes and resumes
+  the context and plays-and-pauses the element in one tick, which is what lifts WebKit's
+  per-element restriction; a `play()` still refused is sent as `narration_paused`, and the
+  player's own play button resumes it.
 - **The socket is the one cross-origin surface, and it checks `Origin`**
   (`MOTET_VOICE_ALLOWED_ORIGINS`). `StartSession` has no CORS policy on purpose: only the
   API calls it.

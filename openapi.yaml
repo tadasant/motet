@@ -3994,7 +3994,14 @@ paths:
         \ depends on the storage backend, and the *store* decides rather than\nthis route: a backend that\
         \ can mint a signed URL returns one, and one that cannot\nreturns ``None``. A podcast client cannot\
         \ tell the difference \u2014 it follows the\nredirect \u2014 so the enclosure URL in the feed\
-        \ is stable across both, and a signed URL's\nexpiry never ends up cached inside a feed document."
+        \ is stable across both, and a signed URL's\nexpiry never ends up cached inside a feed document.\n\
+        \n**The object is asked for before a URL is signed for it.** A signed URL is minted\nwithout touching\
+        \ the object, so a redirect used to be issued for audio a bucket's\nretention rule had already\
+        \ deleted: the browser followed it into the store's 404,\nwhich an ``<audio>`` element reports\
+        \ as nothing more specific than \"could not load\" \u2014\nand the episode screen then blamed\
+        \ the browser. A 410 here, with a sentence, is what\nlets the player say the audio is gone rather\
+        \ than broken. It costs one metadata read\nper load, and a media element asks this route once\
+        \ per load; its range requests go to\nthe signed URL."
       operationId: episode_audio_v1_episodes__episode_id__audio_get
       parameters:
       - in: path
@@ -4017,8 +4024,16 @@ paths:
           content:
             audio/mpeg: {}
           description: The episode audio
+        '206':
+          content:
+            audio/mpeg: {}
+          description: One byte range of the audio
         '307':
           description: Redirect to a time-limited signed URL
+        '410':
+          description: The audio was rendered once and is no longer in storage
+        '416':
+          description: The requested byte range is outside the audio
         '422':
           content:
             application/json:
