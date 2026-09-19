@@ -40,7 +40,10 @@ public enum ConsentFlow {
         case needsWebApp
     }
 
+    /// Runs on the caller's actor (`#isolation`), so the closures it is handed — which in
+    /// the app belong to the main actor — are never sent anywhere.
     public static func run(
+        isolation: isolated (any Actor)? = #isolation,
         api: any SourcesAPI,
         appDomain: String?,
         what: String,
