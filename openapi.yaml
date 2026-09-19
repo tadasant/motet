@@ -2803,6 +2803,12 @@ components:
             type: string
           title: Scopes
           type: array
+        sync_progress:
+          anyOf:
+          - $ref: '#/components/schemas/SourceSyncProgress'
+          - type: 'null'
+          description: Where a sync in flight has got to, or how the latest one ended for an hour after.
+            Null when no sync is running or recent, and for a source nothing polls.
       required:
       - id
       - kind
@@ -2838,6 +2844,97 @@ components:
       - start
       - end
       title: SourceSpanModel
+      type: object
+    SourceSyncProgress:
+      description: "Where a mailbox sync is right now, from \"Sync now\" to the last message extracted.\n\
+        \nA sync is a chain of polls, each listing a bounded slice of the search and queueing\nwhat is\
+        \ new for extraction (motet#94), so a large first sync is many jobs over minutes.\nThis is that\
+        \ chain added up and joined to the job queue, so a screen can show which\nstep it is on and how\
+        \ far through it is instead of a bare \"Syncing\u2026\".\n\n``stage`` is the one field to branch\
+        \ on:\n\n- ``queued`` \u2014 a poll is waiting for a worker to pick it up.\n- ``retrying`` \u2014\
+        \ a poll failed and is waiting to try again; ``error`` says why.\n- ``connecting`` \u2014 a worker\
+        \ has the poll and is reaching the mailbox; nothing listed yet.\n- ``listing`` \u2014 paging through\
+        \ the search. ``found`` is a lower bound until it ends.\n- ``fetching`` \u2014 the search is exhausted;\
+        \ ``found`` is final and messages are still\n  being fetched and extracted.\n- ``done`` \u2014\
+        \ every message found has been through extraction. Reported for an hour.\n- ``failed`` \u2014\
+        \ the sync gave up; ``error`` says why. Reported for an hour.\n\nCounts are of messages this sync\
+        \ found that were **new to Motet**, not of everything the\nsearch matched (that is ``listed``).\
+        \ ``pulled_in`` is found messages that have been\nthrough extraction \u2014 including a receipt\
+        \ it read and skipped as not a newsletter \u2014 so\nit is progress through the work rather than\
+        \ a count of items held for you."
+      properties:
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Why the sync gave up (``failed``) or why its poll is retrying, else null.
+          title: Error
+        failed:
+          description: Found messages whose extraction gave up after its retries.
+          title: Failed
+          type: integer
+        found:
+          description: Of those, messages new to Motet, queued for extraction.
+          title: Found
+          type: integer
+        found_is_lower_bound:
+          description: True while the search still has pages to list, so more may be found. Say 'at least'
+            beside ``found`` when it is.
+          title: Found Is Lower Bound
+          type: boolean
+        listed:
+          description: Messages matching the filter the search has listed so far, new or not.
+          title: Listed
+          type: integer
+        pages:
+          description: Search result pages read so far.
+          title: Pages
+          type: integer
+        pulled_in:
+          description: Found messages that have been through extraction, skipped ones included.
+          title: Pulled In
+          type: integer
+        remaining:
+          description: Found messages still waiting to be fetched and extracted, or in flight.
+          title: Remaining
+          type: integer
+        stage:
+          enum:
+          - queued
+          - retrying
+          - connecting
+          - listing
+          - fetching
+          - done
+          - failed
+          title: Stage
+          type: string
+        started_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When this sync's first poll ran. Null while the first poll is still queued.
+          title: Started At
+        waiting_on_worker:
+          description: "True when work is waiting and no worker has run in the last five minutes and none\
+            \ is running any of it \u2014 so nothing will move until one runs. A queued sync that is merely\
+            \ waiting its turn is false."
+          title: Waiting On Worker
+          type: boolean
+      required:
+      - stage
+      - started_at
+      - listed
+      - found
+      - found_is_lower_bound
+      - pulled_in
+      - remaining
+      - failed
+      - pages
+      - error
+      - waiting_on_worker
+      title: SourceSyncProgress
       type: object
     SourceSyncResult:
       description: "What the most recent poll of a connected source found \u2014 or why it gave up."

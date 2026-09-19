@@ -22,6 +22,85 @@ final class SourceStatusTests: XCTestCase {
         )
     }
 
+    // MARK: - Sync progress — the SPA's `describeSyncProgress`, rule for rule
+
+    private func progress(
+        stage: String,
+        listed: Int = 0,
+        found: Int = 0,
+        lowerBound: Bool = false,
+        pulledIn: Int = 0,
+        remaining: Int = 0,
+        failed: Int = 0,
+        error: String? = nil,
+        waitingOnWorker: Bool = false
+    ) -> SourceSyncProgress {
+        SourceSyncProgress(
+            error: error, failed: failed, found: found, foundIsLowerBound: lowerBound,
+            listed: listed, pages: 0, pulledIn: pulledIn, remaining: remaining, stage: stage,
+            startedAt: nil, waitingOnWorker: waitingOnWorker
+        )
+    }
+
+    func testBeforeACountTheStepIsNamedAndTheBarIsIndeterminate() {
+        let expected = [
+            ("queued", "Waiting for a worker to start the sync"),
+            ("connecting", "Connecting to the mailbox"),
+            ("listing", "Listing messages"),
+        ]
+        for (stage, headline) in expected {
+            let shown = SourceStatus.describeSyncProgress(progress(stage: stage))
+            XCTAssertEqual(shown.headline, headline)
+            XCTAssertNil(shown.count)
+            XCTAssertNil(shown.fraction)
+            XCTAssertEqual(shown.tone, .working)
+            XCTAssertTrue(SourceStatus.syncInFlight(progress(stage: stage)))
+        }
+    }
+
+    func testAStillGrowingTotalIsALowerBoundAndAFinishedOneIsExact() {
+        let listing = SourceStatus.describeSyncProgress(progress(
+            stage: "listing", listed: 600, found: 480, lowerBound: true, pulledIn: 120, remaining: 360
+        ))
+        XCTAssertEqual(listing.headline, "Listing messages · found at least 480 new so far")
+        XCTAssertEqual(listing.count, "Pulled in 120 of at least 480 · 360 left")
+        let fetching = SourceStatus.describeSyncProgress(progress(
+            stage: "fetching", found: 1480, pulledIn: 370, remaining: 1110
+        ))
+        XCTAssertEqual(fetching.count, "Pulled in 370 of 1,480 · 1,110 left")
+        XCTAssertEqual(fetching.fraction, 0.25)
+    }
+
+    func testASyncNothingWillRunSaysSo() {
+        let shown = SourceStatus.describeSyncProgress(progress(stage: "queued", waitingOnWorker: true))
+        XCTAssertEqual(shown.tone, .stalled)
+        XCTAssertEqual(shown.detail, "No worker has run in the last five minutes, so this will not move until one does.")
+    }
+
+    func testAFinishedOrFailedSyncStopsBeingInFlight() {
+        let done = progress(stage: "done", found: 1, pulledIn: 1)
+        XCTAssertFalse(SourceStatus.syncInFlight(done))
+        XCTAssertEqual(SourceStatus.describeSyncProgress(done).headline, "Sync finished · 1 message pulled in")
+        let failed = progress(stage: "failed", found: 60, pulledIn: 60, error: "invalid_grant")
+        XCTAssertFalse(SourceStatus.syncInFlight(failed))
+        let shown = SourceStatus.describeSyncProgress(failed)
+        XCTAssertEqual(shown.tone, .error)
+        XCTAssertEqual(shown.detail, "invalid_grant")
+        XCTAssertEqual(shown.count, "Pulled in 60 of 60 found before it stopped")
+        XCTAssertFalse(SourceStatus.syncInFlight(nil))
+    }
+
+    func testAStageThisBuildDoesNotKnowIsSaidPlainly() {
+        XCTAssertEqual(SourceStatus.describeSyncProgress(progress(stage: "reticulating")).headline, "Syncing")
+    }
+
+    func testNumbersAreGroupedTheWayTheSPAGroupsThem() {
+        XCTAssertEqual(SourceStatus.number(0), "0")
+        XCTAssertEqual(SourceStatus.number(999), "999")
+        XCTAssertEqual(SourceStatus.number(1000), "1,000")
+        XCTAssertEqual(SourceStatus.number(1234567), "1,234,567")
+    }
+
     func testAnAbandonedConsentIsNotABrokenSource() {
         // The row `/v1/sources/connect` creates before the person leaves for Google, still
         // without a credential: never polled, never disconnected.

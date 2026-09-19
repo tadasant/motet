@@ -2261,6 +2261,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
     public var name: String
     public var query: String?
     public var scopes: [String]
+    public var syncProgress: SourceSyncProgress?
 
     public init(
         active: Bool,
@@ -2278,7 +2279,8 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         lastSync: SourceSyncResult? = nil,
         name: String,
         query: String? = nil,
-        scopes: [String]
+        scopes: [String],
+        syncProgress: SourceSyncProgress? = nil
     ) {
         self.active = active
         self.connected = connected
@@ -2296,6 +2298,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         self.name = name
         self.query = query
         self.scopes = scopes
+        self.syncProgress = syncProgress
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2315,6 +2318,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         case name
         case query
         case scopes
+        case syncProgress = "sync_progress"
     }
 }
 
@@ -2334,6 +2338,82 @@ public struct SourceSpanModel: Codable, Hashable, Sendable {
         case end
         case sourceItemId = "source_item_id"
         case start
+    }
+}
+
+/// Where a mailbox sync is right now, from "Sync now" to the last message extracted.
+///
+/// A sync is a chain of polls, each listing a bounded slice of the search and queueing
+/// what is new for extraction (motet#94), so a large first sync is many jobs over minutes.
+/// This is that chain added up and joined to the job queue, so a screen can show which
+/// step it is on and how far through it is instead of a bare "Syncing…".
+///
+/// ``stage`` is the one field to branch on:
+///
+/// - ``queued`` — a poll is waiting for a worker to pick it up.
+/// - ``retrying`` — a poll failed and is waiting to try again; ``error`` says why.
+/// - ``connecting`` — a worker has the poll and is reaching the mailbox; nothing listed yet.
+/// - ``listing`` — paging through the search. ``found`` is a lower bound until it ends.
+/// - ``fetching`` — the search is exhausted; ``found`` is final and messages are still
+///   being fetched and extracted.
+/// - ``done`` — every message found has been through extraction. Reported for an hour.
+/// - ``failed`` — the sync gave up; ``error`` says why. Reported for an hour.
+///
+/// Counts are of messages this sync found that were **new to Motet**, not of everything the
+/// search matched (that is ``listed``). ``pulled_in`` is found messages that have been
+/// through extraction — including a receipt it read and skipped as not a newsletter — so
+/// it is progress through the work rather than a count of items held for you.
+public struct SourceSyncProgress: Codable, Hashable, Sendable {
+    public var error: String?
+    public var failed: Int
+    public var found: Int
+    public var foundIsLowerBound: Bool
+    public var listed: Int
+    public var pages: Int
+    public var pulledIn: Int
+    public var remaining: Int
+    public var stage: String
+    public var startedAt: Date?
+    public var waitingOnWorker: Bool
+
+    public init(
+        error: String? = nil,
+        failed: Int,
+        found: Int,
+        foundIsLowerBound: Bool,
+        listed: Int,
+        pages: Int,
+        pulledIn: Int,
+        remaining: Int,
+        stage: String,
+        startedAt: Date? = nil,
+        waitingOnWorker: Bool
+    ) {
+        self.error = error
+        self.failed = failed
+        self.found = found
+        self.foundIsLowerBound = foundIsLowerBound
+        self.listed = listed
+        self.pages = pages
+        self.pulledIn = pulledIn
+        self.remaining = remaining
+        self.stage = stage
+        self.startedAt = startedAt
+        self.waitingOnWorker = waitingOnWorker
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case error
+        case failed
+        case found
+        case foundIsLowerBound = "found_is_lower_bound"
+        case listed
+        case pages
+        case pulledIn = "pulled_in"
+        case remaining
+        case stage
+        case startedAt = "started_at"
+        case waitingOnWorker = "waiting_on_worker"
     }
 }
 

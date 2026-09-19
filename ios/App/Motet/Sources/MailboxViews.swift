@@ -14,18 +14,15 @@ struct MailboxDetailView: View {
     @State private var actionError: String?
     @State private var working = false
 
-    /// "Sync now", in words that do not promise more than the queue does.
+    /// "Sync now" itself — the request, not the sync. The sync is `source.syncProgress`,
+    /// which the API assembles from the worker's running totals and the job queue.
     enum SyncState: Equatable {
         case idle
-        /// The poll is enqueued; `before` is the `last_sync.at` it has to move past.
-        case queued(before: Date?, startedAt: Date)
-        case done(at: Date, queued: Int)
-        case slow
+        case requesting
         case failed(String)
     }
 
-    /// How long "Sync now" watches for the poll to land, and how often it looks.
-    private static let syncWatchSeconds: TimeInterval = 120
+    /// How often the screen re-reads while a sync is in flight, so the bar moves with it.
     private static let syncPoll: Duration = .seconds(2)
 
     var body: some View {
@@ -86,15 +83,18 @@ struct MailboxDetailView: View {
 
             if SourceStatus.isPollable(source), status != .awaitingConsent {
                 Section {
-                    Button(isSyncing ? "Syncing…" : "Sync now") {
+                    Button(isSyncing(source) ? "Syncing…" : "Sync now") {
                         Task { await syncNow(source) }
                     }
                     .font(Theme.body(16, weight: 600))
-                    .disabled(isSyncing || !source.connected || !source.active)
-                    if let line = syncLine {
-                        Text(line.text)
+                    .disabled(isSyncing(source) || !source.connected || !source.active)
+                    if let progress = source.syncProgress {
+                        SyncProgressView(description: SourceStatus.describeSyncProgress(progress))
+                    }
+                    if case .failed(let message) = sync {
+                        Text(message)
                             .font(Theme.body(14, relativeTo: .footnote))
-                            .foregroundStyle(line.isError ? Theme.errorText : Theme.inkSoft)
+                            .foregroundStyle(Theme.errorText)
                     } else if !source.connected {
                         Text("No credential to sync with.").font(Theme.body(14, relativeTo: .footnote)).foregroundStyle(Theme.inkSoft)
                     } else if !source.active {
@@ -143,10 +143,7 @@ struct MailboxDetailView: View {
         } message: {
             Text("It stops being polled and its credential is forgotten; what it pulled in stays, because episodes already cite it.")
         }
-        .task(id: syncWatchKey) { await watchSync() }
-        .onChange(of: SourceStatus.syncedAt(source)) { _, syncedAt in
-            settleSync(source, syncedAt: syncedAt)
-        }
+        .task(id: SourceStatus.syncInFlight(source.syncProgress)) { await watchSync() }
     }
 
     // MARK: - Pieces
@@ -199,61 +196,30 @@ struct MailboxDetailView: View {
 
     // MARK: - Sync now
 
-    private var isSyncing: Bool {
-        if case .queued = sync { return true }
-        return false
+    private func isSyncing(_ source: SourceResponse) -> Bool {
+        sync == .requesting || SourceStatus.syncInFlight(source.syncProgress)
     }
 
-    /// Restarts the watch whenever a new sync is queued.
-    private var syncWatchKey: Date? {
-        if case .queued(_, let startedAt) = sync { return startedAt }
-        return nil
-    }
-
-    private var syncLine: (text: String, isError: Bool)? {
-        switch sync {
-        case .idle: return nil
-        case .queued: return (SourceStatus.describeQueuedSync(model.worker), false)
-        case .done(let at, let queued):
-            return ("Synced \(at.formatted(.relative(presentation: .named))). \(queued > 0 ? "New items are held for you to ingest." : "Nothing new.")", false)
-        case .slow:
-            return ("Still queued after two minutes. It runs when a worker gets to it; Last sync updates when it does.", false)
-        case .failed(let message): return (message, true)
-        }
-    }
-
+    /// The poll route enqueues and answers with the sync already "queued"; the model puts
+    /// that row in place, and the watch below carries it from there.
     private func syncNow(_ source: SourceResponse) async {
-        sync = .queued(before: SourceStatus.syncedAt(source), startedAt: .now)
+        sync = .requesting
         do {
             try await model.syncNow(source)
+            sync = .idle
         } catch {
             sync = .failed(SourcesModel.describe(error))
         }
     }
 
-    /// The poll route enqueues and answers at once; the sync has *run* when the row's
-    /// `last_sync.at` moves. So re-fetch on an interval until it does, and stop watching —
-    /// not the sync — after a bound.
+    /// Re-read every two seconds for as long as the server says a sync is in flight — not
+    /// for a fixed two minutes: a first sync of a large mailbox is many polls long, and the
+    /// progress is the server's, so it can be watched to the end (motet#94).
     private func watchSync() async {
-        guard case .queued(_, let startedAt) = sync else { return }
-        while !Task.isCancelled, case .queued = sync {
+        while !Task.isCancelled, SourceStatus.syncInFlight(model.source(id: sourceId)?.syncProgress) {
             try? await Task.sleep(for: Self.syncPoll)
-            if Date.now.timeIntervalSince(startedAt) > Self.syncWatchSeconds {
-                sync = .slow
-                return
-            }
+            guard !Task.isCancelled else { return }
             await model.refresh()
-        }
-    }
-
-    /// A poll that gave up records its error on `last_sync` and moves its time too, so a
-    /// moved time is "it ran", not "it worked".
-    private func settleSync(_ source: SourceResponse, syncedAt: Date?) {
-        guard case .queued(let before, _) = sync, let syncedAt, syncedAt != before else { return }
-        if let error = source.lastSync?.error {
-            sync = .failed("The sync gave up: \(error)")
-        } else {
-            sync = .done(at: syncedAt, queued: source.lastSync?.queued ?? 0)
         }
     }
 
@@ -400,6 +366,53 @@ private struct LabelSyncSection: View {
 }
 
 /// A fact about a source: a label and its value, stacked so a long filter wraps.
+/// Where a sync is: the step, pulled-in-of-found once there is a count, and a bar that is
+/// indeterminate until then. `SourceStatus.describeSyncProgress` decides every word.
+struct SyncProgressView: View {
+    let description: SourceStatus.SyncDescription
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(description.headline)
+                .font(Theme.body(15, weight: 600, relativeTo: .subheadline))
+                .foregroundStyle(description.tone == .error ? Theme.errorText : Theme.ink)
+            if description.tone != .done {
+                // An indeterminate *linear* view on iOS is a still, empty track, so before
+                // there is a count the spinner is what says "working" without a number.
+                Group {
+                    if let fraction = description.fraction {
+                        ProgressView(value: fraction)
+                    } else if description.tone == .working {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                .tint(tint)
+                .accessibilityLabel(description.count ?? description.headline)
+            }
+            if let count = description.count {
+                Text(count)
+                    .font(Theme.body(14, relativeTo: .footnote))
+                    .monospacedDigit()
+            }
+            if let detail = description.detail {
+                Text(detail)
+                    .font(Theme.body(13, relativeTo: .caption))
+                    .foregroundStyle(description.tone == .error ? Theme.errorText : Theme.inkSoft)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var tint: Color {
+        switch description.tone {
+        case .working, .done: return Theme.teal
+        case .stalled: return Theme.inkSoft
+        case .error: return Theme.vermilion
+        }
+    }
+}
+
 private struct Fact: View {
     let name: String
     let value: String

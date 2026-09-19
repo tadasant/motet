@@ -50,8 +50,6 @@ final class SourcesModel: ObservableObject {
         SourceStatus.counts(for: source, held: held, ingestion: ingestion)
     }
 
-    var worker: SourceStatus.Worker { SourceStatus.worker(processing) }
-
     /// Whether anything pulled in is still moving, so the counts are worth re-reading.
     var inFlight: Bool { ingestion.contains { $0.state == "pending" } }
 

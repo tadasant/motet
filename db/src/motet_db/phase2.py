@@ -187,6 +187,80 @@ def source_item_counts(
     }
 
 
+@dataclass(frozen=True)
+class SourceSyncJobs:
+    """What the job queue holds for one source's sync, read beside ``sync_state.sync_run``.
+
+    The run record says what the poll chain *found*; these rows say what is still happening
+    to it — whether a poll is waiting or running, and how many of the messages it queued are
+    still being extracted. Only jobs created at or after the run's start are counted, so an
+    earlier sync's leftovers are not reported as this one's work.
+    """
+
+    poll_state: str | None = None
+    poll_attempts: int = 0
+    poll_error: str | None = None
+    extract_open: int = 0
+    extract_running: int = 0
+    extract_failed: int = 0
+
+
+def source_sync_jobs(
+    conn: psycopg.Connection[Any], runs: Sequence[tuple[str, datetime | None]]
+) -> dict[str, SourceSyncJobs]:
+    """Per source — ``(source id, run start or None)`` — the poll and extract jobs of its sync.
+
+    One statement for every source a list route reports. The extract half reads only jobs
+    that are not ``done``, which is exactly migration 0008's partial index: a done job is
+    counted as the difference between what the run queued and what is still open, so the
+    rows that grow without bound are never scanned. The poll half reads the newest open poll
+    job, a running one first — a "Sync now" pressed during a run queues a second job that
+    waits behind the first, and the one running is the one worth describing.
+    """
+    if not runs:
+        return {}
+    rows = _all(
+        conn,
+        """
+        SELECT s.id AS source_id,
+               p.state AS poll_state, p.attempts AS poll_attempts, p.last_error AS poll_error,
+               coalesce(e.open, 0) AS extract_open,
+               coalesce(e.running, 0) AS extract_running,
+               coalesce(e.failed, 0) AS extract_failed
+        FROM unnest(%s::text[], %s::timestamptz[]) AS s(id, since)
+        LEFT JOIN LATERAL (
+            SELECT state, attempts, last_error
+            FROM jobs
+            WHERE queue = 'poll' AND state IN ('ready', 'running')
+              AND payload ->> 'source_id' = s.id
+            ORDER BY (state = 'running') DESC, id DESC
+            LIMIT 1
+        ) p ON true
+        LEFT JOIN LATERAL (
+            SELECT count(*) FILTER (WHERE state IN ('ready', 'running')) AS open,
+                   count(*) FILTER (WHERE state = 'running')             AS running,
+                   count(*) FILTER (WHERE state = 'failed')              AS failed
+            FROM jobs
+            WHERE queue = 'extract' AND state <> 'done'
+              AND payload ->> 'source_id' = s.id
+              AND created_at >= s.since
+        ) e ON s.since IS NOT NULL
+        """,
+        ([source for source, _ in runs], [since for _, since in runs]),
+    )
+    return {
+        row["source_id"]: SourceSyncJobs(
+            poll_state=row["poll_state"],
+            poll_attempts=row["poll_attempts"] or 0,
+            poll_error=row["poll_error"],
+            extract_open=row["extract_open"],
+            extract_running=row["extract_running"],
+            extract_failed=row["extract_failed"],
+        )
+        for row in rows
+    }
+
+
 class SourceRemoval(StrEnum):
     """What :func:`remove_unused_source` did, or which guard refused it."""
 

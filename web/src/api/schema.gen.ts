@@ -3458,6 +3458,8 @@ export interface components {
              * @description OAuth scopes actually granted, which may be more than were asked for.
              */
             scopes: string[];
+            /** @description Where a sync in flight has got to, or how the latest one ended for an hour after. Null when no sync is running or recent, and for a source nothing polls. */
+            sync_progress?: components["schemas"]["SourceSyncProgress"] | null;
         };
         /**
          * SourceSpanModel
@@ -3470,6 +3472,88 @@ export interface components {
             source_item_id: string;
             /** Start */
             start: number;
+        };
+        /**
+         * SourceSyncProgress
+         * @description Where a mailbox sync is right now, from "Sync now" to the last message extracted.
+         *
+         *     A sync is a chain of polls, each listing a bounded slice of the search and queueing
+         *     what is new for extraction (motet#94), so a large first sync is many jobs over minutes.
+         *     This is that chain added up and joined to the job queue, so a screen can show which
+         *     step it is on and how far through it is instead of a bare "Syncing…".
+         *
+         *     ``stage`` is the one field to branch on:
+         *
+         *     - ``queued`` — a poll is waiting for a worker to pick it up.
+         *     - ``retrying`` — a poll failed and is waiting to try again; ``error`` says why.
+         *     - ``connecting`` — a worker has the poll and is reaching the mailbox; nothing listed yet.
+         *     - ``listing`` — paging through the search. ``found`` is a lower bound until it ends.
+         *     - ``fetching`` — the search is exhausted; ``found`` is final and messages are still
+         *       being fetched and extracted.
+         *     - ``done`` — every message found has been through extraction. Reported for an hour.
+         *     - ``failed`` — the sync gave up; ``error`` says why. Reported for an hour.
+         *
+         *     Counts are of messages this sync found that were **new to Motet**, not of everything the
+         *     search matched (that is ``listed``). ``pulled_in`` is found messages that have been
+         *     through extraction — including a receipt it read and skipped as not a newsletter — so
+         *     it is progress through the work rather than a count of items held for you.
+         */
+        SourceSyncProgress: {
+            /**
+             * Error
+             * @description Why the sync gave up (``failed``) or why its poll is retrying, else null.
+             */
+            error: string | null;
+            /**
+             * Failed
+             * @description Found messages whose extraction gave up after its retries.
+             */
+            failed: number;
+            /**
+             * Found
+             * @description Of those, messages new to Motet, queued for extraction.
+             */
+            found: number;
+            /**
+             * Found Is Lower Bound
+             * @description True while the search still has pages to list, so more may be found. Say 'at least' beside ``found`` when it is.
+             */
+            found_is_lower_bound: boolean;
+            /**
+             * Listed
+             * @description Messages matching the filter the search has listed so far, new or not.
+             */
+            listed: number;
+            /**
+             * Pages
+             * @description Search result pages read so far.
+             */
+            pages: number;
+            /**
+             * Pulled In
+             * @description Found messages that have been through extraction, skipped ones included.
+             */
+            pulled_in: number;
+            /**
+             * Remaining
+             * @description Found messages still waiting to be fetched and extracted, or in flight.
+             */
+            remaining: number;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "queued" | "retrying" | "connecting" | "listing" | "fetching" | "done" | "failed";
+            /**
+             * Started At
+             * @description When this sync's first poll ran. Null while the first poll is still queued.
+             */
+            started_at: string | null;
+            /**
+             * Waiting On Worker
+             * @description True when work is waiting and no worker has run in the last five minutes and none is running any of it — so nothing will move until one runs. A queued sync that is merely waiting its turn is false.
+             */
+            waiting_on_worker: boolean;
         };
         /**
          * SourceSyncResult
