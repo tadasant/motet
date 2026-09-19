@@ -230,15 +230,11 @@ public enum SourceStatus {
         return last.caughtUp ? looked : "\(looked) Still catching up: each sync queues the next."
     }
 
-    /// When the last sync ran, for display. Not what "Sync now" watches — see `syncedAt`.
+    /// When the last sync ran, for display: `last_sync.at`, or `last_polled_at` for a row
+    /// polled before the API recorded a result. What a sync in flight is doing is
+    /// `syncProgress` — see `describeSyncProgress`.
     public static func lastSyncedAt(_ source: SourceResponse) -> Date? {
         source.lastSync?.at ?? source.lastPolledAt
-    }
-
-    /// What "Sync now" watches: only `last_sync.at`, which a poll writes and nothing else
-    /// does. `last_polled_at` also moves when extraction skips a message.
-    public static func syncedAt(_ source: SourceResponse) -> Date? {
-        source.lastSync?.at
     }
 
     /// OAuth scopes as short names.
@@ -253,25 +249,6 @@ public enum SourceStatus {
         }
     }
 
-    /// Whether a worker is draining the queues, from the heartbeat (motet#38). A queued
-    /// poll with no worker alive is a poll nothing will run.
-    public enum Worker: Hashable, Sendable {
-        case running
-        case idle
-        case never
-        /// The route answered nothing. Not "no worker": an outage must not read as idle.
-        case unknown
-    }
-
-    /// How recent a heartbeat counts as a worker running. The SPA's `WORKER_FRESH_MS`.
-    public static let workerFreshSeconds: TimeInterval = 5 * 60
-
-    public static func worker(_ processing: ProcessingStatusResponse?) -> Worker {
-        guard let processing else { return .unknown }
-        guard let seen = processing.workerLastSeenAt else { return .never }
-        return processing.now.timeIntervalSince(seen) <= workerFreshSeconds ? .running : .idle
-    }
-
     // MARK: - Sync progress
 
     /// Stages in which something is still happening, so the screen keeps asking.
@@ -281,6 +258,13 @@ public enum SourceStatus {
     public static func syncInFlight(_ progress: SourceSyncProgress?) -> Bool {
         guard let progress else { return false }
         return syncInFlightStages.contains(progress.stage)
+    }
+
+    /// Whether it is worth re-reading every two seconds: in flight, and something is on it.
+    /// A sync no worker will run moves when a worker appears, so the watch slows down rather
+    /// than polling a stall forever. The SPA's `syncMoving`.
+    public static func syncMoving(_ progress: SourceSyncProgress?) -> Bool {
+        syncInFlight(progress) && progress?.waitingOnWorker == false
     }
 
     /// A sync in flight in words and a bar. The SPA's `describeSyncProgress`, rule for rule:
@@ -346,9 +330,10 @@ public enum SourceStatus {
                 progress.found > 0
                     ? "Listing messages · found \(atLeast)\(number(progress.found)) new so far"
                     : "Listing messages",
-                progress.listed > 0
-                    ? "Looked through \(messages(progress.listed)) matching the filter; more pages to go."
-                    : nil,
+                progress.error.map { "A page failed and is being retried. Last attempt: \($0)" }
+                    ?? (progress.listed > 0
+                        ? "Looked through \(messages(progress.listed)) matching the filter; more pages to go."
+                        : nil),
                 bar: fraction
             )
         case "fetching":
@@ -359,8 +344,8 @@ public enum SourceStatus {
             )
         case "done":
             return SyncDescription(
-                headline: progress.found > 0
-                    ? "Sync finished · \(messages(progress.found)) pulled in" : "Sync finished · nothing new",
+                headline: progress.pulledIn > 0
+                    ? "Sync finished · \(messages(progress.pulledIn)) pulled in" : "Sync finished · nothing new",
                 count: nil,
                 detail: failedNote ?? (progress.found > 0 ? "New items are held for you to ingest." : nil),
                 fraction: progress.found > 0 ? 1 : nil,

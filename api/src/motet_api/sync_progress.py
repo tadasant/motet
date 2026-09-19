@@ -30,6 +30,12 @@ WORKER_FRESH = timedelta(minutes=5)
 #: answer; short enough that Tuesday's screen does not report Monday's sync.
 SETTLED_VISIBLE = timedelta(hours=1)
 
+#: How long a run still marked ``listing`` may have no open poll before it is called stopped.
+#: The run and the job rows are read in two statements, so a final link that commits between
+#: them leaves a snapshot showing the old ``listing`` run and no poll — a sync finishing, not
+#: one that broke. A chain that really lost its next link is still reported, a little later.
+BROKEN_CHAIN_GRACE = timedelta(minutes=2)
+
 Stage = Literal["queued", "retrying", "connecting", "listing", "fetching", "done", "failed"]
 
 
@@ -92,7 +98,8 @@ def sync_progress(
         # Mid-chain with no poll open means the chain broke without a failure being
         # recorded — the source was paused, or its job was lost. Reported as stopped rather
         # than as a listing that will never list again.
-        stage = "listing" if jobs.poll_state is not None else "failed"
+        recent = updated_at is not None and now - updated_at <= BROKEN_CHAIN_GRACE
+        stage = "listing" if jobs.poll_state is not None or recent else "failed"
     elif open_ > 0:
         stage = "fetching"
     else:

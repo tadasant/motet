@@ -29,7 +29,7 @@ import { IntegrationCard } from './sources/IntegrationCard'
 import { SourceDetail } from './sources/SourceDetail'
 import { CATALOG, type Integration, type IntegrationId, integrationById } from './sources/catalog'
 import { IntegrationIcon } from './sources/icons'
-import { countsFor, rowStatus, syncInFlight } from './sources/status'
+import { countsFor, rowStatus, syncInFlight, syncMoving } from './sources/status'
 
 /**
  * Move to another section the way the shell does — `pushState` plus a `popstate` — so
@@ -126,12 +126,15 @@ export function Sources({
   // A sync in flight polls faster and for as long as it runs: the progress is the server's,
   // so a twenty-minute first sync is watched to the end rather than given up on (motet#94).
   const inFlight = ingestion.some((item) => item.state === 'pending')
+  // A sync nothing will run is still watched, at the ordinary interval: it moves when a
+  // worker appears, and a tab left open on a stalled sync must not poll every two seconds.
   const syncing = (sources ?? []).some((row) => syncInFlight(row.sync_progress))
+  const moving = (sources ?? []).some((row) => syncMoving(row.sync_progress))
   useEffect(() => {
     if (!inFlight && !syncing) return
-    const timer = window.setInterval(() => void refresh(), syncing ? SYNC_REFRESH_MS : REFRESH_MS)
+    const timer = window.setInterval(() => void refresh(), moving ? SYNC_REFRESH_MS : REFRESH_MS)
     return () => window.clearInterval(timer)
-  }, [inFlight, syncing, refresh])
+  }, [inFlight, syncing, moving, refresh])
 
   const rowsFor = useCallback(
     (integration: Integration): Source[] =>

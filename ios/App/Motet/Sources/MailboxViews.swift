@@ -22,8 +22,10 @@ struct MailboxDetailView: View {
         case failed(String)
     }
 
-    /// How often the screen re-reads while a sync is in flight, so the bar moves with it.
+    /// How often the screen re-reads while a sync is in flight, so the bar moves with it —
+    /// and how often once it has stalled with no worker, which is not a two-second question.
     private static let syncPoll: Duration = .seconds(2)
+    private static let stalledPoll: Duration = .seconds(10)
 
     var body: some View {
         Group {
@@ -217,7 +219,8 @@ struct MailboxDetailView: View {
     /// progress is the server's, so it can be watched to the end (motet#94).
     private func watchSync() async {
         while !Task.isCancelled, SourceStatus.syncInFlight(model.source(id: sourceId)?.syncProgress) {
-            try? await Task.sleep(for: Self.syncPoll)
+            let moving = SourceStatus.syncMoving(model.source(id: sourceId)?.syncProgress)
+            try? await Task.sleep(for: moving ? Self.syncPoll : Self.stalledPoll)
             guard !Task.isCancelled else { return }
             await model.refresh()
         }
@@ -365,7 +368,6 @@ private struct LabelSyncSection: View {
     }
 }
 
-/// A fact about a source: a label and its value, stacked so a long filter wraps.
 /// Where a sync is: the step, pulled-in-of-found once there is a count, and a bar that is
 /// indeterminate until then. `SourceStatus.describeSyncProgress` decides every word.
 struct SyncProgressView: View {
@@ -413,6 +415,7 @@ struct SyncProgressView: View {
     }
 }
 
+/// A fact about a source: a label and its value, stacked so a long filter wraps.
 private struct Fact: View {
     let name: String
     let value: String

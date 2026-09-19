@@ -9,7 +9,6 @@ final class SourcesModel: ObservableObject {
     @Published private(set) var sources: [SourceResponse]?
     @Published private(set) var held: [HeldSourceItemResponse] = []
     @Published private(set) var ingestion: [IngestionItemResponse] = []
-    @Published private(set) var processing: ProcessingStatusResponse?
     @Published private(set) var connectors: [ConnectorResponse]?
     /// Why the primary list could not be loaded. The screen keeps what it had underneath.
     @Published private(set) var loadError: String?
@@ -56,7 +55,7 @@ final class SourcesModel: ObservableObject {
     // MARK: - Loading
 
     /// The sources list is the primary fetch and the only one that can blank the screen.
-    /// Held, ingestion, processing and connectors are each best-effort: a failure loses a
+    /// Held, ingestion and connectors are each best-effort: a failure loses a
     /// count or a section, never the catalog.
     /// Bumped by every refresh, so a slow answer never overwrites a newer one — the list's
     /// ten-second loop, Sync now's watch and a pull-to-refresh can all be in flight at once.
@@ -69,10 +68,9 @@ final class SourcesModel: ObservableObject {
         async let list = Self.catching { try await api.listSources() }
         async let heldItems = try? api.heldSourceItems()
         async let ingestionItems = try? api.ingestion()
-        async let processingStatus = try? api.processingStatus()
         async let connectorList = try? api.listConnectors()
 
-        let results = (await list, await heldItems, await ingestionItems, await processingStatus, await connectorList)
+        let results = (await list, await heldItems, await ingestionItems, await connectorList)
         guard mine == refreshGeneration else { return }
         switch results.0 {
         case .success(let fresh):
@@ -86,8 +84,7 @@ final class SourcesModel: ObservableObject {
         }
         held = results.1 ?? held
         ingestion = results.2 ?? ingestion
-        processing = results.3
-        if let fresh = results.4 { connectors = fresh }
+        if let fresh = results.3 { connectors = fresh }
         else if connectors == nil { connectors = [] }
     }
 

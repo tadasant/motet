@@ -215,7 +215,11 @@ def source_sync_jobs(
     counted as the difference between what the run queued and what is still open, so the
     rows that grow without bound are never scanned. The poll half reads the newest open poll
     job, a running one first — a "Sync now" pressed during a run queues a second job that
-    waits behind the first, and the one running is the one worth describing.
+    waits behind the first, and the one running is the one worth describing. It is spelled
+    ``state = 'ready' OR state = 'running'`` rather than ``IN``, because that is what lets
+    the planner use both partial indexes (``jobs_ready_idx``, ``jobs_stale_idx``) as a
+    ``BitmapOr``; an ``IN`` list implies neither predicate and scans the table, once per
+    source, on a route the screen polls every two seconds.
     """
     if not runs:
         return {}
@@ -231,7 +235,7 @@ def source_sync_jobs(
         LEFT JOIN LATERAL (
             SELECT state, attempts, last_error
             FROM jobs
-            WHERE queue = 'poll' AND state IN ('ready', 'running')
+            WHERE queue = 'poll' AND (state = 'ready' OR state = 'running')
               AND payload ->> 'source_id' = s.id
             ORDER BY (state = 'running') DESC, id DESC
             LIMIT 1
@@ -259,6 +263,26 @@ def source_sync_jobs(
         )
         for row in rows
     }
+
+
+def poll_waiting(conn: psycopg.Connection[Any], source_id_: str) -> bool:
+    """Whether a poll of this source is already queued and not yet claimed.
+
+    The poll handler asks before re-arming its chain: a "Sync now" pressed mid-chain has
+    already queued the next link, and a second re-arm would double the chain for the rest
+    of the search — two polls outstanding on every link, the last of which starts a fresh,
+    empty sync count while the first one's messages are still being extracted.
+    """
+    row = _maybe_one(
+        conn,
+        """
+        SELECT 1 AS waiting FROM jobs
+        WHERE queue = 'poll' AND state = 'ready' AND payload ->> 'source_id' = %s
+        LIMIT 1
+        """,
+        (source_id_,),
+    )
+    return row is not None
 
 
 class SourceRemoval(StrEnum):

@@ -305,6 +305,37 @@ def test_a_chain_of_polls_adds_up_to_one_sync_run(
     assert source.sync_state["last_sync"]["queued"] == 50, "the last link alone"
 
 
+def test_a_sync_now_pressed_mid_chain_does_not_double_the_chain(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queued "Sync now" is the next link; re-arming beside it would run the search twice."""
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(170), page_size=20))
+    source_id = connected_source(db)
+    enqueue_source_poll(db, source_id)  # pressed while the first link is running
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    assert len(_jobs(db, Queue.POLL)) == 1, "one next link, not two"
+
+
+def test_pausing_mid_chain_ends_the_sync_run(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming later starts a fresh count rather than continuing a stale one."""
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(170), page_size=20))
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    phase2.set_source_active(db, source_id, active=False)
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    run = source.sync_state[SYNC_RUN_KEY]
+    assert (run["status"], run["queued"]) == ("failed", 60)
+    assert "paused" in run["error"]
+
+
 def test_a_poll_after_a_finished_sync_starts_a_fresh_count(
     db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5,6 +5,10 @@
 // running totals and the job queue. Nothing is inferred from how long the page has been
 // watching: a sync that takes twenty minutes is still reported step by step, and one with
 // no worker to run it says so instead of spinning.
+//
+// Only the headline and the detail are a live region. The count changes on every poll, and a
+// screen reader announcing "Pulled in 121 of 480" every two seconds is noise; the step changing
+// — or the sync stalling or giving up — is what is worth saying out loud.
 
 import { type SyncProgress as Progress, describeSyncProgress } from './status'
 
@@ -13,12 +17,8 @@ export function SyncProgress({ progress }: { progress: Progress }) {
   const percent = shown.fraction === null ? null : Math.round(shown.fraction * 100)
   const alert = shown.tone === 'error' || shown.tone === 'stalled'
   return (
-    <div
-      className={`sync-progress sync-${shown.tone}`}
-      role={alert ? 'alert' : 'status'}
-      aria-label="Sync progress"
-    >
-      <p className="sync-headline">
+    <section className={`sync-progress sync-${shown.tone}`} aria-label="Sync progress">
+      <p className="sync-headline" role={alert ? 'alert' : 'status'}>
         {shown.headline}
         {shown.tone === 'working' && <span className="sync-ellipsis" aria-hidden="true">…</span>}
       </p>
@@ -35,7 +35,11 @@ export function SyncProgress({ progress }: { progress: Progress }) {
         </div>
       )}
       {shown.count && <p className="sync-count">{shown.count}</p>}
-      {shown.detail && <p className="sync-detail">{shown.detail}</p>}
-    </div>
+      {shown.detail && (
+        <p className="sync-detail" role="status">
+          {shown.detail}
+        </p>
+      )}
+    </section>
   )
 }

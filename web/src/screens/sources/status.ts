@@ -212,6 +212,14 @@ export const syncInFlight = (progress: SyncProgress | null | undefined): boolean
   !!progress && IN_FLIGHT.has(progress.stage)
 
 /**
+ * Whether it is worth re-reading every two seconds: in flight, and something is on it. A
+ * sync no worker will run moves when a worker appears, which is not a two-second question —
+ * so the screen drops back to its ordinary interval rather than polling a stall forever.
+ */
+export const syncMoving = (progress: SyncProgress | null | undefined): boolean =>
+  syncInFlight(progress) && !progress?.waiting_on_worker
+
+/**
  * A sync in flight, in words and a bar — `SourceSyncProgress` on the API, which adds up
  * the whole poll chain and joins it to the job queue (motet#94's chain made visible).
  *
@@ -272,9 +280,11 @@ export function describeSyncProgress(progress: SyncProgress): SyncDescription {
         progress.found > 0
           ? `Listing messages · found ${atLeast}${n(progress.found)} new so far`
           : 'Listing messages',
-        progress.listed > 0
-          ? `Looked through ${messages(progress.listed)} matching the filter; more pages to go.`
-          : null,
+        progress.error
+          ? `A page failed and is being retried. Last attempt: ${progress.error}`
+          : progress.listed > 0
+            ? `Looked through ${messages(progress.listed)} matching the filter; more pages to go.`
+            : null,
       )
     case 'fetching':
       return working(
@@ -284,7 +294,9 @@ export function describeSyncProgress(progress: SyncProgress): SyncDescription {
     case 'done':
       return {
         headline:
-          progress.found > 0 ? `Sync finished · ${messages(progress.found)} pulled in` : 'Sync finished · nothing new',
+          progress.pulled_in > 0
+            ? `Sync finished · ${messages(progress.pulled_in)} pulled in`
+            : 'Sync finished · nothing new',
         count: null,
         detail: failedNote ?? (progress.found > 0 ? 'New items are held for you to ingest.' : null),
         fraction: progress.found > 0 ? 1 : null,

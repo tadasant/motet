@@ -71,10 +71,23 @@ final class SourceStatusTests: XCTestCase {
         XCTAssertEqual(fetching.fraction, 0.25)
     }
 
-    func testASyncNothingWillRunSaysSo() {
-        let shown = SourceStatus.describeSyncProgress(progress(stage: "queued", waitingOnWorker: true))
+    func testASyncNothingWillRunSaysSoAndIsNotPolledFast() {
+        let stalled = progress(stage: "queued", waitingOnWorker: true)
+        XCTAssertTrue(SourceStatus.syncInFlight(stalled))
+        XCTAssertFalse(SourceStatus.syncMoving(stalled))
+        XCTAssertTrue(SourceStatus.syncMoving(progress(stage: "queued")))
+        let shown = SourceStatus.describeSyncProgress(stalled)
         XCTAssertEqual(shown.tone, .stalled)
         XCTAssertEqual(shown.detail, "No worker has run in the last five minutes, so this will not move until one does.")
+    }
+
+    func testAMidChainRetryAndAFinishWithFailuresAreSaidHonestly() {
+        let retrying = SourceStatus.describeSyncProgress(progress(
+            stage: "listing", found: 60, lowerBound: true, remaining: 60, error: "HTTP 429"
+        ))
+        XCTAssertEqual(retrying.detail, "A page failed and is being retried. Last attempt: HTTP 429")
+        let done = SourceStatus.describeSyncProgress(progress(stage: "done", found: 480, pulledIn: 477, failed: 3))
+        XCTAssertEqual(done.headline, "Sync finished · 477 messages pulled in")
     }
 
     func testAFinishedOrFailedSyncStopsBeingInFlight() {
@@ -202,33 +215,9 @@ final class SourceStatusTests: XCTestCase {
         )
     }
 
-    func testSyncNowWatchesTheSyncNotTheLastPoll() {
-        // An extraction that skips a message moves `last_polled_at` too; only `last_sync.at`
-        // is written by a poll, so only it may end the watch.
+    func testLastSyncFallsBackToTheLastPoll() {
         let polled = Date(timeIntervalSince1970: 100)
-        let row = source(lastPolledAt: polled)
-        XCTAssertNil(SourceStatus.syncedAt(row))
-        XCTAssertEqual(SourceStatus.lastSyncedAt(row), polled)
-    }
-
-    func testAMissingHeartbeatIsNotAnIdleWorker() {
-        let now = Date(timeIntervalSince1970: 10_000)
-        XCTAssertEqual(SourceStatus.worker(nil), .unknown)
-        XCTAssertEqual(
-            SourceStatus.worker(ProcessingStatusResponse(now: now, queues: [], readiness: [])), .never
-        )
-        XCTAssertEqual(
-            SourceStatus.worker(ProcessingStatusResponse(
-                now: now, queues: [], readiness: [], workerLastSeenAt: now.addingTimeInterval(-60)
-            )),
-            .running
-        )
-        XCTAssertEqual(
-            SourceStatus.worker(ProcessingStatusResponse(
-                now: now, queues: [], readiness: [], workerLastSeenAt: now.addingTimeInterval(-3_600)
-            )),
-            .idle
-        )
+        XCTAssertEqual(SourceStatus.lastSyncedAt(source(lastPolledAt: polled)), polled)
     }
 
     func testALabelMoveIsDescribed() {

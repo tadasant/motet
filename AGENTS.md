@@ -2501,9 +2501,14 @@ mailbox.
 **The worker adds the chain up; the API joins it to the job queue.** Each poll link adds
 what it listed, queued and paged onto `sync_state.sync_run`, in the transaction that writes
 the cursor; a run is continued while its search has pages left and started afresh otherwise,
-and `record_poll_failure` ends it as `failed`. The API reads the source's newest open poll job
-and its open and failed extract jobs created since the run began — migration 0008's index,
-so the `done` rows that grow without bound are never scanned — and derives one `stage`:
+and `record_poll_failure` — or a poll finding the source paused — ends it as `failed`. A link
+does not re-arm the chain when a poll is already waiting: a "Sync now" pressed mid-chain *is*
+the next link, and a second would run the rest of the search twice and end on an empty
+"fresh" run. The API reads the source's newest open poll job — spelled `state = 'ready' OR
+state = 'running'` so `jobs_ready_idx` and `jobs_stale_idx` answer it, which an `IN` list
+does not — and its open and failed extract jobs created since the run began, on migration
+0008's index, so the `done` rows that grow without bound are never scanned. From those it
+derives one `stage`:
 `queued`, `retrying`, `connecting`, `listing`, `fetching`, `done` or `failed`. Pulled in is
 what the run queued less what is still open or failed. `found_is_lower_bound` is true while
 listing, and both clients say "at least" beside it.
@@ -2511,11 +2516,18 @@ listing, and both clients say "at least" beside it.
 **`waiting_on_worker` is computed server-side** from the newest heartbeat and whether any of
 the sync's jobs is running, with the Processing panel's five minutes — so a sync nothing will
 run says so instead of animating. Both clients poll every two seconds for as long as a sync
-is in flight, rather than for a fixed window. `done` and `failed` are reported for an hour.
+is in flight and moving, rather than for a fixed window, and drop to ten seconds while it
+waits on a worker. `done` and `failed` are reported for an hour.
 
-**`run.started_at` is the database's transaction time**, not the worker's clock: the extract
-jobs of the run's first page are stamped by the same transaction's `now()`, and a Python
-timestamp a few milliseconds later would leave them out of every count.
+**The run and the job rows are two statements, so a snapshot can straddle the last link's
+commit** and show a `listing` run beside no open poll. That is a sync finishing, so a
+`listing` run with no poll reads as stopped only once it is two minutes stale
+(`BROKEN_CHAIN_GRACE`); read as `failed` at once, it stopped both clients' watch mid-sync.
+
+**The run's timestamps are the database's transaction time**, not the worker's clock: the
+extract jobs of the run's first page are stamped by the same transaction's `now()`, and a
+Python timestamp a few milliseconds later would leave them out of every count; `updated_at`
+is aged against the database's clock too.
 
 **Extraction's skip note is a merged key** (`merge_source_sync_state`), not a rewrite of the
 document it read. Extraction is not serialized against the poll, so the rewrite could put

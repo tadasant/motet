@@ -123,6 +123,7 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         raise _permanent(f"source {source_id} no longer exists")
     if not source.active:
         logger.info("source %s is paused; not polling", source_id)
+        _end_sync_run(context.conn, source, "The mailbox was paused before the sync finished.")
         return
     if source.kind != SourceKind.GMAIL.value:
         raise _permanent(f"source {source_id} is a {source.kind!r} source and cannot be polled")
@@ -197,7 +198,7 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         },
         SYNC_RUN_KEY: advance_sync_run(
             run_before,
-            started_at=_transaction_now(context.conn),
+            now=_transaction_now(context.conn),
             listed=seen,
             queued=queued,
             pages=pages,
@@ -215,9 +216,11 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
         sync_state[CATALOG_KEY] = catalog
     phase2.set_source_sync_state(context.conn, source_id, sync_state)
 
-    if more:
+    if more and not phase2.poll_waiting(context.conn, source_id):
         # No delay: a drain claims it as soon as this job's lock is released, so one
-        # execution reads the whole window as a chain of bounded jobs.
+        # execution reads the whole window as a chain of bounded jobs. Not when a poll is
+        # already waiting — a "Sync now" pressed mid-chain — because that one is the next
+        # link, and a second would run the rest of the search twice over.
         enqueue_source_poll(context.conn, source_id)
     logger.info(
         "polled source %s: %d message(s) seen over %d page(s), %d queued for extraction; %s",
@@ -246,7 +249,7 @@ def continuing_sync_run(sync_state: Mapping[str, Any]) -> dict[str, Any] | None:
 def advance_sync_run(
     run: Mapping[str, Any] | None,
     *,
-    started_at: datetime,
+    now: datetime,
     listed: int,
     queued: int,
     pages: int,
@@ -254,11 +257,11 @@ def advance_sync_run(
 ) -> dict[str, Any]:
     """Add one poll's totals to the sync it belongs to.
 
-    ``started_at`` is the database's transaction time, used only when this poll starts the
-    run. It is that clock rather than this process's because the API counts the run's
-    extract jobs by ``created_at >= started_at``, and those rows are stamped by the same
-    transaction's ``now()`` — a Python timestamp a few milliseconds later would leave the
-    first page's jobs out of the count.
+    ``now`` is the database's transaction time: the start when this poll begins the run,
+    and ``updated_at`` either way. That clock rather than this process's, because the API
+    counts the run's extract jobs by ``created_at >= started_at`` — rows stamped by the
+    same transaction's ``now()``, so a Python timestamp a few milliseconds later would leave
+    the first page's jobs out — and ages ``updated_at`` against the database's clock too.
     """
 
     def total(key: str) -> int:
@@ -267,14 +270,33 @@ def advance_sync_run(
 
     begun = run.get("started_at") if run is not None else None
     return {
-        "started_at": begun if isinstance(begun, str) else started_at.isoformat(),
-        "updated_at": datetime.now(UTC).isoformat(),
+        "started_at": begun if isinstance(begun, str) else now.isoformat(),
+        "updated_at": now.isoformat(),
         "listed": total("listed") + listed,
         "queued": total("queued") + queued,
         "pages": total("pages") + pages,
         "status": "listing" if more else "listed",
         "error": None,
     }
+
+
+def _end_sync_run(conn: psycopg.Connection[Any], source: StoredSource, reason: str) -> None:
+    """Close a run still listing, so a later poll starts a fresh count rather than resuming
+    one whose totals and start belong to a sync nobody is watching any more."""
+    run = source.sync_state.get(SYNC_RUN_KEY)
+    if not (isinstance(run, dict) and run.get("status") == "listing"):
+        return
+    phase2.merge_source_sync_state(
+        conn,
+        source.id,
+        SYNC_RUN_KEY,
+        {
+            **run,
+            "updated_at": _transaction_now(conn).isoformat(),
+            "status": "failed",
+            "error": reason,
+        },
+    )
 
 
 def _transaction_now(conn: psycopg.Connection[Any]) -> datetime:
@@ -325,7 +347,7 @@ def record_poll_failure(
     # never began (the first link failed) is recorded as a failed one with nothing found.
     run = source.sync_state.get(SYNC_RUN_KEY)
     base = run if isinstance(run, dict) and run.get("status") == "listing" else {}
-    now = datetime.now(UTC).isoformat()
+    now = _transaction_now(conn).isoformat()
     sync_state[SYNC_RUN_KEY] = {
         "started_at": now,
         "listed": 0,

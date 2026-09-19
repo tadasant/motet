@@ -17,7 +17,12 @@ import pytest
 from fastapi.testclient import TestClient
 from motet_api import app
 from motet_api.deps import reset_store
-from motet_api.sync_progress import SETTLED_VISIBLE, WORKER_FRESH, sync_progress
+from motet_api.sync_progress import (
+    BROKEN_CHAIN_GRACE,
+    SETTLED_VISIBLE,
+    WORKER_FRESH,
+    sync_progress,
+)
 from motet_db import repo
 from motet_db.phase2 import SourceSyncJobs
 from motet_sources import FakeMailClient, RawMessage
@@ -107,9 +112,17 @@ def test_the_next_link_running_is_still_listing_not_a_new_sync() -> None:
 
 
 def test_a_chain_that_lost_its_next_poll_is_reported_stopped_not_listing_forever() -> None:
-    shown = progress(run("listing", queued=60), SourceSyncJobs())
+    stale = BROKEN_CHAIN_GRACE + timedelta(seconds=1)
+    shown = progress(run("listing", queued=60, ago=stale), SourceSyncJobs())
     assert shown.stage == "failed"
     assert shown.error is not None and "Sync now" in shown.error
+
+
+def test_a_final_link_committing_between_the_two_reads_is_not_a_failure() -> None:
+    """The run and the jobs are two statements: a snapshot can show the old ``listing`` run
+    beside no open poll because the last link finished in between. That is a sync ending."""
+    shown = progress(run("listing", queued=60, ago=timedelta(seconds=5)), SourceSyncJobs())
+    assert shown.stage == "listing"
 
 
 # --- after the search is exhausted ------------------------------------------------------
@@ -244,3 +257,24 @@ def test_the_paste_source_reports_no_progress(api: TestClient) -> None:
     listed = api.get("/v1/sources", headers=AUTH).json()
     paste = next(source for source in listed if source["id"] == repo.PASTE_SOURCE_ID)
     assert paste["sync_progress"] is None
+
+
+def test_the_poll_half_of_the_job_read_is_answered_by_the_partial_indexes(
+    db: psycopg.Connection[Any], _migrated: str
+) -> None:
+    """Polled every two seconds during a sync: an ``IN`` list scanned the whole table."""
+    db.execute("SET enable_seqscan = off")
+    plan = "\n".join(
+        row["QUERY PLAN"]
+        for row in db.execute(
+            "EXPLAIN SELECT 1 FROM jobs WHERE queue = 'poll' "
+            "AND (state = 'ready' OR state = 'running') AND payload ->> 'source_id' = 'x'"
+        ).fetchall()
+    )
+    db.execute("RESET enable_seqscan")
+    assert "jobs_ready_idx" in plan and "jobs_stale_idx" in plan, plan
+    import inspect  # noqa: PLC0415
+
+    from motet_db import phase2  # noqa: PLC0415
+
+    assert "(state = 'ready' OR state = 'running')" in inspect.getsource(phase2.source_sync_jobs)

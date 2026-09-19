@@ -340,15 +340,25 @@ describe('the catalog', () => {
     expect(within(detail).getByRole('button', { name: 'Syncing…' })).toHaveProperty('disabled', true)
   })
 
+  it('does not poll a stalled sync every two seconds', async () => {
+    const stuck = withProgress(progress({ stage: 'queued', waiting_on_worker: true }))
+    const calls = mockApi({ '/v1/sources': [PASTE_SOURCE, stuck] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('region', { name: 'Gmail details' })
+    await new Promise((resolve) => setTimeout(resolve, 2_600))
+    expect(calls.filter((c) => c.method === 'GET' && c.url.endsWith('/v1/sources'))).toHaveLength(1)
+  }, 6_000)
+
   it('says so when a queued sync has no worker to run it, rather than spinning', async () => {
     // Tadas's production sync (2026-09-19): the poll was queued and nothing drains prod.
     const stuck = withProgress(progress({ stage: 'queued', waiting_on_worker: true }))
     mockApi({ '/v1/sources': [PASTE_SOURCE, stuck] })
     render(<Sources navigate={vi.fn()} now={NOW} />)
     const detail = await screen.findByRole('region', { name: 'Gmail details' })
-    const box = within(detail).getByRole('alert', { name: 'Sync progress' })
+    const box = within(detail).getByRole('region', { name: 'Sync progress' })
     expect(within(box).getByText(/No worker has run in the last five minutes/)).toBeDefined()
     expect(box.className).toContain('sync-stalled')
+    expect(within(box).getByRole('alert').textContent).toBe('Waiting for a worker to start the sync')
   })
 
   it('says the last sync gave up when it records an error', async () => {
@@ -404,8 +414,8 @@ describe('when something goes wrong', () => {
     mockApi({ '/v1/sources': [PASTE_SOURCE, gaveUp] })
     render(<Sources navigate={vi.fn()} now={NOW} />)
     const detail = await screen.findByRole('region', { name: 'Gmail details' })
-    const box = within(detail).getByRole('alert', { name: 'Sync progress' })
-    expect(within(box).getByText('The sync gave up')).toBeDefined()
+    const box = within(detail).getByRole('region', { name: 'Sync progress' })
+    expect(within(box).getByRole('alert').textContent).toBe('The sync gave up')
     expect(within(box).getByText('SourceAuthError: invalid_grant')).toBeDefined()
     expect(within(box).getByText('Pulled in 60 of 60 found before it stopped')).toBeDefined()
     expect(within(detail).getByRole('button', { name: 'Sync now' })).toHaveProperty('disabled', false)
@@ -784,6 +794,19 @@ describe('describeSyncProgress', () => {
     const fetching = describeSyncProgress(progress({ stage: 'fetching', found: 1480, pulled_in: 370, remaining: 1110 }))
     expect(fetching.count).toBe('Pulled in 370 of 1,480 · 1,110 left')
     expect(fetching.fraction).toBe(0.25)
+  })
+
+  it('says a mid-chain page is being retried, and why', () => {
+    const shown = describeSyncProgress(
+      progress({ stage: 'listing', found: 60, remaining: 60, found_is_lower_bound: true, error: 'HTTP 429' }),
+    )
+    expect(shown.detail).toBe('A page failed and is being retried. Last attempt: HTTP 429')
+  })
+
+  it('counts only what was pulled in when a sync finishes with failures', () => {
+    const shown = describeSyncProgress(progress({ stage: 'done', found: 480, pulled_in: 477, failed: 3 }))
+    expect(shown.headline).toBe('Sync finished · 477 messages pulled in')
+    expect(shown.detail).toBe('3 messages could not be fetched and were left out.')
   })
 
   it('carries a retry reason and the extraction failures into the detail', () => {
