@@ -1152,7 +1152,7 @@ class TestAStaleJobDoesNotReplayWorkThatAlreadyLanded:
 
         db.autocommit = True
         try:
-            outcome = loop._execute(db, claimed, handler, None, None, {})
+            outcome = loop._execute(db, "", claimed, handler, None, None, {})
         finally:
             db.autocommit = False
         assert outcome == "already_applied"

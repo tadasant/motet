@@ -680,6 +680,154 @@ public struct DismissResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// One agent run: what it cost, how hard it worked, and whether it logged in.
+public struct EnrichRunResponse: Codable, Hashable, Sendable {
+    public var articleChars: Int
+    public var costUsd: Double
+    public var error: String?
+    public var finishedAt: Date?
+    public var id: String
+    public var loginPerformed: Bool
+    public var startedAt: Date
+    public var status: String
+    public var toolCalls: Int
+
+    public init(
+        articleChars: Int,
+        costUsd: Double,
+        error: String? = nil,
+        finishedAt: Date? = nil,
+        id: String,
+        loginPerformed: Bool,
+        startedAt: Date,
+        status: String,
+        toolCalls: Int
+    ) {
+        self.articleChars = articleChars
+        self.costUsd = costUsd
+        self.error = error
+        self.finishedAt = finishedAt
+        self.id = id
+        self.loginPerformed = loginPerformed
+        self.startedAt = startedAt
+        self.status = status
+        self.toolCalls = toolCalls
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case articleChars = "article_chars"
+        case costUsd = "cost_usd"
+        case error
+        case finishedAt = "finished_at"
+        case id
+        case loginPerformed = "login_performed"
+        case startedAt = "started_at"
+        case status
+        case toolCalls = "tool_calls"
+    }
+}
+
+/// What the agentic fetch did for this item (motet#102).
+///
+/// Everything here comes off ``source_items`` and the newest ``enrich_runs`` row; the
+/// transcript itself is a separate route, because it is the largest thing on the item and
+/// nothing that lists items needs it.
+public struct EnrichStepResponse: Codable, Hashable, Sendable {
+    public var articleUrl: String?
+    public var domain: String?
+    public var enrichedAt: Date?
+    public var error: String?
+    public var originalChars: Int?
+    public var run: EnrichRunResponse?
+    public var status: String
+
+    public init(
+        articleUrl: String? = nil,
+        domain: String? = nil,
+        enrichedAt: Date? = nil,
+        error: String? = nil,
+        originalChars: Int? = nil,
+        run: EnrichRunResponse? = nil,
+        status: String
+    ) {
+        self.articleUrl = articleUrl
+        self.domain = domain
+        self.enrichedAt = enrichedAt
+        self.error = error
+        self.originalChars = originalChars
+        self.run = run
+        self.status = status
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case articleUrl = "article_url"
+        case domain
+        case enrichedAt = "enriched_at"
+        case error
+        case originalChars = "original_chars"
+        case run
+        case status
+    }
+}
+
+/// One line of a run's **redacted** transcript.
+///
+/// Redacted on the enrichment service, before it crossed the network: a tool result from
+/// anything but the browser is replaced by a note giving its size, and what is kept has had
+/// this run's known secrets and the shapes a secret usually takes removed. See
+/// ``motet_enrich.redact``.
+public struct EnrichTranscriptEntryResponse: Codable, Hashable, Sendable {
+    public var args: String?
+    public var costUsd: Double?
+    public var kind: String
+    public var ok: Bool?
+    public var result: String?
+    public var seq: Int
+    public var text: String?
+    public var tool: String?
+
+    public init(
+        args: String? = nil,
+        costUsd: Double? = nil,
+        kind: String,
+        ok: Bool? = nil,
+        result: String? = nil,
+        seq: Int,
+        text: String? = nil,
+        tool: String? = nil
+    ) {
+        self.args = args
+        self.costUsd = costUsd
+        self.kind = kind
+        self.ok = ok
+        self.result = result
+        self.seq = seq
+        self.text = text
+        self.tool = tool
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case args
+        case costUsd = "cost_usd"
+        case kind
+        case ok
+        case result
+        case seq
+        case text
+        case tool
+    }
+}
+
+public struct EnrichTranscriptResponse: Codable, Hashable, Sendable {
+    public var entries: [EnrichTranscriptEntryResponse]
+    public var run: EnrichRunResponse
+
+    public init(entries: [EnrichTranscriptEntryResponse], run: EnrichRunResponse) {
+        self.entries = entries
+        self.run = run
+    }
+}
+
 public struct EpisodeResponse: Codable, Hashable, Sendable {
     public var audioBytes: Int?
     public var audioMediaType: String?
@@ -765,6 +913,7 @@ public struct HTTPValidationError: Codable, Hashable, Sendable {
 public struct HealthResponse: Codable, Hashable, Sendable {
     public var authenticated: Bool
     public var drainTrigger: Bool
+    public var enrichEnabled: Bool?
     public var errorsConfigured: Bool
     public var inferenceMode: String
     public var iosAppLink: Bool
@@ -785,6 +934,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public init(
         authenticated: Bool,
         drainTrigger: Bool,
+        enrichEnabled: Bool? = nil,
         errorsConfigured: Bool,
         inferenceMode: String,
         iosAppLink: Bool,
@@ -804,6 +954,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     ) {
         self.authenticated = authenticated
         self.drainTrigger = drainTrigger
+        self.enrichEnabled = enrichEnabled
         self.errorsConfigured = errorsConfigured
         self.inferenceMode = inferenceMode
         self.iosAppLink = iosAppLink
@@ -825,6 +976,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case authenticated
         case drainTrigger = "drain_trigger"
+        case enrichEnabled = "enrich_enabled"
         case errorsConfigured = "errors_configured"
         case inferenceMode = "inference_mode"
         case iosAppLink = "ios_app_link"
@@ -1585,6 +1737,7 @@ public struct ProcessingStatusResponse: Codable, Hashable, Sendable {
 public struct ProcessingStepResponse: Codable, Hashable, Sendable {
     public var costRecorded: Bool
     public var decision: DedupDecisionResponse?
+    public var enrich: EnrichStepResponse?
     public var error: String?
     public var finishedAt: Date?
     public var job: SourceItemJobResponse?
@@ -1595,6 +1748,7 @@ public struct ProcessingStepResponse: Codable, Hashable, Sendable {
     public init(
         costRecorded: Bool,
         decision: DedupDecisionResponse? = nil,
+        enrich: EnrichStepResponse? = nil,
         error: String? = nil,
         finishedAt: Date? = nil,
         job: SourceItemJobResponse? = nil,
@@ -1604,6 +1758,7 @@ public struct ProcessingStepResponse: Codable, Hashable, Sendable {
     ) {
         self.costRecorded = costRecorded
         self.decision = decision
+        self.enrich = enrich
         self.error = error
         self.finishedAt = finishedAt
         self.job = job
@@ -1615,6 +1770,7 @@ public struct ProcessingStepResponse: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case costRecorded = "cost_recorded"
         case decision
+        case enrich
         case error
         case finishedAt = "finished_at"
         case job
@@ -2604,6 +2760,11 @@ public enum MotetEndpoints {
     /// `GET /v1/source-items/{source_item_id}` — Get Source Item Detail
     public static func getSourceItemDetail(sourceItemId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/source-items/\(MotetPathComponent(sourceItemId))")
+    }
+
+    /// `GET /v1/source-items/{source_item_id}/enrich-transcript` — Get Enrich Transcript
+    public static func getEnrichTranscript(sourceItemId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/source-items/\(MotetPathComponent(sourceItemId))/enrich-transcript")
     }
 
     /// `GET /v1/sources` — List Sources

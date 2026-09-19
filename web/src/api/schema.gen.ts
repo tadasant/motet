@@ -1135,6 +1135,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/source-items/{source_item_id}/enrich-transcript": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Enrich Transcript
+         * @description The newest agent run's redacted transcript for one item.
+         *
+         *     Its own route rather than a field on the detail: a transcript is the largest thing on an
+         *     item and nothing that *lists* items needs it, so putting it on the detail would make the
+         *     lifecycle drawer pay for it on every open.
+         *
+         *     **Already redacted when it was stored** — on the enrichment service, before it crossed
+         *     the network (``motet_enrich.redact``). Nothing here redacts anything, and nothing here
+         *     should start to: a second redaction pass at read time would be a second definition of
+         *     what is safe, and the one that matters is the one that decided what got written down.
+         */
+        get: operations["get_enrich_transcript_v1_source_items__source_item_id__enrich_transcript_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sources": {
         parameters: {
             query?: never;
@@ -2001,6 +2030,114 @@ export interface components {
              */
             skipped: number;
         };
+        /**
+         * EnrichRunResponse
+         * @description One agent run: what it cost, how hard it worked, and whether it logged in.
+         */
+        EnrichRunResponse: {
+            /** Article Chars */
+            article_chars: number;
+            /**
+             * Cost Usd
+             * @description What the agent's own completions cost.
+             */
+            cost_usd: number;
+            /** Error */
+            error: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Id */
+            id: string;
+            /** Login Performed */
+            login_performed: boolean;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * Status
+             * @description 'ok', 'blocked', 'capped', 'timeout', 'failed' or 'skipped'.
+             */
+            status: string;
+            /** Tool Calls */
+            tool_calls: number;
+        };
+        /**
+         * EnrichStepResponse
+         * @description What the agentic fetch did for this item (motet#102).
+         *
+         *     Everything here comes off ``source_items`` and the newest ``enrich_runs`` row; the
+         *     transcript itself is a separate route, because it is the largest thing on the item and
+         *     nothing that lists items needs it.
+         */
+        EnrichStepResponse: {
+            /**
+             * Article Url
+             * @description The link the run was pointed at.
+             */
+            article_url: string | null;
+            /**
+             * Domain
+             * @description The site the article was fetched from.
+             */
+            domain: string | null;
+            /** Enriched At */
+            enriched_at: string | null;
+            /**
+             * Error
+             * @description Why there is no article, when there is none.
+             */
+            error: string | null;
+            /**
+             * Original Chars
+             * @description How long the newsletter's own body was, once the article has replaced it. Null while the item still carries what arrived.
+             */
+            original_chars: number | null;
+            /** @description The newest run, or null if none has finished — a queued item has none. */
+            run: components["schemas"]["EnrichRunResponse"] | null;
+            /**
+             * Status
+             * @description 'queued', 'running', 'done', 'failed' or 'skipped' (a cap declined it).
+             */
+            status: string;
+        };
+        /**
+         * EnrichTranscriptEntryResponse
+         * @description One line of a run's **redacted** transcript.
+         *
+         *     Redacted on the enrichment service, before it crossed the network: a tool result from
+         *     anything but the browser is replaced by a note giving its size, and what is kept has had
+         *     this run's known secrets and the shapes a secret usually takes removed. See
+         *     ``motet_enrich.redact``.
+         */
+        EnrichTranscriptEntryResponse: {
+            /** Args */
+            args?: string | null;
+            /** Cost Usd */
+            cost_usd?: number | null;
+            /**
+             * Kind
+             * @description 'tool_call', 'tool_result', 'text' or 'error'.
+             */
+            kind: string;
+            /** Ok */
+            ok?: boolean | null;
+            /** Result */
+            result?: string | null;
+            /** Seq */
+            seq: number;
+            /** Text */
+            text?: string | null;
+            /** Tool */
+            tool?: string | null;
+        };
+        /** EnrichTranscriptResponse */
+        EnrichTranscriptResponse: {
+            /** Entries */
+            entries: components["schemas"]["EnrichTranscriptEntryResponse"][];
+            run: components["schemas"]["EnrichRunResponse"];
+        };
         /** EpisodeResponse */
         EpisodeResponse: {
             /** Audio Bytes */
@@ -2071,6 +2208,12 @@ export interface components {
              * @description Whether this process is configured to ask Cloud Run to start a worker execution when a request enqueues work, rather than leaving it for the next worker run. Configured, not proven: where the environment has no run.invoker grant every ask is refused, and motet.api.drain_triggers{outcome} on the obs stack is what says whether asks succeed. False means MOTET_DRAIN_TRIGGER is off — the default — or that it is on and the job could not be resolved or google-auth is missing from the image, both of which the process says at ERROR on startup. Reported for the same reason as 'vault_ready': an inert trigger and a working one look identical from outside. Where the job lives is deliberately not reported; it is topology, and this route is public.
              */
             drain_trigger: boolean;
+            /**
+             * Enrich Enabled
+             * @description Whether an 'ingest now' on an item that links to a site the owner added is sent to the agentic-enrichment queue first (motet#102). This is the API's own routing switch, MOTET_ENRICH; the API never calls the enrichment service and is not told where one is, so this cannot report whether a run would succeed — that is the worker's copy of the switch plus its service URL, and a worker with neither records every queued item as skipped and integrates it on its preview. False is the deployed state until a human switches it on; production stays off longest.
+             * @default false
+             */
+            enrich_enabled: boolean;
             /**
              * Errors Configured
              * @description Whether error reporting is configured. False means errors go nowhere.
@@ -2800,11 +2943,13 @@ export interface components {
         ProcessingStepResponse: {
             /**
              * Cost Recorded
-             * @description Whether this step's spend is stored. Always false.
+             * @description Whether this step's spend is stored per item. True for 'enrich', which writes an enrich_runs row carrying what the agent's completions cost; false for 'dedup', whose cost is a metric and a log line and is not kept per item.
              */
             cost_recorded: boolean;
             /** @description Null until done, and for items integrated before decisions were recorded. */
             decision: components["schemas"]["DedupDecisionResponse"] | null;
+            /** @description The agentic fetch's own detail. Present only on the 'enrich' step. */
+            enrich?: components["schemas"]["EnrichStepResponse"] | null;
             /**
              * Error
              * @description The source item's recorded error, or the job's last one while retrying.
@@ -2828,7 +2973,7 @@ export interface components {
             status: string;
             /**
              * Step
-             * @description 'dedup'.
+             * @description 'enrich' or 'dedup'.
              */
             step: string;
         };
@@ -3053,7 +3198,7 @@ export interface components {
             state: string;
             /**
              * Status
-             * @description 'held' (pending, nobody has asked for inference), 'queued', 'running', 'done', 'failed' or 'dismissed'.
+             * @description 'held' (pending, nobody has asked for inference), 'enriching' (an agent is fetching the full article), 'queued', 'running', 'done', 'failed' or 'dismissed'.
              */
             status: string;
             /** Title */
@@ -4982,6 +5127,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceItemDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_enrich_transcript_v1_source_items__source_item_id__enrich_transcript_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichTranscriptResponse"];
                 };
             };
             /** @description Validation Error */

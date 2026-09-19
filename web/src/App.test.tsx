@@ -1455,6 +1455,8 @@ describe('the generated contract', () => {
       vault_ready: true,
       drain_trigger: true,
       voice_configured: false,
+      // Off unless this deployment has an enrichment service wired (motet#102).
+      enrich_enabled: false,
       mcp_oauth_configured: false,
       mcp_tools: 0,
       inference_mode: 'fake',

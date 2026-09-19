@@ -563,6 +563,7 @@ environment that has not wired a voice service to the API — see "Play Live" be
 | Web SPA | Vite + React, static files on Cloud Run | `web/` |
 | Landing page (getmotet.com) | static HTML/CSS, Cloudflare Pages | `site/` |
 | Voice service | Pipecat, Cloud Run — **Phase 2** | `voice/` |
+| Agentic enrichment | FastAPI + Pi + Chromium, Cloud Run | `enrich/` |
 | iOS app | Swift — **Phase 2** | `ios/` |
 | Golden set | CI harness | `goldens/` |
 
@@ -750,13 +751,13 @@ take that reading. This section is the record.
 
 ### The container images
 
-Cloud Run runs four: `motet-api`, `motet-worker`, `motet-voice`, `motet-web`. The first
-three come from one root `Dockerfile` with three targets (`api`, `worker`, `voice`), because
-a second Dockerfile would be a second copy of one dependency graph. The SPA is
-`web/Dockerfile`.
+Cloud Run runs five: `motet-api`, `motet-worker`, `motet-voice`, `motet-web`,
+`motet-enrich`. The first four of those come from one root `Dockerfile` with four targets
+(`api`, `worker`, `voice`, `enrich`), because a second Dockerfile would be a second copy of
+one dependency graph. The SPA is `web/Dockerfile`.
 
 ```bash
-bin/build-images              # all four, then smoke-test each
+bin/build-images              # all five, then smoke-test each
 bin/build-images api web      # a subset
 ```
 
@@ -767,6 +768,19 @@ in the image at all — invariant 2 as a property of the artifact, which the smo
 asserts. The smoke also mints a session on one container and opens its WebSocket on a
 second that shares the secret, because Cloud Run gives a socket no affinity and a secret
 that differs between instances fails only there.
+
+**`motet-enrich` is `motet-voice`'s argument one service along, and it is the one target
+not built on `base`.** Its venv is `uv sync --package motet-enrich --no-editable`, so
+`motet_db`, `psycopg` and `motet_vault` are absent from the image — design option D2 as a
+property of the artifact, which the smoke asserts. It is built on
+`mcr.microsoft.com/playwright:v<version>-noble` rather than the slim Python image because it
+needs a Chromium and the hundred-odd shared libraries one needs, and the tag is pinned to
+the Playwright version `enrich/harness/package-lock.json` resolves: a mismatch is
+`Executable doesn't exist at /ms-playwright/…` on the first real fetch and nowhere earlier,
+so `enrich/tests/test_toolchain_pin.py` reads both files. Its smoke drives the browser MCP
+server for real inside the container — a page rendered, an off-site navigation refused, the
+storage state written — because those are claims about a running Chromium and a unit test
+can only assert the predicate behind them.
 
 **Both build contexts are the repo root**: `uv.lock` describes the whole workspace, so a
 context rooted at `api/` could not resolve it.
@@ -3267,6 +3281,280 @@ the docstring says so rather than implying more.
 for the vault, API routes and a screen — every one inside the design session above. Nothing
 reads a connector yet: the enrichment pipeline that does is its own change, and the screen
 says nothing is fetched until enrichment is switched on for the deployment.
+
+### The article behind the newsletter is fetched by an agent in a container that holds nothing
+
+`enrich/` (`motet-enrich`), `motet_workers.enrich`, `motet_db.enrichment`, migration 0022,
+`GET /v1/source-items/{id}/enrich-transcript`. **Decided by Tadas on 2026-09-13, in
+motet#102's design session** (Zimmer session 17776) — the same session that chose the
+Credentials half above, and the picks table in that section is this section's too. This is
+options **A2, C2, D2, F2, G3 and H1** built; **B3** and **E1** shipped with the connectors.
+
+A newsletter is usually a preview and a link, and a briefing made from the preview is a
+briefing made from an advertisement for the article. So an item whose links reach a site the
+owner has added goes to an agent first: it opens the link in a stealth browser, logs in if
+the site walls it, and returns the article, which replaces the preview in
+`source_items.text` (H1) with the newsletter kept in `original_text`.
+
+```
+"Ingest now" → does this item link to a site the owner added?
+    no  → integrate, exactly as before
+    yes → enrich job → [motet-enrich runs the agent] → integrate (enriched)
+```
+
+**The decision is a rule, not a model call** (A2), and the prototype's was the other way
+round. A `triage` stage asked Haiku about every ingested item — a fifth `LlmStage`, a model
+call where none existed, and a per-item cost on the volume line. What replaced it is one
+sentence: *the newsletter carries a link whose host belongs to a `site` connector*. Adding
+that connector is the opt-in (B3), so there is no second switch to forget, nothing is
+fetched from a domain the owner never named, and the decision costs nothing.
+
+**The links had to be kept for it, and that is the one change this makes to ingestion.**
+`motet_sources.extract` throws every href away on purpose — a briefing is spoken and a
+600-character tracking redirect is not a sentence — so the rule had nothing to read.
+`source_items.links` is the answer: collected from every part of the message, under the same
+visibility rules the text is (a link inside a hidden preheader is machinery), and `text` is
+byte-for-byte what it was. **Rows written before migration 0022 have an empty array and can
+never be enriched**, because the raw message is not retained; a re-poll inside the window is
+the repair and after the window there is none.
+
+**The rule ties a link to a site and not to the sender, which is a consequence of A2 + B3
+rather than a gap.** A `site` row is the allowlist, and it matches subdomains because a
+publisher's click-tracking host is one — so *any* newsletter the owner ingests can point the
+agent at a subdomain of a site they added, with that site's cookies seeded and its password
+in the browser server's environment. Binding the rule to the sender as well would be a
+different rule than the one the design session picked; it is the obvious next tightening if
+it ever matters.
+
+**A tracking link on an unrelated host is invisible to the rule, and that is stated rather
+than fixed.** `url3396.example.com` matches `example.com` because it is a subdomain; a
+generic `ct.sendgrid.net` wrapper does not, because the only way to learn where it lands is
+to follow it — which is a fetch from a domain the owner never named. F2 is why there is no
+publisher table to fix it in.
+
+#### Why it is a deployable of its own
+
+**Any process in a Cloud Run container can mint that container's service-account token from
+the metadata server.** The enrichment run is third-party npm — Pi, `pi-mcp-adapter`,
+`playwright-stealth-mcp-server`, Chromium — driving a browser over pages nobody at Motet
+wrote, with the owner's mailbox in reach through an MCP connector. Running it inside
+`motet-worker` would hand that code KMS decrypt and Cloud SQL whatever its *environment*
+looked like, because the environment is not the boundary; the identity is. So option D2
+puts it in a container whose service account has no project roles at all, and the
+infrastructure half is tadasant-internal#2837.
+
+That makes the split of duties the contract:
+
+| | Holds | Does |
+|---|---|---|
+| `motet-worker` | the KMS decrypt path (invariant 8), the database | opens the one site login, the MCP token sets and the sealed browser state this run needs, sends them in the request, seals and stores what comes back |
+| `motet-enrich` | nothing | runs the agent, answers with the article, a **redacted** transcript and the browser's new cookies |
+
+**A service, not a job**, which is the infra issue's refinement: a Cloud Run job takes
+per-run input only through execution overrides, which would record the decrypted credentials
+in the execution's spec and need `run.jobs.runWithOverrides` — a permission the worker does
+not and should not hold. A request body carries them in transit and nowhere else.
+
+**The contract lives in `motet_enrich.contract` and the worker imports it**, so
+`motet-workers` depends on `motet-enrich` for exactly one module. A hand-written second copy
+of these shapes would be two definitions of one HTTP contract, and the first field either
+grew would make them disagree silently. The arrow goes one way, and the enrich image is
+built with `--package motet-enrich`, so none of the worker's tree is in it.
+
+**Two doors.** Cloud Run's IAM check — a Google ID token in `X-Serverless-Authorization`,
+audience the service URL, granted to the worker's service account alone — is consumed by the
+platform before a byte reaches the process. `MOTET_ENRICH_SERVICE_TOKEN` is the inner one,
+compared in constant time, and it is what makes a container that becomes reachable some
+other way still refuse to spend an OpenRouter key.
+
+#### What bounds a run, and what bounds the damage
+
+**The caps are two-sided** (C2), because the two halves can see different things. The
+service enforces the wall clock, the tool-call count and the per-item dollar figure, from
+the agent's own event stream — Pi has no "stop after N calls", so the runner reads the
+stream and kills the process group the moment a cap is passed. The **per-user rolling 24-hour
+dollar cap** is the worker's, because only it can see `enrich_runs`. Hitting either is a
+*recorded skip*, never a retry: the cap will still be spent in ten minutes, and the answer
+would cost the same money to learn.
+
+A request may ask for **less** than the service's own limits and never for more, which
+matters the day a worker is rolled out ahead of the service.
+
+**It runs under the user's serialization key, and that costs throughput on purpose.**
+Invariant 6 already serialized `integrate` per user; an `enrich` job takes the same key, so
+"one browser session per user at a time" comes free and two runs cannot both be writing that
+user's cookies for one domain. The cost is real and worth stating: ingesting ten items that
+each need an article is ten runs in series, and a run is 50–250 seconds. The lease keeper is
+what makes that safe (motet#53) — a run is well inside `MAX_LEASE_EXTENSION_SECONDS` — and
+shortening it would mean either a second browser per user or giving up the one-session
+guarantee, neither of which this session chose.
+
+**One item is never enriched twice, and that is the rule money rides on.** The job queue's
+work fence cannot help here: everything that records a run's cost is inside the handler's
+transaction, which does not commit until the agent's answer comes back. So the *one* thing
+written before the money is spent — `enrich_status = 'running'`, on a side connection — is
+also a replay guard: a second claim of an item in that state never starts a second run. And
+a transport failure talking to the service is **not retried**, because the client's timeout
+is shorter than the service's own and a read timeout more often means "the run is still
+going" than "nothing happened". Without both, five attempts of a $0.50 cap is $2.50 on one
+item, and `enrich_runs` — which the daily cap is summed from — would have no row for any of
+it.
+
+**Enrichment never fails the item.** `blocked`, `capped`, `timeout`, `failed`, a cap-skip
+and an agent that cannot be reached at all end the same way: keep the newsletter's preview,
+record the run, queue integrate. A briefing made from a preview is better than no briefing,
+and that is why the `enrich` failure recorder does not mark the source item failed the way
+`integrate`'s does. `MIN_ARTICLE_CHARS` is the other half of it — an `ok` answer carrying
+200 characters of consent notice is *not* an article, and replacing a 1,400-character
+newsletter with one is the single way this feature makes a briefing worse.
+
+**Three guards on the browser, of decreasing strength, and the order is the point.**
+
+1. **The container's identity holds nothing.** This is the one that actually holds. Whatever
+   an injected instruction talks the agent into, the reachable blast radius is the
+   credentials this one run was handed: one site's login, one browser's cookies, and the MCP
+   servers the owner connected on purpose.
+2. **The navigation lock** (G3), in `enrich/harness/browser-mcp.mjs`. Three rules, each
+   bounding a different thing: a **top-level navigation** off the run's allowlist is
+   aborted, so is a **sub-frame** one (an injected `<iframe src=…>` puts an attacker's
+   origin in the page without navigating it), and so is an off-site **`fetch`/XHR/WebSocket**
+   (the shape an injected instruction uses to send what it read somewhere). An empty
+   allowlist refuses everything rather than disabling the lock.
+
+   **Two limits are stated rather than closed.** Passive sub-resources — images,
+   stylesheets, fonts, scripts — are not filtered, because blocking a publisher's CDN
+   breaks the page outright; an `<img src="https://…/?d=…">` beacon therefore still gets
+   out, and exfiltration cannot be closed in a browser that renders third-party pages. And
+   a **redirect continuation is followed**, because a newsletter's tracking link is an
+   allowed URL that 302s onward — which means an *open redirect* on an allowed host can
+   carry the browser off-site. Refusing redirects would refuse the only link most
+   newsletters carry.
+
+   **Read the whole of it honestly**: `browser_execute` evaluates the model's JavaScript in
+   the harness's own Node process, so this is a lock on the browser and not a sandbox on
+   the process. What bounds the blast radius is (1).
+3. **The prompt**, which says page and message text is data and never an instruction. A
+   mitigation, and named as one so that nobody later mistakes it for a control.
+
+**The browser server's environment is deliberately tiny, and that is a control rather than
+hygiene.** Because the model's JavaScript runs in that process, everything in its
+environment is readable by whatever the model was talked into writing. It therefore never
+sees `OPENROUTER_API_KEY`, the service token, or any MCP bearer — `inheritEnv: false`, and
+an explicit short list. The one secret it does hold is the **site password**, as
+`MOTET_SITE_PASSWORD`, which the agent fills into a password field without ever being told
+the value: so the password is in no prompt, no tool argument and no transcript. Certificate
+validation is turned back **on**; the published server defaults it off for container
+convenience, which on the open internet is the difference between a paywall and anyone on
+the path reading the owner's session.
+
+**Each MCP bearer is a 0600 file read by a `!command` header hook**, never a value in the
+MCP document — so a token is not sitting in a config file the agent's own toolchain can
+read with no tool call at all. A server's tool namespace is its **connector id**, not the
+owner's label, because the namespace is what decides transcript retention and a label is
+free text: a connector called "browser" must not be able to buy itself retention.
+
+#### The transcript is redacted where it is produced
+
+`motet_enrich.redact`. The raw stream is the worst thing in this system to store: one spike
+run held the owner's mailbox search results, the body of a sign-in email, a single-use magic
+link and eighteen cookies including a live session. Two mechanisms, and **the first is the
+one that matters**:
+
+1. **A non-browser tool's result is never stored at all** — not redacted, *replaced*, by a
+   note giving its size and its tool. The mailbox search that finds the login email is a
+   non-browser tool, so this is the rule that keeps the email's body out of the database,
+   and it holds for whatever a future connector returns because it is a rule about which
+   server answered rather than about what the answer looked like.
+2. **Everything kept goes through the patterns**: this run's known secrets by exact match,
+   then a bearer header, a credential-carrying query value (`eu=`, `token=`, …), a long
+   opaque URL path segment — which is what a magic link is — a cookie `"value"`, an address.
+
+**Rule 1 is about *which server answered*, so it covers a tool's result and not the model's
+account of it.** A model told to read a code out of an email can restate it in its own
+message, where only rule 2 stands between it and the database. What narrows that is that the
+only assistant text stored is the **final answer with the article's fenced block removed** —
+the agent's two-line verdict and its reasoning about being blocked, not a running narration
+of the mailbox. Keeping the article out is also why the largest row in `enrich_runs` is not
+a second copy of `source_items.text`.
+
+**The pattern half is a backstop and cannot be complete**, which is the honest statement of
+what it buys: a site that puts a session token in a shape none of them matches would have it
+stored. That is why rule 1 is first and needs to guess nothing. Redaction happens **on the
+service, before the transcript crosses the network**; the API route that serves it back
+redacts nothing and must not start to, because a second pass at read time would be a second
+definition of what is safe and the one that matters is the one that decided what got written
+down.
+
+#### What is stored, and the two new tables
+
+Migration 0022. `source_items` learns nine columns — `links`, the triage-free decision's
+`article_url` and `enrich_domain`, `enrich_status`, `enrich_error`, `enriched_at`,
+`original_text`. `enrich_runs` is **a table used as a log**: one row per run, appended and
+never updated, holding the redacted transcript, the cost and the tool-call count — and it is
+what the rolling daily cap is summed from, which is why per-item spend here is a row where
+dedup's is a metric and a log line.
+
+**`browser_states` is the vault's third kind of sealed record**, after `source_credentials`
+and `connectors`: a Playwright storage state per user per domain, which is what makes "log
+in once per domain" true. AAD `user_id:<domain>:browser_state`, so a ciphertext moved onto
+another user's row or another domain's fails to authenticate rather than logging one account
+into another's site. The cookie *count* is plaintext and is the only thing that is: "a
+session was saved and it is empty" and "no session was saved" are otherwise the same row to
+anyone debugging a login that will not stick. The state comes back on **every** outcome
+including a timeout, because the harness writes it after every browser call — so a run that
+logged in and then ran out of clock still bought the next run a login.
+
+**The claim's two readers learn about the new queue.** `repo._HELD_WHERE` and
+`INGESTION_SQL` both ask "does this item have a job", and both asked it of `integrate`
+alone. An item waiting on `enrich` would have read as *held* — on the panel, and claimable
+into a second agent run — and would have been on neither surface once claimed, breaking the
+property those two queries hold between them. Both ask about `queue IN ('integrate',
+'enrich')` now, and 0022 adds 0005's twin index so the OR is still answered off an index
+rather than by a sequential scan of every job ever run (motet#49).
+
+#### What no test here can tell you
+
+Invariant 7 keeps vendors out of CI, so **every test in this repo runs the fake runner**:
+nothing starts a browser against a real site, reaches OpenRouter, or spends a cent. What is
+pinned offline is the decision procedure and the *configuration* — the MCP document, the
+model row priced from the shared catalogue, the argv, the environment each child gets —
+because a typo in any of those ships green and fails at the vendor. `bin/build-images
+enrich` drives the real browser inside the real image for the three claims only a running
+Chromium can make.
+
+What is left is whether a real agent gets past a real paywall, and **the first live run is
+the owner's**: the issue gate forbids an agent from logging into a real site or using the
+owner's mailbox to prove this works. Turning it on is configuration, and the two halves are
+deliberately not the same: the **worker** needs `MOTET_ENRICH`, `MOTET_ENRICH_SERVICE_URL`
+and the shared token, while the **API** needs only `MOTET_ENRICH`. The API decides whether
+an "Ingest now" goes to the `enrich` queue and never calls the service, so telling it where
+one is would put a fact about the private estate into the internet-facing service's
+configuration for nothing. `/internal/health`'s `enrich_enabled` is therefore the API's
+routing switch and not a claim that a run would succeed; the two can disagree, and the
+disagreement is safe either way — a worker with no URL records every queued item as
+`skipped` and integrates it on its preview. Production stays off until a human flips it.
+
+**The per-item cap is checked before a run, so real spend reaches at most
+`MOTET_ENRICH_MAX_USD_PER_DAY` plus one item's cap.** Inherent to checking a budget before
+spending against it; named here so the figure in a bill is not a surprise.
+
+**Deliberately not built, each for a stated reason.** Refreshing an MCP access token from
+the handler: a refresh is an HTTP round trip *and* a re-seal, so it belongs with the OAuth
+client in `motet_sources.mcp_oauth` rather than inside a job handler holding this user's
+serialization lock — until it is wired, an expired grant shows up as the mailbox tool failing
+and the run reporting `blocked`, recoverable by re-authorizing. The SPA's own view of the
+enrich block and the transcript: the API carries both and the lifecycle drawer does not
+render them yet. Raw-message retention in object storage, which motet#91 deferred to its own
+session and H1 declines for now.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** This adds a deployable, a queue,
+two tables, nine columns, a vault role, a vendor toolchain and two API routes — every one of
+them inside motet#102's design session, whose picks are the table in the section above. The
+sign-off is the owner's issue and that session, not the size of the diff. What it does *not*
+add is a new inference stage or a model call in the pipeline: option A2 is precisely the
+choice not to have one, and the agent's own completions are the enrichment service's, priced
+from the existing catalogue and counted on their own instruments rather than folded into
+`llm_usage` — which the service could not write to, having no database.
 
 ### Podcast clients read show notes, chapters and transcripts in more places than one
 

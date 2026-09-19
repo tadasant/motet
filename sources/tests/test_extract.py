@@ -306,3 +306,104 @@ def test_a_hidden_br_does_not_swallow_the_rest_of_the_message() -> None:
     text = html_to_text('<p>Start.</p><br style="display:none"><p>Still here.</p>')
     assert "Start." in text
     assert "Still here." in text
+
+
+# --- the links the text deliberately throws away -------------------------------------
+#
+# `text` keeps no URL — a briefing is spoken, and a 600-character tracking redirect is not
+# a sentence. Enrichment (motet#102) answers "does this newsletter link to a site the owner
+# added" from `links`, so a href thrown away here is an article that can never be fetched.
+
+
+HTML_WITH_LINKS = (
+    "<html><body>"
+    "<p>Northwind Ventures led a $20M round in Acme, the company said on Tuesday. "
+    "The round values Acme at $180M post-money and brings total funding to $26M.</p>"
+    '<a href="https://url3396.example.com/ls/click?upn=Zm9vYmFy">Read the full article</a>'
+    '<div style="display:none"><a href="https://tracker.test/open.gif">.</a></div>'
+    '<a href="mailto:desk@example.com">Reply</a>'
+    '<a href="/relative/path">Relative</a>'
+    '<a href="https://example.com/preferences">Manage preferences</a>'
+    "</body></html>"
+)
+
+
+def test_an_anchors_href_is_kept_beside_the_text_and_not_in_it() -> None:
+    extracted = extract_newsletter(
+        message(content_type='text/html; charset="utf-8"', body=HTML_WITH_LINKS)
+    )
+    assert "https://" not in extracted.text
+    assert "Read the full article" in extracted.text
+    assert extracted.links[0] == "https://url3396.example.com/ls/click?upn=Zm9vYmFy"
+
+
+def test_links_are_in_document_order_and_deduplicated() -> None:
+    body = HTML_WITH_LINKS.replace(
+        "</body>", '<a href="https://url3396.example.com/ls/click?upn=Zm9vYmFy">Again</a></body>'
+    )
+    extracted = extract_newsletter(message(content_type='text/html; charset="utf-8"', body=body))
+    assert extracted.links == (
+        "https://url3396.example.com/ls/click?upn=Zm9vYmFy",
+        "https://example.com/preferences",
+    )
+
+
+def test_a_hidden_links_href_is_not_kept_either() -> None:
+    """The same visibility rules as the text: a link in a hidden preheader is machinery."""
+    extracted = extract_newsletter(
+        message(content_type='text/html; charset="utf-8"', body=HTML_WITH_LINKS)
+    )
+    assert not any("tracker.test" in link for link in extracted.links)
+
+
+def test_a_mailto_or_a_relative_href_is_not_a_link_to_an_article() -> None:
+    extracted = extract_newsletter(
+        message(content_type='text/html; charset="utf-8"', body=HTML_WITH_LINKS)
+    )
+    assert all(link.startswith("https://") for link in extracted.links)
+
+
+def test_a_plain_text_alternative_still_yields_its_links() -> None:
+    """A bare-URL line is dropped from what gets spoken, and kept as a link.
+
+    Both halves matter: `text` must not read out a line of unspeakable characters, and a
+    newsletter whose only body is plain text must still be enrichable. A URL *inside* a
+    sentence stays in the text, because the line around it is a sentence — that is
+    `_BARE_URL_RE`'s existing bound and this change does not move it.
+    """
+    body = BODY + "\nRead the full article\nhttps://url3396.example.com/ls/click?upn=Zm9vYmFy\n"
+    extracted = extract_newsletter(message(body=body))
+    assert "https://" not in extracted.text
+    assert extracted.links == ("https://url3396.example.com/ls/click?upn=Zm9vYmFy",)
+
+
+def test_links_come_from_every_part_not_only_the_one_the_body_won() -> None:
+    """The body prefers plain text; the links are taken from the HTML part too.
+
+    A well-built newsletter puts its anchors in the HTML alternative and its plain
+    alternative is the readable half. Taking links only from the winning part would mean
+    such a newsletter could never be enriched.
+    """
+    boundary = "==BOUNDARY=="
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Type: text/plain; charset="utf-8"\r\n\r\n'
+        f"{BODY}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Type: text/html; charset="utf-8"\r\n\r\n'
+        f"{HTML_WITH_LINKS}\r\n"
+        f"--{boundary}--\r\n"
+    )
+    extracted = extract_newsletter(
+        message(content_type=f'multipart/alternative; boundary="{boundary}"', body=body)
+    )
+    assert extracted.text.startswith("Northwind Ventures")
+    assert extracted.links[0].startswith("https://url3396.example.com")
+
+
+def test_a_url_at_the_end_of_a_sentence_does_not_keep_the_full_stop() -> None:
+    from motet_sources.extract import find_links
+
+    assert find_links("see https://example.com/a-story.") == ["https://example.com/a-story"]
+    assert find_links("see <https://example.com/x>, then") == ["https://example.com/x"]
+    assert find_links("no links here") == []

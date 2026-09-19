@@ -1,6 +1,6 @@
 """The pipeline's queue names.
 
-`Poll → Extract → Dedup/Integrate → Assemble → Script → TTS → GCS`.
+`Poll → Extract → Enrich → Dedup/Integrate → Assemble → Script → TTS → GCS`.
 
 Each stage is a separate queue on the one ``jobs`` table because the stages have different
 rate limits and failure modes — a Cartesia 429 must not stall dedup. They are named here,
@@ -15,6 +15,7 @@ from enum import StrEnum
 class Queue(StrEnum):
     POLL = "poll"
     EXTRACT = "extract"
+    ENRICH = "enrich"
     INTEGRATE = "integrate"
     ASSEMBLE = "assemble"
     SCRIPT = "script"
@@ -35,6 +36,11 @@ class Queue(StrEnum):
 PIPELINE: tuple[Queue, ...] = (
     Queue.POLL,
     Queue.EXTRACT,
+    # Between extract and integrate, so one `runner all` pass carries an item that needs an
+    # article all the way through: the agent fetches it, the enrich handler queues the
+    # integrate job, and integrate — the next queue on this list — picks it up on the same
+    # sweep rather than one poll interval later (motet#102).
+    Queue.ENRICH,
     Queue.INTEGRATE,
     Queue.ASSEMBLE,
     Queue.SCRIPT,

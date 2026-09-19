@@ -1,4 +1,4 @@
-# The Python half of Motet: one build, three runtime targets.
+# The Python half of Motet: one build, four runtime targets.
 #
 # `motet-api` and `motet-worker` are separate images in Artifact Registry because the
 # infrastructure pins them separately, but they are the same tree — the API writes rows
@@ -10,10 +10,13 @@
 #     docker build --target api    -t motet-api    .
 #     docker build --target worker -t motet-worker .
 #     docker build --target voice  -t motet-voice  .
+#     docker build --target enrich -t motet-enrich .
 #
-# `motet-voice` is the one target that is NOT the shared tree. It resolves from the same
-# lockfile in the same build stage, and then installs only `motet-voice` and what it
-# depends on — see the `voice-build` stage for why.
+# `motet-voice` and `motet-enrich` are the two targets that are NOT the shared tree. Each
+# resolves from the same lockfile in the same build stage and then installs only its own
+# package and what that depends on — see the `voice-build` and `enrich-build` stages for
+# why, which is the same reason in both cases: a service that holds no database credential
+# should not have a driver in its image either.
 #
 # Build context is the REPO ROOT, not a subdirectory. `uv.lock` describes the whole
 # workspace, so a context rooted at `api/` could not resolve it.
@@ -57,6 +60,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY api/pyproject.toml api/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
+COPY enrich/pyproject.toml enrich/pyproject.toml
 COPY inference/pyproject.toml inference/pyproject.toml
 COPY obs/pyproject.toml obs/pyproject.toml
 COPY sources/pyproject.toml sources/pyproject.toml
@@ -72,6 +76,7 @@ RUN uv sync --frozen --no-dev --no-install-workspace
 
 COPY api api
 COPY db db
+COPY enrich enrich
 COPY inference inference
 COPY obs obs
 COPY sources sources
@@ -103,6 +108,22 @@ FROM build AS voice-build
 # caching: that stage copied every member's source, so an edit under `api/` or `db/` also
 # re-runs this step.
 RUN uv sync --frozen --no-dev --package motet-voice --no-editable
+
+# ---------------------------------------------------------------------------
+# enrich-build — the enrichment service's venv, and nothing it does not import.
+# ---------------------------------------------------------------------------
+FROM build AS enrich-build
+
+# `voice-build`'s argument, one service along, and with more riding on it. Design option D2
+# (motet#102) puts the agentic run in a container whose service account holds nothing,
+# because the code it shells out to is third-party npm driving a browser over untrusted
+# pages — and any process in a Cloud Run container can mint that container's
+# service-account token. `--package motet-enrich` makes the venv exactly that package's
+# closure, so `motet_db`, `psycopg` and `motet_vault` are not in the image at all: there is
+# no database credential to hand it and no code that could use one.
+# `enrich/tests/test_no_database_reach.py` makes the claim against the source tree and
+# `bin/build-images` makes it against this image.
+RUN uv sync --frozen --no-dev --package motet-enrich --no-editable
 
 # ---------------------------------------------------------------------------
 # base — what every Python image shares: the user, the interpreter settings.
@@ -211,3 +232,88 @@ FROM runtime AS worker
 # here (motet#21). `workers/tests/test_entrypoint.py` reads this line and runs it, so
 # changing the module below without moving the loop out of it fails CI.
 ENTRYPOINT ["python", "-m", "motet_workers.runner"]
+
+# ---------------------------------------------------------------------------
+# enrich-toolchain — Node, the agent, and a Chromium. The one heavy stage here.
+# ---------------------------------------------------------------------------
+#
+# From Playwright's own image rather than apt-get'ing a browser: Chromium's shared-library
+# list on Debian is long, changes between Playwright releases, and a missing one shows up
+# as a browser that will not launch at run time rather than as a build failure. The tag is
+# pinned to the Playwright version `enrich/harness/package-lock.json` resolves — 1.63.0 —
+# because the browser build and the driver have to match: a mismatch is `Executable doesn't
+# exist at /ms-playwright/...` on the first fetch and nowhere earlier.
+# `enrich/tests/test_toolchain_pin.py` reads both files and fails when they drift.
+FROM mcr.microsoft.com/playwright:v1.63.0-noble AS enrich-toolchain
+
+WORKDIR /opt/motet-enrich
+
+# `npm ci` against a committed lockfile, never `npm install`. This is third-party code that
+# drives a browser over untrusted pages inside a container that holds the owner's session
+# cookies; the whole tree is pinned, and a bump is a PR with a diff somebody reads.
+COPY enrich/harness/package.json enrich/harness/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
+COPY enrich/harness/browser-mcp.mjs harness/browser-mcp.mjs
+
+# ---------------------------------------------------------------------------
+# enrich — the agentic enrichment service (motet#102, design option D2).
+# ---------------------------------------------------------------------------
+#
+# NOT built on `base`: it needs a Chromium and the hundred-odd shared libraries one needs,
+# and Playwright's image is where those are known to be right. So the venv and the Python
+# interpreter are copied *in* rather than the browser being installed into a slim image.
+#
+# **This image deliberately carries no database driver** — see `enrich-build` — so there is
+# nothing in it that could be handed a credential even if one were mounted.
+FROM mcr.microsoft.com/playwright:v1.63.0-noble AS enrich
+
+# The interpreter the venv was built against, byte-for-byte. Copying the venv without it
+# leaves every shebang pointing at a Python that is not there.
+COPY --from=enrich-build /usr/local/lib/ /usr/local/lib/
+COPY --from=enrich-build /usr/local/bin/python3.13 /usr/local/bin/python3.13
+RUN ln -sf /usr/local/bin/python3.13 /usr/local/bin/python3 \
+ && ln -sf /usr/local/bin/python3.13 /usr/local/bin/python \
+ && ldconfig
+
+# Not root, for the reason `base` gives — and here it matters more than anywhere else in
+# this repo, because this container runs a browser over pages nobody at Motet wrote. The
+# browsers under /ms-playwright are world-readable in the base image, so a user of our own
+# rather than its `pwuser` costs nothing.
+#
+# Strict, with no `|| true`: the Playwright image ships `pwuser` at uid 1001 and leaves
+# 10001 free, and the day a base image bump takes that uid this must be a failed build
+# rather than a `USER motet` that cannot be resolved at run time — which Docker reports as
+# "unable to find user" on every start, long after the change that caused it.
+RUN useradd --create-home --uid 10001 motet
+
+WORKDIR /app
+
+COPY --from=enrich-build --chown=motet:motet /app/.venv /app/.venv
+COPY --from=enrich-toolchain --chown=motet:motet /opt/motet-enrich /opt/motet-enrich
+
+ENV PATH="/app/.venv/bin:/opt/motet-enrich/node_modules/.bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Where `motet_enrich.config.resolve_toolchain` looks, and where Playwright put the
+    # browsers in its own image. Both are reported by /internal/health as `toolchain_ready`,
+    # which is the field that makes "the npm half is missing" visible from outside.
+    MOTET_ENRICH_TOOLCHAIN_DIR=/opt/motet-enrich \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PORT=8080
+
+USER motet
+EXPOSE 8080
+
+# `create_app --factory` for `motet-voice`'s reason: building the app reads the environment
+# and resolves the toolchain, which must not happen at import.
+#
+# `--forwarded-allow-ips='*'` because Cloud Run's front end is the peer, never loopback.
+#
+# One worker, and the service's own concurrency is 1: a run holds a Chromium for up to ten
+# minutes, and two of them in one container is two browsers in 2 GiB.
+#
+# `--timeout-graceful-shutdown 8`: Cloud Run sends SIGTERM and kills ten seconds later, and
+# the lifespan's `finally` is the telemetry flush. Eight bounds the wait and leaves two for
+# it — the same figure `motet-voice` uses, for the same reason.
+CMD exec uvicorn motet_enrich.app:create_app --factory --host 0.0.0.0 --port "$PORT" --forwarded-allow-ips='*' --timeout-graceful-shutdown 8

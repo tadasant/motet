@@ -44,6 +44,7 @@ from motet_db import (
 )
 from motet_db import auth as auth_repo
 from motet_db import connectors as connector_repo
+from motet_db import enrichment as enrichment_repo
 from motet_db import settings as settings_repo
 from motet_db import waitlist as waitlist_repo
 from motet_inference.llm import LlmConfigError, LlmStage
@@ -90,6 +91,7 @@ from motet_workers import (
     queue_readiness,
     source_query,
 )
+from motet_workers.enrich import load_config as enrich_config
 from motet_workers.queues import PIPELINE
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
@@ -169,6 +171,10 @@ from .schemas import (
     CreateSmartEpisodeRequest,
     DedupDecisionResponse,
     DismissResponse,
+    EnrichRunResponse,
+    EnrichStepResponse,
+    EnrichTranscriptEntryResponse,
+    EnrichTranscriptResponse,
     EpisodeResponse,
     FeedInfoResponse,
     HealthResponse,
@@ -622,6 +628,12 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         llm_overrides_in_force=admin_llm.overrides_in_force(config.database_url, os.environ),
         mcp_tools=len(mcp_registry.ALL_TOOLS),
         mcp_oauth_configured=mcp_oauth_setup(config) is not None,
+        # The API's own routing switch, which is the whole of what this process decides:
+        # it never calls the enrichment service and is deliberately not told where one is
+        # (that is topology, and this repo is public). Whether a queued item then *runs* is
+        # the worker's copy of the same switch plus its service URL — a worker with neither
+        # records every one as skipped and integrates it on its preview.
+        enrich_enabled=enrich_config().enabled,
     )
 
 
@@ -1171,10 +1183,104 @@ def get_source_item_detail(
     life = repo.source_item_lifecycle(conn, user_id, source_item_id)
     if life is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source item.")
-    return _source_item_detail(life)
+    # Only where enrichment touched the item, so the ordinary paste pays no second query.
+    run = (
+        enrichment_repo.latest_enrich_run(conn, source_item_id)
+        if life.enrichment.status is not None
+        else None
+    )
+    return _source_item_detail(life, run)
 
 
-def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailResponse:
+@app.get(
+    "/v1/source-items/{source_item_id}/enrich-transcript",
+    response_model=EnrichTranscriptResponse,
+    tags=["ingestion"],
+)
+def get_enrich_transcript(
+    conn: Conn, user_id: User, source_item_id: Annotated[str, Path()]
+) -> EnrichTranscriptResponse:
+    """The newest agent run's redacted transcript for one item.
+
+    Its own route rather than a field on the detail: a transcript is the largest thing on an
+    item and nothing that *lists* items needs it, so putting it on the detail would make the
+    lifecycle drawer pay for it on every open.
+
+    **Already redacted when it was stored** — on the enrichment service, before it crossed
+    the network (``motet_enrich.redact``). Nothing here redacts anything, and nothing here
+    should start to: a second redaction pass at read time would be a second definition of
+    what is safe, and the one that matters is the one that decided what got written down.
+    """
+    life = repo.source_item_lifecycle(conn, user_id, source_item_id)
+    if life is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source item.")
+    run = enrichment_repo.latest_enrich_run(conn, source_item_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This item has no enrichment run.")
+    return EnrichTranscriptResponse(
+        run=_enrich_run(run),
+        entries=[
+            EnrichTranscriptEntryResponse.model_validate(entry)
+            for entry in run.transcript
+            if isinstance(entry, dict)
+        ],
+    )
+
+
+def _enrich_run(run: enrichment_repo.StoredEnrichRun) -> EnrichRunResponse:
+    return EnrichRunResponse(
+        id=run.id,
+        status=run.status,
+        tool_calls=run.tool_calls,
+        cost_usd=run.cost_usd,
+        article_chars=run.article_chars,
+        login_performed=run.login_performed,
+        error=run.error,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
+
+
+def _enrich_step(
+    life: repo.SourceItemLifecycle, run: enrichment_repo.StoredEnrichRun | None
+) -> ProcessingStepResponse | None:
+    """Stage 2's first step, when there was one.
+
+    ``None`` for every item enrichment never looked at, which is most of them — a paste, an
+    item whose links reach no site the owner added, anything ingested before this shipped.
+    """
+    state = life.enrichment
+    if state.status is None:
+        return None
+    return ProcessingStepResponse(
+        step="enrich",
+        status=state.status,
+        # The job is the newest of the item's `integrate` and `enrich` rows, so it is only
+        # this step's job while the run is still the thing happening.
+        job=None,
+        finished_at=state.enriched_at or (run.finished_at if run is not None else None),
+        error=state.error,
+        outcome=None,
+        decision=None,
+        enrich=EnrichStepResponse(
+            status=state.status,
+            domain=state.domain,
+            article_url=state.article_url,
+            error=state.error,
+            enriched_at=state.enriched_at,
+            original_chars=state.original_chars,
+            run=_enrich_run(run) if run is not None else None,
+        ),
+        # Unlike dedup, this step's per-item spend *is* kept: `enrich_runs.cost_usd` is
+        # what the rolling daily cap is summed from, so it had to be a row rather than a
+        # metric.
+        cost_recorded=True,
+    )
+
+
+def _source_item_detail(
+    life: repo.SourceItemLifecycle, run: enrichment_repo.StoredEnrichRun | None = None
+) -> SourceItemDetailResponse:
     job = life.job
     step_status: str | None
     if life.state is SourceItemState.DISMISSED:
@@ -1183,6 +1289,12 @@ def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailRespo
         status_ = step_status = "done"
     elif life.state is SourceItemState.FAILED:
         status_ = step_status = "failed"
+    elif life.enrichment.status in ("queued", "running"):
+        # An agent is fetching the article. Deliberately its own word rather than
+        # "running": the item is not in dedup, and the panel's copy for the two is
+        # different — one is a model call of a few seconds, the other is a browser that may
+        # take minutes and costs real money.
+        status_, step_status = "enriching", None
     elif job is None:
         status_, step_status = "held", None
     elif job.state == "running":
@@ -1197,6 +1309,7 @@ def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailRespo
     if life.news_item is not None:
         outcome = "new" if life.news_item.position == 0 else "merged"
     decision = life.decision
+    enrich_step = _enrich_step(life, run)
     processed = (
         [
             ProcessingStepResponse(
@@ -1242,6 +1355,11 @@ def _source_item_detail(life: repo.SourceItemLifecycle) -> SourceItemDetailRespo
         if step_status is not None
         else []
     )
+    # Enrichment first, because it happened first: stage 2 is a list of steps in the order
+    # the item went through them, which is what the schema's "so that enrichment steps can
+    # join dedup without a new shape" was written for.
+    if enrich_step is not None:
+        processed.insert(0, enrich_step)
     return SourceItemDetailResponse(
         id=life.id,
         title=life.title,
