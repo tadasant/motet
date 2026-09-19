@@ -275,9 +275,9 @@ final class AppModel: ObservableObject {
         await liveSessionForCurrentPlayer().start(episodeId: episodeId, durationMs: playback.durationMs)
     }
 
-    func stopLive() async {
+    func stopLive(pauseNarration: Bool = true) async {
         liveEpisodeId = nil
-        await liveSession?.stop()
+        await liveSession?.stop(pauseNarration: pauseNarration)
     }
 
     func interruptLive() async { await liveSession?.interrupt() }
@@ -292,12 +292,19 @@ final class AppModel: ObservableObject {
             return
         }
         if let liveEpisodeId, snapshot.episodeId != liveEpisodeId {
-            await stopLive()
+            // Pausing here would pause the episode that was just loaded.
+            await stopLive(pauseNarration: false)
             return
         }
         if snapshot.isPlaying != lastPlaying {
             lastPlaying = snapshot.isPlaying
-            await liveSession.narrationChanged(isPlaying: snapshot.isPlaying, positionMs: snapshot.positionMs)
+            // The briefing running out is not the listener pausing it — the SPA skips its
+            // `pause` event when the element has ended, for the same reason.
+            let ended = !snapshot.isPlaying && snapshot.durationMs > 0
+                && snapshot.positionMs >= snapshot.durationMs - 1_000
+            if !ended {
+                await liveSession.narrationChanged(isPlaying: snapshot.isPlaying, positionMs: snapshot.positionMs)
+            }
         }
         await liveSession.narrationPosition(snapshot.positionMs)
     }

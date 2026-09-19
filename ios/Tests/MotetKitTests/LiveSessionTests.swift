@@ -7,6 +7,17 @@ actor FakeVoiceAPI: VoiceAPI {
     var status = VoiceStatusResponse(configured: true)
     var failure: MotetError?
     private(set) var minted: [Int] = []
+    /// Hold every mint until the gate opens, to stop a session mid-mint.
+    private var gated = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+
+    func setGate(_ closed: Bool) {
+        gated = closed
+        if !closed {
+            held.forEach { $0.resume() }
+            held = []
+        }
+    }
 
     func setStatus(_ status: VoiceStatusResponse) { self.status = status }
     func setFailure(_ failure: MotetError?) { self.failure = failure }
@@ -15,6 +26,7 @@ actor FakeVoiceAPI: VoiceAPI {
 
     func startVoiceSession(episodeId: String, spokenThroughMs: Int) async throws -> VoiceSessionResponse {
         minted.append(spokenThroughMs)
+        if gated { await withCheckedContinuation { held.append($0) } }
         if let failure { throw failure }
         return VoiceSessionResponse(
             arm: "openai_realtime",
@@ -71,14 +83,23 @@ actor FakeLiveAudio: LiveAudio {
     var pending: Double = 0
     var captureError: Error?
     private var frames: (@Sendable (Data) -> Void)?
+    private var failed: (@Sendable (String) -> Void)?
 
     func setCaptureError(_ error: Error?) { captureError = error }
 
-    func startCapture(frames: @escaping @Sendable (Data) -> Void, level: @escaping @Sendable (Double) -> Void) async throws {
+    func startCapture(
+        frames: @escaping @Sendable (Data) -> Void,
+        level: @escaping @Sendable (Double) -> Void,
+        failed: @escaping @Sendable (String) -> Void
+    ) async throws {
         if let captureError { throw captureError }
         capturing = true
         self.frames = frames
+        self.failed = failed
     }
+
+    /// The engine dying under a running session — a route change it could not survive.
+    func die(_ message: String) { failed?(message) }
     func stopCapture() async { capturing = false }
     func enqueue(pcm16: Data, sampleRate: Int) async { enqueued.append(pcm16.count) }
     func playContainer(_ data: Data) async throws -> Bool { containers += 1; return true }
@@ -288,6 +309,72 @@ final class LiveSessionTests: XCTestCase {
         XCTAssertEqual(snapshot.phase, .error)
         XCTAssertEqual(snapshot.error, "Microphone access is off.")
         XCTAssertNil(h.transport.openedURL, "no socket without a mic")
+    }
+
+    func testStoppingWhileTheSessionIsBeingMintedOpensNothing() async throws {
+        let h = makeHarness()
+        await h.api.setGate(true)
+        let starting = Task { await h.session.start(episodeId: "ep-1", durationMs: 300_000) }
+        for _ in 0..<2_000 {
+            if await h.api.minted.count == 1 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await h.session.stop()
+        await h.api.setGate(false)
+        await starting.value
+
+        XCTAssertNil(h.transport.openedURL, "a start abandoned mid-mint opens no socket")
+        let capturing = await h.audio.capturing
+        XCTAssertFalse(capturing)
+        let phase = await h.session.snapshot().phase
+        XCTAssertEqual(phase, .idle)
+    }
+
+    func testAComposedReplyResumesNarrationOnceItHasPlayed() async throws {
+        let h = makeHarness()
+        try await started(h, readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready"}"#)
+        h.transport.receive(#"{"type":"interrupted_at","at_ms":5,"offset_ms":1000}"#)
+        let mp3 = Data([0x49, 0x44, 0x33, 0x04]).base64EncodedString()
+        h.transport.receive(#"{"type":"audio_chunk","at_ms":6,"pcm_base64":"\#(mp3)","sample_rate":24000,"duration_ms":900,"format":"mp3"}"#)
+
+        try await waitUntil { await h.session.snapshot().phase == .narrating && h.transport.frames("narration_resumed").count == 1 }
+        let containers = await h.audio.containers
+        XCTAssertEqual(containers, 1)
+    }
+
+    func testALiveChannelDyingMidSessionFallsBackToTypedQuestions() async throws {
+        let h = makeHarness()
+        try await started(h)
+        h.transport.receive(#"{"type":"error","at_ms":9,"code":"live_unavailable","message":"channel closed"}"#)
+        try await waitUntil { await !h.session.snapshot().isLive }
+
+        let snapshot = await h.session.snapshot()
+        XCTAssertEqual(snapshot.liveUnavailable, "live_unavailable")
+        XCTAssertTrue(snapshot.isRunning)
+    }
+
+    func testEndingBecauseAnotherEpisodeLoadedDoesNotPauseIt() async throws {
+        let h = makeHarness()
+        try await started(h)
+        let before = await h.narration.pauses
+
+        await h.session.stop(pauseNarration: false)
+
+        let after = await h.narration.pauses
+        XCTAssertEqual(after, before)
+        XCTAssertTrue(h.transport.closed)
+    }
+
+    func testAMicThatDiesMidSessionEndsItAndSaysSo() async throws {
+        let h = makeHarness()
+        try await started(h)
+
+        await h.audio.die("The microphone stopped: the audio route changed.")
+        try await waitUntil { await h.session.snapshot().phase == .error }
+
+        let snapshot = await h.session.snapshot()
+        XCTAssertEqual(snapshot.error, "The microphone stopped: the audio route changed.")
+        XCTAssertTrue(h.transport.closed)
     }
 
     func testANewEventTypeDoesNotTakeTheSessionDown() throws {

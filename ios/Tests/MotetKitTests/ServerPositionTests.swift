@@ -48,6 +48,16 @@ final class ServerPositionTests: XCTestCase {
         await harness.api.successfulCalls().filter { $0.name == "setPlaybackPosition" }.map(\.detail)
     }
 
+    /// Reports go out on a task of their own, so a test waits for what it expects.
+    private func waitForServer(_ harness: Harness, _ expected: Int, file: StaticString = #filePath, line: UInt = #line) async throws {
+        for _ in 0..<2_000 {
+            if await harness.api.serverPosition("ep-1") == expected { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let got = await harness.api.serverPosition("ep-1")
+        XCTFail("server position is \(String(describing: got)), expected \(expected)", file: file, line: line)
+    }
+
     // MARK: - Reading it
 
     func testAPhoneThatNeverPlayedAnEpisodeResumesWhereTheLaptopGotTo() async throws {
@@ -99,7 +109,9 @@ final class ServerPositionTests: XCTestCase {
         XCTAssertTrue(early.isEmpty, "less than ten seconds heard is not worth a request")
 
         await harness.engine.listen(toMs: 10_000)
+        try await waitForServer(harness, 10_000)
         await harness.engine.listen(toMs: 21_000)
+        try await waitForServer(harness, 20_000)
         let sent = await reports(harness)
         XCTAssertEqual(sent, ["ep-1:10000", "ep-1:20000"])
     }
@@ -111,10 +123,9 @@ final class ServerPositionTests: XCTestCase {
 
         await harness.controller.perform(.pause)
 
+        try await waitForServer(harness, 4_000)
         let sent = await reports(harness)
         XCTAssertEqual(sent, ["ep-1:4000"])
-        let server = await harness.api.serverPosition("ep-1")
-        XCTAssertEqual(server, 4_000)
     }
 
     func testASkippedStoryIsNeverClaimedByAReport() async throws {
@@ -128,8 +139,10 @@ final class ServerPositionTests: XCTestCase {
 
         await harness.controller.perform(.pause)
 
+        try await waitForServer(harness, 30_000)
+        try await Task.sleep(for: .milliseconds(20))
         let server = await harness.api.serverPosition("ep-1")
-        XCTAssertEqual(server, 30_000)
+        XCTAssertEqual(server, 30_000, "nothing past the skip is ever claimed")
     }
 
     func testResumingAtTheServersPositionReportsOnFromIt() async throws {
@@ -138,8 +151,7 @@ final class ServerPositionTests: XCTestCase {
 
         await harness.engine.listen(toMs: 110_000)
 
-        let server = await harness.api.serverPosition("ep-1")
-        XCTAssertEqual(server, 105_000)
+        try await waitForServer(harness, 105_000)
     }
 
     func testNoSignalIsNotARequestPerTick() async throws {
@@ -147,15 +159,21 @@ final class ServerPositionTests: XCTestCase {
         try await load(harness, episode(serverAt: 0))
         await harness.api.setFailure(.offline)
 
+        await harness.engine.listen(toMs: 10_000)
+        for _ in 0..<2_000 {
+            if await !harness.api.recordedCalls().isEmpty { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try await Task.sleep(for: .milliseconds(20))
         await harness.engine.listen(toMs: 15_000)
+        try await Task.sleep(for: .milliseconds(20))
         let attempts = await harness.api.recordedCalls().filter { $0.name == "setPlaybackPosition" }.count
         XCTAssertEqual(attempts, 1, "one attempt, then quiet until the retry window passes")
 
         await harness.api.setFailure(nil)
         harness.clock.advance(by: 11)
         await harness.engine.listen(toMs: 16_000)
-        let server = await harness.api.serverPosition("ep-1")
-        XCTAssertEqual(server, 16_000, "the next report carries the frontier the lost one had")
+        try await waitForServer(harness, 16_000)
     }
 
     func testFinishingReportsTheEnd() async throws {
@@ -165,8 +183,76 @@ final class ServerPositionTests: XCTestCase {
 
         await harness.engine.finish()
 
-        let server = await harness.api.serverPosition("ep-1")
-        XCTAssertEqual(server, 300_000)
+        try await waitForServer(harness, 300_000)
+    }
+
+    func testAReportStillOutWhenAnotherEpisodeLoadsNeverMovesTheNewOne() async throws {
+        // The old episode's answer arrives after the new one is loaded. Taken as the new
+        // episode's frontier, it would point the frontier at a place in a different episode.
+        let gate = ReportGate()
+        let clock = TestClock()
+        let store = InMemoryKeyValueStore()
+        let api = FakeAPI()
+        let engine = ScriptedEngine()
+        let controller = PlaybackController(
+            engine: engine,
+            positions: ListeningPositionStore(store: store, clock: clock),
+            readState: ReadStateCoordinator(api: api, outbox: Outbox(store: store, clock: clock)),
+            clock: clock,
+            reportPosition: { id, ms in try await gate.report(id, ms) }
+        )
+        await controller.activate()
+        let source = PlaybackController.Source(url: URL(string: "file:///tmp/ep.mp3")!, isLocal: true)
+        try await controller.load(episode: episode(serverAt: 0), source: source, autoplay: true)
+        await engine.listen(toMs: 200_000)
+        for _ in 0..<2_000 {
+            if await gate.pending > 0 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        var second = Fixture.episode(id: "ep-2")
+        second.listenedThroughMs = 0
+        try await controller.load(episode: second, source: source, autoplay: true)
+        // The old episode's report answers now, after the new one is loaded.
+        await gate.release(answer: 200_000)
+        await engine.listen(toMs: 12_000)
+        for _ in 0..<2_000 {
+            if await gate.sent.contains(where: { $0.hasPrefix("ep-2:") }) { break }
+            try await Task.sleep(for: .milliseconds(1))
+            await gate.release(answer: nil)
+        }
+
+        let sent = await gate.sent
+        XCTAssertTrue(sent.contains { $0.hasPrefix("ep-2:") }, "the new episode reports from its own frontier: \(sent)")
+        XCTAssertFalse(sent.contains("ep-2:200000"))
+    }
+
+    func testASubSecondHoleIsBridgedAndASkipIsNot() {
+        let coverage = ListenedCoverage(ranges: [0..<30_000, 30_400..<60_000, 90_000..<120_000])
+        XCTAssertEqual(coverage.frontier(from: 0), 60_000)
+        XCTAssertEqual(coverage.frontier(from: 60_000), 60_000)
+        XCTAssertEqual(coverage.frontier(from: 95_000), 120_000)
+    }
+}
+
+/// A reporter whose answers the test releases by hand, to hold a report open across a load.
+actor ReportGate {
+    private(set) var sent: [String] = []
+    private var waiting: [CheckedContinuation<Int, Error>] = []
+    var pending: Int { waiting.count }
+
+    func report(_ id: String, _ ms: Int) async throws -> Int {
+        sent.append("\(id):\(ms)")
+        return try await withCheckedThrowingContinuation { waiting.append($0) }
+    }
+
+    /// Answer every report still out: with `answer`, or as a failure when nil.
+    func release(answer: Int?) {
+        let out = waiting
+        waiting = []
+        for continuation in out {
+            if let answer { continuation.resume(returning: answer) } else { continuation.resume(throwing: MotetError.offline) }
+        }
     }
 }
 

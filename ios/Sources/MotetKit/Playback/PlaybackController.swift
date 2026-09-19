@@ -52,6 +52,12 @@ public actor PlaybackController {
     private var serverFrontierMs = 0
     private var lastFailedReportAt: Date?
     private var isReporting = false
+    /// A forced report that arrived while another was out, sent when that one answers.
+    private var reportOwed = false
+    /// Bumped whenever the loaded episode changes, so an answer about the old one never
+    /// moves the new one's frontier — which would point `ListenedCoverage.frontier` at a
+    /// place that has nothing to do with this episode.
+    private var reportGeneration = 0
     private let reportPosition: PositionReporter?
     private var observers: [UUID: AsyncStream<PlaybackSnapshot>.Continuation] = [:]
 
@@ -167,7 +173,12 @@ public actor PlaybackController {
     public func load(episode newEpisode: EpisodeResponse, source: Source, autoplay: Bool) async throws {
         if episode?.id != newEpisode.id {
             await persistPosition(force: true)
-            await reportFrontier(force: true)
+            // The outgoing episode's last word, sent whether or not a report is out: the
+            // generation below drops whatever the in-flight one answers.
+            finalReport()
+            reportGeneration += 1
+            isReporting = false
+            reportOwed = false
             markedHeard.removeAll()
             didMarkListened = false
             serverFrontierMs = 0
@@ -225,7 +236,10 @@ public actor PlaybackController {
     /// Take the episode out of the player, persisting where we got to.
     public func unload() async {
         await persistPosition(force: true)
-        await reportFrontier(force: true)
+        finalReport()
+        reportGeneration += 1
+        isReporting = false
+        reportOwed = false
         await engine.pause()
         episode = nil
         timeline = SegmentTimeline(entries: [], episodeDurationMs: 0)
@@ -248,7 +262,7 @@ public actor PlaybackController {
             await engine.pause()
             isPlaying = false
             await persistPosition(force: true)
-            await reportFrontier(force: true)
+            reportFrontier(force: true)
         case .togglePlayPause:
             await perform(isPlaying ? .pause : .play)
             return
@@ -307,7 +321,7 @@ public actor PlaybackController {
         case .paused:
             isPlaying = false
             await persistPosition(force: true)
-            await reportFrontier(force: true)
+            reportFrontier(force: true)
         case .ended:
             await finish()
         case .interrupted(let resumable):
@@ -349,7 +363,7 @@ public actor PlaybackController {
 
         await markNewlyHeard()
         await persistPosition(force: false)
-        await reportFrontier(force: false)
+        reportFrontier(force: false)
     }
 
     /// Every story whose segments were actually played is read (invariant 5).
@@ -391,7 +405,7 @@ public actor PlaybackController {
         // server-side write, so it is only honest when every item really was heard. It
         // still earns its place: it closes any item whose boundary no position tick landed
         // inside, which the per-item writes above cannot.
-        await reportFrontier(force: true)
+        reportFrontier(force: true)
 
         let heardEverything = episode.newsItemIds.allSatisfy { markedHeard.contains($0) }
         if heardEverything {
@@ -407,9 +421,11 @@ public actor PlaybackController {
     ///
     /// Best-effort and not queued: the position is monotonic on the server and every later
     /// report carries the same frontier or a further one, so a report lost to no signal is
-    /// made good by the next one rather than by an outbox.
-    private func reportFrontier(force: Bool) async {
-        guard let episode, let reportPosition, !isReporting else { return }
+    /// made good by the next one rather than by an outbox. And never awaited: a pause, a
+    /// barge-in and a load must not wait on the network, so the request goes on a task of
+    /// its own and its answer comes back through `reportAnswered`.
+    private func reportFrontier(force: Bool) {
+        guard let episode, let reportPosition else { return }
         let frontier = min(coverage.frontier(from: serverFrontierMs), duration)
         guard frontier > serverFrontierMs else { return }
         let now = clock.now
@@ -419,16 +435,43 @@ public actor PlaybackController {
                 return
             }
         }
-        isReporting = true
-        let episodeId = episode.id
-        let accepted = try? await reportPosition(episodeId, frontier)
-        isReporting = false
-        lastFailedReportAt = accepted == nil ? now : nil
-        // The episode may have changed while the request was out; its answer is about the
-        // one it was sent for.
-        if let accepted, self.episode?.id == episodeId {
-            serverFrontierMs = max(serverFrontierMs, accepted)
+        guard !isReporting else {
+            if force { reportOwed = true }
+            return
         }
+        isReporting = true
+        let generation = reportGeneration
+        let episodeId = episode.id
+        Task { [weak self] in
+            let accepted = try? await reportPosition(episodeId, frontier)
+            await self?.reportAnswered(accepted, generation: generation, sentAt: now)
+        }
+    }
+
+    private func reportAnswered(_ accepted: Int?, generation: Int, sentAt: Date) {
+        // About an episode that is no longer loaded: nothing here to move.
+        guard generation == reportGeneration else { return }
+        isReporting = false
+        if let accepted {
+            serverFrontierMs = max(serverFrontierMs, accepted)
+            lastFailedReportAt = nil
+        } else {
+            lastFailedReportAt = sentAt
+        }
+        if reportOwed {
+            reportOwed = false
+            reportFrontier(force: true)
+        }
+    }
+
+    /// The loaded episode's frontier, sent unconditionally and without waiting for an answer
+    /// — for the moment it stops being the loaded episode.
+    private func finalReport() {
+        guard let episode, let reportPosition else { return }
+        let frontier = min(coverage.frontier(from: serverFrontierMs), duration)
+        guard frontier > serverFrontierMs else { return }
+        let episodeId = episode.id
+        Task { _ = try? await reportPosition(episodeId, frontier) }
     }
 
     private func persistPosition(force: Bool) async {

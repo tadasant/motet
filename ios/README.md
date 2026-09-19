@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     123 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     130 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/Motet.xcodeproj/     the app target
   bin/                     toolchain install + the two CI entry points
@@ -105,7 +105,7 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 123 tests
+strict concurrency checking, and 130 tests
 pass — segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
 in flight), the download policy, position resume across a simulated relaunch, interruption
@@ -194,7 +194,10 @@ links. It says nothing about any of this.
     `AVPlayer`; that voice processing cancels the replies and — the open one — whether it
     also cancels the narration coming out of the speaker, or only headphones make an open
     mic workable (the web has the same question and recommends headphones); how AirPods
-    route (HFP for the mic, or A2DP output with the phone's mic); and that the listening
+    route — the session allows Bluetooth input, which most likely moves AirPods to the
+    hands-free profile and makes the briefing itself call-quality while Live runs, the
+    trade for a mic that is at the listener's ear rather than in a pocket; that a route
+    change mid-session restarts the engine rather than ending it; and that the listening
     session comes back after Stop Live, lock screen and all. The mic meter's dBFS is the
     number the service's detector compares against its noise floor, so a session that
     never barges in is diagnosable from the screen.

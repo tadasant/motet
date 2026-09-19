@@ -49,9 +49,13 @@ public enum LiveTransportEvent: Equatable, Sendable {
 public protocol LiveAudio: Sendable {
     /// Open the mic. `frames` receives 16 kHz mono int16 as it is captured, on whatever
     /// thread the audio arrives on; `level` receives dBFS now and then, for the meter.
+    ///
+    /// `failed` is for the mic dying *after* it opened — a route change the engine could not
+    /// come back from, say — so the session can end and say so rather than go quietly deaf.
     func startCapture(
         frames: @escaping @Sendable (Data) -> Void,
-        level: @escaping @Sendable (Double) -> Void
+        level: @escaping @Sendable (Double) -> Void,
+        failed: @escaping @Sendable (String) -> Void
     ) async throws
     func stopCapture() async
     /// One chunk of a streamed reply, queued behind the last one.
@@ -250,7 +254,8 @@ public actor LiveSession {
             let gate = LiveAudioGate(transport: transport)
             try await audio.startCapture(
                 frames: { data in gate.forward(data) },
-                level: { [weak self] db in Task { await self?.meter(db) } }
+                level: { [weak self] db in Task { await self?.meter(db) } },
+                failed: { [weak self] message in Task { await self?.audioFailed(message, generation: mine) } }
             )
             guard generation == mine else {
                 await audio.stopCapture()
@@ -277,11 +282,24 @@ public actor LiveSession {
     }
 
     /// Stop Live: tell the service, pause the briefing, and let go of everything.
-    public func stop() async {
+    ///
+    /// `pauseNarration: false` is for the session ending because another episode was loaded:
+    /// pausing then would pause the *new* episode, which is not what anyone asked for.
+    public func stop(pauseNarration: Bool = true) async {
         send(.close)
         pausedByUs = true
-        _ = await narration.suspendNarration()
         await teardown()
+        if pauseNarration {
+            _ = await narration.suspendNarration()
+        }
+    }
+
+    private func audioFailed(_ message: String, generation mine: Int) async {
+        guard generation == mine, state.isRunning else { return }
+        send(.close)
+        await teardown()
+        state.error = message
+        setPhase(.error)
     }
 
     private func teardown() async {
@@ -317,15 +335,22 @@ public actor LiveSession {
     }
 
     /// "Never mind, resume" — and what a finished reply does.
+    ///
+    /// Every await here can let another event in — a barge-in, a Stop — so the phase and the
+    /// session are checked again after each one rather than assumed.
     public func resumeNarration() async {
         guard transport != nil, state.phase == .listening || state.phase == .replying else { return }
+        let mine = generation
         clearResumeTimer()
         setPhase(.resuming)
         // Resume from the interruption offset, deliberately not rewound: whether a couple of
         // seconds of rewind helps is an open question for the owner (motet#93).
-        send(.narrationResumed(spokenThroughMs: await narration.narrationContext().positionMs))
+        let position = await narration.narrationContext().positionMs
+        guard generation == mine, state.phase == .resuming else { return }
+        send(.narrationResumed(spokenThroughMs: position))
         pausedByUs = false
         await narration.resumeNarration()
+        guard generation == mine else { return }
         if state.phase == .resuming { setPhase(.narrating) }
     }
 
@@ -379,7 +404,7 @@ public actor LiveSession {
         switch event {
         case .text(let text):
             do {
-                await handle(try LiveEvent.decode(text))
+                await handle(try LiveEvent.decode(text), generation: mine)
             } catch {
                 push(.event, "Unreadable event from the voice service.")
             }
@@ -394,7 +419,7 @@ public actor LiveSession {
         }
     }
 
-    private func handle(_ event: LiveEvent) async {
+    private func handle(_ event: LiveEvent, generation mine: Int) async {
         switch event {
         case .sessionState(let phase, let detail, let reason, let live):
             switch phase {
@@ -406,17 +431,19 @@ public actor LiveSession {
                     state.isLive = opened
                     if !opened, let reason { state.liveUnavailable = reason }
                     if let detail { push(.event, "Ready · \(detail)") }
-                    await beginNarration()
+                    await beginNarration(generation: mine)
                 } else {
                     // Every later `ready` is a reply that has finished streaming: let the
                     // queued audio drain, then narration picks up where it stopped.
                     let remaining = await audio.pendingReplySeconds()
+                    guard generation == mine else { return }
                     scheduleResume(after: .milliseconds(Int(remaining * 1_000)) + Self.resumeSlack)
                 }
             case "listening":
                 // The service engaged the live channel, or the listener talked over a reply
                 // and the service cut it off — drop whatever is queued and listen.
                 await audio.flushReplies()
+                guard generation == mine else { return }
                 if let live { state.isLive = live }
                 setPhase(.listening)
                 if let detail, detail != "live — speak your question" { push(.event, detail) }
@@ -429,7 +456,9 @@ public actor LiveSession {
             }
         case .interruptedAt(let offsetMs, let segmentTitle, let claimText, _):
             pausedByUs = true
+            clearResumeTimer()
             _ = await narration.suspendNarration()
+            guard generation == mine else { return }
             var line = String(format: "Interrupted at %.1fs", Double(offsetMs) / 1_000)
             if let segmentTitle {
                 line += " during “\(segmentTitle)”"
@@ -469,6 +498,7 @@ public actor LiveSession {
                 // the question box, and the box still takes the next question.
                 state.turnError = "\(code): \(message)"
                 await audio.flushReplies()
+                guard generation == mine else { return }
                 setPhase(.listening)
                 return
             }
@@ -480,6 +510,7 @@ public actor LiveSession {
             if state.phase == .replying {
                 // No `ready` is coming for a reply that errored.
                 await audio.flushReplies()
+                guard generation == mine else { return }
                 setPhase(.listening)
             }
             push(.event, "Error \(code): \(message)")
@@ -499,13 +530,20 @@ public actor LiveSession {
         await resumeNarration()
     }
 
-    private func beginNarration() async {
+    private func beginNarration(generation mine: Int) async {
         send(.narrationDelivered(durationMs: durationMs))
         let position = await narration.narrationContext().positionMs
+        guard generation == mine else { return }
         lastPositionSent = position
         send(.playbackPosition(spokenThroughMs: position))
         pausedByUs = false
         await narration.resumeNarration()
+        guard generation == mine else {
+            // Stopped while narration was starting: a session that is gone must not leave
+            // the briefing playing on its account.
+            _ = await narration.suspendNarration()
+            return
+        }
         setPhase(.narrating)
     }
 

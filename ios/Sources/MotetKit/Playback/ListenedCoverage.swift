@@ -75,10 +75,18 @@ public struct ListenedCoverage: Codable, Hashable, Sendable {
     /// is supports that claim. Listening on past a skip extends a *different* run and moves
     /// nothing, which is the SPA's rule ("only continuous listening from the frontier
     /// already heard moves the position", AGENTS.md).
-    public func frontier(from start: Int) -> Int {
-        for range in ranges where range.lowerBound <= start && start <= range.upperBound {
-            return max(start, range.upperBound)
+    ///
+    /// A gap of up to `bridgingMs` is stepped over: a resume from a stall, an interruption or
+    /// the player's own jitter on play leaves a sub-second hole that is not a skip, and
+    /// without the bridge one such hole would pin the server's position there for the rest
+    /// of the episode. A second is far below anything a skip moves, so a skipped story still
+    /// stops it.
+    public func frontier(from start: Int, bridgingMs: Int = 1_000) -> Int {
+        var reach = start
+        for range in ranges where range.upperBound >= reach {
+            guard range.lowerBound <= reach + bridgingMs else { break }
+            reach = max(reach, range.upperBound)
         }
-        return start
+        return reach
     }
 }

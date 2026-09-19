@@ -70,7 +70,12 @@ public final class URLSessionLiveTransport: LiveTransport, @unchecked Sendable {
             defer { self.task = nil }
             return self.task
         }
-        task?.cancel(with: .normalClosure, reason: nil)
+        // A ping's answer comes back after everything sent before it — the `close` frame
+        // included — so cancelling there does not cut that frame off. The service also ends
+        // the session on the socket closing, so a ping that never answers loses nothing.
+        task?.sendPing { _ in
+            task?.cancel(with: .normalClosure, reason: nil)
+        }
     }
 }
 #endif
