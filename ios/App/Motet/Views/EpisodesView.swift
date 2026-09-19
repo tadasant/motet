@@ -97,6 +97,10 @@ struct EpisodeRow: View {
                             .labelStyle(.iconOnly)
                             .accessibilityLabel("Downloaded")
                     }
+                    if episode.keepsStoriesInBacklog {
+                        // Said on the row, because it changes what listening does.
+                        Text("· Stays in backlog")
+                    }
                 }
                 .font(Theme.body(13, weight: 500, relativeTo: .caption))
                 .monospacedDigit()

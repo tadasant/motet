@@ -197,15 +197,19 @@ struct BacklogView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button("Select") {
+                // An icon, so the toolbar keeps room for the "Show read" pill beside it.
+                Button {
                     queuedMessage = nil
                     isSelecting = true
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
                 }
                 .disabled(visibleItems.isEmpty)
             }
             ToolbarItem(placement: .topBarLeading) {
                 Toggle("Show read", isOn: $showingRead)
                     .toggleStyle(PillToggleStyle())
+                    .fixedSize()
             }
         }
     }

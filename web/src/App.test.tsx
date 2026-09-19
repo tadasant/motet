@@ -56,6 +56,7 @@ const EPISODE: Episode = {
   created_at: '2026-08-24T00:00:00Z',
   published_at: '2026-08-24T00:01:00Z',
   listened_through_ms: 0,
+  keep_in_backlog: false,
   segments: [
     {
       news_item_id: 'ni_1',

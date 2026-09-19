@@ -499,6 +499,27 @@ must not have two definitions. Rankings are deterministic and model-free — age
 independent sources covered a story. Ranking with a model is Phase 3 and would put an LLM
 call into a stage that currently cannot fail.
 
+**A picked episode is the same selector with one more knob** (Tadas, 2026-09-19: "select
+a few items … and generate an episode based on JUST those selections", from the iOS
+backlog). `POST /v1/episodes` takes an optional `news_item_ids`, and the route stores it as a
+smart episode whose rule is `SmartRule.picked` — only those ids, read or not, no window,
+oldest first — so assembly, the duration cap and the script stage are exactly an ordinary
+episode's. The ids are checked at creation: one that is not the caller's is a 422 that says
+how many, never which, and nothing is created.
+
+**`keep_in_backlog` is invariant 5's one deliberate exception, and it is per episode.** The
+owner asked to generate "without necessarily dismissing the entries", and nothing
+dismisses at generation — listening does. So `episodes.keep_in_backlog` (migration 0023)
+means *listening to this episode* marks nothing read: `record_listen_progress` still moves
+the position and returns zero marked, `POST …/listened` marks nothing, and the iOS player,
+which writes read state per story itself, skips both writes when the episode says so. The
+same story heard in any other episode is still read. **Off by default**, on the request and
+in the app's sheet, because off is what every episode has always done; the whole-backlog
+request is byte-for-byte unchanged. On the response it is optional-with-default rather than
+required, so a TestFlight build decoding an older API — or its own offline cache — still
+decodes. The invariant-12 reading: a knob on an existing rule, a column on an existing table
+used the way it already is, and two fields on an existing route — no new mechanism.
+
 **A rule is stored as a snapshot on the episode**, not referenced from a rule table. An
 episode is a historical artifact, and "why does this contain these stories" has to stay
 answerable after the rule is edited.

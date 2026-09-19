@@ -19,6 +19,7 @@ const UNLISTENED: Episode = {
   created_at: '2026-08-26T07:00:00Z',
   published_at: '2026-08-26T07:05:00Z',
   listened_through_ms: 0,
+  keep_in_backlog: false,
   segments: [
     {
       news_item_id: 'ni_1',
