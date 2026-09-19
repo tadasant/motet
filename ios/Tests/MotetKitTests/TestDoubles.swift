@@ -66,6 +66,19 @@ actor FakeAPI: MotetAPI {
         return MarkListenedResponse(episodeId: id, newsItemsMarkedRead: 0)
     }
 
+    /// The server's monotonic position, per episode, as `PUT …/position` leaves it.
+    var serverPositions: [String: Int] = [:]
+    func serverPosition(_ episodeId: String) -> Int? { serverPositions[episodeId] }
+
+    func setPlaybackPosition(
+        episodeId: String, listenedThroughMs: Int
+    ) async throws -> ListenProgressResponse {
+        try check("setPlaybackPosition", "\(episodeId):\(listenedThroughMs)")
+        let kept = max(serverPositions[episodeId] ?? 0, listenedThroughMs)
+        serverPositions[episodeId] = kept
+        return ListenProgressResponse(episodeId: episodeId, listenedThroughMs: kept, newsItemsMarkedRead: 0)
+    }
+
     func listNewsItems() async throws -> [NewsItemResponse] {
         try check("listNewsItems")
         return newsItems

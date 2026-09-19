@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     85 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     123 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/Motet.xcodeproj/     the app target
   bin/                     toolchain install + the two CI entry points
@@ -53,16 +53,28 @@ toolchain and no JVM.
 | **The client never speaks a vendor protocol** (invariant 1) | There is no OpenAI, Cartesia, or Anthropic call anywhere in this app and no credential for one. Audio comes from `/v1/episodes/{id}/audio`, which either serves bytes or redirects to a signed URL; the client follows the redirect and cannot tell which. |
 | **`spoken_through_ms` is ours** (invariant 4) | `PlaybackController` owns the position. `AVPlayer`'s clock is an *input* — it reports 0 while re-buffering after an interruption and knows nothing after the process is killed. The position is written durably by us and survives both. |
 | **Read state is per News Item, synced** (invariant 5) | `SegmentTimeline` turns a position into the set of news items fully spoken; each one is written with the same `POST /v1/news-items/{id}/read` the SPA uses, queued in a durable outbox when there is no signal. The app is a participant, not a local copy. |
-| **Deterministic commands** | `PlaybackCommand` is a closed set of pure state transitions. A lockscreen button, a steering-wheel remote, a CarPlay tap, and an on-screen tap all funnel through it, with no model and no network in the path. The voice seam (`NarrationControl`) sits *beside* it, so a spoken command can never do something a button could not. |
+| **Deterministic commands** | `PlaybackCommand` is a closed set of pure state transitions. A lockscreen button, a steering-wheel remote, a CarPlay tap, and an on-screen tap all funnel through it, with no model and no network in the path. Play Live's seam (`NarrationControl`) sits *beside* it, so a spoken command can never do something a button could not. |
 
-### The voice seam is a seam, not a stub
+### Play Live is built on the phone, as on the web
 
-`NarrationControl` says what the barge-in path (session #8530's `voice/`) will need from the
-player: suspend, resume, and "what is being spoken". `PlaybackController` conforms to it.
-Nothing voice-related is implemented here — that is deliberate, and it is the other
-session's work.
+`LiveSession` (MotetKit) is the SPA's `Live.tsx` ported rule for rule (motet#93): the API
+mints the session and hands back a socket and the frame to open it with (invariant 2 — the
+app never holds the voice service's start token); the app tells the service whether
+narration is playing and where (`narration_delivered`, `narration_paused`,
+`narration_resumed`, `playback_position`); listener audio goes as 16 kHz mono int16 binary
+frames for the service's own detector to decide a barge-in on; a barge-in pauses the
+player, a finished reply resumes it from the interruption offset, and a pause the listener
+makes is never reported as one. `PlaybackController` is the narration it pauses and plays,
+so the position is still ours (invariant 4), and nothing names a vendor (invariant 1).
 
----
+The device halves are `MotetPlayback`'s: `URLSessionLiveTransport` (the socket — it sends no
+`Origin`, which the voice service admits because that check is for browsers) and
+`AVLiveAudio` (the mic through `AVAudioEngine` with voice processing on, and the replies —
+streamed `pcm16` scheduled back to back, or one container for the composed arm). For the
+length of a Live session the audio session is `.playAndRecord`; stopping hands the
+listening session back. The mic pill is the SPA's: a press starts Play Live, a press while
+narrating interrupts, and a deployment with no voice service shows it disabled with the
+API's reason beside it.
 
 ## What is verified, and how
 
@@ -93,7 +105,7 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 85 tests
+strict concurrency checking, and 123 tests
 pass — segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
 in flight), the download policy, position resume across a simulated relaunch, interruption
@@ -176,40 +188,52 @@ links. It says nothing about any of this.
     by pulling the sheet down (the knob and both times must return to the playback
     position), VoiceOver's adjust gesture (it skips), and a text-size change in Control
     Centre while the app is open (the tree rebuilds at the new size).
+13. **Play Live on a phone.** Everything `LiveSession` decides is tested; what `AVLiveAudio`
+    does is not. The questions only a device answers: that the permission prompt appears
+    and a refusal says so; that switching to `.playAndRecord` mid-briefing does not stall
+    `AVPlayer`; that voice processing cancels the replies and — the open one — whether it
+    also cancels the narration coming out of the speaker, or only headphones make an open
+    mic workable (the web has the same question and recommends headphones); how AirPods
+    route (HFP for the mic, or A2DP output with the phone's mic); and that the listening
+    session comes back after Stop Live, lock screen and all. The mic meter's dBFS is the
+    number the service's detector compares against its noise floor, so a session that
+    never barges in is diagnosable from the screen.
 
-## Playback position is still device-local, and that is now a client gap
+## Playback position is cross-device
 
-Read state syncs: position becomes *completed news items* via the segment map, and each one
-is written with `POST /v1/news-items/{id}/read` — the same fact the web backlog writes.
-That part is done, and it is what invariant 5 asks for.
+Read state has always synced: position becomes *completed news items* via the segment map,
+each written with `POST /v1/news-items/{id}/read` — the same fact the web backlog writes
+(invariant 5). The **position** now syncs too ([issue #11](https://github.com/tadasant/motet/issues/11)).
 
-`spoken_through_ms` is a different fact, and it is still kept **on the device only**, so a
-second device does not know where you got to. When this app was written the contract had
-nowhere to put it, which is why it was filed as
-[issue #11](https://github.com/tadasant/motet/issues/11). **The backend has since answered
-both halves of it.** The write is `PUT /v1/episodes/{id}/position` (or
-`POST /v1/episodes/{id}/progress`, the same handler under the older name), and the *read* is
-`listened_through_ms` on every `EpisodeResponse` — which is the part that was missing, and
-the part cross-device resume actually needs. The generated client already carries
-`setPlaybackPosition`, `reportListenProgress` and the new field, because the generator picks
-up whatever `openapi.yaml` says.
+* **Reading it.** Every `EpisodeResponse` carries the server's `listened_through_ms`. Loading
+  an episode resumes there when it is past everything *this* phone ever heard of it — the
+  listening happened on another device — and at the phone's own playhead otherwise,
+  including one the listener deliberately scrubbed back to, which stays device-local. An
+  episode never played on the phone shows the server's progress in its row.
+* **Writing it.** `PUT /v1/episodes/{id}/position`, every ten seconds of listening and on
+  pause, finish and unload. What is sent is **not** the playhead: the server marks every
+  story a position has passed, so the value is the end of the listening that is unbroken
+  from where the server already is (`ListenedCoverage.frontier`) — the SPA's rule, "only
+  continuous listening from the frontier moves the position". Listening on past a skipped
+  story moves nothing. Best-effort and not queued: the server's value is monotonic and the
+  next report carries the same frontier, so a report lost to no signal is made good by the
+  next one; after a failure the phone leaves the server alone for ten seconds rather than
+  trying on every tick.
+* **Mark listened** (swipe an episode right) is the SPA's: every story read through the
+  outbox, then the position at the end.
 
-**One thing to get right when wiring it up:** the server's value is **monotonic**, so it is
-this store's `furthestSpokenMs` and not its `spokenThroughMs`. Sending the playhead would
-let a seek backwards, or a stale outbox entry replayed after a walk, rewind the position for
-every other device. Where the listener scrubbed back to is device-local on purpose.
+**Ordering constraint, unchanged:** `listened_through_ms` is a required field, so a build
+cannot read episodes from an API revision older than it — ship the API first and check
+`/internal/health`'s `revision`.
 
-**And one ordering constraint**, which is the same one every required response field carries:
-`listened_through_ms` is not optional, and the generated types decode strictly, so a build
-that expects it cannot read an episode from an API revision that predates it — not a missing
-field, an empty episodes list. The API image pin lags `main` by however long the last bump
-was ago, so ship the API first and check `/internal/health` before shipping a build that
-depends on it.
+## Audio that will not load is said out loud
 
-**Wiring it up is deliberately not in this change.** It is a behaviour change, not a
-rebase, and it wants its own tests: `ListeningPositionStore` gains a remote sink, the outbox
-gains a third entry kind, and resume has to decide what to do when the device and the server
-disagree. Small, and worth doing on its own.
+The controller always knew when audio failed to load and when it was still loading; the
+player showed neither, so an episode whose audio would not load was a play button that did
+nothing. The player now says "This episode's audio could not be loaded", with the detail and
+**Try again**. A failure also forgets the cached feed token: it authenticates the audio route
+and used to be cached until the app was reinstalled, so a token rotated on the web broke
+streaming on the phone for good. The next attempt asks the API for the current one.
 
 ## Configuration
 

@@ -11,6 +11,9 @@ public protocol MotetAPI: Sendable {
     func episode(id: String) async throws -> EpisodeResponse
     func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse
+    /// Move the server's listening position (`PUT /v1/episodes/{id}/position`). Monotonic
+    /// on the server: a smaller value is accepted and changes nothing.
+    func setPlaybackPosition(episodeId: String, listenedThroughMs: Int) async throws -> ListenProgressResponse
 
     func listNewsItems() async throws -> [NewsItemResponse]
     func setNewsItemRead(id: String, read: Bool) async throws -> NewsItemResponse
@@ -61,6 +64,16 @@ public struct MotetHTTPClient: MotetAPI {
     public func markEpisodeListened(id: String) async throws -> MarkListenedResponse {
         try await send(
             MotetEndpoints.markEpisodeListened(episodeId: id), as: MarkListenedResponse.self
+        )
+    }
+
+    public func setPlaybackPosition(
+        episodeId: String, listenedThroughMs: Int
+    ) async throws -> ListenProgressResponse {
+        try await send(
+            MotetEndpoints.setPlaybackPosition(episodeId: episodeId),
+            body: ListenProgressRequest(listenedThroughMs: listenedThroughMs),
+            as: ListenProgressResponse.self
         )
     }
 
@@ -132,13 +145,13 @@ public struct MotetHTTPClient: MotetAPI {
 
     // MARK: - Plumbing
 
-    private func send<Response: Decodable>(
+    func send<Response: Decodable>(
         _ endpoint: HTTPEndpoint, as type: Response.Type
     ) async throws -> Response {
         try await send(endpoint, body: Optional<Never>.none, as: type)
     }
 
-    private func send<Body: Encodable, Response: Decodable>(
+    func send<Body: Encodable, Response: Decodable>(
         _ endpoint: HTTPEndpoint, body: Body?, as _: Response.Type
     ) async throws -> Response {
         let response = try await perform(endpoint, body: body)
@@ -149,7 +162,7 @@ public struct MotetHTTPClient: MotetAPI {
         }
     }
 
-    private func perform<Body: Encodable>(
+    func perform<Body: Encodable>(
         _ endpoint: HTTPEndpoint, body: Body?
     ) async throws -> HTTPResponse {
         guard let base = configuration.baseURL, let url = endpoint.url(relativeTo: base) else {

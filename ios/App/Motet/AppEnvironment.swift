@@ -19,6 +19,15 @@ final class AppEnvironment {
     let audioSession = AudioSessionController()
     let nowPlaying = NowPlayingController()
     let credentials = CredentialStore()
+    /// Play Live's microphone and reply player. One for the process, like the engine: it
+    /// holds the audio session while a Live session runs and hands it back afterwards.
+    private(set) lazy var liveAudio: AVLiveAudio = {
+        let audioSession = self.audioSession
+        return AVLiveAudio(restoreListening: {
+            try? audioSession.configure()
+            try? audioSession.activate()
+        })
+    }()
 
     private(set) var library: MotetLibrary
     private(set) var controller: PlaybackController
@@ -105,7 +114,14 @@ final class AppEnvironment {
                 readState: readState
             ),
             controller: PlaybackController(
-                engine: engine, positions: positions, readState: readState
+                engine: engine, positions: positions, readState: readState,
+                // The server's position, so listening here moves every other device's resume
+                // point and marks stories read there as their segments pass (motet#11).
+                reportPosition: { episodeId, listenedThroughMs in
+                    try await api.setPlaybackPosition(
+                        episodeId: episodeId, listenedThroughMs: listenedThroughMs
+                    ).listenedThroughMs
+                }
             )
         )
     }

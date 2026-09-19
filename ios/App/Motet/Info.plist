@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The three keys that make this a podcast player rather than a foreground app:
+  The keys that make this a podcast player rather than a foreground app:
 
   * `UIBackgroundModes: audio` — without it iOS stops the audio the moment the phone is
     locked or pocketed, which is the entire listening situation this app exists for.
@@ -8,6 +8,8 @@
     until the `com.apple.developer.carplay-audio` entitlement is granted by Apple.
   * `NSAppTransportSecurity` is deliberately absent: the API is reached over HTTPS, and an
     exception here would be a way to point the app at a plaintext host by accident.
+  * `NSMicrophoneUsageDescription` — Play Live opens the mic. Without the key iOS terminates
+    the app the first time it asks, rather than showing the permission prompt.
 
   And the ones App Store Connect reads on upload (`ios/bin/testflight` asserts each of them
   against the archived app, because the upload is the only other place they are checked):
@@ -59,6 +61,8 @@
 	<string>$(MOTET_DEFAULT_API_BASE_URL)</string>
 	<key>MotetAppLinkDomain</key>
 	<string>$(MOTET_APP_LINK_DOMAIN)</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Play Live listens while an episode plays, so you can interrupt it and ask a question out loud.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

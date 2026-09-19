@@ -114,6 +114,25 @@ public actor MotetLibrary {
         try await api.createEpisode(title: title, maxDurationMs: maxDurationMs)
     }
 
+    /// "Mark listened", as the SPA's shelf has it: every story read, then the position at the
+    /// end — both facts, in that order, and one-way (there is no un-listening that is not
+    /// un-reading). The read half goes through the outbox, so it survives no signal; the
+    /// position half is best-effort, because the server's position is monotonic and a later
+    /// report says the same thing.
+    public func markListened(episode: EpisodeResponse) async throws {
+        try await readState.markEpisodeListened(episodeId: episode.id, newsItemIds: episode.newsItemIds)
+        try await positions.record(
+            episodeId: episode.id,
+            spokenThroughMs: episode.durationMs,
+            durationMs: episode.durationMs,
+            finished: true,
+            coverage: ListenedCoverage(ranges: episode.durationMs > 0 ? [0..<episode.durationMs] : [])
+        )
+        _ = try? await api.setPlaybackPosition(
+            episodeId: episode.id, listenedThroughMs: episode.durationMs
+        )
+    }
+
     public func paste(title: String, text: String) async throws -> SourceItemResponse {
         try await api.pasteSource(title: title, text: text)
     }

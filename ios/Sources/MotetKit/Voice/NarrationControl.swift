@@ -1,18 +1,10 @@
 import Foundation
 
-/// The seam the voice path will attach to — and nothing more.
+/// What Play Live needs from the player, and nothing more: stop the narration, know where it
+/// stopped, and start it again. `LiveSession` is its one caller.
 ///
-/// Phase 2's interactive half lives in `voice/` (a Pipecat service reached through our own
-/// API, never a vendor SDK in the app — invariant 1). When barge-in arrives, it needs
-/// exactly three things from the player: stop the narration, know where it stopped, and
-/// start it again. That is this protocol.
-///
-/// It is declared here, unimplemented by anything voice-related, on purpose. Writing the
-/// seam costs nothing and settles the shape; writing a stub *implementation* would be
-/// pretending, and the barge-in path is another session's work.
-///
-/// Two properties the voice side must be able to rely on, which is why it is a protocol
-/// over `PlaybackController` rather than over the audio engine:
+/// A protocol over `PlaybackController` rather than over the audio engine, because the
+/// voice side must be able to rely on two properties:
 ///
 /// * pausing for a question does not lose the position — the position is ours (invariant 4);
 /// * whatever the listener says resolves to a `PlaybackCommand`, so an interactive command

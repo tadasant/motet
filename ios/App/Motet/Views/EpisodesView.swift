@@ -66,6 +66,12 @@ struct EpisodeRow: View {
     let position: ListeningPosition?
     let isDownloaded: Bool
 
+    /// Heard to the end here, or within the sign-off's slack of it anywhere.
+    private var isListened: Bool {
+        position?.isFinished == true
+            || (episode.durationMs > 0 && episode.durationMs - episode.listenedThroughMs <= 5_000)
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
             Button {
@@ -114,6 +120,22 @@ struct EpisodeRow: View {
                     .font(Theme.body(12, weight: 500, relativeTo: .caption2))
                     .monospacedDigit()
                     .foregroundStyle(Theme.inkSoft)
+                } else if episode.listenedThroughMs > 0, episode.durationMs > 0 {
+                    // Never played on this phone, but listened to somewhere: the server's
+                    // position, which is where Play resumes (motet#11).
+                    let finished = episode.durationMs - episode.listenedThroughMs <= 5_000
+                    PlayedTrack(
+                        fraction: Double(episode.listenedThroughMs) / Double(episode.durationMs),
+                        height: 4, isFinished: finished
+                    )
+                    Text(
+                        finished
+                            ? "Listened"
+                            : "\(Format.time(episode.listenedThroughMs)) of \(Format.time(episode.durationMs))"
+                    )
+                    .font(Theme.body(12, weight: 500, relativeTo: .caption2))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkSoft)
                 }
 
                 if let error = episode.lastError, episode.episodeState == .failed {
@@ -129,6 +151,16 @@ struct EpisodeRow: View {
         .listRowBackground(Theme.parchment)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+        .swipeActions(edge: .leading) {
+            if episode.episodeState.isPlayable, !isListened {
+                Button {
+                    Task { await model.markListened(episode: episode) }
+                } label: {
+                    Label("Mark listened", systemImage: "checkmark.circle")
+                }
+                .tint(Theme.ink)
+            }
+        }
         .swipeActions(edge: .trailing) {
             if isDownloaded {
                 Button(role: .destructive) {

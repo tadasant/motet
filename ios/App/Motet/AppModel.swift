@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import MotetKit
+import MotetPlayback
 import SwiftUI
 
 /// What the screens observe. A thin projection of `MotetKit` onto the main thread.
@@ -21,9 +22,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSigningIn = false
     /// Why the last sign-in did not finish. Shown under the button, never as a modal.
     @Published private(set) var signInMessage: String?
+    /// Play Live, as its session last published it.
+    @Published private(set) var live = LiveSnapshot()
 
     private let environment: AppEnvironment
     private var snapshotTask: Task<Void, Never>?
+    private var liveSession: LiveSession?
+    private var liveTask: Task<Void, Never>?
+    /// The episode the running Live session is about, and what the player last said about
+    /// playing — so only a *change* reaches the session.
+    private var liveEpisodeId: String?
+    private var lastPlaying: Bool?
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -56,8 +65,16 @@ final class AppModel: ObservableObject {
         snapshotTask = Task { [weak self] in
             for await snapshot in await controller.snapshots() {
                 guard let self else { return }
+                let previousError = self.playback.errorMessage
                 self.playback = snapshot
                 nowPlaying.update(with: snapshot)
+                // A streamed episode that will not load may be carrying a feed token that was
+                // rotated since it was cached, and a cached token is never re-read otherwise.
+                // Forget it, so the next attempt asks the API for the current one.
+                if snapshot.errorMessage != nil, previousError == nil, !snapshot.isOffline {
+                    try? await self.library.invalidateFeedToken()
+                }
+                await self.forwardToLive(snapshot)
             }
         }
     }
@@ -113,6 +130,26 @@ final class AppModel: ObservableObject {
         } catch {
             connectionMessage = String(describing: error)
         }
+    }
+
+    /// Try the loaded episode again, with a freshly fetched feed token.
+    func retryPlayback() async {
+        guard let episode = episodes.first(where: { $0.id == playback.episodeId }) else { return }
+        try? await library.invalidateFeedToken()
+        await play(episode: episode)
+    }
+
+    /// "Mark listened", as the SPA's shelf has it: every story read, the position at the end.
+    func markListened(episode: EpisodeResponse) async {
+        do {
+            try await library.markListened(episode: episode)
+        } catch let error as MotetError {
+            connectionMessage = error.description
+        } catch {
+            connectionMessage = String(describing: error)
+        }
+        await reloadPositions()
+        newsItems = (try? await library.newsItems(forceRefresh: false)) ?? newsItems
     }
 
     func perform(_ command: PlaybackCommand) async {
@@ -202,7 +239,75 @@ final class AppModel: ObservableObject {
         await applyCredentialChange()
     }
 
+    // MARK: - Play Live (motet#93)
+
+    /// The session for the player in force now. Rebuilt after a credential change, because
+    /// the controller it pauses and plays is rebuilt with it.
+    private func liveSessionForCurrentPlayer() -> LiveSession {
+        if let liveSession { return liveSession }
+        let audio = environment.liveAudio
+        let session = LiveSession(
+            api: MotetHTTPClient(configuration: environment.credentials.configuration()),
+            narration: controller,
+            audio: audio,
+            makeTransport: { URLSessionLiveTransport() }
+        )
+        liveSession = session
+        liveTask?.cancel()
+        liveTask = Task { [weak self] in
+            for await snapshot in await session.snapshots() {
+                self?.live = snapshot
+            }
+        }
+        return session
+    }
+
+    /// Asked of our API whenever the player opens: whether this deployment has a voice
+    /// service. "Not configured" is an answer, shown beside a disabled pill.
+    func checkLiveAvailability() async {
+        await liveSessionForCurrentPlayer().checkAvailability()
+    }
+
+    func startLive() async {
+        guard let episodeId = playback.episodeId else { return }
+        liveEpisodeId = episodeId
+        lastPlaying = playback.isPlaying
+        await liveSessionForCurrentPlayer().start(episodeId: episodeId, durationMs: playback.durationMs)
+    }
+
+    func stopLive() async {
+        liveEpisodeId = nil
+        await liveSession?.stop()
+    }
+
+    func interruptLive() async { await liveSession?.interrupt() }
+    func askLive(_ question: String) async { await liveSession?.ask(question) }
+    func resumeLiveNarration() async { await liveSession?.resumeNarration() }
+
+    /// What the player did, for the Live session: a change of playing state, and where it is.
+    /// Another episode loaded under a running session ends it — the session is about one.
+    private func forwardToLive(_ snapshot: PlaybackSnapshot) async {
+        guard let liveSession, live.isRunning else {
+            lastPlaying = snapshot.isPlaying
+            return
+        }
+        if let liveEpisodeId, snapshot.episodeId != liveEpisodeId {
+            await stopLive()
+            return
+        }
+        if snapshot.isPlaying != lastPlaying {
+            lastPlaying = snapshot.isPlaying
+            await liveSession.narrationChanged(isPlaying: snapshot.isPlaying, positionMs: snapshot.positionMs)
+        }
+        await liveSession.narrationPosition(snapshot.positionMs)
+    }
+
     private func applyCredentialChange() async {
+        await stopLive()
+        liveTask?.cancel()
+        liveTask = nil
+        liveSession = nil
+        live = LiveSnapshot()
         // Rebuilds the controller *and* re-activates it, so the engine's single event
         // handler points at the new one.
         await environment.reconfigure()
