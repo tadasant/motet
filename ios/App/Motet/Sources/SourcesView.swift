@@ -25,6 +25,7 @@ struct SourcesView: View {
                 }
             }
             .navigationTitle("Sources")
+            .navigationBarTitleDisplayMode(.inline)
         }
         .onAppear { holder.bind(app) }
     }

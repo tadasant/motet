@@ -29,7 +29,13 @@ final class SourcesModel: ObservableObject {
     private var api: any SourcesAPI { app.sourcesAPI }
     var appLinkDomain: String? { app.appLinkDomain }
     var webSourcesURL: URL? { ConsentCallback.webSourcesURL(appDomain: appLinkDomain) }
-    var canConsentHere: Bool { ConsentSheet.isAvailable(appDomain: appLinkDomain) }
+    /// Whether a consent can come back to this phone. Besides the build and the iOS being
+    /// able to catch it, the server has to be the build's own: `appLinkDomain` is the web
+    /// app of the deployment this build was made for, and a server changed under Advanced
+    /// has a different web app, whose registered callback this build cannot know.
+    var canConsentHere: Bool {
+        ConsentSheet.isAvailable(appDomain: appLinkDomain) && app.isOnBuildServer
+    }
 
     func rows(_ integration: Integration) -> [SourceResponse] {
         integration.rows(in: sources ?? [])
@@ -53,7 +59,13 @@ final class SourcesModel: ObservableObject {
     /// The sources list is the primary fetch and the only one that can blank the screen.
     /// Held, ingestion, processing and connectors are each best-effort: a failure loses a
     /// count or a section, never the catalog.
+    /// Bumped by every refresh, so a slow answer never overwrites a newer one — the list's
+    /// ten-second loop, Sync now's watch and a pull-to-refresh can all be in flight at once.
+    private var refreshGeneration = 0
+
     func refresh() async {
+        refreshGeneration += 1
+        let mine = refreshGeneration
         let api = self.api
         async let list = Self.catching { try await api.listSources() }
         async let heldItems = try? api.heldSourceItems()
@@ -61,7 +73,9 @@ final class SourcesModel: ObservableObject {
         async let processingStatus = try? api.processingStatus()
         async let connectorList = try? api.listConnectors()
 
-        switch await list {
+        let results = (await list, await heldItems, await ingestionItems, await processingStatus, await connectorList)
+        guard mine == refreshGeneration else { return }
+        switch results.0 {
         case .success(let fresh):
             sources = fresh
             loadError = nil
@@ -71,10 +85,10 @@ final class SourcesModel: ObservableObject {
             loadError = Self.describe(error)
             if sources == nil { sources = [] }
         }
-        held = await heldItems ?? held
-        ingestion = await ingestionItems ?? ingestion
-        processing = await processingStatus
-        if let fresh = await connectorList { connectors = fresh }
+        held = results.1 ?? held
+        ingestion = results.2 ?? ingestion
+        processing = results.3
+        if let fresh = results.4 { connectors = fresh }
         else if connectors == nil { connectors = [] }
     }
 
@@ -83,7 +97,7 @@ final class SourcesModel: ObservableObject {
     /// Connect a mailbox: mint the source and consent URL, show Google's page in the sheet,
     /// and finish the consent with this phone's own session.
     func connectMailbox(
-        name: String, query: String, present: @MainActor (URL) async -> ConsentSheet.Result
+        name: String, query: String, present: @MainActor (URL) async -> ConsentFlow.Presentation
     ) async -> Bool {
         guard let redirect = ConsentCallback.redirectURI(appDomain: appLinkDomain), canConsentHere else {
             consentNeedsWebApp = true
@@ -91,7 +105,7 @@ final class SourcesModel: ObservableObject {
         }
         return await runConsent(what: "your mailbox", present: present) { api in
             let started = try await api.connectSource(name: name, query: query, redirectURI: redirect)
-            return (started.authorizationUrl, started.state)
+            return .init(url: started.authorizationUrl, state: started.state, createdSourceId: started.sourceId)
         } finish: { api, code, state, _ in
             let source = try await api.completeSourceConsent(code: code, state: state)
             return "\(source.name) is connected. New messages are pulled in and held for you to ingest."
@@ -100,7 +114,7 @@ final class SourcesModel: ObservableObject {
 
     /// Ask for the wider `gmail.modify` grant label sync needs (motet#96).
     func reauthorize(
-        _ source: SourceResponse, present: @MainActor (URL) async -> ConsentSheet.Result
+        _ source: SourceResponse, present: @MainActor (URL) async -> ConsentFlow.Presentation
     ) async -> Bool {
         guard let redirect = ConsentCallback.redirectURI(appDomain: appLinkDomain), canConsentHere else {
             consentNeedsWebApp = true
@@ -108,7 +122,7 @@ final class SourcesModel: ObservableObject {
         }
         return await runConsent(what: "change labels in \(source.name)", present: present) { api in
             let started = try await api.reauthorizeSource(id: source.id, redirectURI: redirect)
-            return (started.authorizationUrl, started.state)
+            return .init(url: started.authorizationUrl, state: started.state)
         } finish: { api, code, state, _ in
             _ = try await api.completeSourceConsent(code: code, state: state)
             return "\(source.name) may now change labels on the messages you ingest."
@@ -154,73 +168,51 @@ final class SourcesModel: ObservableObject {
     }
 
     /// Authorize an MCP server: the third flow on `/oauth/callback`, finished at the
-    /// connectors' own callback route with RFC 9207's issuer when the server sent one.
+    /// connectors' own callback route with RFC 9207's issuer when the server sent one. A
+    /// refused authorize writes its reason onto the row, which the refresh after it shows.
     func authorize(
-        _ connector: ConnectorResponse, present: @MainActor (URL) async -> ConsentSheet.Result
+        _ connector: ConnectorResponse, present: @MainActor (URL) async -> ConsentFlow.Presentation
     ) async -> Bool {
         guard let redirect = ConsentCallback.redirectURI(appDomain: appLinkDomain), canConsentHere else {
             consentNeedsWebApp = true
             return false
         }
-        let authorized = await runConsent(what: connector.label, present: present) { api in
+        return await runConsent(what: connector.label, present: present) { api in
             let started = try await api.authorizeConnector(id: connector.id, redirectURI: redirect)
-            return (started.authorizationUrl, started.state)
+            return .init(url: started.authorizationUrl, state: started.state)
         } finish: { api, code, state, iss in
             let updated = try await api.completeConnectorConsent(code: code, state: state, iss: iss)
             return "\(updated.label) is authorized."
         }
-        // A refused authorize writes its reason onto the row (a 409 for no registration, a
-        // 502 for a server that would not answer), so the list is worth re-reading either way.
-        await refresh()
-        return authorized
     }
 
     // MARK: - Consent
 
-    /// Start, present, and finish one consent. Every outcome ends in `notice`.
+    /// One consent through `ConsentFlow`; every ending lands in `notice` and a refresh.
     private func runConsent(
         what: String,
-        present: @MainActor (URL) async -> ConsentSheet.Result,
-        start: (any SourcesAPI) async throws -> (url: String, state: String),
+        present: @MainActor (URL) async -> ConsentFlow.Presentation,
+        start: (any SourcesAPI) async throws -> ConsentFlow.Started,
         finish: (any SourcesAPI, String, String, String?) async throws -> String
     ) async -> Bool {
         busy = true
         notice = nil
         consentNeedsWebApp = false
         defer { busy = false }
-        let api = self.api
-        do {
-            let started = try await start(api)
-            guard let url = URL(string: started.url) else {
-                notice = "The API answered with a consent address that is not a URL."
-                return false
-            }
-            switch await present(url) {
-            case .dismissed:
-                notice = "You closed the consent page before finishing. Nothing was changed."
-                await refresh()
-                return false
-            case .refused:
-                consentNeedsWebApp = true
-                await refresh()
-                return false
-            case .callback(let callback):
-                switch try ConsentCallback.outcome(
-                    from: callback, appDomain: appLinkDomain, expectedState: started.state
-                ) {
-                case .denied(let error, let description):
-                    notice = ConsentCallback.describeDenial(error: error, description: description, what: what)
-                    await refresh()
-                    return false
-                case .granted(let code, let state, let iss):
-                    notice = try await finish(api, code, state, iss)
-                    await refresh()
-                    return true
-                }
-            }
-        } catch {
-            notice = Self.describe(error)
-            await refresh()
+        let outcome = await ConsentFlow.run(
+            api: api, appDomain: appLinkDomain, what: what,
+            start: start, present: { await present($0) }, finish: finish
+        )
+        await refresh()
+        switch outcome {
+        case .finished(let sentence):
+            notice = sentence
+            return true
+        case .notFinished(let sentence):
+            notice = sentence
+            return false
+        case .needsWebApp:
+            consentNeedsWebApp = true
             return false
         }
     }
@@ -232,17 +224,6 @@ final class SourcesModel: ObservableObject {
     }
 
     static func describe(_ error: Error) -> String {
-        if let error = error as? MotetError {
-            switch error {
-            case .http(503, let detail?):
-                return "This deployment can’t do that right now. That is configuration, not you: \(detail)"
-            case .http(_, let detail?):
-                return detail
-            default:
-                return error.description
-            }
-        }
-        if let error = error as? ConsentCallback.Failure { return error.description }
-        return error.localizedDescription
+        ConsentFlow.describe(error)
     }
 }

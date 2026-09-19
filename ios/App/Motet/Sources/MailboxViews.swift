@@ -25,7 +25,7 @@ struct MailboxDetailView: View {
     }
 
     /// How long "Sync now" watches for the poll to land, and how often it looks.
-    private static let syncWatch: Duration = .seconds(120)
+    private static let syncWatchSeconds: TimeInterval = 120
     private static let syncPoll: Duration = .seconds(2)
 
     var body: some View {
@@ -111,7 +111,10 @@ struct MailboxDetailView: View {
             Section {
                 if status == .awaitingConsent {
                     Button("Remove this attempt", role: .destructive) {
-                        Task { await run { try await model.remove(source) } }
+                        Task {
+                            // Gone from the list once removed; there is nothing left to show here.
+                            if await run({ try await model.remove(source) }) { dismiss() }
+                        }
                     }
                     .disabled(working)
                 }
@@ -235,7 +238,7 @@ struct MailboxDetailView: View {
         guard case .queued(_, let startedAt) = sync else { return }
         while !Task.isCancelled, case .queued = sync {
             try? await Task.sleep(for: Self.syncPoll)
-            if Date.now.timeIntervalSince(startedAt) > 120 {
+            if Date.now.timeIntervalSince(startedAt) > Self.syncWatchSeconds {
                 sync = .slow
                 return
             }
@@ -254,11 +257,18 @@ struct MailboxDetailView: View {
         }
     }
 
-    private func run(_ action: () async throws -> Void) async {
+    @discardableResult
+    private func run(_ action: () async throws -> Void) async -> Bool {
         working = true
         actionError = nil
         defer { working = false }
-        do { try await action() } catch { actionError = SourcesModel.describe(error) }
+        do {
+            try await action()
+            return true
+        } catch {
+            actionError = SourcesModel.describe(error)
+            return false
+        }
     }
 }
 
@@ -277,7 +287,8 @@ private struct LabelSyncSection: View {
     @State private var error: String?
 
     private var changed: Bool {
-        remove != (labels.removeLabel ?? "") || add != (labels.addLabel ?? "")
+        remove.trimmingCharacters(in: .whitespaces) != (labels.removeLabel ?? "")
+            || add.trimmingCharacters(in: .whitespaces) != (labels.addLabel ?? "")
     }
 
     var body: some View {
@@ -317,25 +328,36 @@ private struct LabelSyncSection: View {
             remove = labels.removeLabel ?? ""
             add = labels.addLabel ?? ""
         }
-        .onChange(of: labels) { _, fresh in
-            remove = fresh.removeLabel ?? ""
-            add = fresh.addLabel ?? ""
+        // Only a change to what is *stored* resets the fields. A refresh moves the catalog,
+        // the counts and the timestamps too — every two seconds while Sync now watches — and
+        // resetting on those would wipe a choice mid-edit.
+        .onChange(of: [labels.removeLabel ?? "", labels.addLabel ?? ""]) { _, stored in
+            remove = stored[0]
+            add = stored[1]
         }
     }
 
-    /// The names the last poll cached, plus whatever is already chosen — a label deleted in
-    /// Gmail since must still show as the current choice rather than silently as "none".
-    private func options(including current: String) -> [String] {
-        var names = labels.availableLabels
-        if !current.isEmpty, !names.contains(current) { names.insert(current, at: 0) }
-        return names
-    }
-
+    /// A label name, typed or picked from the ones the last poll cached. Typed as well as
+    /// picked, as on the web: before the first poll there is no list, and the API resolves a
+    /// name it has not cached by asking Gmail.
     private func labelPicker(_ title: String, selection: Binding<String>) -> some View {
-        Picker(title, selection: selection) {
-            Text("None").tag("")
-            ForEach(options(including: selection.wrappedValue), id: \.self) { name in
-                Text(name).tag(name)
+        HStack {
+            Text(title)
+            TextField("None", text: selection)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !labels.availableLabels.isEmpty {
+                Menu {
+                    Button("None") { selection.wrappedValue = "" }
+                    ForEach(labels.availableLabels, id: \.self) { name in
+                        Button(name) { selection.wrappedValue = name }
+                    }
+                } label: {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .foregroundStyle(Theme.inkSoft)
+                }
+                .accessibilityLabel("\(title): choose a label")
             }
         }
         .font(Theme.body(16))
@@ -353,7 +375,7 @@ private struct LabelSyncSection: View {
                 .font(Theme.body(14, relativeTo: .footnote))
         default:
             Text(labels.availableLabels.isEmpty
-                 ? "Off. The label list arrives with the next sync."
+                 ? "Off. Type a label to add or remove; the list of yours arrives with the next sync."
                  : "Off. Choose a label to add or remove.")
                 .font(Theme.body(14, relativeTo: .footnote))
                 .foregroundStyle(Theme.inkSoft)

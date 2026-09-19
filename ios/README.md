@@ -273,10 +273,14 @@ spent.
 
 That needs what the https sign-in needs — `MOTET_IOS_APP_DOMAIN` signed into the build,
 iOS 17.4, and the association verified on the device — and it needs nothing on the server:
-`/v1/sources/connect` has always taken the redirect URI from its caller. Where any of it is
-missing the screen says so and offers the web app's Sources screen instead, because nothing
-else can bring the consent back; a refusal is told apart from a person's Cancel by the same
-one-second rule the sign-in uses.
+`/v1/sources/connect` has always taken the redirect URI from its caller. It also needs the
+app to be on **the build's own server**: `MOTET_IOS_APP_DOMAIN` is that deployment's web app,
+and a server changed under Advanced has a different one. Where any of it is missing the
+screen says so and offers the web app's Sources screen instead, because nothing else can
+bring the consent back. A refusal is told apart from a person's Cancel by the same
+one-second rule the sign-in uses, and a refused mailbox connect removes the row
+`/v1/sources/connect` made for it, since nobody ever saw Google's page. Every ending of a
+consent is `ConsentFlow`, in MotetKit, and tested.
 
 ## Configuration
 

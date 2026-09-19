@@ -382,3 +382,124 @@ final class SourcesWireTests: XCTestCase {
         XCTAssertEqual(created.status, "needs_auth")
     }
 }
+
+/// Records what a consent did to the API; every other route answers something harmless.
+actor FakeSourcesAPI: SourcesAPI {
+    private(set) var removed: [String] = []
+    private(set) var completed: [String] = []
+    var finishFailure: MotetError?
+
+    func setFinishFailure(_ error: MotetError?) { finishFailure = error }
+
+    private static let when = Date(timeIntervalSince1970: 0)
+    private func source(_ id: String) -> SourceResponse {
+        SourceResponse(active: true, connected: true, createdAt: Self.when, id: id, itemsIntegrated: 0,
+                       itemsPulledIn: 0, kind: "gmail", name: "Mail", scopes: [])
+    }
+
+    func listSources() async throws -> [SourceResponse] { [] }
+    func heldSourceItems() async throws -> [HeldSourceItemResponse] { [] }
+    func ingestion() async throws -> [IngestionItemResponse] { [] }
+    func processingStatus() async throws -> ProcessingStatusResponse {
+        ProcessingStatusResponse(now: Self.when, queues: [], readiness: [])
+    }
+    func connectSource(name: String, query: String?, redirectURI: String) async throws -> ConnectSourceResponse {
+        ConnectSourceResponse(authorizationUrl: "https://accounts.example/o", sourceId: "src_new", state: "s1")
+    }
+    func completeSourceConsent(code: String, state: String) async throws -> SourceResponse {
+        if let finishFailure { throw finishFailure }
+        completed.append("\(code):\(state)")
+        return source("src_new")
+    }
+    func pollSource(id: String) async throws -> SourceResponse { source(id) }
+    func disconnectSource(id: String) async throws {}
+    func removeSource(id: String) async throws { removed.append(id) }
+    func setLabelSync(id: String, removeLabel: String?, addLabel: String?) async throws -> SourceResponse { source(id) }
+    func reauthorizeSource(id: String, redirectURI: String) async throws -> ConnectSourceResponse {
+        ConnectSourceResponse(authorizationUrl: "https://accounts.example/o", sourceId: id, state: "s1")
+    }
+    func listConnectors() async throws -> [ConnectorResponse] { [] }
+    func createConnector(_ request: CreateConnectorRequest) async throws -> ConnectorResponse {
+        throw MotetError.http(status: 500, detail: nil)
+    }
+    func deleteConnector(id: String) async throws {}
+    func authorizeConnector(id: String, redirectURI: String) async throws -> AuthorizeConnectorResponse {
+        AuthorizeConnectorResponse(authorizationUrl: "https://as.example/authorize", state: "connector.s1")
+    }
+    func completeConnectorConsent(code: String, state: String, iss: String?) async throws -> ConnectorResponse {
+        throw MotetError.http(status: 500, detail: nil)
+    }
+}
+
+final class ConsentFlowTests: XCTestCase {
+    private let domain = "app.example.test"
+
+    private func connect(
+        _ api: FakeSourcesAPI, _ presentation: ConsentFlow.Presentation
+    ) async -> ConsentFlow.Outcome {
+        await ConsentFlow.run(
+            api: api, appDomain: domain, what: "your mailbox",
+            start: { api in
+                let started = try await api.connectSource(name: "Mail", query: nil, redirectURI: "https://app.example.test/oauth/callback")
+                return .init(url: started.authorizationUrl, state: started.state, createdSourceId: started.sourceId)
+            },
+            present: { _ in presentation },
+            finish: { api, code, state, _ in
+                _ = try await api.completeSourceConsent(code: code, state: state)
+                return "connected"
+            }
+        )
+    }
+
+    func testAGrantedConsentFinishesAtTheAPIWithItsCode() async {
+        let api = FakeSourcesAPI()
+        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?code=c1&state=s1")!))
+        XCTAssertEqual(outcome, .finished("connected"))
+        let completed = await api.completed
+        XCTAssertEqual(completed, ["c1:s1"])
+    }
+
+    func testASheetIOSRefusedTakesAwayTheRowNobodySaw() async {
+        let api = FakeSourcesAPI()
+        let outcome = await connect(api, .refused)
+        XCTAssertEqual(outcome, .needsWebApp)
+        let removed = await api.removed
+        XCTAssertEqual(removed, ["src_new"], "a refused sheet must not leave an 'Awaiting consent' row per retry")
+    }
+
+    func testAPersonsCancelKeepsTheRowTheWebWouldKeep() async {
+        let api = FakeSourcesAPI()
+        let outcome = await connect(api, .dismissed)
+        XCTAssertEqual(outcome, .notFinished("You closed the consent page before finishing. Nothing was changed."))
+        let removed = await api.removed
+        XCTAssertTrue(removed.isEmpty)
+    }
+
+    func testCancelOnTheProvidersPageIsSaidAsAnAnswer() async {
+        let api = FakeSourcesAPI()
+        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?error=access_denied&state=s1")!))
+        XCTAssertEqual(outcome, .notFinished("You didn’t grant access to your mailbox. Nothing was changed."))
+    }
+
+    func testACallbackForAnotherAttemptIsNeverSpent() async {
+        let api = FakeSourcesAPI()
+        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?code=c&state=other")!))
+        XCTAssertEqual(outcome, .notFinished(ConsentCallback.Failure.stateMismatch.description))
+        let completed = await api.completed
+        XCTAssertTrue(completed.isEmpty)
+    }
+
+    func testAFinishTheAPIRefusedIsSaidInItsOwnWords() async {
+        let api = FakeSourcesAPI()
+        await api.setFinishFailure(.http(status: 400, detail: "The provider returned no refresh token."))
+        let outcome = await connect(api, .callback(URL(string: "https://app.example.test/oauth/callback?code=c1&state=s1")!))
+        XCTAssertEqual(outcome, .notFinished("The provider returned no refresh token."))
+    }
+
+    func testAnUnconfiguredDeploymentIsSaidToBeConfiguration() {
+        XCTAssertEqual(
+            ConsentFlow.describe(MotetError.http(status: 503, detail: "GOOGLE_OAUTH_CLIENT_ID is not set.")),
+            "This deployment can’t do that right now. That is configuration, not you: GOOGLE_OAUTH_CLIENT_ID is not set."
+        )
+    }
+}

@@ -12,13 +12,7 @@ import SwiftUI
 /// has nowhere else to come back to — Google returns to the one registered web address —
 /// so a refusal here sends the person to the web app instead.
 enum ConsentSheet {
-    enum Result {
-        case callback(URL)
-        /// A person dismissed it. Nothing to say.
-        case dismissed
-        /// iOS would not show it, or it failed before anyone could use it.
-        case refused
-    }
+    typealias Result = ConsentFlow.Presentation
 
     private static let logger = Logger(subsystem: "com.getmotet.app", category: "consent")
 
