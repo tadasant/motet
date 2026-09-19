@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     134 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     174 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/Motet.xcodeproj/     the app target
   bin/                     toolchain install + the two CI entry points
@@ -105,7 +105,7 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 134 tests
+strict concurrency checking, and 174 tests
 pass — segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
 in flight), the download policy, position resume across a simulated relaunch, interruption
