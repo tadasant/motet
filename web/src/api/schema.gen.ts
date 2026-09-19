@@ -1974,7 +1974,7 @@ export interface components {
             max_duration_ms: number;
             /**
              * News Item Ids
-             * @description Only these news items, in backlog order (oldest first), whether or not they are read. Omit for every unread item. Every id must be one of your news items, or the request is refused with a 422 and nothing is created. The duration cap still applies: a story that does not fit is left out.
+             * @description Only these news items, spoken oldest first, whether or not they are read. Omit for every unread item. Every id must be one of your news items, or the request is refused with a 422 and nothing is created. The duration cap still applies: a story that does not fit is left out.
              */
             news_item_ids?: string[] | null;
             /** Title */

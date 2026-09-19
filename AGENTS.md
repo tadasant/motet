@@ -89,7 +89,9 @@ almost every design question that comes up is already answered by one of them.
 
 5. **Read state is per News Item, and syncs across audio and visual.** Not per episode, not
    per segment, not per source item. Marking something read on the web backlog must be the
-   same fact as having listened past it in an episode.
+   same fact as having listened past it in an episode. The one exception is an episode
+   made with `keep_in_backlog`, whose listening marks nothing read (Tadas, 2026-09-19; see
+   "A picked episode is the same selector with one more knob").
 
 6. **Ingestion is serialized per user.** Two ingestion runs for the same user never
    overlap. Dedup/integrate compares a new source item against the current window of news
@@ -526,7 +528,8 @@ answerable after the rule is edited.
 
 **Read state from the audio side is `episodes.listened_through_ms`.** It is monotonic in the
 repository layer — a client that seeks backwards is reviewing, not un-listening — and its
-only job is deciding which news items are read, so listening past a story on a walk and
+job is deciding which news items are read (on a `keep_in_backlog` episode, only where to
+resume), so listening past a story on a walk and
 ticking it off on the backlog screen stay one fact. Deliberately **not** named
 `spoken_through_ms`: that belongs to the voice session contract, which is a different
 session's work, and the voice service should call this same repository function rather than

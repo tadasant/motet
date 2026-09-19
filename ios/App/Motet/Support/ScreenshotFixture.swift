@@ -5,10 +5,11 @@ import MotetKit
 /// A Debug-only way to put one screen on a simulator with sample data and no server.
 ///
 /// `-MotetScreenshot <scene>` on the launch arguments renders the backlog in that state
-/// instead of the app, with no sign-in and no network. It exists because nothing else can
-/// show a screen of this app to someone without a Mac: CI's hosted macOS runner boots a
-/// simulator, launches with the argument, and takes the picture. Release builds — which
-/// is everything TestFlight ships — do not contain it.
+/// instead of the app, with no sign-in and no network. It exists because this app has no
+/// Mac to be looked at on: a hosted macOS runner can build Debug for a simulator, then
+/// `xcrun simctl launch <udid> com.getmotet.app -MotetScreenshot selecting` and
+/// `xcrun simctl io <udid> screenshot` take the picture (how motet#130's were taken). Release
+/// builds — which is everything TestFlight ships — do not contain it.
 enum ScreenshotFixture: String {
     /// The backlog as it opens.
     case backlog

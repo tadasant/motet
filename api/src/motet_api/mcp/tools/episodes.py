@@ -139,6 +139,8 @@ def set_playback_position(
 def mark_episode_listened(episode_id: Annotated[str, _EPISODE_ID]) -> MarkListenedResponse:
     """Mark every story in an episode read, as though it had been listened to the end.
 
+    Marks nothing for an episode made with `keep_in_backlog`: its stories stay unread.
+
     There is no undo for the episode as a whole; `set_news_item_read` can mark a single
     story unread again.
     """

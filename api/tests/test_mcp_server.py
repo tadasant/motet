@@ -270,6 +270,30 @@ class TestWhatAConnectionSees:
         assert result.is_error
         assert text(result).endswith("404: No such episode.")
 
+    def test_create_episode_takes_a_pick_and_refuses_an_unknown_story(
+        self, env: None, db: psycopg.Connection[Any]
+    ) -> None:
+        db.execute(
+            "INSERT INTO news_items (id, user_id, title, summary) "
+            "VALUES ('ni_mcp_pick', 'motet-owner', 'Picked', 'A story.')"
+        )
+        db.commit()
+
+        async def work(client: Client) -> tuple[Any, Any]:
+            args = {"title": "Picked", "max_duration_ms": 600_000, "keep_in_backlog": True}
+            made = await client.call_tool(
+                "create_episode", {**args, "news_item_ids": ["ni_mcp_pick"]}
+            )
+            refused = await client.call_tool(
+                "create_episode", {**args, "news_item_ids": ["ni_not_there"]}
+            )
+            return made, refused
+
+        made, refused = with_client(BEARER, "", work)
+        assert not made.is_error, text(made)
+        assert made.structured_content["keep_in_backlog"] is True
+        assert refused.is_error and "422: 1 of the picked news items" in text(refused)
+
     def test_arguments_the_request_model_refuses_are_a_422(self, env: None) -> None:
         async def work(client: Client) -> Any:
             return await client.call_tool("paste_text", {"title": "", "text": "x"})

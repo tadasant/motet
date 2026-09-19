@@ -758,6 +758,40 @@ def test_a_pick_naming_another_users_story_is_refused(
     assert api.get("/v1/episodes", headers=AUTH).json() == []
 
 
+def test_a_pick_whose_stories_vanished_fails_saying_so(
+    api: TestClient, db: psycopg.Connection[Any], _migrated: str
+) -> None:
+    backlog = paste_backlog(api, _migrated)
+    created = create_picked(api, [backlog[0]["id"]])
+    db.execute("DELETE FROM news_item_sources WHERE news_item_id = %s", (backlog[0]["id"],))
+    db.execute("DELETE FROM news_items WHERE id = %s", (backlog[0]["id"],))
+    db.commit()
+    drain(Queue.ASSEMBLE, _migrated)
+    episode = api.get(f"/v1/episodes/{created.json()['id']}", headers=AUTH).json()
+    assert episode["state"] == "failed"
+    assert "none of the 1 picked news items exist" in (episode["last_error"] or "")
+
+
+def test_the_smart_route_cannot_carry_a_pick(api: TestClient, _migrated: str) -> None:
+    """Ownership is checked on `/v1/episodes`; the smart rule's model has no such field.
+
+    Pydantic ignores the unknown key, so the episode is an ordinary rule — never a pick of
+    ids nobody checked.
+    """
+    paste_backlog(api, _migrated)
+    created = api.post(
+        "/v1/episodes/smart",
+        json={"title": "S", "max_duration_ms": 600_000, "rule": {"news_item_ids": ["ni_x"]}},
+        headers=AUTH,
+    )
+    assert created.status_code == 201, created.text
+    with psycopg.connect(_migrated) as conn:
+        row = conn.execute(
+            "SELECT rule FROM episodes WHERE id = %s", (created.json()["id"],)
+        ).fetchone()
+    assert row is not None and row[0]["news_item_ids"] == []
+
+
 def test_an_empty_or_oversized_pick_is_refused_by_the_contract(api: TestClient) -> None:
     assert create_picked(api, []).status_code == 422
     assert create_picked(api, [f"ni_{n}" for n in range(101)]).status_code == 422

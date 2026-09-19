@@ -340,6 +340,10 @@ def handle_assemble(context: Context, payload: Mapping[str, Any]) -> None:
 
     rule = _rule_for(context.conn, episode_id, episode.kind, episode.rule)
     candidates = phase2.select_for_rule(context.conn, episode.user_id, rule)
+    if not candidates and rule.news_item_ids:
+        raise PermanentFailure(
+            f"none of the {len(rule.news_item_ids)} picked news items exist any more"
+        )
     if not candidates:
         raise PermanentFailure(
             f"no news items match this episode's rule ({rule.ranking.value}, "

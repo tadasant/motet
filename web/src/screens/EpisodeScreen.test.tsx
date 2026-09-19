@@ -339,6 +339,20 @@ describe('Mark listened on the detail', () => {
   })
 })
 
+describe('an episode made to keep its stories in the backlog', () => {
+  it('says so, and Mark listened does not claim to have marked anything read', async () => {
+    mockApi()
+    renderScreen({ ...EPISODE, keep_in_backlog: true })
+    expect(
+      screen.getByText('Listening to this episode leaves its stories in the backlog.'),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark listened' }))
+    expect(
+      await screen.findByText('Marked listened. Its stories stay in the backlog.'),
+    ).toBeTruthy()
+  })
+})
+
 describe('the player transport (motet#110)', () => {
   it('plays and pauses the element from the ink play circle', async () => {
     mockApi()

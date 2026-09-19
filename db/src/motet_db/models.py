@@ -174,7 +174,8 @@ class StoredEpisode:
     last_error: str | None
     #: How far the listener has actually got, in milliseconds. We own playback position
     #: (invariant 4) and this is written by our own API from a client's report — never
-    #: read back out of a vendor SDK. Its only job is deciding which news items are read.
+    #: read back out of a vendor SDK. Its job is deciding which news items are read — except
+    #: on a ``keep_in_backlog`` episode, where it is only where to resume.
     listened_through_ms: int
     #: Listening to this episode leaves read state alone (migration 0023). The position
     #: still advances — it is where to resume — but no story is marked read by it.

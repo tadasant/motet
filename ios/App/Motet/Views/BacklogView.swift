@@ -35,10 +35,12 @@ struct BacklogView: View {
         showingRead ? model.newsItems : model.newsItems.filter { !$0.read }
     }
 
-    /// The picks, in the order the backlog shows them — which is the order the server will
-    /// speak them in, oldest first.
+    /// The picks, oldest first — the order the server will speak them in, and so the order
+    /// the duration cap drops from the end of. The backlog itself lists newest first.
     private var pickedItems: [NewsItemResponse] {
-        model.newsItems.filter { selection.contains($0.id) }
+        model.newsItems
+            .filter { selection.contains($0.id) }
+            .sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
     }
 
     var body: some View {
@@ -85,7 +87,10 @@ struct BacklogView: View {
                 }
                 .listStyle(.plain)
                 .brandGround()
-                .refreshable { await model.refresh() }
+                .refreshable {
+                    queuedMessage = nil
+                    await model.refresh()
+                }
                 if isSelecting {
                     generateBar
                 } else if let queuedMessage {
@@ -250,7 +255,7 @@ struct PickedEpisodeView: View {
                         .font(Theme.body(16))
                         .monospacedDigit()
                 } footer: {
-                    Text("Stories that don't fit are left out, oldest kept first.")
+                    Text("Spoken oldest first. Stories that don't fit are left out from the end.")
                         .font(Theme.body(13, relativeTo: .footnote))
                         .foregroundStyle(Theme.inkSoft)
                 }
@@ -301,7 +306,7 @@ struct PickedEpisodeView: View {
                     }
                     .disabled(
                         isSending || items.isEmpty
-                            || title.trimmingCharacters(in: .whitespaces).isEmpty
+                            || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     )
                 }
             }
