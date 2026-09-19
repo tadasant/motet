@@ -47,6 +47,18 @@ public actor PlaybackController {
     private var lastPersistAt: Date?
     private var lastPersistMs = 0
     private var shouldResumeAfterInterruption = false
+    /// Where the server's `listened_through_ms` is for the loaded episode, as far as this
+    /// device knows: the value the episode arrived with, moved by every report it accepted.
+    private var serverFrontierMs = 0
+    private var lastFailedReportAt: Date?
+    private var isReporting = false
+    /// A forced report that arrived while another was out, sent when that one answers.
+    private var reportOwed = false
+    /// Bumped whenever the loaded episode changes, so an answer about the old one never
+    /// moves the new one's frontier — which would point `ListenedCoverage.frontier` at a
+    /// place that has nothing to do with this episode.
+    private var reportGeneration = 0
+    private let reportPosition: PositionReporter?
     private var observers: [UUID: AsyncStream<PlaybackSnapshot>.Continuation] = [:]
 
     /// How often a position is written to flash while playing. Every tick would be a write
@@ -62,18 +74,34 @@ public actor PlaybackController {
     /// larger is a seek, a resume from a stall, or a jump the app itself asked for.
     static let maxListeningStepMs = 5_000
 
+    /// Writes the listening frontier to the server — `PUT /v1/episodes/{id}/position` — and
+    /// answers with the value the server holds afterwards. The server's value is what makes
+    /// a position cross-device: a phone that never played an episode resumes where a laptop
+    /// got to, and the other way round (motet#11). Nil in tests that do not care.
+    public typealias PositionReporter = @Sendable (_ episodeId: String, _ listenedThroughMs: Int) async throws -> Int
+
+    /// How much new listening is worth a report while playing. The SPA reports every ten
+    /// seconds of playback; a pause, a finish and an unload report whatever there is.
+    static let reportStepMs = 10_000
+    /// How long to leave the server alone after a report that did not arrive, so a walk with
+    /// no signal is not a request per position tick. The next report carries the same
+    /// frontier, so nothing is lost by waiting.
+    static let reportRetrySeconds: TimeInterval = 10
+
     public init(
         engine: any PlaybackEngine,
         positions: ListeningPositionStore,
         readState: ReadStateCoordinator,
         settings: PlaybackSettings = PlaybackSettings(),
-        clock: any MotetClock = SystemClock()
+        clock: any MotetClock = SystemClock(),
+        reportPosition: PositionReporter? = nil
     ) {
         self.engine = engine
         self.positions = positions
         self.readState = readState
         self.settings = settings
         self.clock = clock
+        self.reportPosition = reportPosition
     }
 
     /// Subscribe the controller to its engine. Call once, at startup.
@@ -145,8 +173,16 @@ public actor PlaybackController {
     public func load(episode newEpisode: EpisodeResponse, source: Source, autoplay: Bool) async throws {
         if episode?.id != newEpisode.id {
             await persistPosition(force: true)
+            // The outgoing episode's last word, sent whether or not a report is out: the
+            // generation below drops whatever the in-flight one answers.
+            finalReport()
+            reportGeneration += 1
+            isReporting = false
+            reportOwed = false
             markedHeard.removeAll()
             didMarkListened = false
+            serverFrontierMs = 0
+            lastFailedReportAt = nil
             await readState.resetPlaybackDedup()
         }
 
@@ -162,10 +198,19 @@ public actor PlaybackController {
         // Resuming at the very end would immediately re-fire "ended"; a finished episode
         // starts again from the top, which is what a listener expects from one they
         // already heard.
-        let resumeAt: Int = {
+        let localResume: Int = {
             guard let stored, !stored.isFinished else { return 0 }
             return stored.spokenThroughMs >= newEpisode.durationMs - 1_000 ? 0 : stored.spokenThroughMs
         }()
+        // The server's position is the furthest anyone listened, on any device. Where it is
+        // past everything *this* device ever heard, the listening happened elsewhere and it
+        // wins; where it is not, the device's own playhead stands — including one the
+        // listener deliberately scrubbed back to, which is device-local on purpose.
+        let server = newEpisode.listenedThroughMs
+        serverFrontierMs = max(serverFrontierMs, server)
+        let heardHere = max(stored?.furthestSpokenMs ?? 0, stored?.coverage.upperBound ?? 0)
+        let resumeAt = server > heardHere && server < newEpisode.durationMs - 1_000
+            ? server : localResume
         positionMs = resumeAt
         furthestMs = max(resumeAt, stored?.furthestSpokenMs ?? 0)
         // Anything already heard in a previous session must not be re-marked.
@@ -191,6 +236,10 @@ public actor PlaybackController {
     /// Take the episode out of the player, persisting where we got to.
     public func unload() async {
         await persistPosition(force: true)
+        finalReport()
+        reportGeneration += 1
+        isReporting = false
+        reportOwed = false
         await engine.pause()
         episode = nil
         timeline = SegmentTimeline(entries: [], episodeDurationMs: 0)
@@ -213,6 +262,7 @@ public actor PlaybackController {
             await engine.pause()
             isPlaying = false
             await persistPosition(force: true)
+            reportFrontier(force: true)
         case .togglePlayPause:
             await perform(isPlaying ? .pause : .play)
             return
@@ -271,6 +321,7 @@ public actor PlaybackController {
         case .paused:
             isPlaying = false
             await persistPosition(force: true)
+            reportFrontier(force: true)
         case .ended:
             await finish()
         case .interrupted(let resumable):
@@ -312,6 +363,7 @@ public actor PlaybackController {
 
         await markNewlyHeard()
         await persistPosition(force: false)
+        reportFrontier(force: false)
     }
 
     /// Every story whose segments were actually played is read (invariant 5) — unless the
@@ -357,12 +409,73 @@ public actor PlaybackController {
         // server-side write, so it is only honest when every item really was heard. It
         // still earns its place: it closes any item whose boundary no position tick landed
         // inside, which the per-item writes above cannot.
+        reportFrontier(force: true)
+
         let heardEverything = episode.newsItemIds.allSatisfy { markedHeard.contains($0) }
         if heardEverything, !episode.keepsStoriesInBacklog {
             try? await readState.markEpisodeListened(
                 episodeId: episode.id, newsItemIds: episode.newsItemIds
             )
         }
+    }
+
+    /// Move the server's position to the end of the listening that is unbroken from where
+    /// the server already is (`ListenedCoverage.frontier`) — never to the playhead, which a
+    /// seek moves, and never past a story that was skipped.
+    ///
+    /// Best-effort and not queued: the position is monotonic on the server and every later
+    /// report carries the same frontier or a further one, so a report lost to no signal is
+    /// made good by the next one rather than by an outbox. And never awaited: a pause, a
+    /// barge-in and a load must not wait on the network, so the request goes on a task of
+    /// its own and its answer comes back through `reportAnswered`.
+    private func reportFrontier(force: Bool) {
+        guard let episode, let reportPosition else { return }
+        let frontier = min(coverage.frontier(from: serverFrontierMs), duration)
+        guard frontier > serverFrontierMs else { return }
+        let now = clock.now
+        if !force {
+            guard frontier - serverFrontierMs >= Self.reportStepMs else { return }
+            if let last = lastFailedReportAt, now.timeIntervalSince(last) < Self.reportRetrySeconds {
+                return
+            }
+        }
+        guard !isReporting else {
+            if force { reportOwed = true }
+            return
+        }
+        isReporting = true
+        let generation = reportGeneration
+        let episodeId = episode.id
+        Task { [weak self] in
+            let accepted = try? await reportPosition(episodeId, frontier)
+            await self?.reportAnswered(accepted, generation: generation, sentAt: now)
+        }
+    }
+
+    private func reportAnswered(_ accepted: Int?, generation: Int, sentAt: Date) {
+        // About an episode that is no longer loaded: nothing here to move.
+        guard generation == reportGeneration else { return }
+        isReporting = false
+        if let accepted {
+            serverFrontierMs = max(serverFrontierMs, accepted)
+            lastFailedReportAt = nil
+        } else {
+            lastFailedReportAt = sentAt
+        }
+        if reportOwed {
+            reportOwed = false
+            reportFrontier(force: true)
+        }
+    }
+
+    /// The loaded episode's frontier, sent unconditionally and without waiting for an answer
+    /// — for the moment it stops being the loaded episode.
+    private func finalReport() {
+        guard let episode, let reportPosition else { return }
+        let frontier = min(coverage.frontier(from: serverFrontierMs), duration)
+        guard frontier > serverFrontierMs else { return }
+        let episodeId = episode.id
+        Task { _ = try? await reportPosition(episodeId, frontier) }
     }
 
     private func persistPosition(force: Bool) async {

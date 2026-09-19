@@ -32,12 +32,14 @@ struct PlayerView: View {
                         Label("Playing from this device", systemImage: "arrow.down.circle.fill")
                             .brandLabel(size: 11)
                     }
+                    loadState
                 }
                 .padding(.top, 24)
 
                 scrubber
                 transportControls
                 pills
+                LivePanel()
 
                 if let episode {
                     TranscriptList(episode: episode, positionMs: model.playback.positionMs)
@@ -126,19 +128,66 @@ struct PlayerView: View {
         }
     }
 
+    /// Loading and failing, said where they can be seen. The controller always knew both;
+    /// the screen showed neither, so audio that would not load was a play button that did
+    /// nothing.
+    @ViewBuilder
+    private var loadState: some View {
+        if let error = model.playback.errorMessage {
+            VStack(spacing: 6) {
+                Text("This episode’s audio could not be loaded.")
+                    .font(Theme.body(14, weight: 600, relativeTo: .footnote))
+                    .foregroundStyle(Theme.errorText)
+                    .multilineTextAlignment(.center)
+                // The route's answer when there is one — "no longer in storage" is not a
+                // retry away — and the player's own words only when there is not.
+                Text(model.playbackProblem?.sentence ?? error)
+                    .font(Theme.body(12, relativeTo: .caption))
+                    .foregroundStyle(Theme.inkSoft)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.center)
+                if !isGone {
+                    Button("Try again") { Task { await model.retryPlayback() } }
+                        .font(Theme.body(14, weight: 600))
+                }
+            }
+            .padding(.top, 4)
+        } else if model.playback.isLoading {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Loading audio…")
+                    .font(Theme.body(13, relativeTo: .footnote))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+        }
+    }
+
+    private var isGone: Bool {
+        if case .gone = model.playbackProblem { return true }
+        return false
+    }
+
     /// The speed pill and the mic pill, as the brand's transport draws them.
     private var pills: some View {
         VStack(spacing: 6) {
             HStack(spacing: 8) {
                 speedControl
-                askPill
+                LivePill()
             }
             // Said where it can be seen, not only to VoiceOver: a dimmed pill with no reason
             // beside it reads as a control that is broken.
-            Text("Asking out loud isn’t in the app yet.")
-                .font(Theme.body(12, relativeTo: .caption))
-                .foregroundStyle(Theme.inkSoft)
+            if case .unavailable(let reason) = model.live.availability {
+                Text(reason)
+                    .font(Theme.body(12, relativeTo: .caption))
+                    .foregroundStyle(Theme.inkSoft)
+                    .multilineTextAlignment(.center)
+            } else if !model.live.isRunning, model.live.availability == .available {
+                Text("Headphones recommended: the mic stays open for the whole session.")
+                    .font(Theme.body(12, relativeTo: .caption))
+                    .foregroundStyle(Theme.inkSoft)
+            }
         }
+        .task { await model.checkLiveAvailability() }
     }
 
     /// The same choice the segmented picker offered — any rung of the rate ladder — drawn
@@ -158,27 +207,6 @@ struct PlayerView: View {
         }
         .accessibilityLabel("Speed")
         .accessibilityValue(Format.rate(model.settings.rate))
-    }
-
-    /// The brand's mic pill, shown and switched off.
-    ///
-    /// The transport has it, and this app has nothing behind it: the voice path is a seam
-    /// (`NarrationControl`) with no implementation on the phone. So the pill is drawn
-    /// disabled rather than wired to anything — building push-to-talk is not a restyle. It
-    /// says "just ask", as the web's pill does, rather than the reference's "hold to ask":
-    /// no hold-and-release interaction exists on either client (AGENTS.md, motet#110).
-    private var askPill: some View {
-        Button {} label: {
-            Pill(filled: true) {
-                Image(systemName: "mic.fill").font(.system(size: 12, weight: .semibold))
-                Text("just ask")
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(true)
-        .opacity(0.42)
-        .accessibilityLabel("Just ask")
-        .accessibilityHint("Asking out loud is not available in the app yet.")
     }
 
     private func command(_ command: PlaybackCommand, systemImage: String, label: String) -> some View {

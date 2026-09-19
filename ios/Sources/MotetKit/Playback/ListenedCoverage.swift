@@ -65,4 +65,28 @@ public struct ListenedCoverage: Codable, Hashable, Sendable {
         let needed = (range.upperBound - range.lowerBound) - tolerance
         return coveredLength(of: range) >= max(0, needed)
     }
+
+    /// How far continuous listening reaches from `start`: the upper end of the covered run
+    /// that `start` sits in (or touches), or `start` itself when nothing covers it.
+    ///
+    /// This is the number the server's position may be moved to. The server marks every
+    /// story a reported position has *passed*, so a position is a claim about everything
+    /// before it — and only a run that is unbroken from where the server's frontier already
+    /// is supports that claim. Listening on past a skip extends a *different* run and moves
+    /// nothing, which is the SPA's rule ("only continuous listening from the frontier
+    /// already heard moves the position", AGENTS.md).
+    ///
+    /// A gap of up to `bridgingMs` is stepped over: a resume from a stall, an interruption or
+    /// the player's own jitter on play leaves a sub-second hole that is not a skip, and
+    /// without the bridge one such hole would pin the server's position there for the rest
+    /// of the episode. A second is far below anything a skip moves, so a skipped story still
+    /// stops it.
+    public func frontier(from start: Int, bridgingMs: Int = 1_000) -> Int {
+        var reach = start
+        for range in ranges where range.upperBound >= reach {
+            guard range.lowerBound <= reach + bridgingMs else { break }
+            reach = max(reach, range.upperBound)
+        }
+        return reach
+    }
 }

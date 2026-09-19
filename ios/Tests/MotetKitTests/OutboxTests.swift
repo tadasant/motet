@@ -128,6 +128,9 @@ actor GatedAPI: MotetAPI {
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse {
         MarkListenedResponse(episodeId: id, newsItemsMarkedRead: 0)
     }
+    func setPlaybackPosition(episodeId: String, listenedThroughMs: Int) async throws -> ListenProgressResponse {
+        ListenProgressResponse(episodeId: episodeId, listenedThroughMs: listenedThroughMs, newsItemsMarkedRead: 0)
+    }
     func listNewsItems() async throws -> [NewsItemResponse] { [] }
     func pasteSource(title: String, text: String) async throws -> SourceItemResponse {
         SourceItemResponse(id: "source", state: "pending", title: title)

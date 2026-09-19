@@ -550,9 +550,10 @@ generator names its endpoint function from the summary, and FastAPI would derive
 for both routes.
 
 **The value is monotonic, so it is the *furthest* point rather than the playhead**, and the
-distinction is the one thing to get right when wiring a client to it. The iOS store keeps
-both — `spokenThroughMs`, which moves backwards when the listener seeks back, and
-`furthestSpokenMs`, which does not — and the server's column is the second of those. That is
+distinction is the one thing to get right when wiring a client to it. The iOS app keeps
+its playhead, which moves backwards when the listener seeks back, on the device, and reports
+the end of the listening that is unbroken from the server's value (`ListenedCoverage.frontier`)
+— never the playhead, and never a point past a story it skipped. That is
 why the API does not spell this field `spoken_through_ms` however much a client would like it
 to: the same name for two different quantities across the client boundary is worse than two
 names for one. A last-write-wins playhead would also be the wrong thing to sync, because a
@@ -2070,7 +2071,8 @@ desk, with the transcript beside it.
 - **It resumes from `listened_through_ms` and writes `PUT …/position`**, the position
   resource a syncing player wants, so listening here moves the shelf and marks stories
   read as their segments pass. It is the first client to write the position from real
-  playback — iOS keeps its own and RSS clients cannot report. It reports every ten seconds
+  playback — the iOS app does the same by the same rule (`ios/README.md`, "Playback position
+  is cross-device") and RSS clients cannot report. It reports every ten seconds
   of playback and flushes on pause, on the end and on leaving the screen; a refused report
   is not retried per tick, because the next one carries the same frontier.
 - **Only continuous listening from the frontier already heard moves the position.** The
@@ -2164,6 +2166,13 @@ Deliberately not built, each for a stated reason: a **startup probe that the rea
 is billable** is a vendor connection per instance start and belongs with the decision to
 deploy the service at all; **streaming the composed arm's reply** (2–5 s of silence today)
 waits on whether the composed arm is the default.
+
+**The iOS app has the same client**, ported rule for rule into MotetKit (`LiveSession`) with
+the socket and audio in `MotetPlayback` — a second client of the existing session contract,
+not a new one: the same mint route, the same frames, no vendor named (`ios/README.md`,
+"Play Live is built on the phone, as on the web"). Its open questions are the web's, plus the
+ones only a phone asks — how AirPods route while the mic is open, and whether the echo
+canceller hears the narration.
 
 **Open for the design session, with what runs today:** the default arm given realtime cost
 (`composed`); open mic relying on browser echo cancellation vs headphones (open mic,
