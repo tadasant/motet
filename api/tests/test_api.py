@@ -19,7 +19,7 @@ import podcastparser
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from motet_api import app
+from motet_api import app, deps
 from motet_api.deps import reset_store
 from motet_api.feed import ARTWORK_PATH, artwork_bytes, artwork_version
 from motet_api.main import HEALTH_PATH
@@ -674,6 +674,199 @@ class TestEndToEnd:
 
         feed = api.get("/feed.xml", params={"token": token})
         assert feedparser.parse(feed.text).entries == []
+
+
+class TestEpisodeAudio:
+    """What a media element gets from the audio route — the thing a phone refused."""
+
+    def _rendered(self, api: TestClient, url: str) -> tuple[str, str, int]:
+        api.post(
+            "/v1/sources/paste",
+            json={"title": NEWSLETTER[0], "text": NEWSLETTER[1]},
+            headers=AUTH,
+        )
+        run_pipeline(url)
+        episode_id = api.post(
+            "/v1/episodes", json={"title": "E", "max_duration_ms": 600_000}, headers=AUTH
+        ).json()["id"]
+        run_pipeline(url)
+        episode = api.get(f"/v1/episodes/{episode_id}", headers=AUTH).json()
+        assert episode["state"] == "ready"
+        token = api.get("/v1/feed", headers=AUTH).json()["token"]
+        return episode_id, token, int(episode["audio_bytes"])
+
+    def test_safaris_opening_probe_gets_a_partial_response(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        """WebKit opens media with `bytes=0-1` and will not play a server that ignores it."""
+        episode_id, token, size = self._rendered(api, _migrated)
+        whole = api.get(f"/v1/episodes/{episode_id}/audio", params={"token": token})
+        assert whole.status_code == 200
+        assert whole.headers["accept-ranges"] == "bytes"
+
+        probe = api.get(
+            f"/v1/episodes/{episode_id}/audio",
+            params={"token": token},
+            headers={"Range": "bytes=0-1"},
+        )
+        assert probe.status_code == 206
+        assert probe.headers["content-range"] == f"bytes 0-1/{size}"
+        assert probe.headers["content-length"] == "2"
+        assert probe.headers["content-type"] == whole.headers["content-type"]
+        assert probe.content == whole.content[:2]
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("bytes=10-", (10, None)),
+            ("bytes=-5", (-5, None)),
+            ("bytes=3-7", (3, 8)),
+            ("bytes=0-99999999", (0, None)),
+        ],
+    )
+    def test_ranges_slice_the_body(
+        self,
+        api: TestClient,
+        _migrated: str,
+        header: str,
+        expected: tuple[int, int | None],
+    ) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        path = f"/v1/episodes/{episode_id}/audio"
+        whole = api.get(path, params={"token": token}).content
+        part = api.get(path, params={"token": token}, headers={"Range": header})
+        assert part.status_code == 206
+        assert part.content == whole[expected[0] : expected[1]]
+        start = size - 5 if expected[0] < 0 else expected[0]
+        end = start + len(part.content) - 1
+        assert part.headers["content-range"] == f"bytes {start}-{end}/{size}"
+
+    def test_a_range_past_the_end_is_416_with_the_length(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        response = api.get(
+            f"/v1/episodes/{episode_id}/audio",
+            params={"token": token},
+            headers={"Range": f"bytes={size}-"},
+        )
+        assert response.status_code == 416
+        assert response.headers["content-range"] == f"bytes */{size}"
+
+    @pytest.mark.parametrize("header", ["bytes=5-3", "bytes=" + "9" * 5000 + "-", "items=0-1"])
+    def test_an_invalid_range_is_ignored_not_an_error(
+        self, api: TestClient, _migrated: str, header: str
+    ) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        response = api.get(
+            f"/v1/episodes/{episode_id}/audio", params={"token": token}, headers={"Range": header}
+        )
+        assert response.status_code == 200
+        assert len(response.content) == size
+
+    def test_an_empty_suffix_is_unsatisfiable(self, api: TestClient, _migrated: str) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        response = api.get(
+            f"/v1/episodes/{episode_id}/audio",
+            params={"token": token},
+            headers={"Range": "bytes=-0"},
+        )
+        assert response.status_code == 416
+        assert response.headers["content-range"] == f"bytes */{size}"
+
+    def test_a_multi_range_request_gets_the_whole_body(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        episode_id, token, size = self._rendered(api, _migrated)
+        response = api.get(
+            f"/v1/episodes/{episode_id}/audio",
+            params={"token": token},
+            headers={"Range": "bytes=0-1, 4-5"},
+        )
+        assert response.status_code == 200
+        assert len(response.content) == size
+
+    def test_audio_gone_from_storage_is_410_not_a_redirect_into_a_404(
+        self, api: TestClient, _migrated: str, object_store: Any
+    ) -> None:
+        """Staging's bucket deletes audio after its retention; the route used to sign anyway."""
+        episode_id, token, _ = self._rendered(api, _migrated)
+        signed: list[str] = []
+
+        class SigningStore:
+            def exists(self, key: str) -> bool:
+                return False
+
+            def signed_url(self, key: str, *, ttl_seconds: int | None = None) -> str:
+                signed.append(key)
+                return "https://storage.example/object?sig=x"
+
+        app.dependency_overrides[deps.store] = SigningStore
+        try:
+            response = api.get(
+                f"/v1/episodes/{episode_id}/audio",
+                params={"token": token},
+                follow_redirects=False,
+            )
+        finally:
+            app.dependency_overrides.pop(deps.store, None)
+        assert response.status_code == 410
+        assert "no longer in storage" in response.json()["detail"]
+        assert signed == []
+
+    def test_a_present_object_still_redirects(self, api: TestClient, _migrated: str) -> None:
+        episode_id, token, _ = self._rendered(api, _migrated)
+
+        class SigningStore:
+            def exists(self, key: str) -> bool:
+                return True
+
+            def signed_url(self, key: str, *, ttl_seconds: int | None = None) -> str:
+                return "https://storage.example/object?sig=x"
+
+        app.dependency_overrides[deps.store] = SigningStore
+        try:
+            response = api.get(
+                f"/v1/episodes/{episode_id}/audio",
+                params={"token": token},
+                follow_redirects=False,
+            )
+        finally:
+            app.dependency_overrides.pop(deps.store, None)
+        assert response.status_code == 307
+        assert response.headers["location"] == "https://storage.example/object?sig=x"
+
+    def test_a_store_that_cannot_answer_still_redirects(
+        self, api: TestClient, _migrated: str
+    ) -> None:
+        """The existence check may only make a failure clearer, never cause one."""
+        episode_id, token, _ = self._rendered(api, _migrated)
+
+        class FlakyStore:
+            def exists(self, key: str) -> bool:
+                raise RuntimeError("metadata read refused")
+
+            def signed_url(self, key: str, *, ttl_seconds: int | None = None) -> str:
+                return "https://storage.example/object?sig=x"
+
+        app.dependency_overrides[deps.store] = FlakyStore
+        try:
+            response = api.get(
+                f"/v1/episodes/{episode_id}/audio",
+                params={"token": token},
+                follow_redirects=False,
+            )
+        finally:
+            app.dependency_overrides.pop(deps.store, None)
+        assert response.status_code == 307
+
+    def test_a_local_object_deleted_under_the_episode_is_410(
+        self, api: TestClient, _migrated: str, object_store: Any
+    ) -> None:
+        episode_id, token, _ = self._rendered(api, _migrated)
+        object_store.clear()
+        response = api.get(f"/v1/episodes/{episode_id}/audio", params={"token": token})
+        assert response.status_code == 410
 
 
 class TestFeedTokens:

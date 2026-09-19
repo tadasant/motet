@@ -449,6 +449,31 @@ export const api = {
    */
   audioUrl: (id: string, feedToken: string) =>
     `${apiBaseUrl()}/v1/episodes/${encodeURIComponent(id)}/audio?token=${encodeURIComponent(feedToken)}`,
+  // Why a media element could not load the audio route, which the element itself cannot
+  // say: `error` carries no status. Asked only after a failure. `redirect: 'manual'` stops at
+  // the API's own answer — a redirect means the object is there and the failure was the
+  // browser's — and the body is never read, so a local backend's 200 is not downloaded.
+  // Null when the route did not refuse, or could not be asked within ten seconds.
+  audioProblem: async (id: string, feedToken: string): Promise<string | null> => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 10_000)
+    try {
+      const response = await fetch(api.audioUrl(id, feedToken), {
+        redirect: 'manual',
+        signal: controller.signal,
+      })
+      // The feed token in the URL is refused: rotated while this page was open.
+      if (response.status === 401) return 'The private feed link has changed since this page loaded. Reload to play.'
+      if (response.status !== 404 && response.status !== 410) return null
+      const body = (await response.json().catch(() => null)) as { detail?: unknown } | null
+      return typeof body?.detail === 'string' ? body.detail : 'The API has no audio for this episode.'
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  },
   // Play Live. Asked first, so an environment with no voice service shows a disabled
   // button with a reason and never reaches for a host that does not exist (motet#93).
   voiceStatus: () => apiGet('/v1/voice'),

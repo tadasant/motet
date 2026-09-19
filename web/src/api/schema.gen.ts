@@ -604,6 +604,16 @@ export interface paths {
          *     returns ``None``. A podcast client cannot tell the difference — it follows the
          *     redirect — so the enclosure URL in the feed is stable across both, and a signed URL's
          *     expiry never ends up cached inside a feed document.
+         *
+         *     **The object is asked for before a URL is signed for it.** A signed URL is minted
+         *     without touching the object, so a redirect used to be issued for audio a bucket's
+         *     retention rule had already deleted: the browser followed it into the store's 404,
+         *     which an ``<audio>`` element reports as nothing more specific than "could not load" —
+         *     and the episode screen then blamed the browser. A 410 here, with a sentence, is what
+         *     lets the player say the audio is gone rather than broken. It costs one metadata read
+         *     per request to this route: Chrome asks it once per load and sends its range requests to
+         *     the signed URL, and WebKit may come back to it on a seek, which then pays the read
+         *     beside the signing it already paid for.
          */
         get: operations["episode_audio_v1_episodes__episode_id__audio_get"];
         put?: never;
@@ -4453,8 +4463,31 @@ export interface operations {
                     "audio/mpeg": unknown;
                 };
             };
+            /** @description One byte range of the audio */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/mpeg": unknown;
+                };
+            };
             /** @description Redirect to a time-limited signed URL */
             307: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The audio was rendered once and is no longer in storage */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested byte range is outside the audio */
+            416: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -150,6 +150,7 @@ export function EpisodeScreen({
           key={episode.id}
           episode={episode}
           src={api.audioUrl(episode.id, feed.token)}
+          diagnose={() => api.audioProblem(episode.id, feed.token)}
           audioRef={player}
           autoPlay={autoPlay}
           micSlot={setMicSlot}
@@ -233,6 +234,10 @@ export function EpisodeScreen({
   )
 }
 
+/** The element failed and the route did not refuse: the file is there, this browser balked. */
+export const COULD_NOT_PLAY =
+  'This episode\u2019s audio is there, but this browser could not load or play it just now. The podcast feed below has the same file.'
+
 /** What the speed pill steps through, in order, from 1×. */
 const SPEEDS = [1, 1.2, 1.5, 2, 0.8]
 
@@ -240,12 +245,11 @@ const SPEEDS = [1, 1.2, 1.5, 2, 0.8]
  * The in-page player: resume from the server's position, report the furthest point played.
  *
  * **Pointed at the route, not fetched into a blob.** The prototype fetched the audio into
- * a blob URL because the local storage backend serves no `Range` and a browser treats that
- * as unseekable. But a deployed API answers the route with a 307 to a signed URL on the
+ * a blob URL because the local storage backend served no `Range` and a browser treats that
+ * as unseekable (it serves one now). But a deployed API answers the route with a 307 to a signed URL on the
  * object store's origin, and a `fetch` of that needs CORS on the bucket — which nothing
  * grants — so the player would have silently not appeared anywhere but a laptop. A media
  * element follows the redirect without CORS and gets real range support from the store.
- * Locally, seeking is limited to what has buffered; that is the dev path only.
  *
  * **Only continuous listening from what has already been heard moves the position.** The
  * server marks read every story whose segment the position has *passed*, so a reported
@@ -261,6 +265,7 @@ const SPEEDS = [1, 1.2, 1.5, 2, 0.8]
 function Player({
   episode,
   src,
+  diagnose,
   audioRef,
   autoPlay,
   micSlot,
@@ -268,6 +273,8 @@ function Player({
 }: {
   episode: Episode
   src: string
+  /** Asks the route why the element could not load it: the API's sentence, or null. */
+  diagnose: () => Promise<string | null>
   audioRef: RefObject<HTMLAudioElement | null>
   autoPlay: boolean
   /** Receives the transport's pill slot, which Play Live renders its mic pill into. */
@@ -320,7 +327,10 @@ function Player({
   const [rate, setRate] = useState(1)
   // The browser's own controls used to show a broken player when the audio could not load;
   // the transport has to say so itself, or its play circle is a button that does nothing.
-  const [failed, setFailed] = useState(false)
+  // What it says is the API's reason where the route refused — audio that retention removed
+  // is not a broken browser, and the feed below cannot serve it either — and a sentence
+  // about this browser where the route answered and the element still could not play it.
+  const [failure, setFailure] = useState<string | null>(null)
   const duration = episode.duration_ms
   const played = duration > 0 ? Math.min(100, (at / duration) * 100) : 0
 
@@ -385,11 +395,14 @@ function Player({
         src={src}
         onPlay={() => {
           setPlaying(true)
-          setFailed(false)
+          setFailure(null)
         }}
         onError={() => {
           setPlaying(false)
-          setFailed(true)
+          setFailure(COULD_NOT_PLAY)
+          void diagnose().then((reason) => {
+            if (reason) setFailure(reason)
+          })
         }}
         onLoadedMetadata={(event) => {
           const el = event.currentTarget
@@ -430,9 +443,9 @@ function Player({
           flush()
         }}
       />
-      {failed && (
+      {failure && (
         <p className="error" role="alert">
-          This episode&rsquo;s audio could not be loaded. The podcast feed below still has it.
+          {failure}
         </p>
       )}
       {resumeAt > 0 && (

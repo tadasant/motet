@@ -140,6 +140,29 @@ const PHASE_LABEL: Record<Phase, string> = {
   error: 'error',
 }
 
+/** The session's AudioContext, at the rate the service speaks where the browser allows it. */
+function openAudioContext(): AudioContext {
+  try {
+    return new AudioContext({ sampleRate: TARGET_RATE })
+  } catch {
+    return new AudioContext()
+  }
+}
+
+/**
+ * Let a later, gesture-less `play()` through on browsers that gate playback per element.
+ *
+ * WebKit lifts an element's user-gesture restriction the first time `play()` is called inside
+ * a tap, whether or not that play goes on to produce sound — so playing and pausing in the
+ * same tick unlocks the element without a word of narration escaping. Only while paused: a
+ * listener already playing has unlocked it, and pausing them would be a bug of our own.
+ */
+export function primePlayback(el: HTMLAudioElement) {
+  if (!el.paused) return
+  el.play()?.catch(() => undefined)
+  el.pause()
+}
+
 export function Live({
   episode,
   player,
@@ -287,7 +310,33 @@ export function Live({
     // the owner (motet#93), and this is the one line that would change.
     send({ type: 'narration_resumed', spoken_through_ms: position() })
     pausedByUs.current = false
-    void el.play().then(() => setPhaseBoth('narrating'))
+    startPlayer(el)
+  }
+
+  /**
+   * Play the narration from a socket event, which is not a tap. The start primed the element
+   * so a browser that insists on a gesture (iOS Safari) allows this; where it still refuses,
+   * the session is told narration is paused — the frame a listener's own pause sends — and
+   * the player's play button, a real tap, resumes it through the ordinary `narration_resumed`
+   * path. Unhandled, the refusal left the pill on "connecting" with nothing playing.
+   */
+  const startPlayer = (el: HTMLAudioElement) => {
+    const mine = generation.current
+    const played = el.play()
+    if (!played) {
+      setPhaseBoth('narrating')
+      return
+    }
+    played.then(
+      () => setPhaseBoth('narrating'),
+      () => {
+        // A refusal that lands after a stop, or after a newer Play Live, is not this session's.
+        if (!ws.current || generation.current !== mine) return
+        send({ type: 'narration_paused', spoken_through_ms: position() })
+        setPhaseBoth('paused')
+        push({ kind: 'event', text: 'the browser would not start the narration — press play' })
+      },
+    )
   }
 
   const playReply = async (event: Extract<SessionEvent, { type: 'audio_chunk' }>) => {
@@ -327,7 +376,7 @@ export function Live({
     send({ type: 'narration_delivered', duration_ms: episode.duration_ms })
     send({ type: 'playback_position', spoken_through_ms: position() })
     pausedByUs.current = false
-    void el.play().then(() => setPhaseBoth('narrating'))
+    startPlayer(el)
   }
 
   const handleEvent = (event: SessionEvent) => {
@@ -523,7 +572,15 @@ export function Live({
   }
 
   const start = async () => {
-    if (!player.current) return
+    const el = player.current
+    if (!el) return
+    // Everything a browser only allows inside a tap happens here, before the first await.
+    // iOS Safari starts an AudioContext made outside a gesture suspended — no reply audio,
+    // and a suspended context never runs the processor that feeds the mic to the socket —
+    // and refuses `play()` on the element when the session's `ready` arrives over the socket
+    // seconds later. Left until after the mint's round trip, both fail silently on a phone.
+    primePlayback(el)
+    let audio: AudioContext | null = null
     setError('')
     setTurnError('')
     setLiveUnavailable(null)
@@ -536,27 +593,20 @@ export function Live({
     const abandoned = () => generation.current !== mine
     setPhaseBoth('connecting')
     try {
+      audio = openAudioContext()
+      void audio.resume().catch(() => undefined)
       const session = await api.startVoiceSession(episode.id, position())
-      if (abandoned()) return
+      if (abandoned()) {
+        void audio.close().catch(() => undefined)
+        return
+      }
       setArm(`${session.arm}${session.conversational ? '' : ' (text turns only)'}`)
-      let audio: AudioContext
-      try {
-        audio = new AudioContext({ sampleRate: TARGET_RATE })
-      } catch {
-        audio = new AudioContext()
-      }
-      let opened: { stream: MediaStream; node: ScriptProcessorNode }
-      try {
-        opened = await startMic(audio)
-      } catch (err) {
-        void audio.close()
-        throw err
-      }
+      const opened = await startMic(audio)
       if (abandoned()) {
         // Stopped or unmounted while the mic permission was pending: release what we took.
         opened.node.disconnect()
         opened.stream.getTracks().forEach((track) => track.stop())
-        void audio.close()
+        void audio.close().catch(() => undefined)
         return
       }
       ctx.current = audio
@@ -564,6 +614,9 @@ export function Live({
       processor.current = opened.node
       openSocket(session)
     } catch (err) {
+      // Made before the first await, so every exit that did not hand it to the session
+      // releases it; one that did is closed by the teardown below.
+      if (audio && ctx.current !== audio) void audio.close().catch(() => undefined)
       if (abandoned()) return
       setError(err instanceof Error ? err.message : String(err))
       teardown()

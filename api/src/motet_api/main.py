@@ -1926,13 +1926,17 @@ def feed_artwork(request: Request) -> Response:
     response_class=Response,
     responses={
         200: {"content": {"audio/mpeg": {}}, "description": "The episode audio"},
+        206: {"content": {"audio/mpeg": {}}, "description": "One byte range of the audio"},
         307: {"description": "Redirect to a time-limited signed URL"},
+        410: {"description": "The audio was rendered once and is no longer in storage"},
+        416: {"description": "The requested byte range is outside the audio"},
     },
 )
 def episode_audio(
     conn: Conn,
     user_id: FeedUser,
     blobs: Store,
+    request: Request,
     episode_id: Annotated[str, Path()],
 ) -> Response:
     """Serve an episode's audio, or redirect to a signed URL for it.
@@ -1942,10 +1946,23 @@ def episode_audio(
     returns ``None``. A podcast client cannot tell the difference — it follows the
     redirect — so the enclosure URL in the feed is stable across both, and a signed URL's
     expiry never ends up cached inside a feed document.
+
+    **The object is asked for before a URL is signed for it.** A signed URL is minted
+    without touching the object, so a redirect used to be issued for audio a bucket's
+    retention rule had already deleted: the browser followed it into the store's 404,
+    which an ``<audio>`` element reports as nothing more specific than "could not load" —
+    and the episode screen then blamed the browser. A 410 here, with a sentence, is what
+    lets the player say the audio is gone rather than broken. It costs one metadata read
+    per request to this route: Chrome asks it once per load and sends its range requests to
+    the signed URL, and WebKit may come back to it on a seek, which then pays the read
+    beside the signing it already paid for.
     """
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     if episode is None or not episode.has_audio or episode.audio_key is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This episode has no audio yet.")
+
+    if not _audio_present(blobs, episode.id, episode.audio_key):
+        raise HTTPException(status.HTTP_410_GONE, AUDIO_GONE_DETAIL)
 
     signed = blobs.signed_url(episode.audio_key)
     if signed is not None:
@@ -1954,18 +1971,82 @@ def episode_audio(
         data = blobs.get(episode.audio_key)
     except StorageError as exc:
         logger.error("episode %s audio is missing from storage: %s", episode.id, exc)
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "This episode's audio is no longer available."
-        ) from exc
-    # Deliberately no `Accept-Ranges: bytes`. Podcast clients do range-request large files,
-    # but this branch serves the whole body and ignores `Range` — advertising support we do
-    # not have would tell a resuming client it had resumed when it had started over. The
-    # deployed backend hands out a signed URL above and gets real range support from object
-    # storage; this path is dev and CI only.
+        raise HTTPException(status.HTTP_410_GONE, AUDIO_GONE_DETAIL) from exc
+    return _byte_range_response(
+        data, episode.audio_media_type or "audio/mpeg", request.headers.get("range")
+    )
+
+
+AUDIO_GONE_DETAIL: Final = (
+    "This episode's audio is no longer in storage: it was rendered, and has since been "
+    "removed. Its stories are still in your backlog."
+)
+
+
+def _audio_present(blobs: ObjectStore, episode_id: str, key: str) -> bool:
+    """Whether the rendered object is still there. Unanswerable counts as present.
+
+    A store that cannot answer — a transient error, a permission the metadata read needs
+    and the signed URL does not — falls through to the redirect the route always issued,
+    so this check can only ever turn a certain failure into a clearer one.
+    """
+    try:
+        present = blobs.exists(key)
+    except Exception as exc:  # noqa: BLE001 - see the docstring: never worse than before
+        logger.warning("could not ask storage whether episode %s audio exists: %s", episode_id, exc)
+        return True
+    if not present:
+        logger.warning("episode %s is rendered but its audio is gone from storage", episode_id)
+    return present
+
+
+# Bounded, and ASCII: `int()` refuses a string of more than 4300 digits, and `\d` alone would
+# also match digits from other scripts. Eighteen is a byte offset far past any audio file.
+_RANGE = re.compile(r"^\s*bytes\s*=\s*([0-9]{0,18})\s*-\s*([0-9]{0,18})\s*$", re.ASCII)
+
+
+def _byte_range_response(data: bytes, media_type: str, range_header: str | None) -> Response:
+    """The whole body, or the one byte range asked for — the local backend's serving path.
+
+    **Safari will not play media from a server that ignores ``Range``.** WebKit opens a
+    media resource with ``Range: bytes=0-1`` and, answered with a 200 and the whole body,
+    iOS Safari reports the source as unplayable, where Chrome plays it without a
+    complaint — so the dev path could not be tried on a phone at all. The deployed backend
+    redirects to object storage above and gets ranges from the store; this is the path
+    for the local backend, where the bytes are already in memory.
+
+    One range only. A multi-range request is answered with the whole body, which the
+    specification allows and every media client accepts; a range that starts past the end
+    is a 416 carrying the length, so a client can recover.
+    """
+    total = len(data)
+    headers = {"Accept-Ranges": "bytes"}
+    match = _RANGE.match(range_header) if range_header else None
+    if match is not None and match.group(1) and match.group(2):
+        # `last < first` is not a range at all (RFC 9110 §14.1.1): ignored, like a malformed one.
+        if int(match.group(2)) < int(match.group(1)):
+            match = None
+    if match is None or (not match.group(1) and not match.group(2)):
+        headers["Content-Length"] = str(total)
+        return Response(content=data, media_type=media_type, headers=headers)
+    first, last = match.group(1), match.group(2)
+    if first:
+        start = int(first)
+        end = min(int(last), total - 1) if last else total - 1
+    else:
+        # `bytes=-N`: the final N bytes.
+        start = max(0, total - int(last))
+        end = total - 1
+    if start >= total or end < start:
+        headers["Content-Range"] = f"bytes */{total}"
+        return Response(status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE, headers=headers)
+    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(end - start + 1)
     return Response(
-        content=data,
-        media_type=episode.audio_media_type or "audio/mpeg",
-        headers={"Content-Length": str(len(data))},
+        content=data[start : end + 1],
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
+        media_type=media_type,
+        headers=headers,
     )
 
 

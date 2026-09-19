@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Episode } from '../api/client'
-import { EpisodeScreen } from './EpisodeScreen'
+import { COULD_NOT_PLAY, EpisodeScreen } from './EpisodeScreen'
 
 /** 31:05 long, two segments, played to 12:30. */
 const EPISODE: Episode = {
@@ -37,7 +37,8 @@ const EPISODE: Episode = {
   ],
 }
 
-function mockApi() {
+/** What the audio route answers a diagnosis: a redirect by default, as a deployed API does. */
+function mockApi(audio: { status: number; detail?: string } = { status: 0 }) {
   const calls: { url: string; method: string; body: unknown }[] = []
   vi.stubGlobal(
     'fetch',
@@ -48,6 +49,10 @@ function mockApi() {
       calls.push({ url, method, body })
       let payload: unknown = { detail: 'not found' }
       let ok = true
+      if (url.includes('/audio?token=')) {
+        // `redirect: 'manual'` turns the 307 into an opaque response with status 0.
+        return { ok: false, status: audio.status, json: async () => ({ detail: audio.detail }) } as Response
+      }
       if (url.endsWith('/v1/feed')) {
         payload = { url: 'https://example.test/feed.xml?token=f33d', token: 'f33d' }
       } else if (url.endsWith('/listened')) {
@@ -376,14 +381,37 @@ describe('the player transport (motet#110)', () => {
   })
 
   it('says so when the audio cannot load, rather than leaving a play button that does nothing', async () => {
-    mockApi()
+    const calls = mockApi()
     renderScreen()
     const audio = await findAudio()
 
     fireEvent.play(audio)
     fireEvent.error(audio)
-    expect((await screen.findByRole('alert')).textContent).toContain('could not be loaded')
+    expect((await screen.findByRole('alert')).textContent).toBe(COULD_NOT_PLAY)
     expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy()
+    // The route was asked why, and answered with a redirect: the file is there.
+    await waitFor(() => expect(calls.some((call) => call.url.includes('/audio?token=f33d'))).toBe(true))
+    expect(screen.getByRole('alert').textContent).toBe(COULD_NOT_PLAY)
+  })
+
+  it('says the feed link changed when the route refuses its token, rather than blaming the browser', async () => {
+    mockApi({ status: 401 })
+    renderScreen()
+    fireEvent.error(await findAudio())
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('feed link has changed'))
+  })
+
+  it("shows the API's reason when the audio is gone from storage, not a browser fault", async () => {
+    // Staging's bucket deletes audio after its retention window; the route says 410.
+    mockApi({ status: 410, detail: "This episode's audio is no longer in storage." })
+    renderScreen()
+    const audio = await findAudio()
+
+    fireEvent.error(audio)
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toBe("This episode's audio is no longer in storage."),
+    )
+    expect(screen.getByRole('alert').textContent).not.toContain('podcast feed')
   })
 
   it('draws Play Live as the mic pill inside the transport, once', async () => {
