@@ -234,3 +234,70 @@ export function takeState(): string {
 export function stateMatches(expected: string, received: string): boolean {
   return expected === '' || expected === received
 }
+
+/**
+ * Whether a mailbox or connector consent landing here was begun by the iOS app rather than
+ * by this tab — read without forgetting anything, because the callback screen that runs
+ * next still takes the state.
+ *
+ * Two things have to hold. This is an iPhone or iPad, since the app's system sign-in sheet
+ * is the only place such a consent is begun somewhere other than a browser tab; a desktop
+ * browser that lost its storage keeps exactly the exchange it always made. And this tab
+ * remembers no state at all: the sheet is a fresh browsing context with an empty
+ * sessionStorage, while a tab that remembers a *different* state began something itself
+ * and keeps the refusal `stateMatches` gives it. Storage that throws answers `false` for
+ * the same reason — the sheet's storage works, so a browser whose storage does not is not
+ * the sheet. See `appConsentHandoffUrl`.
+ */
+export function consentBegunElsewhere(userAgent: string = window.navigator.userAgent): boolean {
+  if (!isAppleMobile(userAgent)) return false
+  try {
+    return !window.sessionStorage.getItem(STATE_STORAGE_KEY)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * iPhone, iPod or iPad. iPadOS asks for the desktop site by default and says "Macintosh",
+ * so an iPad is told apart from a Mac by having a touch screen.
+ */
+function isAppleMobile(userAgent: string): boolean {
+  if (/iPhone|iPad|iPod/.test(userAgent)) return true
+  return /Macintosh/.test(userAgent) && (window.navigator.maxTouchPoints ?? 0) > 1
+}
+
+/**
+ * Where a consent the iOS app began is handed back to it: `motet://consent`, carrying
+ * exactly what Google put on this page.
+ *
+ * Google returns every consent to this web page — the one redirect URI registered on the
+ * OAuth client — and the app's sheet waits for this custom-scheme link rather than for
+ * Google's redirect itself. A custom scheme is the callback every iOS version catches
+ * with no associated-domain verification, which is what the https callback the app first
+ * used depended on, and what nobody could see failing on a phone (2026-09-19).
+ *
+ * **A code in a custom-scheme URL is safe to hand over here, where a sign-in's was not.**
+ * Another app can register `motet`, but finishing a consent is `POST
+ * /v1/sources/callback` (or the connectors' route), which needs an allowlisted Motet
+ * session, and the code is redeemed with a PKCE verifier (and, for Google, a client secret)
+ * that never leaves the API. An intercepted code is therefore worth nothing to the app that
+ * took it. Sign-in's code *becomes* a session, which is why it needed more.
+ *
+ * Keep the scheme and host in step with `ConsentCallback` in the iOS app's MotetKit.
+ */
+export const APP_CONSENT_URL = 'motet://consent'
+
+export function appConsentHandoffUrl(callback: Exclude<OAuthCallback, { kind: 'empty' }>): string {
+  const params = new URLSearchParams()
+  if (callback.kind === 'denied') {
+    params.set('error', callback.error)
+    if (callback.description) params.set('error_description', callback.description)
+    params.set('state', callback.state)
+  } else {
+    params.set('code', callback.code)
+    params.set('state', callback.state)
+    if (callback.iss) params.set('iss', callback.iss)
+  }
+  return `${APP_CONSENT_URL}?${params.toString()}`
+}

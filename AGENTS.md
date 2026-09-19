@@ -2457,15 +2457,28 @@ registrations live in the private repo and nothing in this one can tell you it b
 Google matches the string exactly, so in dev the app has to be reached at `localhost` and
 not `127.0.0.1`.
 
-**The phone uses the same registered path, and catches it before the page loads.** The iOS
+**The phone uses the same registered path, and the page hands the consent back.** The iOS
 Sources tab connects a mailbox, re-consents for label sync and authorizes an MCP server by
 passing the web app's `/oauth/callback` as the redirect URI and opening the consent in the
-system sign-in sheet with an https callback on that host and path — the `webcredentials`
-association the sign-in handoff already needs. iOS hands the redirect to the app instead of
-loading it, and the app finishes the consent at the same API route with its own session. No
-redirect URI is registered for the app and no route was added for it; where the association
-is not in force the app sends the person to the web app. `ios/README.md`, "Sources and
-connectors on the phone".
+system sign-in sheet, told to finish on `motet://consent`. The callback page, loaded inside
+the sheet on an iPhone, remembers no state in its empty sessionStorage — which is how it
+knows the consent is the app's (`consentBegunElsewhere`) — so it exchanges nothing and forwards
+Google's query to that link (`AppConsentHandoff`); the app finishes the consent at the same
+API route with its own session. A tab that remembers a *different* state keeps the old
+refusal, and a person who really did begin it in another tab can press "Finish here
+instead". No redirect URI is registered for the app and no route was added for it.
+`ios/README.md`, "Sources and connectors on the phone".
+
+**It first waited for an https callback on that host and path, and that is what failed on a
+phone** (Tadas, 2026-09-19: "the iOS app can't do it at all"): iOS honours one only on 17.4+,
+only after verifying the `webcredentials` association, and only if it catches Google's
+cross-site redirect — and where it did not, the page loaded in a sheet with no Motet session
+and the consent died on a 401 the app never saw. The custom scheme that sign-in declined is
+safe here because **a consent's code is worthless without an allowlisted Motet session**
+to finish it with and a PKCE verifier (and, for Google, a client secret) that never leaves
+the API; sign-in's code *becomes* a session, which is why it needed more. The invariant-12
+reading: a second use of the app's existing scheme and one branch on an existing page — no
+route, table, vendor or registration.
 
 Two things there are load-bearing rather than defensive. The **authorization code is
 exchanged exactly once** — StrictMode double-invokes effects, the API consumes the state
@@ -2592,8 +2605,10 @@ not being a job, stated rather than discovered.
 ### The Sources screen is a catalog, and a source row says what it did
 
 `web/src/screens/Sources.tsx`, `web/src/screens/sources/` (motet#90). A card per
-integration — Gmail, Paste, and two honestly disabled "Coming soon" — and one panel under
-the grid for the account(s) behind the one you pick. **The catalog is static**, because
+integration — Gmail, Paste, and two honestly disabled "Coming soon" — and one panel for
+the account(s) behind the one you pick, opened in the grid directly under its card and
+scrolled into view (it used to follow the whole grid, which put the connect form off-screen
+on a phone, 2026-09-19). **The catalog is static**, because
 `GET /v1/sources` lists *accounts* and something not yet connected has no row to render.
 
 The last sync's result, the filter and the first-sync window are motet#94's fields and are

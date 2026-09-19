@@ -2,9 +2,10 @@
 // connect a mailbox.
 //
 // It used to be a list of rows and a form. It is a catalog of what Motet can pull from —
-// Gmail, Paste, and two honestly labelled "Coming soon" — with one panel under the grid
-// for the integration you pick: the account(s) behind it, what each has pulled in and
-// where that went, Sync now, Disconnect, and the connect form (motet#90). The connect
+// Gmail, Paste, and two honestly labelled "Coming soon" — with one panel for the
+// integration you pick, opened in the grid directly under its card: the account(s) behind
+// it, what each has pulled in and where that went, Sync now, Disconnect, and the connect
+// form (motet#90). The connect
 // *flow* is untouched (`sources/ConnectGmail.tsx`, `oauth.ts`, the callback branch in
 // App.tsx); what changed is how it is presented.
 //
@@ -13,7 +14,7 @@
 // every count of held items here says "waiting for you" and points at the Backlog, where
 // the ingest button is.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   ApiError,
@@ -69,6 +70,11 @@ export function Sources({
   const [selected, setSelected] = useState<IntegrationId | null>(null)
   const [connectAnother, setConnectAnother] = useState(false)
   const autoOpened = useRef(false)
+  // Set when a *person* opens a panel, so the panel is brought into view once it renders.
+  // Not for the automatic open on first load: scrolling a page the moment it arrives is a
+  // page that jumps under somebody's thumb.
+  const scrollToPanel = useRef(false)
+  const panelRef = useRef<HTMLDivElement>(null)
 
   /**
    * The sources list is the primary fetch and the only one that can blank the screen.
@@ -145,8 +151,20 @@ export function Sources({
 
   const toggle = (id: IntegrationId) => {
     setConnectAnother(false)
+    scrollToPanel.current = selected !== id
     setSelected((current) => (current === id ? null : id))
   }
+
+  // Pressing Connect or Manage has to *show* something. The panel is the whole answer to
+  // that press, and before this it could open entirely off-screen — under three more cards
+  // on a phone — so all anyone saw was the button flipping between Connect and Close.
+  // Optional call: jsdom has no `scrollIntoView`.
+  useEffect(() => {
+    if (!selected || !scrollToPanel.current) return
+    scrollToPanel.current = false
+    const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    panelRef.current?.scrollIntoView?.({ behavior: still ? 'auto' : 'smooth', block: 'start' })
+  }, [selected])
 
   return (
     <section aria-label="Sources" className="sources">
@@ -172,63 +190,68 @@ export function Sources({
       {sources === null ? (
         <p className="hint">Loading…</p>
       ) : (
+        // The panel is rendered *inside* the grid, straight after the card that opened it,
+        // spanning every column (`grid-auto-flow: dense` backfills the card beside it). It
+        // used to follow the whole grid, which put it below the fold on a phone — see
+        // `toggle`. DOM order is also focus order: the panel comes right after its button.
         <div className="integration-grid">
           {CATALOG.map((integration) => (
-            <IntegrationCard
-              key={integration.id}
-              integration={integration}
-              rows={rowsFor(integration)}
-              selected={selected === integration.id}
-              highlighted={fresh && integration.id === 'gmail'}
-              onSelect={() => toggle(integration.id)}
-              onOpenPaste={() => navigateTo('/paste')}
-            />
+            <Fragment key={integration.id}>
+              <IntegrationCard
+                integration={integration}
+                rows={rowsFor(integration)}
+                selected={selected === integration.id}
+                highlighted={fresh && integration.id === 'gmail'}
+                onSelect={() => toggle(integration.id)}
+                onOpenPaste={() => navigateTo('/paste')}
+              />
+              {selectedIntegration?.id === integration.id && (
+                <div
+                  ref={panelRef}
+                  className="integration-panel"
+                  id={`integration-panel-${selectedIntegration.id}`}
+                  role="region"
+                  aria-label={`${selectedIntegration.name} details`}
+                >
+                  <div className="integration-panel-head">
+                    <IntegrationIcon id={selectedIntegration.id} />
+                    <div>
+                      <h3>{selectedIntegration.name}</h3>
+                      <p className="hint">{selectedIntegration.detail}</p>
+                    </div>
+                    <button type="button" className="linkish close" onClick={() => setSelected(null)}>
+                      Close
+                    </button>
+                  </div>
+
+                  {selectedIntegration.id === 'gmail' && (
+                    <GmailPanel
+                      rows={selectedRows}
+                      held={held}
+                      ingestion={ingestion}
+                      processing={processing}
+                      onRefresh={refresh}
+                      navigate={navigate}
+                      connectAnother={connectAnother}
+                      onConnectAnother={setConnectAnother}
+                      {...(now === undefined ? {} : { now })}
+                    />
+                  )}
+
+                  {selectedIntegration.id === 'paste' && (
+                    <PastePanel
+                      rows={selectedRows}
+                      held={held}
+                      ingestion={ingestion}
+                      processing={processing}
+                      onRefresh={refresh}
+                      {...(now === undefined ? {} : { now })}
+                    />
+                  )}
+                </div>
+              )}
+            </Fragment>
           ))}
-        </div>
-      )}
-
-      {selectedIntegration && sources !== null && (
-        <div
-          className="integration-panel"
-          id={`integration-panel-${selectedIntegration.id}`}
-          role="region"
-          aria-label={`${selectedIntegration.name} details`}
-        >
-          <div className="integration-panel-head">
-            <IntegrationIcon id={selectedIntegration.id} />
-            <div>
-              <h3>{selectedIntegration.name}</h3>
-              <p className="hint">{selectedIntegration.detail}</p>
-            </div>
-            <button type="button" className="linkish close" onClick={() => setSelected(null)}>
-              Close
-            </button>
-          </div>
-
-          {selectedIntegration.id === 'gmail' && (
-            <GmailPanel
-              rows={selectedRows}
-              held={held}
-              ingestion={ingestion}
-              processing={processing}
-              onRefresh={refresh}
-              navigate={navigate}
-              connectAnother={connectAnother}
-              onConnectAnother={setConnectAnother}
-              {...(now === undefined ? {} : { now })}
-            />
-          )}
-
-          {selectedIntegration.id === 'paste' && (
-            <PastePanel
-              rows={selectedRows}
-              held={held}
-              ingestion={ingestion}
-              processing={processing}
-              onRefresh={refresh}
-              {...(now === undefined ? {} : { now })}
-            />
-          )}
         </div>
       )}
     </section>
@@ -236,8 +259,9 @@ export function Sources({
 }
 
 /**
- * Gmail's panel: every mailbox row in full, then the connect form — on its own when there
- * is nothing connected, behind "Connect another mailbox" when there is.
+ * Gmail's panel: the connect form first when nothing is connected, then every mailbox row
+ * in full; with a mailbox connected, the rows first and the form behind "Connect another
+ * mailbox".
  *
  * Order is "needs attention first": an errored or connected mailbox above an abandoned
  * consent attempt, so the row that matters is the one at the top.
@@ -275,28 +299,39 @@ function GmailPanel({
   const connectedCount = rows.filter((row) => row.connected).length
   const anyConnected = connectedCount > 0
 
+  const rowList = ordered.length > 0 && (
+    <ul className="source-rows">
+      {ordered.map((source) => (
+        <li key={source.id}>
+          <SourceDetail
+            source={source}
+            counts={countsFor(source, held, ingestion)}
+            processing={processing}
+            onRefresh={onRefresh}
+            onGoToBacklog={() => navigateTo('/backlog')}
+            {...(now === undefined ? {} : { now })}
+          />
+        </li>
+      ))}
+    </ul>
+  )
+
+  // Nothing connected: the form is the thing to do, so it comes first. Below it are only
+  // abandoned attempts and disconnected mailboxes, and each of those is a full detail block
+  // — above the form, one of them pushed "Connect Gmail" a screen and a half down a phone.
+  if (!anyConnected) {
+    return (
+      <>
+        <ConnectGmail navigate={navigate} />
+        {rowList}
+      </>
+    )
+  }
+
   return (
     <>
-      {ordered.length > 0 && (
-        <ul className="source-rows">
-          {ordered.map((source) => (
-            <li key={source.id}>
-              <SourceDetail
-                source={source}
-                counts={countsFor(source, held, ingestion)}
-                processing={processing}
-                onRefresh={onRefresh}
-                onGoToBacklog={() => navigateTo('/backlog')}
-                {...(now === undefined ? {} : { now })}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {!anyConnected ? (
-        <ConnectGmail navigate={navigate} />
-      ) : connectAnother ? (
+      {rowList}
+      {connectAnother ? (
         <div className="connect-another">
           <div className="row">
             <h4>Connect another mailbox</h4>

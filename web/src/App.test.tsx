@@ -900,6 +900,7 @@ describe('the /oauth/callback landing', () => {
     // exchange would overwrite a success with "already used"; a reload of a URL still
     // carrying the code would do the same.
     const calls = mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true } })
+    window.sessionStorage.setItem('motet.oauthState', 'st_1')
     window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_1')
 
     render(
@@ -915,6 +916,7 @@ describe('the /oauth/callback landing', () => {
 
   it('treats a denied consent as an answer, not as a crash', async () => {
     const calls = mockApi()
+    window.sessionStorage.setItem('motet.oauthState', 'st_1')
     window.history.replaceState({}, '', '/oauth/callback?error=access_denied&state=st_1')
 
     render(<App />)
@@ -927,6 +929,7 @@ describe('the /oauth/callback landing', () => {
     // motet#98. Otherwise the only trace of pressing Cancel is a row reading "waiting for
     // consent" — which is what a live attempt looks like too.
     mockApi()
+    window.sessionStorage.setItem('motet.oauthState', 'st_1')
     window.history.replaceState({}, '', '/oauth/callback?error=access_denied&state=st_1')
     render(<App />)
 
@@ -1003,6 +1006,7 @@ describe('the /oauth/callback landing', () => {
 
   it('hands the user back to the normal UI when it is done', async () => {
     mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true, active: true } })
+    window.sessionStorage.setItem('motet.oauthState', 'st_1')
     window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_1')
     render(<App />)
     await screen.findByText(/is connected/)
@@ -1020,8 +1024,76 @@ describe('the /oauth/callback landing', () => {
     expect(window.history.length).toBe(before)
   })
 
+  describe('begun in the iOS app', () => {
+    const IPHONE =
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+    let userAgent: ReturnType<typeof vi.spyOn>
+    beforeEach(() => {
+      userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(IPHONE)
+    })
+    afterEach(() => userAgent.mockRestore())
+
+    it('hands a consent this tab did not begin back to the app, and exchanges nothing', async () => {
+      // The app opens Google in the system sign-in sheet, which has an empty
+      // sessionStorage, and waits for motet://consent. Exchanging here instead — with no
+      // session in the sheet — was a 401 the app never heard about.
+      const calls = mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true } })
+      window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_app')
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: 'Back to the Motet app' })).toBeDefined()
+      expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
+
+      // Somebody who really did begin it in another tab of this browser can still finish.
+      fireEvent.click(screen.getByRole('button', { name: 'Finish here instead' }))
+      expect(await screen.findByText(/is connected/)).toBeDefined()
+      expect(calls.filter((call) => call.url.includes('/v1/sources/callback'))).toHaveLength(1)
+    })
+
+    it('hands back a connector authorization too, and it finishes at the connector route', async () => {
+      const calls = mockApi({ '/v1/connectors/oauth/callback': { status: 400, detail: 'refused' } })
+      window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=connector.st')
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: 'Back to the Motet app' })).toBeDefined()
+      expect(calls.find((call) => call.url.includes('/oauth/callback'))).toBeUndefined()
+      fireEvent.click(screen.getByRole('button', { name: 'Finish here instead' }))
+      await waitFor(() =>
+        expect(calls.find((call) => call.url.includes('/v1/connectors/oauth/callback'))).toBeDefined(),
+      )
+      expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
+    })
+
+    it('still refuses a callback for a different authorization than this tab began', async () => {
+      const calls = mockApi()
+      window.sessionStorage.setItem('motet.oauthState', 'st_1')
+      window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_ELSEWHERE')
+
+      render(<App />)
+
+      expect(await screen.findByText(/different authorization/)).toBeDefined()
+      expect(screen.queryByRole('heading', { name: 'Back to the Motet app' })).toBeNull()
+      expect(calls.find((call) => call.url.includes('/v1/sources/callback'))).toBeUndefined()
+    })
+  })
+
+  it('exchanges a consent with nothing remembered as it always did, off an iPhone', async () => {
+    // A desktop browser that lost its storage is not the app's sheet.
+    const calls = mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true } })
+    window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_lost')
+
+    render(<App />)
+
+    expect(await screen.findByText(/is connected/)).toBeDefined()
+    expect(screen.queryByRole('heading', { name: 'Back to the Motet app' })).toBeNull()
+    expect(calls.filter((call) => call.url.includes('/v1/sources/callback'))).toHaveLength(1)
+  })
+
   it('renders without the shell while it is on screen', async () => {
     mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true, active: true } })
+    window.sessionStorage.setItem('motet.oauthState', 'st_1')
     window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_1')
     render(<App />)
 
@@ -1149,6 +1221,7 @@ describe('the /oauth/callback landing, for a sign-in', () => {
     // Both flows land on this one path. `state` is the only value that survives the round
     // trip through Google, so it is the only thing that can say which finished.
     const calls = mockApi({ '/v1/sources/callback': { ...GMAIL_SOURCE, connected: true } })
+    window.sessionStorage.setItem('motet.oauthState', 'st_mailbox')
     window.history.replaceState({}, '', '/oauth/callback?code=abc123&state=st_mailbox')
 
     render(<App />)

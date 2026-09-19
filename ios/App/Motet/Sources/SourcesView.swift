@@ -298,7 +298,7 @@ struct WebAppFallback: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("This phone can’t finish that consent itself: Google returns to the web app, and this build or this iOS can’t catch it on the way. Do it from the web app’s Sources screen instead.")
+            Text("This phone can’t finish that consent itself: this build doesn’t know which web app Google returns to, or the sheet couldn’t open. Do it from the web app’s Sources screen instead.")
                 .font(Theme.body(14, relativeTo: .footnote))
                 .foregroundStyle(Theme.ink)
             if let url {

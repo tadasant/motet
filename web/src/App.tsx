@@ -40,7 +40,14 @@ import {
   setToken,
 } from './api/client'
 import { Wordmark } from './brand/Brand'
-import { forgetCallbackUrl, isConnectorState, isLoginState, isMcpState, readCallback } from './oauth'
+import {
+  consentBegunElsewhere,
+  forgetCallbackUrl,
+  isConnectorState,
+  isLoginState,
+  isMcpState,
+  readCallback,
+} from './oauth'
 import { Admin } from './screens/Admin'
 import { Backlog } from './screens/Backlog'
 import { Credentials } from './screens/Credentials'
@@ -48,6 +55,7 @@ import { ConnectorCallback } from './screens/credentials/ConnectorCallback'
 import { IN_PROGRESS } from './screens/EpisodeScreen'
 import { Episodes, newestFirst } from './screens/Episodes'
 import { McpAuthorizeCallback } from './screens/McpAuthorizeCallback'
+import { AppConsentHandoff } from './screens/AppConsentHandoff'
 import { OAuthCallback, explain as explainDenial } from './screens/OAuthCallback'
 import { PasteIn } from './screens/PasteIn'
 import { SignIn } from './screens/SignIn'
@@ -144,6 +152,18 @@ export default function App() {
   // start and which ends in a question rather than a result (motet#111).
   const authorizingMcp =
     callback !== null && callback.kind !== 'empty' && isMcpState(callback.state)
+  // A mailbox or connector consent this tab did not begin: the iOS app's, finishing in the
+  // system sign-in sheet (`consentBegunElsewhere`). It goes back to the app rather than
+  // being exchanged here (`AppConsentHandoff`). Decided once, at boot, because the callback
+  // screen that would otherwise run takes the remembered state.
+  const [consentForApp, setConsentForApp] = useState(
+    () =>
+      callback !== null &&
+      callback.kind !== 'empty' &&
+      !isLoginState(callback.state) &&
+      !isMcpState(callback.state) &&
+      consentBegunElsewhere(),
+  )
 
   const saveToken = useCallback((value: string) => {
     setToken(value)
@@ -446,9 +466,12 @@ export default function App() {
             so it gets a reading column. */}
         <main className={`door-main${callback ? ' narrow' : ''}`}>
           {errorLine}
-          {/* The MCP branch first: its state is neither a sign-in's nor a mailbox's, and
+          {/* The app's handoff first: exchanging its code here would spend it without the
+              app's session. Then MCP: its state is neither a sign-in's nor a mailbox's, and
               sending it to either route would burn it. */}
-          {callback && authorizingMcp ? (
+          {callback && callback.kind !== 'empty' && consentForApp ? (
+            <AppConsentHandoff callback={callback} onFinishHere={() => setConsentForApp(false)} />
+          ) : callback && authorizingMcp ? (
             <McpAuthorizeCallback callback={callback} onDone={finishCallback} />
           ) : callback && signingIn ? (
             <SignInCallback callback={callback} onSignedIn={saveToken} onDone={finishCallback} />

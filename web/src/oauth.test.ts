@@ -5,9 +5,10 @@
 // to a URL, and getting it wrong means a user who granted consent lands on the paste-in
 // screen with no idea whether it worked.
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  consentBegunElsewhere,
   forgetCallbackUrl,
   isLoginState,
   isMcpState,
@@ -135,5 +136,44 @@ describe('takeState', () => {
     window.sessionStorage.setItem('motet.oauthState', 'st_1')
     expect(takeState()).toBe('st_1')
     expect(takeState()).toBe('')
+  })
+})
+
+describe('a consent begun in the iOS app', () => {
+  const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15'
+  const MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15'
+
+  afterEach(() => {
+    window.sessionStorage.clear()
+    vi.restoreAllMocks()
+  })
+
+  it('is one with nothing remembered, on an iPhone — and reading it forgets nothing', () => {
+    expect(consentBegunElsewhere(IPHONE)).toBe(true)
+    window.sessionStorage.setItem('motet.oauthState', 'st_1')
+    expect(consentBegunElsewhere(IPHONE)).toBe(false)
+    expect(window.sessionStorage.getItem('motet.oauthState')).toBe('st_1')
+  })
+
+  it('is never one on a desktop, whatever the storage says', () => {
+    expect(consentBegunElsewhere('Mozilla/5.0 (X11; Linux x86_64) Chrome/140')).toBe(false)
+    expect(consentBegunElsewhere(MAC)).toBe(false)
+  })
+
+  it('tells an iPad asking for the desktop site apart from a Mac by its touch screen', () => {
+    // jsdom has no maxTouchPoints at all, so it is defined for this test and taken away.
+    Object.defineProperty(window.navigator, 'maxTouchPoints', { value: 5, configurable: true })
+    try {
+      expect(consentBegunElsewhere(MAC)).toBe(true)
+    } finally {
+      delete (window.navigator as { maxTouchPoints?: number }).maxTouchPoints
+    }
+  })
+
+  it('is not one when storage throws: the sheet has working storage', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('SecurityError')
+    })
+    expect(consentBegunElsewhere(IPHONE)).toBe(false)
   })
 })
