@@ -700,12 +700,32 @@ components:
       title: CreateConnectorRequest
       type: object
     CreateEpisodeRequest:
-      description: 'Phase 1 has manual episodes only: ''all unread'', capped by duration.'
+      description: "'All unread', capped by duration \u2014 or exactly the stories somebody picked."
       properties:
+        keep_in_backlog:
+          default: false
+          description: 'Listening to this episode leaves read state alone, so its stories stay on the
+            backlog however far the listener gets. The position is still recorded. Off by default, which
+            is what every episode has always done: a story you listen past is read (invariant 5).'
+          title: Keep In Backlog
+          type: boolean
         max_duration_ms:
           exclusiveMinimum: 0.0
           title: Max Duration Ms
           type: integer
+        news_item_ids:
+          anyOf:
+          - items:
+              type: string
+            maxItems: 100
+            minItems: 1
+            type: array
+          - type: 'null'
+          description: 'Only these news items, spoken oldest first, whether or not they are read. Omit
+            for every unread item. Every id must be one of your news items, or the request is refused
+            with a 422 and nothing is created. The duration cap still applies: a story that does not fit
+            is left out.'
+          title: News Item Ids
         title:
           maxLength: 500
           minLength: 1
@@ -1027,6 +1047,15 @@ components:
         id:
           title: Id
           type: string
+        keep_in_backlog:
+          default: false
+          description: "Listening to this episode does not mark its stories read. A client that marks\
+            \ stories read from playback itself must skip it for this episode; the server's own position\
+            \ and listened routes already do. Optional in the contract, absent meaning false, so a client\
+            \ decoding a response from an API older than this field \u2014 or its own offline cache of\
+            \ one \u2014 still decodes."
+          title: Keep In Backlog
+          type: boolean
         last_error:
           anyOf:
           - type: string
@@ -3876,9 +3905,14 @@ paths:
       tags:
       - episodes
     post:
-      description: "Assemble a manual episode from unread news items, capped by duration.\n\nReturns immediately,\
-        \ in ``pending``. Assembly, scripting and TTS happen on the queue\nafterwards \u2014 so the episode\
-        \ a client polls for moves through states rather than\nappearing finished."
+      description: "Assemble an episode from unread news items \u2014 or from the ones picked \u2014 capped\
+        \ by duration.\n\nReturns immediately, in ``pending``. Assembly, scripting and TTS happen on the\
+        \ queue\nafterwards \u2014 so the episode a client polls for moves through states rather than\n\
+        appearing finished.\n\nA pick is stored as a smart episode whose rule is :meth:`SmartRule.picked`,\
+        \ so it goes\nthrough the one selector every other episode does. The ids are checked here, at\n\
+        creation, for the reason the smart route checks its rule: an id that is not the\ncaller's would\
+        \ otherwise surface minutes later as an episode that failed on a queue,\nor as one quietly shorter\
+        \ than what was picked."
       operationId: create_episode_v1_episodes_post
       parameters:
       - in: header
@@ -4091,7 +4125,9 @@ paths:
         \ RSS gives background audio and CarPlay for\nfree, and takes away any way for a client to report\
         \ where the listener got to. Phase\n2's iOS app reports ``spoken_through_ms`` and this becomes\
         \ automatic \u2014 but the fact it\nwrites is the same one, on the same column, which is why swapping\
-        \ the trigger later\nchanges nothing about read state."
+        \ the trigger later\nchanges nothing about read state.\n\nAn episode made with ``keep_in_backlog``\
+        \ marks nothing: that is the promise it was\nmade with, and a player that reports reaching the\
+        \ end is not asking to break it."
       operationId: mark_episode_listened_v1_episodes__episode_id__listened_post
       parameters:
       - in: path

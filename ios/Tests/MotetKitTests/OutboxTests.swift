@@ -120,7 +120,9 @@ actor GatedAPI: MotetAPI {
     // The rest of the contract is not exercised here.
     func listEpisodes() async throws -> [EpisodeResponse] { [] }
     func episode(id: String) async throws -> EpisodeResponse { Fixture.episode(id: id) }
-    func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
+    func createEpisode(
+        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+    ) async throws -> EpisodeResponse {
         Fixture.episode()
     }
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse {

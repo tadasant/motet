@@ -42,6 +42,58 @@ final class MotetHTTPClientTests: XCTestCase {
         XCTAssertTrue(item.read)
     }
 
+    private static let pendingEpisode = """
+    {"id":"e1","title":"Picked","state":"pending","duration_ms":0,"max_duration_ms":1800000,
+     "audio_bytes":null,"audio_media_type":null,"last_error":null,
+     "created_at":"2026-09-19T04:00:00.123456Z","published_at":null,
+     "listened_through_ms":0,"keep_in_backlog":true,"segments":[]}
+    """
+
+    private func sentBody(_ transport: StubTransport) throws -> [String: Any] {
+        let request = try XCTUnwrap(transport.recordedRequests().first)
+        XCTAssertEqual(request.method, "POST")
+        XCTAssertEqual(request.url.absoluteString, "https://api.example.invalid/v1/episodes")
+        let body = try JSONSerialization.jsonObject(with: try XCTUnwrap(request.body))
+        return try XCTUnwrap(body as? [String: Any])
+    }
+
+    func testAPickedEpisodeSendsItsItemsAndTheKeepFlag() async throws {
+        let transport = StubTransport()
+        transport.enqueueJSON(Self.pendingEpisode, status: 201)
+
+        let episode = try await makeClient(transport).createEpisode(
+            title: "Picked", maxDurationMs: 1_800_000, newsItemIds: ["n1", "n2"], keepInBacklog: true
+        )
+
+        let body = try sentBody(transport)
+        XCTAssertEqual(body["news_item_ids"] as? [String], ["n1", "n2"])
+        XCTAssertEqual(body["keep_in_backlog"] as? Bool, true)
+        XCTAssertEqual(body["max_duration_ms"] as? Int, 1_800_000)
+        XCTAssertTrue(episode.keepsStoriesInBacklog)
+    }
+
+    func testTheWholeBacklogRequestIsUnchanged() async throws {
+        let transport = StubTransport()
+        transport.enqueueJSON(Self.pendingEpisode, status: 201)
+
+        _ = try await makeClient(transport).createEpisode(title: "All", maxDurationMs: 60_000)
+
+        let body = try sentBody(transport)
+        XCTAssertEqual(Set(body.keys), ["title", "max_duration_ms"])
+    }
+
+    func testAnEpisodeWithoutTheFlagDecodesAsConsuming() async throws {
+        // What an API older than the field sends, and what an offline cache written by an
+        // older build holds. Neither may fail to decode.
+        let transport = StubTransport()
+        transport.enqueueJSON(
+            Self.pendingEpisode.replacingOccurrences(of: #""keep_in_backlog":true,"#, with: "")
+        )
+        let episode = try await makeClient(transport).episode(id: "e1")
+        XCTAssertNil(episode.keepInBacklog)
+        XCTAssertFalse(episode.keepsStoriesInBacklog)
+    }
+
     func testAnIdWithASlashCannotRewriteTheRoute() async throws {
         let transport = StubTransport()
         transport.enqueueJSON("{}")

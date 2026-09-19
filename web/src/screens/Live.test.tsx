@@ -17,6 +17,7 @@ const EPISODE: Episode = {
   created_at: '2026-09-13T07:00:00Z',
   published_at: '2026-09-13T07:00:00Z',
   listened_through_ms: 0,
+  keep_in_backlog: false,
   segments: [],
 }
 

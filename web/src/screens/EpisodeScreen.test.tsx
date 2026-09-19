@@ -17,6 +17,7 @@ const EPISODE: Episode = {
   created_at: '2026-08-25T07:00:00Z',
   published_at: '2026-08-25T07:05:00Z',
   listened_through_ms: 750_000,
+  keep_in_backlog: false,
   segments: [
     {
       news_item_id: 'ni_1',
@@ -335,6 +336,20 @@ describe('Mark listened on the detail', () => {
     expect(writes[1]!.body).toEqual({ listened_through_ms: 1_865_000 })
     expect(onPositionReported).toHaveBeenCalledWith('ep_1', 1_865_000)
     expect(onBacklogChanged).toHaveBeenCalled()
+  })
+})
+
+describe('an episode made to keep its stories in the backlog', () => {
+  it('says so, and Mark listened does not claim to have marked anything read', async () => {
+    mockApi()
+    renderScreen({ ...EPISODE, keep_in_backlog: true })
+    expect(
+      screen.getByText('Listening to this episode leaves its stories in the backlog.'),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark listened' }))
+    expect(
+      await screen.findByText('Marked listened. Its stories stay in the backlog.'),
+    ).toBeTruthy()
   })
 })
 

@@ -640,6 +640,163 @@ def test_a_smart_episode_with_nothing_selected_fails_visibly(
     assert "rule" in (episode["last_error"] or "")
 
 
+# --- episodes from a pick ------------------------------------------------------------
+
+
+def paste_backlog(api: TestClient, url: str) -> list[dict[str, Any]]:
+    for title, text in NEWSLETTERS:
+        api.post("/v1/sources/paste", json={"title": title, "text": text}, headers=AUTH)
+    drain(Queue.INTEGRATE, url)
+    backlog: list[dict[str, Any]] = api.get("/v1/news-items", headers=AUTH).json()
+    assert len(backlog) == len(NEWSLETTERS)
+    return backlog
+
+
+def create_picked(api: TestClient, ids: list[str], **extra: Any) -> Any:
+    return api.post(
+        "/v1/episodes",
+        json={"title": "Picked", "max_duration_ms": 1_200_000, "news_item_ids": ids, **extra},
+        headers=AUTH,
+    )
+
+
+def test_a_picked_episode_is_made_of_only_what_was_picked(api: TestClient, _migrated: str) -> None:
+    """The rest of the backlog is unread and would be chosen by a manual episode."""
+    backlog = paste_backlog(api, _migrated)
+    picked = backlog[-1]["id"]
+
+    created = create_picked(api, [picked])
+    assert created.status_code == 201, created.text
+    assert created.json()["keep_in_backlog"] is False, "consuming is still the default"
+    run_pipeline(_migrated)
+
+    episode = api.get(f"/v1/episodes/{created.json()['id']}", headers=AUTH).json()
+    assert episode["state"] == "ready", episode.get("last_error")
+    assert [segment["news_item_id"] for segment in episode["segments"]] == [picked]
+
+
+def test_a_pick_may_include_a_story_already_read(api: TestClient, _migrated: str) -> None:
+    """A pick is a decision about these stories, so read state does not filter it."""
+    backlog = paste_backlog(api, _migrated)
+    ids = [item["id"] for item in backlog]
+    api.patch(f"/v1/news-items/{ids[0]}", json={"read": True}, headers=AUTH)
+
+    created = create_picked(api, ids)
+    assert created.status_code == 201, created.text
+    drain(Queue.ASSEMBLE, _migrated)
+
+    episode = api.get(f"/v1/episodes/{created.json()['id']}", headers=AUTH).json()
+    assert sorted(segment["news_item_id"] for segment in episode["segments"]) == sorted(ids)
+
+
+def test_keep_in_backlog_leaves_every_story_unread_however_far_you_listen(
+    api: TestClient, _migrated: str
+) -> None:
+    backlog = paste_backlog(api, _migrated)
+    ids = [item["id"] for item in backlog]
+
+    created = create_picked(api, ids, keep_in_backlog=True)
+    assert created.status_code == 201, created.text
+    assert created.json()["keep_in_backlog"] is True
+    run_pipeline(_migrated)
+    episode = api.get(f"/v1/episodes/{created.json()['id']}", headers=AUTH).json()
+    assert episode["state"] == "ready", episode.get("last_error")
+
+    moved = api.put(
+        f"/v1/episodes/{episode['id']}/position",
+        json={"listened_through_ms": episode["duration_ms"]},
+        headers=AUTH,
+    ).json()
+    assert moved["listened_through_ms"] == episode["duration_ms"], "the position still moves"
+    assert moved["news_items_marked_read"] == 0
+
+    listened = api.post(f"/v1/episodes/{episode['id']}/listened", headers=AUTH).json()
+    assert listened["news_items_marked_read"] == 0
+
+    after = api.get("/v1/news-items", headers=AUTH).json()
+    assert not any(item["read"] for item in after), "every picked story is still in the backlog"
+
+
+def test_an_ordinary_episode_still_marks_what_you_listened_past(
+    api: TestClient, _migrated: str
+) -> None:
+    """The flag is per episode: without it a pick consumes exactly like 'all unread'."""
+    backlog = paste_backlog(api, _migrated)
+    created = create_picked(api, [item["id"] for item in backlog])
+    run_pipeline(_migrated)
+    episode = api.get(f"/v1/episodes/{created.json()['id']}", headers=AUTH).json()
+
+    listened = api.post(f"/v1/episodes/{episode['id']}/listened", headers=AUTH).json()
+    assert listened["news_items_marked_read"] == len(backlog)
+
+
+def test_a_pick_naming_an_unknown_story_is_refused_and_creates_nothing(
+    api: TestClient, _migrated: str
+) -> None:
+    backlog = paste_backlog(api, _migrated)
+    refused = create_picked(api, [backlog[0]["id"], "ni_does_not_exist"])
+    assert refused.status_code == 422
+    assert "1 of the picked news items" in refused.text
+    assert api.get("/v1/episodes", headers=AUTH).json() == []
+
+
+def test_a_pick_naming_another_users_story_is_refused(
+    api: TestClient, db: psycopg.Connection[Any], _migrated: str
+) -> None:
+    """Refused the same way as an id that does not exist: no oracle for whose it is."""
+    backlog = paste_backlog(api, _migrated)
+    db.execute("INSERT INTO users (id) VALUES ('pick-other') ON CONFLICT DO NOTHING")
+    db.execute(
+        "INSERT INTO news_items (id, user_id, title, summary) "
+        "VALUES ('ni_theirs', 'pick-other', 'Theirs', 'Not yours.')"
+    )
+    db.commit()
+
+    refused = create_picked(api, [backlog[0]["id"], "ni_theirs"])
+    assert refused.status_code == 422
+    assert "Theirs" not in refused.text
+    assert api.get("/v1/episodes", headers=AUTH).json() == []
+
+
+def test_a_pick_whose_stories_vanished_fails_saying_so(
+    api: TestClient, db: psycopg.Connection[Any], _migrated: str
+) -> None:
+    backlog = paste_backlog(api, _migrated)
+    created = create_picked(api, [backlog[0]["id"]])
+    db.execute("DELETE FROM news_item_sources WHERE news_item_id = %s", (backlog[0]["id"],))
+    db.execute("DELETE FROM news_items WHERE id = %s", (backlog[0]["id"],))
+    db.commit()
+    drain(Queue.ASSEMBLE, _migrated)
+    episode = api.get(f"/v1/episodes/{created.json()['id']}", headers=AUTH).json()
+    assert episode["state"] == "failed"
+    assert "none of the 1 picked news items exist" in (episode["last_error"] or "")
+
+
+def test_the_smart_route_cannot_carry_a_pick(api: TestClient, _migrated: str) -> None:
+    """Ownership is checked on `/v1/episodes`; the smart rule's model has no such field.
+
+    Pydantic ignores the unknown key, so the episode is an ordinary rule — never a pick of
+    ids nobody checked.
+    """
+    paste_backlog(api, _migrated)
+    created = api.post(
+        "/v1/episodes/smart",
+        json={"title": "S", "max_duration_ms": 600_000, "rule": {"news_item_ids": ["ni_x"]}},
+        headers=AUTH,
+    )
+    assert created.status_code == 201, created.text
+    with psycopg.connect(_migrated) as conn:
+        row = conn.execute(
+            "SELECT rule FROM episodes WHERE id = %s", (created.json()["id"],)
+        ).fetchone()
+    assert row is not None and row[0]["news_item_ids"] == []
+
+
+def test_an_empty_or_oversized_pick_is_refused_by_the_contract(api: TestClient) -> None:
+    assert create_picked(api, []).status_code == 422
+    assert create_picked(api, [f"ni_{n}" for n in range(101)]).status_code == 422
+
+
 # --- read state from the audio side --------------------------------------------------
 
 

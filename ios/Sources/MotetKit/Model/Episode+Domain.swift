@@ -58,6 +58,11 @@ extension EpisodeResponse {
         }
     }
 
+    /// Listening to this episode leaves its stories on the backlog. Absent on the wire —
+    /// an older API, or an episode cached before the field existed — is false, which is
+    /// what every episode did then.
+    public var keepsStoriesInBacklog: Bool { keepInBacklog ?? false }
+
     public var timeline: SegmentTimeline {
         SegmentTimeline(segments: segments, episodeDurationMs: durationMs)
     }

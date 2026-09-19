@@ -25,6 +25,16 @@ actor FakeAPI: MotetAPI {
     var failure: MotetError?
     var baseURL = URL(string: "https://api.example.invalid")!
 
+    struct CreatedEpisode: Hashable {
+        let title: String
+        let newsItemIds: [String]?
+        let keepInBacklog: Bool
+    }
+
+    /// What each `createEpisode` asked for.
+    private(set) var createdEpisodes: [CreatedEpisode] = []
+    func recordedEpisodeCreations() -> [CreatedEpisode] { createdEpisodes }
+
     func setFailure(_ error: MotetError?) { failure = error }
     func setEpisodes(_ episodes: [EpisodeResponse]) { self.episodes = episodes }
     func setNewsItems(_ items: [NewsItemResponse]) { self.newsItems = items }
@@ -51,11 +61,17 @@ actor FakeAPI: MotetAPI {
         return match
     }
 
-    func createEpisode(title: String, maxDurationMs: Int) async throws -> EpisodeResponse {
+    func createEpisode(
+        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+    ) async throws -> EpisodeResponse {
         try check("createEpisode", title)
+        createdEpisodes.append(
+            CreatedEpisode(title: title, newsItemIds: newsItemIds, keepInBacklog: keepInBacklog)
+        )
         return EpisodeResponse(
             audioBytes: nil, audioMediaType: nil, createdAt: Date(), durationMs: 0,
-            id: "new", lastError: nil, listenedThroughMs: 0, maxDurationMs: maxDurationMs,
+            id: "new", keepInBacklog: keepInBacklog, lastError: nil, listenedThroughMs: 0,
+            maxDurationMs: maxDurationMs,
             publishedAt: nil,
             segments: [], state: "pending", title: title
         )
@@ -263,7 +279,8 @@ enum Fixture {
         id: String = "ep-1",
         state: String = "ready",
         durationMs: Int = 300_000,
-        createdAt: Date = Date(timeIntervalSince1970: 1_800_000_000)
+        createdAt: Date = Date(timeIntervalSince1970: 1_800_000_000),
+        keepInBacklog: Bool? = nil
     ) -> EpisodeResponse {
         EpisodeResponse(
             audioBytes: 1_024,
@@ -271,6 +288,7 @@ enum Fixture {
             createdAt: createdAt,
             durationMs: durationMs,
             id: id,
+            keepInBacklog: keepInBacklog,
             lastError: nil,
             listenedThroughMs: 0,
             maxDurationMs: 600_000,

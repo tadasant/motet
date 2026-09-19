@@ -583,18 +583,29 @@ public struct CreateConnectorRequest: Codable, Hashable, Sendable {
     }
 }
 
-/// Phase 1 has manual episodes only: 'all unread', capped by duration.
+/// 'All unread', capped by duration — or exactly the stories somebody picked.
 public struct CreateEpisodeRequest: Codable, Hashable, Sendable {
+    public var keepInBacklog: Bool?
     public var maxDurationMs: Int
+    public var newsItemIds: [String]?
     public var title: String
 
-    public init(maxDurationMs: Int, title: String) {
+    public init(
+        keepInBacklog: Bool? = nil,
+        maxDurationMs: Int,
+        newsItemIds: [String]? = nil,
+        title: String
+    ) {
+        self.keepInBacklog = keepInBacklog
         self.maxDurationMs = maxDurationMs
+        self.newsItemIds = newsItemIds
         self.title = title
     }
 
     private enum CodingKeys: String, CodingKey {
+        case keepInBacklog = "keep_in_backlog"
         case maxDurationMs = "max_duration_ms"
+        case newsItemIds = "news_item_ids"
         case title
     }
 }
@@ -834,6 +845,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
     public var createdAt: Date
     public var durationMs: Int
     public var id: String
+    public var keepInBacklog: Bool?
     public var lastError: String?
     public var listenedThroughMs: Int
     public var maxDurationMs: Int
@@ -848,6 +860,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
         createdAt: Date,
         durationMs: Int,
         id: String,
+        keepInBacklog: Bool? = nil,
         lastError: String? = nil,
         listenedThroughMs: Int,
         maxDurationMs: Int,
@@ -861,6 +874,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.durationMs = durationMs
         self.id = id
+        self.keepInBacklog = keepInBacklog
         self.lastError = lastError
         self.listenedThroughMs = listenedThroughMs
         self.maxDurationMs = maxDurationMs
@@ -876,6 +890,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
         case createdAt = "created_at"
         case durationMs = "duration_ms"
         case id
+        case keepInBacklog = "keep_in_backlog"
         case lastError = "last_error"
         case listenedThroughMs = "listened_through_ms"
         case maxDurationMs = "max_duration_ms"

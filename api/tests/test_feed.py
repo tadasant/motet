@@ -81,6 +81,7 @@ def episode(
         audio_media_type="audio/mpeg",
         last_error=None,
         listened_through_ms=0,
+        keep_in_backlog=False,
         created_at=when,
         published_at=when,
         segments=(
@@ -587,6 +588,7 @@ def _episode(*, segments: list[StoredSegment]) -> StoredEpisode:
         audio_media_type="audio/mpeg",
         last_error=None,
         listened_through_ms=0,
+        keep_in_backlog=False,
         created_at=datetime(2026, 8, 18, 7, 0, tzinfo=UTC),
         published_at=datetime(2026, 8, 18, 7, 5, tzinfo=UTC),
         segments=tuple(segments),

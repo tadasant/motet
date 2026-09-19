@@ -314,13 +314,17 @@ public actor PlaybackController {
         await persistPosition(force: false)
     }
 
-    /// Every story whose segments were actually played is read (invariant 5).
+    /// Every story whose segments were actually played is read (invariant 5) — unless the
+    /// episode was made to keep its stories in the backlog, where hearing one is tracked
+    /// for this player's own bookkeeping and never written as read.
     private func markNewlyHeard() async {
         let completed = timeline.newsItemsCompleted(coverage: coverage)
         let fresh = completed.filter { !markedHeard.contains($0) }
         guard !fresh.isEmpty else { return }
         markedHeard.formUnion(fresh)
-        try? await readState.markHeard(newsItemIds: fresh)
+        if episode?.keepsStoriesInBacklog != true {
+            try? await readState.markHeard(newsItemIds: fresh)
+        }
         // Write the coverage that justified this immediately: if the app dies before the
         // next throttled write, the next launch would recompute "not heard yet" and report
         // the same items again.
@@ -354,7 +358,7 @@ public actor PlaybackController {
         // still earns its place: it closes any item whose boundary no position tick landed
         // inside, which the per-item writes above cannot.
         let heardEverything = episode.newsItemIds.allSatisfy { markedHeard.contains($0) }
-        if heardEverything {
+        if heardEverything, !episode.keepsStoriesInBacklog {
             try? await readState.markEpisodeListened(
                 episodeId: episode.id, newsItemIds: episode.newsItemIds
             )

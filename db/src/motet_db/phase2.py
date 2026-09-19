@@ -848,6 +848,9 @@ def select_for_rule(
             )"""
         )
         params.append(list(rule.source_ids))
+    if rule.news_item_ids:
+        conditions.append("ni.id = ANY(%s)")
+        params.append(list(rule.news_item_ids))
 
     order = {
         Ranking.OLDEST_FIRST: "ni.created_at ASC, ni.id ASC",
@@ -891,6 +894,9 @@ def record_listen_progress(
     Invariant 5 is the second half: a story counts as read once its segment has been
     *passed*, so the comparison is against the end of the segment rather than its start.
     Marking at the start would tick off a story the moment its first word played.
+
+    An episode made with ``keep_in_backlog`` records the position and marks nothing: the
+    listener asked for these stories to stay on the list however far they got.
     """
     row = _maybe_one(
         conn,
@@ -898,13 +904,15 @@ def record_listen_progress(
         UPDATE episodes
         SET listened_through_ms = greatest(listened_through_ms, %s), updated_at = now()
         WHERE id = %s AND user_id = %s
-        RETURNING listened_through_ms
+        RETURNING listened_through_ms, keep_in_backlog
         """,
         (max(0, listened_through_ms), episode_id_, user_id),
     )
     if row is None:
         raise LookupError(f"no episode {episode_id_!r} for this user")
     position = int(row["listened_through_ms"])
+    if row["keep_in_backlog"]:
+        return position, 0
 
     passed = _all(
         conn,

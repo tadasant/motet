@@ -171,10 +171,16 @@ export function EpisodeScreen({
           </button>
           {listened !== null && (
             <span className="ok" role="status">
-              {listened} news item{listened === 1 ? '' : 's'} marked read.
+              {episode.keep_in_backlog
+                ? 'Marked listened. Its stories stay in the backlog.'
+                : `${listened} news item${listened === 1 ? '' : 's'} marked read.`}
             </span>
           )}
         </div>
+      )}
+      {/* Made from a pick with "keep in backlog": listening here marks nothing read. */}
+      {episode.keep_in_backlog && (
+        <p className="hint">Listening to this episode leaves its stories in the backlog.</p>
       )}
 
       {feed && episode.state === 'ready' && (

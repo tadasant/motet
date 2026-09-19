@@ -711,14 +711,44 @@ class EpisodeResponse(BaseModel):
             "player happens to be parked right now."
         )
     )
+    keep_in_backlog: bool = Field(
+        default=False,
+        description=(
+            "Listening to this episode does not mark its stories read. A client that "
+            "marks stories read from playback itself must skip it for this episode; the "
+            "server's own position and listened routes already do. Optional in the "
+            "contract, absent meaning false, so a client decoding a response from an API "
+            "older than this field — or its own offline cache of one — still decodes."
+        ),
+    )
     segments: list[SegmentResponse]
 
 
 class CreateEpisodeRequest(BaseModel):
-    """Phase 1 has manual episodes only: 'all unread', capped by duration."""
+    """'All unread', capped by duration — or exactly the stories somebody picked."""
 
     title: str = Field(min_length=1, max_length=500)
     max_duration_ms: int = Field(gt=0)
+    news_item_ids: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description=(
+            "Only these news items, spoken oldest first, whether or not they "
+            "are read. Omit for every unread item. Every id must be one of your news "
+            "items, or the request is refused with a 422 and nothing is created. The "
+            "duration cap still applies: a story that does not fit is left out."
+        ),
+    )
+    keep_in_backlog: bool = Field(
+        default=False,
+        description=(
+            "Listening to this episode leaves read state alone, so its stories stay on "
+            "the backlog however far the listener gets. The position is still recorded. "
+            "Off by default, which is what every episode has always done: a story you "
+            "listen past is read (invariant 5)."
+        ),
+    )
 
 
 class MarkListenedResponse(BaseModel):

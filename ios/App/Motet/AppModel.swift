@@ -163,17 +163,30 @@ final class AppModel: ObservableObject {
         downloadedEpisodeIds = (try? await library.downloadedEpisodeIds()) ?? downloadedEpisodeIds
     }
 
-    func createEpisode(title: String, maxDurationMinutes: Int) async {
+    /// `newsItemIds` nil is every unread story; a list is exactly those. Returns whether the
+    /// server took it, so a sheet can stay open with the picks intact when it did not.
+    @discardableResult
+    func createEpisode(
+        title: String,
+        maxDurationMinutes: Int,
+        newsItemIds: [String]? = nil,
+        keepInBacklog: Bool = false
+    ) async -> Bool {
         do {
             _ = try await library.createEpisode(
-                title: title, maxDurationMs: maxDurationMinutes * 60_000
+                title: title,
+                maxDurationMs: maxDurationMinutes * 60_000,
+                newsItemIds: newsItemIds,
+                keepInBacklog: keepInBacklog
             )
             await refresh()
+            return true
         } catch let error as MotetError {
             connectionMessage = error.description
         } catch {
             connectionMessage = String(describing: error)
         }
+        return false
     }
 
     func paste(title: String, text: String) async {
@@ -186,6 +199,13 @@ final class AppModel: ObservableObject {
             connectionMessage = String(describing: error)
         }
     }
+
+    #if DEBUG
+    /// Sample stories and no server, for `ScreenshotFixture`.
+    func showScreenshotFixture() {
+        newsItems = ScreenshotFixture.newsItems
+    }
+    #endif
 
     // MARK: - Settings
 

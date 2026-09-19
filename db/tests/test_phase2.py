@@ -14,7 +14,16 @@ from typing import Any
 
 import psycopg
 import pytest
-from motet_db import CredentialPurpose, EpisodeKind, Ranking, SmartRule, SourceKind, phase2, repo
+from motet_db import (
+    CredentialPurpose,
+    EpisodeKind,
+    Ranking,
+    RuleError,
+    SmartRule,
+    SourceKind,
+    phase2,
+    repo,
+)
 from motet_vault import DecryptionError, LocalKeyManager
 
 USER = repo.OWNER_USER_ID
@@ -705,6 +714,67 @@ def test_max_items_bounds_the_selection(db: psycopg.Connection[Any]) -> None:
     assert len(phase2.select_for_rule(db, USER, SmartRule(window_days=0, max_items=1))) == 1
 
 
+def test_a_pick_selects_exactly_the_picked_stories_read_or_not(
+    db: psycopg.Connection[Any],
+) -> None:
+    ids = seed_stories(db)
+    rule = SmartRule.picked([ids["covered"], ids["old_read"], ids["old_read"]])
+    chosen = [item.id for item in phase2.select_for_rule(db, USER, rule)]
+    assert chosen == [ids["old_read"], ids["covered"]], "oldest first, the read one included"
+
+
+def test_a_pick_never_reaches_another_users_story(db: psycopg.Connection[Any]) -> None:
+    """The route refuses a foreign id; the selector's own user predicate is the backstop."""
+    ids = seed_stories(db)
+    db.execute("INSERT INTO users (id) VALUES ('pick-stranger') ON CONFLICT DO NOTHING")
+    db.execute(
+        "INSERT INTO news_items (id, user_id, title, summary) "
+        "VALUES ('ni_stranger', 'pick-stranger', 'Theirs', 's')"
+    )
+    rule = SmartRule.picked([ids["recent"], "ni_stranger"])
+    assert [item.id for item in phase2.select_for_rule(db, USER, rule)] == [ids["recent"]]
+    assert repo.news_items_owned(db, user_id=USER, item_ids=[ids["recent"], "ni_stranger"]) == {
+        ids["recent"]
+    }
+
+
+def test_a_pick_round_trips_through_its_snapshot() -> None:
+    rule = SmartRule.picked(["b", "a"])
+    assert rule.news_item_ids == ("a", "b")
+    assert SmartRule.from_json(rule.to_json()) == rule
+    with pytest.raises(RuleError):
+        SmartRule.picked([])
+    with pytest.raises(RuleError):
+        SmartRule.from_json({"news_item_ids": "a"})
+
+
+def test_keep_in_backlog_records_the_position_and_marks_nothing(
+    db: psycopg.Connection[Any],
+) -> None:
+    ids = seed_stories(db)
+    episode_id = repo.create_episode(
+        db,
+        user_id=USER,
+        title="Keep",
+        max_duration_ms=600_000,
+        kind=EpisodeKind.SMART,
+        rule=SmartRule.picked([ids["recent"]]).to_json(),
+        keep_in_backlog=True,
+    )
+    repo.replace_segments(
+        db,
+        episode_id,
+        [repo.SegmentSpec(news_item_id=ids["recent"], text="", duration_ms=1_000, claims=())],
+    )
+    position, marked = phase2.record_listen_progress(
+        db, user_id=USER, episode_id_=episode_id, listened_through_ms=5_000
+    )
+    assert (position, marked) == (5_000, 0)
+    episode = repo.get_episode(db, episode_id)
+    assert episode is not None and episode.keep_in_backlog
+    assert [item.id for item in repo.unread_news_items(db, USER)].count(ids["recent"]) == 1
+
+
 # --- smart episodes ------------------------------------------------------------------
 
 
@@ -751,6 +821,7 @@ def test_a_manual_episode_still_defaults(db: psycopg.Connection[Any]) -> None:
     assert episode.kind is EpisodeKind.MANUAL
     assert episode.rule is None
     assert episode.listened_through_ms == 0
+    assert episode.keep_in_backlog is False
 
 
 # --- highlights ----------------------------------------------------------------------
