@@ -66,14 +66,16 @@ const DETAIL: Detail = {
   ],
 }
 
-function mockFetch(routes: Record<string, unknown>): { url: string; method: string }[] {
-  const calls: { url: string; method: string }[] = []
+type Call = { url: string; method: string; body: unknown }
+
+function mockFetch(routes: Record<string, unknown>): Call[] {
+  const calls: Call[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), 'http://api.test').pathname
       const method = init?.method ?? 'GET'
-      calls.push({ url, method })
+      calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
       const key = `${method} ${url}`
       const found = key in routes
       return {
@@ -177,8 +179,15 @@ describe('a backlog row', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Make an episode' }))
 
-    await waitFor(() =>
-      expect(calls.some((call) => call.method === 'POST' && call.url === '/v1/episodes')).toBe(true),
-    )
+    // The body, not merely that a POST happened: this screen used to compose
+    // `Episode — ${new Date().toLocaleDateString()}` itself, and an assertion on the URL
+    // alone would pass against that going back in.
+    const posted = async () => calls.find((call) => call.method === 'POST')
+    await waitFor(async () => expect(await posted()).toBeDefined())
+    expect(await posted()).toEqual({
+      url: '/v1/episodes',
+      method: 'POST',
+      body: { max_duration_ms: 1_200_000 },
+    })
   })
 })

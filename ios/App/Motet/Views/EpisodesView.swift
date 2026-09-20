@@ -285,7 +285,8 @@ struct NewEpisodeView: View {
                     Button("Make it") {
                         Task {
                             await model.createEpisode(
-                                title: title.trimmingCharacters(in: .whitespaces).nilIfEmpty,
+                                title: title.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .nilIfEmpty,
                                 maxDurationMinutes: minutes
                             )
                             dismiss()

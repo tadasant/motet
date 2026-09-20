@@ -718,7 +718,7 @@ describe('connecting a mailbox', () => {
     render(<Sources navigate={vi.fn()} now={NOW} />)
     await screen.findByRole('form', { name: 'Connect Gmail' })
 
-    expect(screen.getByText(/Read-only/)).toBeDefined()
+    expect(screen.getAllByText(/Read-only/).length).toBeGreaterThan(0)
     expect(screen.getByText('Nothing is processed until you ingest it')).toBeDefined()
   })
 

@@ -2019,8 +2019,9 @@ below, and "The app's door is a sign-in, not a second landing page".
   nothing else, and the section below is the record. The motif's path data is still lifted
   verbatim into `web/src/brand/scoreData.ts`, not redrawn; the transport picture under the
   score (`aria-hidden`, as on the reference page) lives only in `site/` now.
-- **New episodes are titled "Episode — <date>"**, no longer "Briefing — …". The title is
-  stored and appears in the RSS feed, so older episodes keep the old word.
+- **New episodes are named after the day**, no longer "Briefing — …" and — since the
+  rename section below — no longer "Episode — <date>" either. The title is stored and
+  appears in the RSS feed, so older episodes keep whatever they were called.
 - **Dark mode is not designed**, so nothing here derives one.
 
 **The web player's transport replaced the browser's own controls.** The ink play circle,
@@ -2335,6 +2336,17 @@ failed episode — so a rename that touched it would reopen the failure panel, o
 clients, for a build that gave up days ago. A title is a label somebody put on a historical
 artifact; it is not the pipeline moving. `repo.rename_episode`'s docstring says so and
 `test_backlog_and_titles.py` pins it.
+
+**The app keeps composing the date for one release, and that is Runner policy's ordering
+rule rather than a second definition of the default.** A TestFlight build reaches a phone
+minutes after its PR merges, while the API it talks to serves whatever the private repo
+pins — so an app that sent no title at all would meet an API whose `title` is still
+required and get a 422, breaking "Make it", which works today. `MotetHTTPClient.dayTitle`
+sends the string the server would have chosen, byte-identical, and its docstring names the
+condition for deleting it: the deployed API being at or past this change. The two genuinely
+*new* iOS calls — the provenance read and the rename — need no shim, because nothing
+regresses when they are refused; the provenance screen falls back to the titles the backlog
+row already carries and says the previews are missing.
 
 **The invariant-12 reading, recorded as invariant 12 asks.** A route on the existing API,
 a write to a column that has always existed, an MCP tool beside the ones the episodes group

@@ -105,15 +105,18 @@ export function EpisodeScreen({
           legally contain — the browser would close the paragraph around it. */}
       <div className="hint episode-heading">
         <strong>{episode.title}</strong>
-        <span className="episode-heading-meta">
-          {episode.state}
-          {episode.state === 'ready' && ` · ${formatClock(episode.duration_ms)}`}
-          {/* Renaming sits beside the state rather than over the title, so the title
-              stays the display-face heading it is everywhere else. */}
+        {/* Renaming sits beside the state rather than over the title, so the title stays
+            the display-face heading it is everywhere else. The row is a <div>, not a
+            <span>: the editor is a <form>, and phrasing content cannot contain one. */}
+        <div className="episode-heading-meta">
+          <span>
+            {episode.state}
+            {episode.state === 'ready' && ` · ${formatClock(episode.duration_ms)}`}
+          </span>
           <EpisodeTitle episode={episode} onRenamed={onBacklogChanged}>
             <span aria-hidden="true">·</span>
           </EpisodeTitle>
-        </span>
+        </div>
       </div>
 
       {/* Where the build is, from the server: which step, how far into the render, how

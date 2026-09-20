@@ -11,7 +11,7 @@ public protocol MotetAPI: Sendable {
     func episode(id: String) async throws -> EpisodeResponse
     /// `newsItemIds` nil is "every unread item"; a list is exactly those stories.
     /// `keepInBacklog` makes listening to the episode leave their read state alone.
-    /// `title` nil lets the server name it after the day — the one place that is composed.
+    /// `title` nil means "you name it" — see `MotetHTTPClient` for what is actually sent.
     func createEpisode(
         title: String?, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
     ) async throws -> EpisodeResponse
@@ -93,6 +93,28 @@ public struct MotetHTTPClient: MotetAPI {
         self.encoder = MotetDate.makeEncoder()
     }
 
+    /// The title an unnamed episode is created with **from this app**, and a compatibility
+    /// shim rather than a second definition of the default.
+    ///
+    /// The API composes this string itself now and takes no `title` at all — which is where
+    /// it belongs, because three clients spelling one default three ways is what that change
+    /// removed. But a TestFlight build reaches a phone minutes after its PR merges, while
+    /// the API it talks to serves whatever the private repo pins (`ios/README.md`,
+    /// "Distribution"), and an API older than that change refuses a request with no title
+    /// with a 422 — so an app that sent nothing would break "Make it", which works today.
+    /// Sending the same string the server would have chosen is right against both.
+    ///
+    /// **Delete this once the deployed API is at or past that change**, and pass `nil`.
+    /// UTC and ISO order, to be byte-identical to `motet_api.main.episode_title`.
+    static func dayTitle(now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: now)
+    }
+
     // MARK: - Episodes
 
     public func listEpisodes() async throws -> [EpisodeResponse] {
@@ -112,7 +134,7 @@ public struct MotetHTTPClient: MotetAPI {
             keepInBacklog: keepInBacklog ? true : nil,
             maxDurationMs: maxDurationMs,
             newsItemIds: newsItemIds,
-            title: title
+            title: title ?? MotetHTTPClient.dayTitle()
         )
         return try await send(MotetEndpoints.createEpisode, body: body, as: EpisodeResponse.self)
     }

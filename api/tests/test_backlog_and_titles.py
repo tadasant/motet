@@ -258,10 +258,20 @@ class TestRenamingAnEpisode:
             api.get(f"/v1/episodes/{episode['id']}", headers=AUTH).json()["build_progress"] is None
         )
 
-    def test_an_empty_title_is_refused_rather_than_stored(self, api: TestClient) -> None:
+    @pytest.mark.parametrize("title", ["", "   ", "\n\t "])
+    def test_a_blank_title_is_refused_rather_than_stored(self, api: TestClient, title: str) -> None:
+        """Whitespace is three characters and no title.
+
+        ``min_length`` alone would pass ``"   "`` and store an empty string — onto the
+        shelf, into a rename button's accessible name, and out through ``<title>`` in the
+        RSS feed, which a podcast client renders as a blank row. So the model strips
+        first, which also covers the MCP tool and any token-driven caller.
+        """
         episode = api.post("/v1/episodes", json={"max_duration_ms": 600_000}, headers=AUTH).json()
 
-        refused = api.put(f"/v1/episodes/{episode['id']}/title", json={"title": ""}, headers=AUTH)
+        refused = api.put(
+            f"/v1/episodes/{episode['id']}/title", json={"title": title}, headers=AUTH
+        )
 
         assert refused.status_code == 422
         assert (

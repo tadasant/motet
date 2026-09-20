@@ -128,8 +128,18 @@ public actor MotetLibrary {
     ///
     /// Not through the outbox: renaming is a deliberate act somebody is watching the result
     /// of, and a rename replayed later from a queue would overwrite a newer one silently.
+    ///
+    /// **The cached list is updated with the server's answer**, because that cache is what
+    /// a launch with no signal renders — without this, renaming an episode and then opening
+    /// the app on a train would show the old title back again.
     public func renameEpisode(id: String, title: String) async throws -> EpisodeResponse {
-        try await api.renameEpisode(id: id, title: title)
+        let renamed = try await api.renameEpisode(id: id, title: title)
+        if let cached = try? cachedEpisodes(), let index = cached.firstIndex(where: { $0.id == id }) {
+            var updated = cached
+            updated[index] = renamed
+            try? cache.setValue(updated, forKey: Self.episodesKey)
+        }
+        return renamed
     }
 
     /// One story with every source behind it — the provenance the backlog row links to.

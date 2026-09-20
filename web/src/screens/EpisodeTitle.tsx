@@ -35,12 +35,20 @@ export function EpisodeTitle({
     setEditing(true)
   }
 
+  // Both ways out of the editor, and they clear the error together: the message belongs to
+  // an attempt that is over, and the non-editing branch renders it too — so leaving it set
+  // would park a `role="alert"` beside the Rename button until the row unmounted.
+  const cancel = () => {
+    setError('')
+    setEditing(false)
+  }
+
   const save = async () => {
     const title = value.trim()
     // Nothing to write, and an empty title is not a request to be re-named after the
     // date: that default is applied at creation, and undoing a rename is a rename.
     if (!title || title === episode.title) {
-      setEditing(false)
+      cancel()
       return
     }
     setBusy(true)
@@ -99,13 +107,13 @@ export function EpisodeTitle({
         maxLength={500}
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Escape') setEditing(false)
+          if (event.key === 'Escape') cancel()
         }}
       />
       <button type="submit" className="primary" disabled={busy}>
         {busy ? 'Saving…' : 'Save'}
       </button>
-      <button type="button" className="linkish hint" onClick={() => setEditing(false)}>
+      <button type="button" className="linkish hint" onClick={cancel}>
         Cancel
       </button>
       {error && (

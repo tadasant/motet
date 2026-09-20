@@ -43,7 +43,7 @@ export const CATALOG: Integration[] = [
     kind: 'gmail',
     availability: 'available',
     detail:
-      'Motet polls the mailbox and extracts the article from each matching message.',
+      'Read-only. Motet polls the mailbox and extracts the article from each matching message.',
   },
   {
     id: 'paste',

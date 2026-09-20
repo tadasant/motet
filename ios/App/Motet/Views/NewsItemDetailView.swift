@@ -29,21 +29,25 @@ struct NewsItemDetailView: View {
             }
             .listRowBackground(Theme.surface)
 
-            if let failure {
-                Section {
-                    Text(failure)
-                        .font(Theme.body(14, relativeTo: .footnote))
-                        .foregroundStyle(Theme.errorText)
-                }
-                .listRowBackground(Theme.surface)
-            }
-
             Section {
                 if let detail {
                     ForEach(detail.sources, id: \.id) { source in
                         sourceRow(source, merged: detail.sources.count > 1)
                     }
-                } else if failure == nil {
+                } else if failure != nil {
+                    // The route is not there, or could not be reached. The row this screen
+                    // was opened from already carries every source's title, so the titles
+                    // are shown and the previews are the thing that is missing — said once,
+                    // rather than an error page over data the app is holding.
+                    ForEach(item.sources, id: \.id) { source in
+                        Text(source.title.isEmpty ? "(untitled)" : source.title)
+                            .font(Theme.display(17, relativeTo: .headline))
+                            .foregroundStyle(Theme.ink)
+                    }
+                    Text("Previews couldn't be loaded.")
+                        .font(Theme.body(13, relativeTo: .footnote))
+                        .foregroundStyle(Theme.inkSoft)
+                } else {
                     Text("Loading…")
                         .font(Theme.body(14, relativeTo: .footnote))
                         .foregroundStyle(Theme.inkSoft)

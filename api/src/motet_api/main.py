@@ -2146,7 +2146,7 @@ def rename_episode(
     nothing about what the episode contains. An episode being built can be renamed while
     it builds; the title is not something any stage reads.
     """
-    episode = repo.rename_episode(conn, episode_id, user_id=user_id, title=body.title.strip())
+    episode = repo.rename_episode(conn, episode_id, user_id=user_id, title=body.title)
     if episode is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.")
     return _episode(conn, episode, progress=_one_build_progress(conn, user_id, episode))
@@ -2461,9 +2461,12 @@ def display_title(stored_title: str, source_titles: Sequence[str]) -> str:
 
     A source with a blank title falls back to the stored one: an extractor that found no
     subject line has given us nothing to show, and an empty row is worse than a paraphrase.
+    Surrounding whitespace is trimmed, which is not a departure from verbatim — the words
+    are untouched — and a subject line with a leading space otherwise renders padded in a
+    SwiftUI `Text`, where HTML would have collapsed it.
     """
     if len(source_titles) == 1 and source_titles[0].strip():
-        return source_titles[0]
+        return source_titles[0].strip()
     return stored_title
 
 

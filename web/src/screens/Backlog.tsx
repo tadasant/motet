@@ -27,8 +27,15 @@ import { Processing } from './Processing'
 
 const DEFAULT_MAX_MINUTES = 20
 
+/** The shelf's rule, one screen over: the year only when it is not this one. */
 function when(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  const date = new Date(iso)
+  const sameYear = date.getFullYear() === new Date().getFullYear()
+  return date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  })
 }
 
 export function Backlog({

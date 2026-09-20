@@ -116,6 +116,27 @@ describe('renaming an episode', () => {
     expect(screen.getByLabelText('Episode title')).toBeDefined()
   })
 
+  it('does not leave an alert on the row after a failure is cancelled', async () => {
+    mockFetch({})
+    render(
+      <EpisodeTitle episode={EPISODE} onRenamed={() => {}}>
+        <span>{EPISODE.title}</span>
+      </EpisodeTitle>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename 2026-09-20' }))
+    fireEvent.change(screen.getByLabelText('Episode title'), { target: { value: 'Nope' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByRole('alert')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // The message belonged to an attempt that is over, and the row renders it too — left
+    // set it would be announced beside the Rename button until the row unmounted.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Rename/ })).toBeDefined())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('cancels on Escape without writing', async () => {
     const calls = mockFetch({ 'PUT /v1/episodes/ep_1/title': EPISODE })
     render(

@@ -627,8 +627,11 @@ def news_item_detail(
 ) -> NewsItemDetail | None:
     """One story and the sources it was deduped from, or ``None`` if it is not this user's.
 
-    **Scoped by user in the statement itself**, for ``source_item_lifecycle``'s reason: the
-    answer carries mailbox content, so "not yours" and "does not exist" are one answer.
+    **Both statements are scoped by user**, for ``source_item_lifecycle``'s reason: the
+    answer carries mailbox content, so "not yours" and "does not exist" are one answer. The
+    second one would be correct today without it — dedup only ever merges inside one user's
+    window — but that is an invariant enforced in another package, and this is the query
+    that returns the previews.
 
     The sources come back in ``position`` order, which is the order dedup wrote them — 0
     is the write-up that created the story and anything higher merged into it — so a reader
@@ -653,10 +656,10 @@ def news_item_detail(
         FROM news_item_sources link
         JOIN source_items si ON si.id = link.source_item_id
         JOIN sources src ON src.id = si.source_id
-        WHERE link.news_item_id = %s
+        WHERE link.news_item_id = %s AND si.user_id = %s
         ORDER BY link.position, si.id
         """,
-        (preview_chars, item_id),
+        (preview_chars, item_id, user_id),
     )
     return NewsItemDetail(
         item=_attach_sources(conn, [row])[0],

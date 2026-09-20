@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from motet_db.api_tokens import MAX_LABEL_CHARS as MAX_TOKEN_LABEL_CHARS
 from motet_sources import MAX_FIRST_SYNC_DAYS
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .fixtures import DEFAULT_FIXTURE_SOURCE_NAME
 
@@ -927,6 +927,21 @@ class RenameEpisodeRequest(BaseModel):
     """
 
     title: str = Field(min_length=1, max_length=500)
+
+    @field_validator("title")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        """Trim here, so ``min_length`` counts what is stored rather than what was typed.
+
+        ``"   "`` is three characters and no title. Stripping in the route instead would
+        have let it through validation and written an empty string — onto the shelf, into
+        a rename button's accessible name, and out through `<title>` in the RSS feed,
+        where a podcast client renders a blank row.
+        """
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("An episode title cannot be blank.")
+        return trimmed
 
 
 class EpisodeResponse(BaseModel):
