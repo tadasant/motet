@@ -253,8 +253,8 @@ from .schemas import (
     WaitlistJoinResponse,
 )
 from .shownotes import SourceExcerpt, chapters_json, transcript_vtt
+from .slack import WEBHOOK_ENV, SlackAlerter, WaitlistAlert
 from .slack import Signup as SlackSignup
-from .slack import SlackAlerter, WaitlistAlert
 from .sync_progress import WORKER_FRESH, run_started_at, sync_progress
 from .voice import (
     VoiceConfig,
@@ -415,6 +415,17 @@ async def lifespan(target: FastAPI) -> AsyncIterator[None]:
             "drain: %s is off or unusable, so enqueued work waits for the next worker "
             "run rather than starting one immediately",
             ENABLED_ENV,
+        )
+    # The same argument one seam along: `build_alerter` logs its own ERROR for a URL that
+    # is set and unusable, and resolving it here is what makes that a startup line rather
+    # than one buried under the first signup. The quiet case is the expected one in both
+    # environments until the secret is wired, so it is INFO and says which.
+    if slack_alerter().configured:
+        obs.logger.info("waitlist: a signup will post an alert to Slack")
+    else:
+        obs.logger.info(
+            "waitlist: %s is unset or unusable, so a signup posts no Slack alert",
+            WEBHOOK_ENV,
         )
     # Said once at startup for the reason every line above is: a mount that registered
     # nothing and an authorization server that is switched off both look, from outside,
@@ -1809,11 +1820,6 @@ def join_waitlist(
         )
     try:
         joined = waitlist_repo.join(conn, submission.email)
-        # Inside the same transaction and the same try, because by the time the alert is
-        # sent there is no connection left to ask — and because a count that failed must
-        # cost the number in the message rather than the signup. `None` renders as no
-        # line at all rather than as a wrong one.
-        total: int | None = waitlist_repo.count(conn)
     except Exception as exc:
         # Caught, and reported by type alone, because this is the one route where letting an
         # exception escape would leak the thing it promises never to log: the error reporter
@@ -1823,9 +1829,28 @@ def join_waitlist(
             conn.rollback()
         logger.error("waitlist: storing a submission failed (%s)", type(exc).__name__)
         return waitlist_answer(WaitlistOutcome.STORE_FAILED, wants_json=submission.wants_json)
-    alert.arm(SlackSignup(email=submission.email, returning=not joined, total=total))
+    alert.arm(SlackSignup(email=submission.email, returning=not joined, total=_list_length(conn)))
     outcome = WaitlistOutcome.JOINED if joined else WaitlistOutcome.ALREADY_LISTED
     return waitlist_answer(outcome, wants_json=submission.wants_json)
+
+
+def _list_length(conn: psycopg.Connection[Any]) -> int | None:
+    """How long the list is now, for the alert — or ``None``, and the row stays stored.
+
+    Its own failure boundary rather than the ``join``'s, deliberately: this read exists
+    only to decorate a Slack message, and inside the write's ``try`` a count that failed
+    would have rolled the successful insert back and told the visitor their signup was
+    lost — the one thing the alert is not allowed to cost (the fresh-eyes review of the
+    first draft found exactly that). A count that fails inside the transaction aborts it,
+    so the savepoint is what keeps the insert; ``None`` renders as no line at all rather
+    than a wrong number.
+    """
+    try:
+        with conn.transaction():
+            return waitlist_repo.count(conn)
+    except Exception as exc:
+        logger.warning("waitlist: could not count the list for the alert (%s)", type(exc).__name__)
+        return None
 
 
 @app.get("/v1/admin/waitlist", response_model=AdminWaitlistResponse, tags=["admin"])

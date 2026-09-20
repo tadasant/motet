@@ -300,6 +300,71 @@ class TestWhenSlackDoesNotAnswer:
         assert WEBHOOK not in caplog.text
         assert "xoxbSecretPath" not in caplog.text
 
+    @pytest.mark.parametrize("status_code", [200, 500])
+    def test_httpx_s_own_request_line_does_not_name_the_webhook(
+        self, status_code: int, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # `httpx.Client.send` logs `HTTP Request: POST <url> "..."` at INFO on the `httpx`
+        # logger, on every call, upstream of everything slack.py writes — and the obs
+        # stack's handler is on the root logger at INFO, which is why this captures at the
+        # root rather than under `motet.api`: the first draft's tests all scoped to
+        # `motet.api` and passed with the credential shipping on every alert.
+        seen: list[httpx.Request] = []
+        with caplog.at_level(logging.DEBUG):
+            capturing(seen, status_code=status_code).signup(
+                Signup(email="ada@example.com", returning=False, total=1), environment="staging"
+            )
+
+        httpx_lines = [r.getMessage() for r in caplog.records if r.name.startswith("httpx")]
+        assert httpx_lines, "httpx logged nothing — the guard has nothing to guard, re-check"
+        assert all("HTTP Request: POST" in line for line in httpx_lines)
+        assert WEBHOOK not in caplog.text
+        assert "xoxbSecretPath" not in caplog.text
+        assert "/services/T0/B0" not in caplog.text
+
+    def test_the_httpx_filter_is_installed_once_and_withholds_every_webhook(self) -> None:
+        httpx_logger = logging.getLogger("httpx")
+        before = len(httpx_logger.filters)
+        WebhookSlackAlerter(WEBHOOK, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+        WebhookSlackAlerter(
+            "https://hooks.slack.invalid/services/T1/B1/second",
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        filters = [f for f in httpx_logger.filters if type(f).__name__ == "_WithholdWebhook"]
+        assert len(filters) == 1
+        assert len(httpx_logger.filters) <= before + 1
+
+        record = logging.LogRecord(
+            "httpx",
+            logging.INFO,
+            __file__,
+            1,
+            'HTTP Request: %s %s "%s"',
+            (
+                "POST",
+                httpx.URL("https://hooks.slack.invalid/services/T1/B1/second"),
+                "HTTP/1.1 200 OK",
+            ),
+            None,
+        )
+        assert filters[0].filter(record) is True
+        assert "second" not in record.getMessage()
+        assert "HTTP Request: POST" in record.getMessage()
+
+    def test_a_secret_cut_by_the_body_bound_does_not_survive_as_a_fragment(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Redacted before truncated: cut first, the tail of the path could straddle the
+        # bound and slip past an exact-match replace.
+        seen: list[httpx.Request] = []
+        body = "x" * 190 + f" see {WEBHOOK} for details"
+        with caplog.at_level(logging.DEBUG, logger="motet.api"):
+            capturing(seen, status_code=500, body=body).signup(
+                Signup(email="ada@example.com", returning=False, total=1), environment="staging"
+            )
+        assert "xoxb" not in caplog.text
+        assert "/services/" not in caplog.text
+
     def test_the_url_is_not_in_a_repr(self) -> None:
         # An error reporter captures frame locals by their repr, and `self` is one.
         alerter = build_alerter(WEBHOOK)
@@ -464,6 +529,30 @@ class TestThroughTheRoute:
         assert response.status_code == 200
         assert rows(db) == [{"email": "ada@example.com", "submissions": 1}]
 
+    def test_a_count_that_fails_costs_the_number_and_not_the_signup(
+        self, api: TestClient, db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The count exists only to decorate the message. Inside the write's failure
+        # boundary it rolled the successful insert back and told the visitor their signup
+        # was lost — the fresh-eyes review's finding, pinned here.
+        from motet_db import waitlist as waitlist_repo
+
+        def broken(conn: Any) -> int:
+            conn.execute("SELECT 1 / 0")  # a real, transaction-aborting error
+            return 0
+
+        monkeypatch.setattr(waitlist_repo, "count", broken)
+        recorder = Recorder()
+        self.use(recorder)
+
+        response = api.post(JOIN, content="email=ada%40example.com", headers=AS_SCRIPT)
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "joined"}
+        assert rows(db) == [{"email": "ada@example.com", "submissions": 1}]
+        assert len(recorder.sent) == 1
+        assert recorder.sent[0][0].total is None
+
     def test_the_alert_is_sent_only_after_the_row_has_committed(
         self, api: TestClient, _migrated: str
     ) -> None:
@@ -486,6 +575,33 @@ class TestThroughTheRoute:
 
         assert len(recorder.sent) == 1
         assert visible == [1]
+
+    def test_startup_says_whether_alerts_are_wired(
+        self,
+        db: psycopg.Connection[Any],
+        _migrated: str,
+        object_store: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Resolved in the lifespan like the drain trigger, so a URL that is set and
+        # unusable is an ERROR at startup rather than under the first signup.
+        monkeypatch.setenv("DATABASE_URL", _migrated)
+        monkeypatch.setenv(WEBHOOK_ENV, "not-a-url")
+        reset_store()
+        reset_slack_alerter()
+        try:
+            with caplog.at_level(logging.INFO), TestClient(app):
+                pass
+        finally:
+            reset_slack_alerter()
+            reset_store()
+
+        assert any(
+            r.levelno == logging.ERROR and WEBHOOK_ENV in r.getMessage() for r in caplog.records
+        )
+        assert any("posts no Slack alert" in r.getMessage() for r in caplog.records)
+        assert "not-a-url" not in caplog.text
 
     def test_health_reports_whether_a_signup_would_reach_slack(self, api: TestClient) -> None:
         # `vault_ready`'s argument: an unwired deployment and a revoked webhook look

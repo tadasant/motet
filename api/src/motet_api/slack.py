@@ -35,7 +35,14 @@ Three things about it are decisions rather than details:
   exception *type* and status code alone, never with ``logger.exception``: the error
   reporter captures frame locals, and a traceback out of httpx carries the request's URL
   with it. That is the rule ``motet_api.waitlist`` already keeps for the address, applied
-  to the other secret in the same request.
+  to the other secret in the same request. **httpx's own logger is the third place**, and
+  the one a review found this module had missed: ``httpx.Client.send`` logs
+  ``HTTP Request: POST <url> "HTTP/1.1 200 OK"`` at INFO on the ``httpx`` logger on every
+  call, success or failure, upstream of every guard here — and the obs stack's log
+  handler sits on the root logger at INFO, so in exactly the two environments where the
+  URL is real that record would have shipped to VictoriaLogs and ridden into GlitchTip
+  as a breadcrumb. :class:`_WithholdWebhook` is a filter on that logger that rewrites the
+  URL out of the record before any handler, the error reporter's included, sees it.
 
 **The address, by contrast, is the payload.** ``motet_api.waitlist`` promises no address
 reaches a log line or a metric, and that promise is intact: the address goes to Slack, the
@@ -82,6 +89,68 @@ UNLABELLED: Final = "an unlabelled deployment"
 
 #: What stands in for the webhook wherever one could otherwise be written down.
 _WITHHELD: Final = "<webhook withheld>"
+
+
+class _WithholdWebhook(logging.Filter):
+    """Rewrite a webhook URL out of httpx's own request log line.
+
+    ``httpx`` logs every request's method and full URL at INFO on the ``httpx`` logger
+    (``httpx._client``, ``logger = logging.getLogger("httpx")``), and the only way to keep
+    a secret out of that line is to change the record before the handlers see it — a
+    *logger*-level filter runs inside ``Logger.handle`` ahead of ``callHandlers``, which
+    is also ahead of the error reporter's patched ``callHandlers``, so the breadcrumb it
+    keeps is the rewritten record too. Raising the logger's level instead would silence
+    every httpx line in the process for the sake of one caller, and a filter on a handler
+    would miss the reporter's patch (motet#73's lesson, one logger over).
+
+    One instance per process, on the ``httpx`` logger, holding every webhook this
+    process has been handed: a test that builds several alerters must not stack several
+    filters, and a second URL must be withheld as surely as the first. Idempotent to
+    install, and only ever installed by :class:`WebhookSlackAlerter`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._secrets: set[str] = set()
+
+    def withhold(self, url: str) -> None:
+        self._secrets.add(url)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._secrets:
+            return True
+        # httpx passes the URL as an `httpx.URL` argument; anything else that mentions it
+        # would be in the formatted message. Both are rewritten, and the record is always
+        # kept — the line is still useful, it just no longer names the credential.
+        if record.args:
+            args = record.args if isinstance(record.args, tuple) else (record.args,)
+            record.args = tuple(self._scrub(arg) for arg in args)
+        if isinstance(record.msg, str):
+            record.msg = self._scrub_text(record.msg)
+        return True
+
+    def _scrub(self, arg: object) -> object:
+        text = str(arg)
+        return self._scrub_text(text) if any(secret in text for secret in self._secrets) else arg
+
+    def _scrub_text(self, text: str) -> str:
+        for secret in self._secrets:
+            text = text.replace(secret, _WITHHELD)
+            path = urlsplit(secret).path
+            if len(path) > 1:
+                text = text.replace(path, _WITHHELD)
+        return text
+
+
+_httpx_filter = _WithholdWebhook()
+
+
+def _withhold_from_httpx(url: str) -> None:
+    """Make sure httpx's request line never names ``url``. Safe to call repeatedly."""
+    httpx_logger = logging.getLogger("httpx")
+    if _httpx_filter not in httpx_logger.filters:
+        httpx_logger.addFilter(_httpx_filter)
+    _httpx_filter.withhold(url)
 
 
 _meter = metrics.get_meter("motet.api")
@@ -179,6 +248,8 @@ class WebhookSlackAlerter:
         # Bound to the instance under a private name and never in a repr: see the module
         # docstring on why this URL is treated as the credential it is.
         self._url = url
+        # Before the client exists, so no request can be logged before the filter is on.
+        _withhold_from_httpx(url)
         self._client = httpx.Client(transport=transport, timeout=timeout)
 
     def __repr__(self) -> str:
@@ -198,9 +269,13 @@ class WebhookSlackAlerter:
         *secret* half is the path, so it is removed as well as the whole URL: a body
         quoting only ``/services/T…/B…/…`` would otherwise survive the first replacement.
         """
-        redacted = body[:_ERROR_BODY_CHARS].replace(self._url, _WITHHELD)
+        redacted = body.replace(self._url, _WITHHELD)
         path = urlsplit(self._url).path
-        return redacted.replace(path, _WITHHELD) if len(path) > 1 else redacted
+        if len(path) > 1:
+            redacted = redacted.replace(path, _WITHHELD)
+        # Redacted first and bounded second: cut first, a secret straddling the bound
+        # would survive as a fragment the exact-match replace cannot see.
+        return redacted[:_ERROR_BODY_CHARS]
 
     def signup(self, signup: Signup, *, environment: str | None) -> None:
         """Post the alert. Best-effort, and never raises.
@@ -296,8 +371,10 @@ def build_alerter(webhook_url: str | None) -> SlackAlerter:
 
     Nothing here raises. An unset URL is silent — it is the state both deployments are in
     until the secret is wired, and the state every laptop is in forever. A URL that is
-    *set* and unusable says so at ERROR, once, at startup: somebody meant to wire this and
-    the value is wrong, and that is a different thing from not having wired it.
+    *set* and unusable says so at ERROR, once, at startup — the API's lifespan resolves
+    the process's alerter for exactly that reason, as it does the drain trigger: somebody
+    meant to wire this and the value is wrong, and that is a different thing from not
+    having wired it.
 
     **The refusal never repeats the value.** A webhook URL is a bearer credential, and an
     error message naming it would put it in the startup log of a public-facing service.
