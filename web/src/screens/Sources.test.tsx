@@ -94,6 +94,7 @@ const progress = (overrides: Partial<SyncProgress>): SyncProgress => ({
   pages: 0,
   error: null,
   waiting_on_worker: false,
+  worker_starting: false,
   ...overrides,
 })
 
@@ -819,6 +820,45 @@ describe('describeSyncProgress', () => {
     const shown = describeSyncProgress(progress({ stage: 'fetching', found: 10, remaining: 10, waiting_on_worker: true }))
     expect(shown.tone).toBe('stalled')
     expect(shown.detail).toMatch(/No worker has run in the last five minutes/)
+  })
+
+  it('says a worker is starting rather than that none will come', () => {
+    const started = describeSyncProgress(
+      progress({ stage: 'queued', started_at: null, worker_starting: true }),
+    )
+    expect(started.headline).toBe('Starting a worker to run the sync')
+    expect(started.tone).toBe('working')
+    expect(started.detail).toBe(
+      'A worker has been asked for — that usually takes a minute or two.',
+    )
+  })
+
+  it('still says nothing will run a sync no worker was started for', () => {
+    // The two are mutually exclusive on the wire; the stalled reading must survive.
+    const shown = describeSyncProgress(progress({ stage: 'queued', waiting_on_worker: true }))
+    expect(shown.tone).toBe('stalled')
+    expect(shown.detail).toMatch(/No worker has run/)
+  })
+
+  it('says how long a sync in flight has been running, and not after it stops', () => {
+    const now = Date.parse('2026-09-12T23:59:00Z')
+    const shown = describeSyncProgress(
+      progress({ stage: 'listing', started_at: '2026-09-12T23:56:50Z', found: 60 }),
+      now,
+    )
+    expect(shown.elapsed).toBe('2m 10s')
+    // A settled sync has stopped: a clock that kept counting would be running over nothing.
+    expect(describeSyncProgress(progress({ stage: 'done', found: 1, pulled_in: 1 }), now).elapsed).toBeNull()
+  })
+
+  it('counts elapsed in seconds, minutes and hours, and never backwards', () => {
+    const now = Date.parse('2026-09-13T00:00:00Z')
+    const at = (started: string) =>
+      describeSyncProgress(progress({ stage: 'listing', started_at: started }), now).elapsed
+    expect(at('2026-09-12T23:59:15Z')).toBe('45s')
+    expect(at('2026-09-12T22:20:00Z')).toBe('1h 40m')
+    // Clock skew between the browser and the API must not produce "-3s".
+    expect(at('2026-09-13T00:00:03Z')).toBeNull()
   })
 
   it('finishes with a sentence, not a bar', () => {

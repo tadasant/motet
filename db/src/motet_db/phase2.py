@@ -200,6 +200,12 @@ class SourceSyncJobs:
     poll_state: str | None = None
     poll_attempts: int = 0
     poll_error: str | None = None
+    #: When that poll job row was written. The API enqueues a poll and, where the drain
+    #: trigger is on, asks Cloud Run for a worker in the same breath (motet#71) — so a young
+    #: poll job is one a worker is *being started* for, which is the difference between
+    #: "nothing will run this" and "a container is booting". See
+    #: :data:`motet_api.sync_progress.WORKER_STARTING`.
+    poll_enqueued_at: datetime | None = None
     extract_open: int = 0
     extract_running: int = 0
     extract_failed: int = 0
@@ -228,12 +234,13 @@ def source_sync_jobs(
         """
         SELECT s.id AS source_id,
                p.state AS poll_state, p.attempts AS poll_attempts, p.last_error AS poll_error,
+               p.created_at AS poll_enqueued_at,
                coalesce(e.open, 0) AS extract_open,
                coalesce(e.running, 0) AS extract_running,
                coalesce(e.failed, 0) AS extract_failed
         FROM unnest(%s::text[], %s::timestamptz[]) AS s(id, since)
         LEFT JOIN LATERAL (
-            SELECT state, attempts, last_error
+            SELECT state, attempts, last_error, created_at
             FROM jobs
             WHERE queue = 'poll' AND (state = 'ready' OR state = 'running')
               AND payload ->> 'source_id' = s.id
@@ -257,6 +264,7 @@ def source_sync_jobs(
             poll_state=row["poll_state"],
             poll_attempts=row["poll_attempts"] or 0,
             poll_error=row["poll_error"],
+            poll_enqueued_at=row["poll_enqueued_at"],
             extract_open=row["extract_open"],
             extract_running=row["extract_running"],
             extract_failed=row["extract_failed"],

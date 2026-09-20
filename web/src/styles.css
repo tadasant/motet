@@ -763,6 +763,7 @@ details > summary:hover { color: var(--ink); }
 .sync-progress p { margin: 0; }
 .sync-headline { font-weight: 600; }
 .sync-count { margin-top: .45rem !important; font-variant-numeric: tabular-nums; }
+.sync-elapsed { color: var(--ink-soft); }
 .sync-detail { margin-top: .3rem !important; color: var(--ink-soft); font-size: 14px; }
 .sync-bar { position: relative; height: 6px; margin-top: .55rem; background: var(--rule); border-radius: 6px; overflow: hidden; }
 .sync-bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--voices); border-radius: 6px; transition: width .6s ease; }

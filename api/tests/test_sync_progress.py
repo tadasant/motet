@@ -21,6 +21,7 @@ from motet_api.sync_progress import (
     BROKEN_CHAIN_GRACE,
     SETTLED_VISIBLE,
     WORKER_FRESH,
+    WORKER_STARTING,
     sync_progress,
 )
 from motet_db import repo
@@ -53,9 +54,15 @@ def run(
 
 
 def progress(
-    state: dict[str, Any], jobs: SourceSyncJobs = NO_JOBS, seen: datetime | None = ALIVE
+    state: dict[str, Any],
+    jobs: SourceSyncJobs = NO_JOBS,
+    seen: datetime | None = ALIVE,
+    *,
+    trigger: bool = False,
 ) -> Any:
-    return sync_progress(state, jobs, now=NOW, worker_last_seen_at=seen)
+    return sync_progress(
+        state, jobs, now=NOW, worker_last_seen_at=seen, drain_trigger_enabled=trigger
+    )
 
 
 # --- before anything is found ---------------------------------------------------------
@@ -73,6 +80,98 @@ def test_a_waiting_poll_is_queued_and_says_whether_a_worker_will_take_it() -> No
     stuck = progress({}, queued, seen=None)
     assert (stuck.stage, stuck.waiting_on_worker) == ("queued", True)
     assert progress({}, queued, seen=GONE).waiting_on_worker is True
+
+
+def test_a_worker_being_started_is_not_a_worker_that_will_never_come() -> None:
+    """Tadas's "stuck on Syncing…", and the half of it that outlived the infrastructure fix.
+
+    Where the API starts the worker itself (motet#71) the worker is one-shot, so at the
+    moment "Sync now" is pressed the newest heartbeat is always older than ``WORKER_FRESH``
+    — the last worker exited when it finished. Read by the heartbeat alone, every sync in
+    such a deployment opens by announcing that nothing will move, for the minute or two
+    Cloud Run takes to start the container the same request asked for.
+    """
+    fresh = SourceSyncJobs(poll_state="ready", poll_enqueued_at=NOW - timedelta(seconds=30))
+    shown = progress({}, fresh, seen=GONE, trigger=True)
+    assert (shown.stage, shown.worker_starting, shown.waiting_on_worker) == ("queued", True, False)
+
+
+def test_a_worker_that_was_never_asked_for_is_still_reported_as_missing() -> None:
+    """The switch is off — no execution was started — so the honest answer is the old one."""
+    fresh = SourceSyncJobs(poll_state="ready", poll_enqueued_at=NOW - timedelta(seconds=30))
+    shown = progress({}, fresh, seen=GONE, trigger=False)
+    assert (shown.worker_starting, shown.waiting_on_worker) == (False, True)
+
+
+def test_a_nudge_that_produced_no_container_stops_claiming_one_is_coming() -> None:
+    """A refused or lost nudge must not promise a worker forever: the window expires and
+    the heartbeat's own reading takes over."""
+    stale = SourceSyncJobs(
+        poll_state="ready", poll_enqueued_at=NOW - WORKER_STARTING - timedelta(seconds=1)
+    )
+    shown = progress({}, stale, seen=GONE, trigger=True)
+    assert (shown.worker_starting, shown.waiting_on_worker) == (False, True)
+
+
+def test_a_live_worker_is_never_reported_as_merely_starting() -> None:
+    """A poll job written by the worker mid-chain fires no nudge, and the worker that wrote
+    it is alive — so the heartbeat, not the job's age, is what answers."""
+    fresh = SourceSyncJobs(poll_state="ready", poll_enqueued_at=NOW - timedelta(seconds=5))
+    shown = progress({}, fresh, seen=ALIVE, trigger=True)
+    assert (shown.worker_starting, shown.waiting_on_worker) == (False, False)
+
+
+def test_a_poll_job_stamped_in_the_future_is_not_a_worker_starting() -> None:
+    """Clock skew between the API and Postgres must not open the window indefinitely."""
+    ahead = SourceSyncJobs(poll_state="ready", poll_enqueued_at=NOW + timedelta(minutes=10))
+    assert progress({}, ahead, seen=GONE, trigger=True).worker_starting is False
+
+
+def test_extraction_left_unattended_can_also_be_waiting_on_a_starting_worker() -> None:
+    """The stage after the search, with the poll chain's own job still open behind it."""
+    jobs = SourceSyncJobs(
+        poll_state="ready",
+        poll_enqueued_at=NOW - timedelta(seconds=20),
+        extract_open=10,
+    )
+    shown = progress(run("listing", queued=10), jobs, seen=GONE, trigger=True)
+    assert (shown.stage, shown.worker_starting, shown.waiting_on_worker) == (
+        "listing",
+        True,
+        False,
+    )
+
+
+def test_a_poll_a_worker_already_holds_is_neither_waiting_nor_starting() -> None:
+    """`connecting` means a worker has it: both flags are claims about one that is absent."""
+    held = SourceSyncJobs(poll_state="running", poll_enqueued_at=NOW - timedelta(seconds=5))
+    shown = progress({}, held, seen=GONE, trigger=True)
+    assert (shown.stage, shown.waiting_on_worker, shown.worker_starting) == (
+        "connecting",
+        False,
+        False,
+    )
+
+
+@pytest.mark.parametrize("trigger", [True, False])
+@pytest.mark.parametrize("seen", [ALIVE, GONE, None])
+@pytest.mark.parametrize("poll_state", [None, "ready", "running"])
+@pytest.mark.parametrize("age", [timedelta(seconds=5), WORKER_STARTING + timedelta(seconds=1)])
+def test_the_two_readings_are_never_both_true(
+    trigger: bool, seen: datetime | None, poll_state: str | None, age: timedelta
+) -> None:
+    """They are one question with two answers, and both clients branch on them in order.
+
+    A state reporting both would show the stalled sentence over a booting worker, which is
+    the defect this field exists to remove — so it is asserted over the whole cross product
+    rather than in the branches that happened to get a test.
+    """
+    jobs = SourceSyncJobs(poll_state=poll_state, poll_enqueued_at=NOW - age)
+    for state in ({}, run("listing", queued=60), run("listed", queued=10)):
+        shown = progress(state, jobs, seen=seen, trigger=trigger)
+        if shown is None:
+            continue
+        assert not (shown.waiting_on_worker and shown.worker_starting), shown.stage
 
 
 def test_a_claimed_poll_with_nothing_listed_yet_is_connecting() -> None:
@@ -251,6 +350,120 @@ def test_a_sync_reports_each_stage_as_its_jobs_run(
         0,
         0,
     )
+
+
+def test_sync_now_answers_with_the_sync_already_queued(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The answer to "Sync now" has to *be* the start of the sync, not a row with nothing on it.
+
+    A regression guard rather than a fix: ``_source_response`` computes the progress from
+    its own default argument, so no single-source route says anything about it and nothing
+    in ``main.py`` would notice that default being dropped. It matters most to the iOS app,
+    which *keeps* this response and watches the row it puts in place — a null progress there
+    leaves the button falling straight back to "Sync now" and the detail screen polling
+    nothing, where the SPA would escape it by throwing the answer away and re-fetching.
+    """
+    mailbox = FakeMailClient(messages=[], page_size=20)
+    monkeypatch.setattr("motet_workers.ingest.build_mail_client", lambda token, env=None: mailbox)
+    started = api.post(
+        "/v1/sources/connect",
+        json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+        headers=AUTH,
+    ).json()
+    connected = api.post(
+        "/v1/sources/callback",
+        json={"state": started["state"], "code": "fake-auth-code"},
+        headers=AUTH,
+    ).json()
+    # Completing the consent queues the first poll, and says so in its own answer.
+    assert connected["sync_progress"] is not None
+    assert connected["sync_progress"]["stage"] == "queued"
+
+    answered = api.post(f"/v1/sources/{started['source_id']}/poll", headers=AUTH)
+    assert answered.status_code == 200
+    shown = answered.json()["sync_progress"]
+    assert shown is not None, "Sync now answered with no sync"
+    assert shown["stage"] == "queued"
+    # And it is the same reading the list gives, rather than a second opinion.
+    assert shown == gmail_progress(api, started["source_id"])
+
+
+def test_a_label_sync_save_does_not_wipe_a_sync_in_flight(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same guard one route along: saving labels answers with a full row, which the iOS
+    app puts back into its list, so a null progress here would blank a running sync's panel
+    mid-sync. Three routes return a single source and all three rely on the same default."""
+    mailbox = FakeMailClient(messages=[], page_size=20)
+    monkeypatch.setattr("motet_workers.ingest.build_mail_client", lambda token, env=None: mailbox)
+    started = api.post(
+        "/v1/sources/connect",
+        json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+        headers=AUTH,
+    ).json()
+    api.post(
+        "/v1/sources/callback",
+        json={"state": started["state"], "code": "fake-auth-code"},
+        headers=AUTH,
+    )
+    saved = api.put(
+        f"/v1/sources/{started['source_id']}/label-sync",
+        json={"remove_label": "Newsletters", "add_label": "Completed"},
+        headers=AUTH,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["sync_progress"] is not None
+
+
+class _Trigger:
+    """A drain trigger that is configured. Only ``enabled`` is read on this path."""
+
+    def __init__(self, *, enabled: bool) -> None:
+        self._enabled = enabled
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def fire(self, reason: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("enabled", "expected"), [(True, {"worker_starting"}), (False, {"waiting_on_worker"})]
+)
+def test_the_route_reports_which_reading_this_deployment_is_entitled_to(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch, enabled: bool, expected: set[str]
+) -> None:
+    """The one assertion that the flag reaches a client, rather than being computed.
+
+    Every other ``worker_starting`` case drives the pure function and passes
+    ``drain_trigger_enabled`` by hand, so deleting the one line in ``_sync_progress`` that
+    reads the real trigger would leave the suite green and the field permanently false in
+    every deployment — the computed-but-never-delivered failure this field exists to fix.
+    """
+    from motet_api import deps as api_deps  # noqa: PLC0415 — the module the route resolves
+
+    monkeypatch.setattr(api_deps, "_trigger", _Trigger(enabled=enabled))
+    mailbox = FakeMailClient(messages=[], page_size=20)
+    monkeypatch.setattr("motet_workers.ingest.build_mail_client", lambda token, env=None: mailbox)
+    started = api.post(
+        "/v1/sources/connect",
+        json={"provider": "gmail", "name": "Gmail", "redirect_uri": REDIRECT},
+        headers=AUTH,
+    ).json()
+    api.post(
+        "/v1/sources/callback",
+        json={"state": started["state"], "code": "fake-auth-code"},
+        headers=AUTH,
+    )
+    # No worker has ever run here, so the heartbeat is absent and the poll was just written.
+    shown = gmail_progress(api, started["source_id"])
+    assert shown is not None
+    assert shown["stage"] == "queued"
+    true_flags = {name for name in ("waiting_on_worker", "worker_starting") if shown[name]}
+    assert true_flags == expected
 
 
 def test_the_paste_source_reports_no_progress(api: TestClient) -> None:

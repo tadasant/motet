@@ -2519,6 +2519,55 @@ run says so instead of animating. Both clients poll every two seconds for as lon
 is in flight and moving, rather than for a fixed window, and drop to ten seconds while it
 waits on a worker. `done` and `failed` are reported for an hour.
 
+**`worker_starting` is the same trap read from the other end, and the heartbeat alone cannot
+see it.** Where the API starts the worker itself (motet#71) the worker is one-shot: it drains,
+writes its heartbeat and exits. So at the moment anybody presses "Sync now" the newest
+heartbeat is *always* older than the five minutes, and Cloud Run's job scheduling latency —
+90–165 seconds, and unchanged by what caused the execution — is how long it stays that way.
+Read by the heartbeat alone, every sync in such a deployment opens by announcing that nothing
+will move until a worker runs, over a container that is booting because of that very request.
+That is production, and it is what "stuck on Syncing…" was (Tadas, 2026-09-19, on
+TestFlight). **Inferring "nothing is coming" from "nothing has run" is the same mistake as
+inferring "no errors" from "no data"**, and it is worth naming because the panel exists to
+avoid the first one.
+
+So `sync_progress` also takes whether this deployment nudges (`MOTET_DRAIN_TRIGGER`), and a
+poll job younger than `WORKER_STARTING` — four minutes: past the 165-second ceiling, inside
+`WORKER_FRESH` — reads as a worker *starting* rather than a worker missing. The two are
+mutually exclusive, both clients say "a worker is starting" instead of the stalled sentence,
+and the fast poll interval applies because it is about to move. **What it infers is that this
+API asked for a worker when it wrote this poll job**, not that one will certainly arrive: the
+nudge is fire-and-forget and leaves no record (`motet_api.drain`), so the claim is bounded in
+both directions — never made where the switch is off, and expired by the window, so a nudge
+Cloud Run refused reverts to the heartbeat's own reading rather than promising a worker
+forever. **The copy stops at the ask for the same reason** — "a worker has been asked for",
+never "then it moves" — because `MOTET_DRAIN_TRIGGER` is configured-not-proven in exactly the
+sense `/internal/health`'s field is, and an environment whose service account lacks the
+`run.invoker` grant has every ask refused with a 403 the panel cannot see. Read **only** off
+the poll job, because that is the one the API enqueues and nudges for; an extract job or a
+further link of a chain is written by the worker, which fires no trigger, and a worker that
+just wrote one is alive anyway — a gate that rests on the heartbeat being written before each
+claim, on `Queue.POLL` leading `queues.PIPELINE`, and on `WORKER_STARTING` sitting a minute
+inside `WORKER_FRESH`.
+
+**A route answering a single source answers with its progress too, and it does so through a
+default argument nothing else mentions.** `_source_response`'s `progress` parameter carries a
+`Literal[False]` sentinel and computes the reading itself when a caller omits it, so all three
+single-source routes — the consent callback, "Sync now", and a label-sync save — answer with
+`sync_progress` without saying so. The poll job is written in the transaction that read is
+made in, so the answer already says `queued`. **The cost of that shape is that no route would
+notice the default being dropped**, and the client it would break is the one that keeps the
+answer: the iOS app puts the row straight into its list and watches it (`SourcesModel.replace`),
+so a null progress there leaves the button falling back to "Sync now" and the detail screen
+polling nothing, where the SPA throws the answer away and re-fetches the list regardless.
+`api/tests/test_sync_progress.py` pins all three routes for that reason.
+
+**How long a sync has been running is shown while it is in flight**, from `started_at`,
+recomputed on each poll rather than by a timer of its own — because "is this slow or is it
+stuck" is the question somebody watching a first sync of a large mailbox is actually asking,
+and every other field answers a different one. Not on a `done` or `failed` sync: that clock
+would keep counting over something that has stopped.
+
 **The run and the job rows are two statements, so a snapshot can straddle the last link's
 commit** and show a `listing` run beside no open poll. That is a sync finishing, so a
 `listing` run with no poll reads as stopped only once it is two minutes stale

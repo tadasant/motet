@@ -235,17 +235,47 @@ export type SyncDescription = {
   headline: string
   count: string | null
   detail: string | null
+  /** How long the sync has been running, once its first poll has run. Null before that. */
+  elapsed: string | null
   fraction: number | null
   tone: 'working' | 'stalled' | 'done' | 'error'
+}
+
+/**
+ * `2m 10s`, from the sync's own start. A first sync of a large mailbox is many polls over
+ * many minutes, and without this the screen cannot tell "slow" from "stuck" — which is the
+ * question somebody watching it is actually asking. Recomputed on every poll, so it ticks
+ * without a timer of its own.
+ */
+export const elapsedSince = (startedAt: string, now: number): string | null => {
+  const began = Date.parse(startedAt)
+  if (Number.isNaN(began)) return null
+  const seconds = Math.floor((now - began) / 1000)
+  if (seconds < 0) return null
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
 const n = (value: number): string => value.toLocaleString('en-US')
 const messages = (value: number): string => `${n(value)} message${value === 1 ? '' : 's'}`
 
-export function describeSyncProgress(progress: SyncProgress): SyncDescription {
+export function describeSyncProgress(
+  progress: SyncProgress,
+  now: number = Date.now(),
+): SyncDescription {
   const stalled = progress.waiting_on_worker
   const noWorker =
     'No worker has run in the last five minutes, so this will not move until one does.'
+  // A worker has been asked for and its container has not appeared yet. Saying "no worker
+  // will run this" over that is the mistake motet#136 shipped: where the API starts the
+  // worker itself, that is every sync's first minute or two. The wording stops at the ask
+  // deliberately — `MOTET_DRAIN_TRIGGER` says an ask was made, never that Cloud Run
+  // accepted it, so promising that it moves would be a standing lie in an environment
+  // whose service account lacks the grant.
+  const starting =
+    'A worker has been asked for — that usually takes a minute or two.'
   const atLeast = progress.found_is_lower_bound ? 'at least ' : ''
   const count =
     progress.found > 0
@@ -256,17 +286,23 @@ export function describeSyncProgress(progress: SyncProgress): SyncDescription {
     progress.failed > 0
       ? `${messages(progress.failed)} could not be fetched and ${progress.failed === 1 ? 'was' : 'were'} left out.`
       : null
+  const elapsed = progress.started_at ? elapsedSince(progress.started_at, now) : null
   const working = (headline: string, detail: string | null, bar: number | null = fraction): SyncDescription => ({
     headline,
     count,
-    detail: stalled ? noWorker : detail,
+    detail: stalled ? noWorker : progress.worker_starting ? starting : detail,
+    elapsed,
     fraction: bar,
     tone: stalled ? 'stalled' : 'working',
   })
 
   switch (progress.stage) {
     case 'queued':
-      return working('Waiting for a worker to start the sync', null, null)
+      return working(
+        progress.worker_starting ? 'Starting a worker to run the sync' : 'Waiting for a worker to start the sync',
+        null,
+        null,
+      )
     case 'retrying':
       return working(
         'Could not reach the mailbox — trying again',
@@ -299,6 +335,9 @@ export function describeSyncProgress(progress: SyncProgress): SyncDescription {
             : 'Sync finished · nothing new',
         count: null,
         detail: failedNote ?? (progress.found > 0 ? 'New items are held for you to ingest.' : null),
+        // A settled sync has stopped: an elapsed time that kept counting up would be a
+        // running clock over something that is not running.
+        elapsed: null,
         fraction: progress.found > 0 ? 1 : null,
         tone: 'done',
       }
@@ -311,6 +350,7 @@ export function describeSyncProgress(progress: SyncProgress): SyncDescription {
               (progress.remaining > 0 ? ` · ${n(progress.remaining)} still being fetched` : '')
             : null,
         detail: progress.error,
+        elapsed: null,
         fraction,
         tone: 'error',
       }

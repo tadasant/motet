@@ -34,7 +34,19 @@ export function SyncProgress({ progress }: { progress: Progress }) {
           <span className="sync-bar-fill" style={percent === null ? undefined : { width: `${percent}%` }} />
         </div>
       )}
-      {shown.count && <p className="sync-count">{shown.count}</p>}
+      {(shown.count || shown.elapsed) && (
+        <p className="sync-count">
+          {shown.count}
+          {/* How long it has been going, so "slow" and "stuck" are tellable apart. Not a
+              live region: it changes on every poll and is not worth announcing. */}
+          {shown.elapsed && (
+            <span className="sync-elapsed">
+              {shown.count ? ' · ' : ''}
+              {`running for ${shown.elapsed}`}
+            </span>
+          )}
+        </p>
+      )}
       {shown.detail && (
         <p className="sync-detail" role="status">
           {shown.detail}
