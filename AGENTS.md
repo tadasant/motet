@@ -3272,6 +3272,17 @@ example invariant 9 gives above. The runbook belongs to the private repo, not to
 - **No framework and no dependencies.** The brand allows two webfonts and nothing else, so
   the page is HTML, one stylesheet and one small script, and `build.mjs` is standard-library
   Node. `bin/ci` runs the same `npm run build` Cloudflare does, plus the build's own tests.
+  **One script on the page is not ours and never appears in this tree**: Cloudflare injects
+  its Web Analytics beacon into every proxied HTML response on the zone (auto-install, on
+  since 2026-08-23), and the page's `_headers` carries the two sources that let it run —
+  `https://static.cloudflareinsights.com` on `script-src`, and `'self'` on `connect-src`,
+  because automatic injection reports to this origin's own `/cdn-cgi/rum` rather than to
+  `cloudflareinsights.com`. Until motet#141 the policy blocked it and the site produced no
+  analytics at all. **The invariant-12 reading is that this repo adds no vendor**: the zone
+  already injects the beacon whatever `_headers` says, the dashboard setting is the owner's
+  and outside this repo, and all a policy can do is decide whether what arrives runs. The
+  host is pinned and the *path* is not, deliberately — `_headers` gives the reason, and it
+  is robustness rather than narrowness.
 - **The API origin is the build's one input**, `MOTET_API_BASE_URL`, set per Pages
   environment — the same reason `web/`'s container reads it at start: no deployment's
   hostname lives in this public repo. It is filled into the form's `action` and into the

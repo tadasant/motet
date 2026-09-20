@@ -22,15 +22,34 @@ afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-/** The built `_headers` policy, as directive -> sources, so a test can assert the whole of it. */
+/**
+ * The built `_headers` policy, as directive -> sources, so a test can assert the whole of it.
+ *
+ * Parsed as Cloudflare parses the file — a rule is an unindented path, its headers are the
+ * indented lines under it — rather than by finding the first line that looks like a policy.
+ * Where the policy *sits* is as load-bearing as what it says: a policy under `/index.html`,
+ * or above the first rule, leaves `/` with no policy at all, and a second `/*` block could
+ * add back everything the assertions below forbid. Both read identically to a line grep.
+ */
 function contentSecurityPolicy(headers) {
-  const line = headers
-    .split('\n')
-    .map((row) => row.trim())
-    .find((row) => row.startsWith('Content-Security-Policy:'))
-  assert.ok(line, '_headers must set a Content-Security-Policy')
+  const rules = new Map()
+  let path = null
+  for (const row of headers.split('\n')) {
+    if (!row.trim() || row.trimStart().startsWith('#')) continue
+    if (!/^\s/.test(row)) {
+      path = row.trim()
+      rules.set(path, [])
+      continue
+    }
+    assert.ok(path, '_headers has a header line before any path rule')
+    rules.get(path).push(row.trim())
+  }
+  assert.deepEqual([...rules.keys()], ['/*'], '_headers must apply to /* and nothing else')
+
+  const lines = rules.get('/*').filter((row) => row.startsWith('Content-Security-Policy:'))
+  assert.equal(lines.length, 1, '/* must set exactly one Content-Security-Policy')
   const policy = {}
-  for (const directive of line.slice('Content-Security-Policy:'.length).split(';')) {
+  for (const directive of lines[0].slice('Content-Security-Policy:'.length).split(';')) {
     const [name, ...sources] = directive.trim().split(/\s+/)
     if (name) policy[name] = sources
   }
@@ -99,7 +118,7 @@ describe('build', () => {
     assert.ok(!html.includes(PLACEHOLDER) && !headers.includes(PLACEHOLDER))
   })
 
-  it('lets Cloudflare\u2019s analytics beacon load and report, and nothing else', () => {
+  it('lets Cloudflare’s analytics beacon load and report, and nothing else', () => {
     // Cloudflare injects the beacon into every proxied HTML response on this zone, so the
     // page's own markup never mentions it and only this policy decides whether it runs.
     // Observed against the live site: the script comes from static.cloudflareinsights.com
@@ -112,10 +131,8 @@ describe('build', () => {
     assert.deepEqual(policy['script-src'], ["'self'", 'https://static.cloudflareinsights.com'])
     assert.ok(policy['connect-src'].includes("'self'"))
 
-    // The host, never a path: the injected URL is /beacon.min.js/<build>, and a CSP path
-    // without a trailing slash matches exactly, so a path source would block the beacon.
-    assert.ok(!policy['script-src'].some((source) => /cloudflareinsights\.com\//.test(source)))
     // Automatic injection posts same-origin, so the reporting host is deliberately absent.
+    // The `deepEqual` above is what pins the script source, path forms included.
     assert.ok(!policy['connect-src'].includes('https://cloudflareinsights.com'))
   })
 
@@ -127,7 +144,15 @@ describe('build', () => {
     assert.deepEqual(policy['default-src'], ["'self'"])
     assert.deepEqual(policy['object-src'], ["'none'"])
     assert.deepEqual(policy['frame-ancestors'], ["'none'"])
-    // Every source is a keyword, `data:`, or one exact host. No `*`, no bare scheme, no
+    assert.deepEqual(policy['base-uri'], ["'self'"])
+    // The three directives with no placeholder in them are pinned outright, so a host
+    // added to any of them is a failure rather than merely a well-shaped source.
+    assert.deepEqual(policy['style-src'], ["'self'", 'https://fonts.googleapis.com'])
+    assert.deepEqual(policy['font-src'], ['https://fonts.gstatic.com'])
+    assert.deepEqual(policy['img-src'], ["'self'", 'data:'])
+
+    // And a sweep over everything, including the two directives the build substitutes
+    // into: every source is a keyword or one exact host. No `*`, no bare scheme, no
     // inline escape — a beacon is not a reason to reach for any of them.
     const keyword = /^'(self|none)'$/
     const exactHost = /^https:\/\/[a-z0-9.-]+$/
@@ -136,7 +161,7 @@ describe('build', () => {
         const allowed =
           keyword.test(source) ||
           exactHost.test(source) ||
-          source === 'data:' ||
+          (directive === 'img-src' && source === 'data:') ||
           source === LOCAL_API_ORIGIN
         assert.ok(allowed, `${directive} must not widen to ${source}`)
       }
