@@ -343,19 +343,23 @@ class GmailOAuthClient:
                 "client_secret": self._client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
-            }
+            },
+            refreshing=True,
         )
 
-    def _token_request(self, form: dict[str, str]) -> TokenGrant:
+    def _token_request(self, form: dict[str, str], *, refreshing: bool = False) -> TokenGrant:
         response = self._post(self._token_endpoint, form)
         status = response.status_code
         if status == 400 or status == 401:
-            # `invalid_grant` is the one that matters: the user revoked access, or the
-            # refresh token expired after six months of disuse. Retrying cannot fix it and
-            # only re-consent can, so it is a permanent failure rather than a retryable one.
+            # `invalid_grant` is the one that matters: retrying cannot fix it and only
+            # re-consent can, so it is a permanent failure rather than a retryable one.
             raise SourceAuthError(
                 f"Google rejected the token request ({status}): {_error_detail(response)}. "
-                "The mailbox must be reconnected."
+                + (
+                    REFRESH_REJECTED
+                    if refreshing and _error_code(response) == "invalid_grant"
+                    else "The mailbox must be reconnected."
+                )
             )
         if status >= 300:
             raise SourceError(f"Google's token endpoint returned {status}: {response.text[:300]}")
@@ -615,6 +619,42 @@ class GmailMailClient:
         if not isinstance(body, dict):
             raise SourceError(f"Gmail returned a non-object body fetching {what}")
         return body
+
+
+#: What to say when Google refuses a *refresh* with ``invalid_grant``.
+#:
+#: The error means one grant is dead and says nothing about which of three things killed
+#: it, so the message names all three rather than asserting the likeliest. The third is
+#: the one that cost an afternoon and is invisible from inside this repo: **an OAuth
+#: client left in Google's "Testing" publishing status expires every refresh token it has
+#: issued after roughly seven days.** A deployment driven by an automated loop therefore
+#: breaks on a weekly cadence, with a `400 invalid_grant` and nothing anywhere pointing at
+#: the console setting that caused it — the publishing status is a fact about the OAuth
+#: client, which lives in the private infrastructure repo and which nothing here can read.
+#:
+#: The carve-out that makes people discount this does not apply to Motet: Google exempts
+#: clients requesting only name, email and profile, and Motet asks for ``gmail.readonly``.
+REFRESH_REJECTED: Final = (
+    "The mailbox must be reconnected. Google refuses a refresh with 'invalid_grant' for "
+    "three different reasons and does not say which: access was revoked, the token went "
+    "unused for six months, or this OAuth client is still in 'Testing' publishing status, "
+    "which expires every refresh token it issued after about seven days. Check the "
+    "publishing status first if this recurs on a weekly cadence."
+)
+
+
+def _error_code(response: Any) -> str:
+    """The OAuth 2 ``error`` field, which :func:`_error_detail` deliberately passes over.
+
+    That function prefers ``error_description`` because it is what a person reads; this one
+    wants the machine-readable code, because ``invalid_grant`` is the one value worth
+    branching on and the description is free-form prose Google has changed before.
+    """
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 — an error body is frequently not JSON
+        return ""
+    return str(body.get("error", "")) if isinstance(body, dict) else ""
 
 
 def _error_detail(response: Any) -> str:

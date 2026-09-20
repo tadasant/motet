@@ -1019,6 +1019,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var status: String
     public var telemetryConfigured: Bool
     public var telemetryExporting: Bool
+    public var testFixtures: Bool?
     public var vaultBackend: String
     public var vaultReady: Bool
     public var voiceConfigured: Bool?
@@ -1040,6 +1041,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         status: String,
         telemetryConfigured: Bool,
         telemetryExporting: Bool,
+        testFixtures: Bool? = nil,
         vaultBackend: String,
         vaultReady: Bool,
         voiceConfigured: Bool? = nil
@@ -1060,6 +1062,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.status = status
         self.telemetryConfigured = telemetryConfigured
         self.telemetryExporting = telemetryExporting
+        self.testFixtures = testFixtures
         self.vaultBackend = vaultBackend
         self.vaultReady = vaultReady
         self.voiceConfigured = voiceConfigured
@@ -1082,6 +1085,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case status
         case telemetryConfigured = "telemetry_configured"
         case telemetryExporting = "telemetry_exporting"
+        case testFixtures = "test_fixtures"
         case vaultBackend = "vault_backend"
         case vaultReady = "vault_ready"
         case voiceConfigured = "voice_configured"
@@ -2026,6 +2030,60 @@ public struct SaveHighlightRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// Re-establish the connected state a human's one-time consent produced.
+public struct SeedGmailSourceRequest: Codable, Hashable, Sendable {
+    public var mailbox: String?
+    public var name: String?
+    public var query: String?
+    public var scopes: [String]?
+
+    public init(
+        mailbox: String? = nil,
+        name: String? = nil,
+        query: String? = nil,
+        scopes: [String]? = nil
+    ) {
+        self.mailbox = mailbox
+        self.name = name
+        self.query = query
+        self.scopes = scopes
+    }
+}
+
+public struct SeedGmailSourceResponse: Codable, Hashable, Sendable {
+    public var created: Bool
+    public var mailbox: String?
+    public var name: String
+    public var pollJob: TestingJobResponse
+    public var scopes: [String]
+    public var sourceId: String
+
+    public init(
+        created: Bool,
+        mailbox: String? = nil,
+        name: String,
+        pollJob: TestingJobResponse,
+        scopes: [String],
+        sourceId: String
+    ) {
+        self.created = created
+        self.mailbox = mailbox
+        self.name = name
+        self.pollJob = pollJob
+        self.scopes = scopes
+        self.sourceId = sourceId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case created
+        case mailbox
+        case name
+        case pollJob = "poll_job"
+        case scopes
+        case sourceId = "source_id"
+    }
+}
+
 public struct SegmentResponse: Codable, Hashable, Sendable {
     public var claims: [ClaimModel]
     public var durationMs: Int
@@ -2629,6 +2687,128 @@ public struct StartVoiceSessionRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// One job row, plus whether anything is draining the queue it is on.
+///
+/// The second half is the point. A job in ``ready`` looks identical whether a worker is
+/// working through a backlog or whether none has run for a week, so a caller given only
+/// the state cannot tell slow from broken — which is the trap motet#38 is about, and the
+/// reason ``worker_last_seen_at`` and ``worker_fresh`` travel with every answer.
+public struct TestingJobResponse: Codable, Hashable, Sendable {
+    public var attempts: Int
+    public var createdAt: Date
+    public var jobId: Int
+    public var lastError: String?
+    public var lockedAt: Date?
+    public var maxAttempts: Int
+    public var now: Date
+    public var queue: String
+    public var runAt: Date
+    public var state: String
+    public var subjectId: String?
+    public var updatedAt: Date
+    public var workerFresh: Bool
+    public var workerLastSeenAt: Date?
+
+    public init(
+        attempts: Int,
+        createdAt: Date,
+        jobId: Int,
+        lastError: String? = nil,
+        lockedAt: Date? = nil,
+        maxAttempts: Int,
+        now: Date,
+        queue: String,
+        runAt: Date,
+        state: String,
+        subjectId: String? = nil,
+        updatedAt: Date,
+        workerFresh: Bool,
+        workerLastSeenAt: Date? = nil
+    ) {
+        self.attempts = attempts
+        self.createdAt = createdAt
+        self.jobId = jobId
+        self.lastError = lastError
+        self.lockedAt = lockedAt
+        self.maxAttempts = maxAttempts
+        self.now = now
+        self.queue = queue
+        self.runAt = runAt
+        self.state = state
+        self.subjectId = subjectId
+        self.updatedAt = updatedAt
+        self.workerFresh = workerFresh
+        self.workerLastSeenAt = workerLastSeenAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempts
+        case createdAt = "created_at"
+        case jobId = "job_id"
+        case lastError = "last_error"
+        case lockedAt = "locked_at"
+        case maxAttempts = "max_attempts"
+        case now
+        case queue
+        case runAt = "run_at"
+        case state
+        case subjectId = "subject_id"
+        case updatedAt = "updated_at"
+        case workerFresh = "worker_fresh"
+        case workerLastSeenAt = "worker_last_seen_at"
+    }
+}
+
+/// What a reset removed, per table, and what it deliberately did not.
+public struct TestingResetResponse: Codable, Hashable, Sendable {
+    public var deleted: JSONValue
+    public var kept: [String]
+    public var userId: String
+
+    public init(deleted: JSONValue, kept: [String], userId: String) {
+        self.deleted = deleted
+        self.kept = kept
+        self.userId = userId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case deleted
+        case kept
+        case userId = "user_id"
+    }
+}
+
+/// Run one pipeline stage now, and say which job that was.
+public struct TriggerJobRequest: Codable, Hashable, Sendable {
+    public var keepInBacklog: Bool?
+    public var kind: String
+    public var maxDurationMs: Int?
+    public var sourceId: String?
+    public var title: String?
+
+    public init(
+        keepInBacklog: Bool? = nil,
+        kind: String,
+        maxDurationMs: Int? = nil,
+        sourceId: String? = nil,
+        title: String? = nil
+    ) {
+        self.keepInBacklog = keepInBacklog
+        self.kind = kind
+        self.maxDurationMs = maxDurationMs
+        self.sourceId = sourceId
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case keepInBacklog = "keep_in_backlog"
+        case kind
+        case maxDurationMs = "max_duration_ms"
+        case sourceId = "source_id"
+        case title
+    }
+}
+
 public struct ValidationError: Codable, Hashable, Sendable {
     public var ctx: JSONValue?
     public var input: JSONValue?
@@ -3028,6 +3208,26 @@ public enum MotetEndpoints {
     /// `POST /v1/sources/{source_id}/resync` — Resync Source
     public static func resyncSource(sourceId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/sources/\(MotetPathComponent(sourceId))/resync")
+    }
+
+    /// `POST /v1/testing/gmail-source` — Seed Gmail Source
+    public static var seedGmailSource: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/testing/gmail-source")
+    }
+
+    /// `POST /v1/testing/jobs` — Trigger Testing Job
+    public static var triggerTestingJob: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/testing/jobs")
+    }
+
+    /// `GET /v1/testing/jobs/{job_id}` — Get Testing Job
+    public static func getTestingJob(jobId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/testing/jobs/\(MotetPathComponent(jobId))")
+    }
+
+    /// `POST /v1/testing/reset` — Reset Testing State
+    public static var resetTestingState: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/testing/reset")
     }
 
     /// `GET /v1/voice` — Voice Status

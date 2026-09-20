@@ -205,8 +205,9 @@ RETENTION_SECONDS: Mapping[str, int] = {
 #: therefore *unsigned*. Reassembling them arithmetically overflows ``bigint`` for any key
 #: with the top bit set, which is half of them, so the halves are concatenated as bit
 #: strings and read back as two's complement. ``objsubid = 1`` is the one-bigint form;
-#: ``2`` is the two-``int`` form, which only the held-item claim uses
-#: (``repo.HELD_CLAIM_LOCK_NAMESPACE``) — a different lock space, filtered out here.
+#: ``2`` is the two-``int`` form, which the API's transaction-scoped locks use — the
+#: held-item claim (``repo.HELD_CLAIM_LOCK_NAMESPACE``) and the test harness's seed
+#: (``motet_db.fixtures.SEED_LOCK_NAMESPACE``) — a different lock space, filtered out here.
 #:
 #: ``database`` is not decoration. ``pg_locks`` is cluster-wide while an advisory lock is
 #: per database, so without it a worker would skip work because *another database on the

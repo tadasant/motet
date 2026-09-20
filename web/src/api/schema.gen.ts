@@ -1557,6 +1557,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/testing/gmail-source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Seed Gmail Source
+         * @description Connect the staging test mailbox from a refresh token, as a consent would have.
+         *
+         *     **There is no machine-to-machine OAuth for a consumer ``@gmail.com`` account.** Google's
+         *     only mechanism for a service account to act as a mailbox is domain-wide delegation,
+         *     which requires Workspace — so the consent is performed once, by a human, and is exactly
+         *     the one-time boundary invariant 9 reserves for one. What is *not* a human step is
+         *     re-establishing the connected state afterwards, and this is that: the refresh token
+         *     that consent produced lives in Secret Manager, arrives as an environment variable, and
+         *     is sealed here.
+         *
+         *     **It seals through the same call the OAuth callback makes**, over the same encrypt-only
+         *     :class:`~motet_vault.DekWrapper`, so the row is envelope-encrypted under the same KEK
+         *     with the same ``user_id:source_id:provider`` AAD. No decrypt is widened — the API could
+         *     not open this credential a moment before this route existed and cannot now.
+         *
+         *     **Re-seeding replaces rather than accumulates.** A loop that ran daily and created a
+         *     mailbox each time would poll the same inbox N ways and dedup it against itself, so a
+         *     source of this user's with this name is reused and its grant overwritten — which is the
+         *     upsert ``store_source_credential`` already does for a re-consent.
+         *
+         *     ``mailbox`` is recorded rather than checked here: the worker is what asks Gmail which
+         *     account a grant reaches, before it reads with it (motet#96), and a token for some other
+         *     inbox therefore disconnects the source on the next poll instead of ingesting it.
+         */
+        post: operations["seed_gmail_source_v1_testing_gmail_source_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/testing/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Testing Job
+         * @description Run the Gmail poll or build an episode now, and say which job that is.
+         *
+         *     **The triggering is not the new part** — ``POST /v1/sources/{id}/poll`` and
+         *     ``POST /v1/episodes`` already enqueue exactly these jobs, and this route calls the same
+         *     two helpers rather than a second definition of either. What the product routes cannot
+         *     answer is *which job* they produced, which is what a caller needs in order to watch one
+         *     rather than to poll a list and guess. That is the whole of what this adds.
+         *
+         *     ``source_id`` may be omitted when the account has exactly one connected Gmail source,
+         *     which is the state a seeded staging loop is in — so a script does not have to thread an
+         *     id it did not choose. Zero or several is refused rather than guessed at.
+         */
+        post: operations["trigger_testing_job_v1_testing_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/testing/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Testing Job
+         * @description One job of this caller's, with whether anything is draining its queue.
+         *
+         *     **The two numbers together are the deliverable.** ``state`` alone cannot tell a job a
+         *     worker is about to pick up from one on a queue nothing has touched in a week — they are
+         *     the same row — so a caller given only the state has to infer liveness from elapsed time,
+         *     which is the mistake motet#38 records and `/v1/processing` exists to stop.
+         *
+         *     A job whose subject has been deleted resolves to no user and is a 404, which is also
+         *     what a reset makes of every job it removes.
+         */
+        get: operations["get_testing_job_v1_testing_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/testing/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Testing State
+         * @description Delete this account's ingested and produced state, and the jobs about them.
+         *
+         *     Without it a run starts from whatever the last one left behind, which makes every
+         *     assertion downstream of it a statement about two runs rather than one.
+         *
+         *     **The whole of what goes**, because "sources, items and episodes" undersells it: the
+         *     Gmail sources and their sealed credentials, source items, news items, episodes and
+         *     their segments and claims, the user's **highlights**, the enrichment run log, and the
+         *     sealed **browser states** a site login produced. Every one is in the `deleted` counts.
+         *
+         *     What it never touches — the account, the session the caller is holding, the feed token
+         *     a podcast client is subscribed to, the connectors a human added — is
+         *     :data:`motet_db.fixtures.RESET_KEEPS`, which says why for each. The seeded paste source
+         *     survives too: deleting it would take paste-in down in a way that reads as an application
+         *     bug.
+         *
+         *     **Audio objects are not removed**, and that is a stated gap rather than an oversight:
+         *     the object store has no delete on its interface, so a rendered episode's bytes outlive
+         *     its row. In staging that is one unreferenced object per rendered episode; nothing reads
+         *     it, because the key is only reachable through the episode row this deletes.
+         */
+        post: operations["reset_testing_state_v1_testing_reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/voice": {
         parameters: {
             query?: never;
@@ -2511,6 +2650,12 @@ export interface components {
              */
             telemetry_exporting: boolean;
             /**
+             * Test Fixtures
+             * @description Whether the staging test harness — the four authenticated routes under /v1/testing, two of which delete data — is switched on in this deployment (MOTET_TEST_FIXTURES=1). Reported for vault_ready's reason: a deployment with the harness on and one without look identical from outside, and an agent about to drive a staging loop should be able to ask before it seeds. True on staging only; a production process with the flag set refuses to start, so this is never true there. The routes still need a bearer, so reporting the switch advertises nothing a caller could use without one.
+             * @default false
+             */
+            test_fixtures: boolean;
+            /**
              * Vault Backend
              * @description Which credential vault this process resolved: 'kms' or 'local'. 'local' in a deployed environment is a misconfiguration the process refuses to serve under — see vault_ready.
              */
@@ -3335,6 +3480,51 @@ export interface components {
             /** Span Start */
             span_start: number;
         };
+        /**
+         * SeedGmailSourceRequest
+         * @description Re-establish the connected state a human's one-time consent produced.
+         */
+        SeedGmailSourceRequest: {
+            /**
+             * Mailbox
+             * @description Which mailbox the refresh token is for. Recorded so that a token for some other account disconnects the source on the next poll instead of quietly ingesting the wrong inbox. Unset falls back to the address this deployment was configured with; with neither, a new source records whatever the first poll sees and a re-seed keeps the address already recorded.
+             */
+            mailbox?: string | null;
+            /**
+             * Name
+             * @description What the source is called, and what a re-seed matches on so that running the loop twice replaces one mailbox rather than adding a second.
+             * @default Staging test inbox
+             */
+            name: string;
+            /**
+             * Query
+             * @description The Gmail search this source polls. Unset means the default filter on a new source, and leaves the recorded one alone on a re-seed.
+             */
+            query?: string | null;
+            /**
+             * Scopes
+             * @description Granted scopes. Empty means Gmail read-only, which is what a connect grants.
+             */
+            scopes?: string[];
+        };
+        /** SeedGmailSourceResponse */
+        SeedGmailSourceResponse: {
+            /**
+             * Created
+             * @description False when this replaced the grant on an existing source.
+             */
+            created: boolean;
+            /** Mailbox */
+            mailbox: string | null;
+            /** Name */
+            name: string;
+            /** @description The poll this seed enqueued, exactly as completing a consent does. */
+            poll_job: components["schemas"]["TestingJobResponse"];
+            /** Scopes */
+            scopes: string[];
+            /** Source Id */
+            source_id: string;
+        };
         /** SegmentResponse */
         SegmentResponse: {
             /** Claims */
@@ -3882,6 +4072,122 @@ export interface components {
              * @description Where the listener's player is. The session's clock starts here (invariant 4: the position is ours, reported by the client's player). Omitted means the episode's own listened_through_ms.
              */
             spoken_through_ms?: number | null;
+        };
+        /**
+         * TestingJobResponse
+         * @description One job row, plus whether anything is draining the queue it is on.
+         *
+         *     The second half is the point. A job in ``ready`` looks identical whether a worker is
+         *     working through a backlog or whether none has run for a week, so a caller given only
+         *     the state cannot tell slow from broken — which is the trap motet#38 is about, and the
+         *     reason ``worker_last_seen_at`` and ``worker_fresh`` travel with every answer.
+         */
+        TestingJobResponse: {
+            /** Attempts */
+            attempts: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Job Id */
+            job_id: number;
+            /** Last Error */
+            last_error: string | null;
+            /** Locked At */
+            locked_at: string | null;
+            /**
+             * Max Attempts
+             * @description Reported from the queue's own constant, never restated.
+             */
+            max_attempts: number;
+            /**
+             * Now
+             * Format: date-time
+             * @description The database's clock, for ageing the timestamps above.
+             */
+            now: string;
+            /** Queue */
+            queue: string;
+            /**
+             * Run At
+             * Format: date-time
+             */
+            run_at: string;
+            /** State */
+            state: string;
+            /**
+             * Subject Id
+             * @description The source, item or episode the job is about.
+             */
+            subject_id: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Worker Fresh
+             * @description Whether that was recent enough to expect this job to move.
+             */
+            worker_fresh: boolean;
+            /**
+             * Worker Last Seen At
+             * @description When a worker last drained this job's queue. Null means never.
+             */
+            worker_last_seen_at: string | null;
+        };
+        /**
+         * TestingResetResponse
+         * @description What a reset removed, per table, and what it deliberately did not.
+         */
+        TestingResetResponse: {
+            /**
+             * Deleted
+             * @description Rows removed per table, including the join tables under episodes and news items, so a caller can assert a baseline rather than trust one.
+             */
+            deleted: {
+                [key: string]: number;
+            };
+            /**
+             * Kept
+             * @description Tables a reset never touches — the account, its session, its feed token.
+             */
+            kept: string[];
+            /** User Id */
+            user_id: string;
+        };
+        /**
+         * TriggerJobRequest
+         * @description Run one pipeline stage now, and say which job that was.
+         */
+        TriggerJobRequest: {
+            /**
+             * Keep In Backlog
+             * @description episode: listening to it marks nothing read.
+             * @default false
+             */
+            keep_in_backlog: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "gmail_poll" | "episode";
+            /**
+             * Max Duration Ms
+             * @description episode: the duration cap. Unset means the default.
+             */
+            max_duration_ms?: number | null;
+            /**
+             * Source Id
+             * @description gmail_poll: which mailbox. Omit it when the account has exactly one connected Gmail source, which is the case a staging loop is in.
+             */
+            source_id?: string | null;
+            /**
+             * Title
+             * @description episode: its title. Unset means a dated one.
+             */
+            title?: string | null;
         };
         /** ValidationError */
         ValidationError: {
@@ -5966,6 +6272,140 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    seed_gmail_source_v1_testing_gmail_source_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SeedGmailSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeedGmailSourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_testing_job_v1_testing_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TriggerJobRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestingJobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_testing_job_v1_testing_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestingJobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reset_testing_state_v1_testing_reset_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestingResetResponse"];
                 };
             };
             /** @description Validation Error */

@@ -217,6 +217,35 @@ ALL_TOOLS: tuple[ToolDef, ...] = (
 
 
 EXCLUDED: dict[Operation, str] = {
+    # The staging test harness (`motet_api.fixtures`). One reason covers all four: they
+    # are a test surface, not a product capability, and they are off in every deployment
+    # that has not set MOTET_TEST_FIXTURES=1 — so a tool for one would be a tool that
+    # answers 503 everywhere an MCP client actually connects. The agent these exist for
+    # drives the API over HTTP with a bearer, which is the surface they are shaped for.
+    ("POST", "/v1/testing/gmail-source"): (
+        "Staging test harness: seeds a mailbox credential from a refresh token this "
+        "deployment was handed. Off unless MOTET_TEST_FIXTURES=1, and refused at startup "
+        "in production."
+    ),
+    ("POST", "/v1/testing/reset"): (
+        "Staging test harness: deletes the caller's sources, items and episodes. Not a tool "
+        "for the same reason the seed is not — it is off in every deployment that has not "
+        "set MOTET_TEST_FIXTURES=1, and it is a test surface rather than a capability. "
+        "Keeping it off the tool list is not a bound on what a grant may reach: an access "
+        "token is an auth_sessions row that reaches all of /v1, so on a staging deployment "
+        "with the flag on a model holding an approved grant can call it over plain HTTP. "
+        "What bounds that is the flag and the allowlist, as for every other /v1 route."
+    ),
+    ("POST", "/v1/testing/jobs"): (
+        "Staging test harness: enqueues a poll or an episode and returns the job id. The "
+        "enqueue itself is already a tool — poll_source, create_episode — and the job id "
+        "is what only the harness wants."
+    ),
+    ("GET", "/v1/testing/jobs/{job_id}"): (
+        "Staging test harness: one job row with its queue's liveness. get_processing_status "
+        'is the product answer to "is anything draining"; this is the per-job one, and it '
+        "is off outside staging."
+    ),
     ("POST", "/v1/sources/callback"): (
         "The browser redirect leg of a mailbox consent: only /oauth/callback calls it, with a "
         "single-use code Google handed to a browser. connect_source and reauthorize_source "

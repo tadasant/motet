@@ -1352,6 +1352,17 @@ components:
             \ is right and the SDK did not start \u2014 check the startup log."
           title: Telemetry Exporting
           type: boolean
+        test_fixtures:
+          default: false
+          description: "Whether the staging test harness \u2014 the four authenticated routes under /v1/testing,\
+            \ two of which delete data \u2014 is switched on in this deployment (MOTET_TEST_FIXTURES=1).\
+            \ Reported for vault_ready's reason: a deployment with the harness on and one without look\
+            \ identical from outside, and an agent about to drive a staging loop should be able to ask\
+            \ before it seeds. True on staging only; a production process with the flag set refuses to\
+            \ start, so this is never true there. The routes still need a bearer, so reporting the switch\
+            \ advertises nothing a caller could use without one."
+          title: Test Fixtures
+          type: boolean
         vault_backend:
           description: "Which credential vault this process resolved: 'kms' or 'local'. 'local' in a deployed\
             \ environment is a misconfiguration the process refuses to serve under \u2014 see vault_ready."
@@ -2510,6 +2521,78 @@ components:
       - span_end
       title: SaveHighlightRequest
       type: object
+    SeedGmailSourceRequest:
+      description: Re-establish the connected state a human's one-time consent produced.
+      properties:
+        mailbox:
+          anyOf:
+          - maxLength: 320
+            type: string
+          - type: 'null'
+          description: Which mailbox the refresh token is for. Recorded so that a token for some other
+            account disconnects the source on the next poll instead of quietly ingesting the wrong inbox.
+            Unset falls back to the address this deployment was configured with; with neither, a new source
+            records whatever the first poll sees and a re-seed keeps the address already recorded.
+          title: Mailbox
+        name:
+          default: Staging test inbox
+          description: What the source is called, and what a re-seed matches on so that running the loop
+            twice replaces one mailbox rather than adding a second.
+          maxLength: 200
+          minLength: 1
+          title: Name
+          type: string
+        query:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          description: The Gmail search this source polls. Unset means the default filter on a new source,
+            and leaves the recorded one alone on a re-seed.
+          title: Query
+        scopes:
+          description: Granted scopes. Empty means Gmail read-only, which is what a connect grants.
+          items:
+            type: string
+          maxItems: 10
+          title: Scopes
+          type: array
+      title: SeedGmailSourceRequest
+      type: object
+    SeedGmailSourceResponse:
+      properties:
+        created:
+          description: False when this replaced the grant on an existing source.
+          title: Created
+          type: boolean
+        mailbox:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mailbox
+        name:
+          title: Name
+          type: string
+        poll_job:
+          $ref: '#/components/schemas/TestingJobResponse'
+          description: The poll this seed enqueued, exactly as completing a consent does.
+        scopes:
+          items:
+            type: string
+          title: Scopes
+          type: array
+        source_id:
+          title: Source Id
+          type: string
+      required:
+      - source_id
+      - name
+      - created
+      - scopes
+      - mailbox
+      - poll_job
+      title: SeedGmailSourceResponse
+      type: object
     SegmentResponse:
       properties:
         claims:
@@ -3231,6 +3314,155 @@ components:
             listened_through_ms.'
           title: Spoken Through Ms
       title: StartVoiceSessionRequest
+      type: object
+    TestingJobResponse:
+      description: "One job row, plus whether anything is draining the queue it is on.\n\nThe second half\
+        \ is the point. A job in ``ready`` looks identical whether a worker is\nworking through a backlog\
+        \ or whether none has run for a week, so a caller given only\nthe state cannot tell slow from\
+        \ broken \u2014 which is the trap motet#38 is about, and the\nreason ``worker_last_seen_at`` and\
+        \ ``worker_fresh`` travel with every answer."
+      properties:
+        attempts:
+          title: Attempts
+          type: integer
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        job_id:
+          title: Job Id
+          type: integer
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        locked_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Locked At
+        max_attempts:
+          description: Reported from the queue's own constant, never restated.
+          title: Max Attempts
+          type: integer
+        now:
+          description: The database's clock, for ageing the timestamps above.
+          format: date-time
+          title: Now
+          type: string
+        queue:
+          title: Queue
+          type: string
+        run_at:
+          format: date-time
+          title: Run At
+          type: string
+        state:
+          title: State
+          type: string
+        subject_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The source, item or episode the job is about.
+          title: Subject Id
+        updated_at:
+          format: date-time
+          title: Updated At
+          type: string
+        worker_fresh:
+          description: Whether that was recent enough to expect this job to move.
+          title: Worker Fresh
+          type: boolean
+        worker_last_seen_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When a worker last drained this job's queue. Null means never.
+          title: Worker Last Seen At
+      required:
+      - job_id
+      - queue
+      - state
+      - attempts
+      - max_attempts
+      - subject_id
+      - last_error
+      - run_at
+      - created_at
+      - updated_at
+      - locked_at
+      - now
+      - worker_last_seen_at
+      - worker_fresh
+      title: TestingJobResponse
+      type: object
+    TestingResetResponse:
+      description: What a reset removed, per table, and what it deliberately did not.
+      properties:
+        deleted:
+          additionalProperties:
+            type: integer
+          description: Rows removed per table, including the join tables under episodes and news items,
+            so a caller can assert a baseline rather than trust one.
+          title: Deleted
+          type: object
+        kept:
+          description: "Tables a reset never touches \u2014 the account, its session, its feed token."
+          items:
+            type: string
+          title: Kept
+          type: array
+        user_id:
+          title: User Id
+          type: string
+      required:
+      - user_id
+      - deleted
+      - kept
+      title: TestingResetResponse
+      type: object
+    TriggerJobRequest:
+      description: Run one pipeline stage now, and say which job that was.
+      properties:
+        keep_in_backlog:
+          default: false
+          description: 'episode: listening to it marks nothing read.'
+          title: Keep In Backlog
+          type: boolean
+        kind:
+          enum:
+          - gmail_poll
+          - episode
+          title: Kind
+          type: string
+        max_duration_ms:
+          anyOf:
+          - exclusiveMinimum: 0.0
+            type: integer
+          - type: 'null'
+          description: 'episode: the duration cap. Unset means the default.'
+          title: Max Duration Ms
+        source_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'gmail_poll: which mailbox. Omit it when the account has exactly one connected
+            Gmail source, which is the case a staging loop is in.'
+          title: Source Id
+        title:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          description: 'episode: its title. Unset means a dated one.'
+          title: Title
+      required:
+      - kind
+      title: TriggerJobRequest
       type: object
     ValidationError:
       properties:
@@ -5728,6 +5960,182 @@ paths:
       summary: Resync Source
       tags:
       - sources
+  /v1/testing/gmail-source:
+    post:
+      description: "Connect the staging test mailbox from a refresh token, as a consent would have.\n\n\
+        **There is no machine-to-machine OAuth for a consumer ``@gmail.com`` account.** Google's\nonly\
+        \ mechanism for a service account to act as a mailbox is domain-wide delegation,\nwhich requires\
+        \ Workspace \u2014 so the consent is performed once, by a human, and is exactly\nthe one-time\
+        \ boundary invariant 9 reserves for one. What is *not* a human step is\nre-establishing the connected\
+        \ state afterwards, and this is that: the refresh token\nthat consent produced lives in Secret\
+        \ Manager, arrives as an environment variable, and\nis sealed here.\n\n**It seals through the\
+        \ same call the OAuth callback makes**, over the same encrypt-only\n:class:`~motet_vault.DekWrapper`,\
+        \ so the row is envelope-encrypted under the same KEK\nwith the same ``user_id:source_id:provider``\
+        \ AAD. No decrypt is widened \u2014 the API could\nnot open this credential a moment before this\
+        \ route existed and cannot now.\n\n**Re-seeding replaces rather than accumulates.** A loop that\
+        \ ran daily and created a\nmailbox each time would poll the same inbox N ways and dedup it against\
+        \ itself, so a\nsource of this user's with this name is reused and its grant overwritten \u2014\
+        \ which is the\nupsert ``store_source_credential`` already does for a re-consent.\n\n``mailbox``\
+        \ is recorded rather than checked here: the worker is what asks Gmail which\naccount a grant reaches,\
+        \ before it reads with it (motet#96), and a token for some other\ninbox therefore disconnects\
+        \ the source on the next poll instead of ingesting it."
+      operationId: seed_gmail_source_v1_testing_gmail_source_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SeedGmailSourceRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeedGmailSourceResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Seed Gmail Source
+      tags:
+      - testing
+  /v1/testing/jobs:
+    post:
+      description: "Run the Gmail poll or build an episode now, and say which job that is.\n\n**The triggering\
+        \ is not the new part** \u2014 ``POST /v1/sources/{id}/poll`` and\n``POST /v1/episodes`` already\
+        \ enqueue exactly these jobs, and this route calls the same\ntwo helpers rather than a second\
+        \ definition of either. What the product routes cannot\nanswer is *which job* they produced, which\
+        \ is what a caller needs in order to watch one\nrather than to poll a list and guess. That is\
+        \ the whole of what this adds.\n\n``source_id`` may be omitted when the account has exactly one\
+        \ connected Gmail source,\nwhich is the state a seeded staging loop is in \u2014 so a script does\
+        \ not have to thread an\nid it did not choose. Zero or several is refused rather than guessed\
+        \ at."
+      operationId: trigger_testing_job_v1_testing_jobs_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TriggerJobRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestingJobResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Trigger Testing Job
+      tags:
+      - testing
+  /v1/testing/jobs/{job_id}:
+    get:
+      description: "One job of this caller's, with whether anything is draining its queue.\n\n**The two\
+        \ numbers together are the deliverable.** ``state`` alone cannot tell a job a\nworker is about\
+        \ to pick up from one on a queue nothing has touched in a week \u2014 they are\nthe same row \u2014\
+        \ so a caller given only the state has to infer liveness from elapsed time,\nwhich is the mistake\
+        \ motet#38 records and `/v1/processing` exists to stop.\n\nA job whose subject has been deleted\
+        \ resolves to no user and is a 404, which is also\nwhat a reset makes of every job it removes."
+      operationId: get_testing_job_v1_testing_jobs__job_id__get
+      parameters:
+      - in: path
+        name: job_id
+        required: true
+        schema:
+          title: Job Id
+          type: integer
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestingJobResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get Testing Job
+      tags:
+      - testing
+  /v1/testing/reset:
+    post:
+      description: "Delete this account's ingested and produced state, and the jobs about them.\n\nWithout\
+        \ it a run starts from whatever the last one left behind, which makes every\nassertion downstream\
+        \ of it a statement about two runs rather than one.\n\n**The whole of what goes**, because \"\
+        sources, items and episodes\" undersells it: the\nGmail sources and their sealed credentials,\
+        \ source items, news items, episodes and\ntheir segments and claims, the user's **highlights**,\
+        \ the enrichment run log, and the\nsealed **browser states** a site login produced. Every one\
+        \ is in the `deleted` counts.\n\nWhat it never touches \u2014 the account, the session the caller\
+        \ is holding, the feed token\na podcast client is subscribed to, the connectors a human added\
+        \ \u2014 is\n:data:`motet_db.fixtures.RESET_KEEPS`, which says why for each. The seeded paste\
+        \ source\nsurvives too: deleting it would take paste-in down in a way that reads as an application\n\
+        bug.\n\n**Audio objects are not removed**, and that is a stated gap rather than an oversight:\n\
+        the object store has no delete on its interface, so a rendered episode's bytes outlive\nits row.\
+        \ In staging that is one unreferenced object per rendered episode; nothing reads\nit, because\
+        \ the key is only reachable through the episode row this deletes."
+      operationId: reset_testing_state_v1_testing_reset_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestingResetResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Reset Testing State
+      tags:
+      - testing
   /v1/voice:
     get:
       description: "Whether Play Live can run in this deployment.\n\nAsked by the SPA before it offers\

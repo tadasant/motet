@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from motet_sources import GmailMailClient, SourceError
+from motet_sources import GmailMailClient, GmailOAuthClient, SourceAuthError, SourceError
 from motet_sources.gmail import (
     DEFAULT_FIRST_SYNC_DAYS,
     FIRST_SYNC_DAYS_ENV,
@@ -387,3 +387,62 @@ def test_a_page_token_without_its_pass_start_re_reads_the_pass() -> None:
     page = client(stub).list_messages(query=FILTER, cursor=cursor, limit=50)
     assert "pageToken" not in stub.requests[0][1]
     assert page.first_sync_days is None, "a known watermark, so not a first sync"
+
+
+# --- a refused refresh names the three things it can mean ---------------------------------
+
+
+@dataclass
+class _TokenEndpoint:
+    """Google's token endpoint, refusing with one OAuth error body."""
+
+    error: str
+    description: str
+
+    def post(self, url: str, data: dict[str, str]) -> _Response:
+        assert "token" in url
+        return _Response(400, {"error": self.error, "error_description": self.description})
+
+
+def _oauth(stub: _TokenEndpoint) -> GmailOAuthClient:
+    return GmailOAuthClient(client_id="id", client_secret="secret", transport=stub)
+
+
+def test_a_refused_refresh_names_the_testing_publishing_status() -> None:
+    """The one cause nothing in this repo can see, so the message has to carry it.
+
+    A Google OAuth client left in "Testing" publishing status expires every refresh token
+    it issued after about seven days. The symptom is this error and nothing else — the
+    publishing status is a console setting on a client defined in the private
+    infrastructure repo — so an unattended loop breaks weekly with no signal pointing at
+    the cause. The message is the signal.
+    """
+    stub = _TokenEndpoint("invalid_grant", "Token has been expired or revoked.")
+    with pytest.raises(SourceAuthError) as refusal:
+        _oauth(stub).refresh(refresh_token="whatever")
+    said = str(refusal.value)
+    assert "Testing" in said and "seven days" in said
+    # And the two ordinary causes are still named, because this error cannot tell them
+    # apart and a message that asserted one would be wrong two times in three.
+    assert "revoked" in said and "six months" in said
+
+
+def test_a_refused_code_exchange_does_not_blame_the_publishing_status() -> None:
+    """``invalid_grant`` on the *first* exchange is a spent or expired authorization code.
+
+    Same error name, different fact, and a refresh token's seven-day expiry has nothing to
+    do with it — so the branch is on which request was made rather than on the error alone.
+    """
+    stub = _TokenEndpoint("invalid_grant", "Bad Request")
+    with pytest.raises(SourceAuthError) as refusal:
+        _oauth(stub).exchange_code(code="c", redirect_uri="https://x.invalid/cb", code_verifier="v")
+    assert "Testing" not in str(refusal.value)
+
+
+def test_a_refusal_that_is_not_invalid_grant_keeps_the_plain_message() -> None:
+    stub = _TokenEndpoint("invalid_client", "The OAuth client was not found.")
+    with pytest.raises(SourceAuthError) as refusal:
+        _oauth(stub).refresh(refresh_token="whatever")
+    said = str(refusal.value)
+    assert "Testing" not in said
+    assert "must be reconnected" in said

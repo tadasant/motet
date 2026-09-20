@@ -71,6 +71,22 @@ ATTRIBUTES_MESSAGE = "Invalid type dict for attribute 'motet.queue' value"
 MOTET_LOGGER = "motet.workers.runner"
 MOTET_MESSAGE = "worker could not claim a job"
 
+#: A credential held in a local while the frame that holds it raises — the exact shape of
+#: ``main.oauth_callback``, whose ``grant`` holds a *user's* Gmail refresh token, and of
+#: ``main.seed_gmail_source``. Both log with ``exception()`` on a vault failure by design,
+#: because a traceback is what tells a bug apart from a KMS refusal — so if the SDK attaches
+#: frame locals, one unreachable keyring posts a live refresh token to GlitchTip.
+#:
+#: **Held on an object named ``grant``, and that is the point of the test rather than an
+#: incidental choice.** `sentry_sdk`'s own `EventScrubber` runs by default and filters a
+#: variable *named* something on its denylist — ``secret``, ``token``, ``password``. A test
+#: whose local was called ``secret`` passes with locals switched on and proves nothing. The
+#: name the API actually uses is ``grant``, which is on no denylist, and its ``repr``
+#: carries the token.
+SECRET_LOCAL = "1//0e-a-refresh-token-shaped-string"  # noqa: S105 — a literal, not a secret
+SEAL_FAILURE_LOGGER = "motet.api"
+SEAL_FAILURE_MESSAGE = "could not seal the credential"
+
 EMITTER = f"""
 import json
 import logging
@@ -86,6 +102,23 @@ logging.getLogger({TRANSPORT_LOGGER!r}).error({TRANSPORT_MESSAGE!r})
 logging.getLogger({LOG_PROCESSOR_LOGGER!r}).error({LOG_PROCESSOR_MESSAGE!r})
 logging.getLogger({ATTRIBUTES_LOGGER!r}).error({ATTRIBUTES_MESSAGE!r})
 logging.getLogger({MOTET_LOGGER!r}).error({MOTET_MESSAGE!r})
+
+class Grant:
+    # Named as `motet_sources.TokenGrant` is, so the scrubber's name denylist does not
+    # accidentally do this test's work for it.
+    def __init__(self, refresh_token):
+        self.refresh_token = refresh_token
+    def __repr__(self):
+        return "TokenGrant(refresh_token=" + repr(self.refresh_token) + ")"
+
+def seal_and_fail(grant):
+    # The frame `sentry_sdk` would attach locals from, holding the credential.
+    try:
+        raise RuntimeError("the vault refused")
+    except RuntimeError:
+        logging.getLogger({SEAL_FAILURE_LOGGER!r}).exception({SEAL_FAILURE_MESSAGE!r})
+
+seal_and_fail(Grant({SECRET_LOCAL!r}))
 
 # Flushes both the OTLP batch processors and the Sentry transport, which is what puts the
 # envelopes on the socket before this process exits.
@@ -243,3 +276,32 @@ def test_the_dropped_records_survive_as_breadcrumbs(
     trail = [crumb.get("message") for crumb in events[0].get("breadcrumbs", {}).get("values", [])]
     assert METRIC_EXPORTER_MESSAGE in trail
     assert TRANSPORT_MESSAGE in trail
+
+
+def test_a_credential_in_a_frame_local_does_not_reach_glitchtip(
+    emitted: dict[str, Any], otlp_collector: OtlpCollector
+) -> None:
+    """The error channel must not be the thing that copies a mailbox token out.
+
+    ``send_default_pii=False`` does **not** cover this — it governs request bodies, headers
+    and user identity, while local variables are attached on their own switch that this SDK
+    defaults to *on*. Two places in the API hold a refresh token in a local inside a ``try``
+    and log with ``exception()`` there on purpose, because a traceback is what tells a bug
+    apart from a KMS refusal; with locals attached, one unreachable keyring puts a live
+    credential into a searchable issue.
+
+    Asserted over the raw envelope rather than over a flag, because the question is what
+    left the process — and over a local named ``grant`` rather than ``secret``, because
+    `sentry_sdk`'s own scrubber filters the second by name and would make this test green
+    against a leak it never prevented.
+    """
+    events = otlp_collector.sentry_events()
+    reported = [
+        event
+        for event in events
+        if str(event.get("logentry", {}).get("message")) == SEAL_FAILURE_MESSAGE
+    ]
+    assert reported, "the control: a Motet failure with a traceback still becomes an event"
+    assert SECRET_LOCAL not in json.dumps(events), (
+        "a credential held in a frame local reached the error reporter"
+    )
