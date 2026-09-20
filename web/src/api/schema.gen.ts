@@ -2650,6 +2650,12 @@ export interface components {
              */
             telemetry_exporting: boolean;
             /**
+             * Test Fixtures
+             * @description Whether the staging test harness — the four authenticated routes under /v1/testing, two of which delete data — is switched on in this deployment (MOTET_TEST_FIXTURES=1). Reported for vault_ready's reason: a deployment with the harness on and one without look identical from outside, and an agent about to drive a staging loop should be able to ask before it seeds. True on staging only; a production process with the flag set refuses to start, so this is never true there. The routes still need a bearer, so reporting the switch advertises nothing a caller could use without one.
+             * @default false
+             */
+            test_fixtures: boolean;
+            /**
              * Vault Backend
              * @description Which credential vault this process resolved: 'kms' or 'local'. 'local' in a deployed environment is a misconfiguration the process refuses to serve under — see vault_ready.
              */
@@ -3481,7 +3487,7 @@ export interface components {
         SeedGmailSourceRequest: {
             /**
              * Mailbox
-             * @description Which mailbox the refresh token is for. Recorded so that a token for some other account disconnects the source on the next poll instead of quietly ingesting the wrong inbox. Unset falls back to the address this deployment was configured with, and then to recording whatever the first poll sees.
+             * @description Which mailbox the refresh token is for. Recorded so that a token for some other account disconnects the source on the next poll instead of quietly ingesting the wrong inbox. Unset falls back to the address this deployment was configured with; with neither, a new source records whatever the first poll sees and a re-seed keeps the address already recorded.
              */
             mailbox?: string | null;
             /**
@@ -3492,7 +3498,7 @@ export interface components {
             name: string;
             /**
              * Query
-             * @description The Gmail search this source polls. Unset means the default filter.
+             * @description The Gmail search this source polls. Unset means the default filter on a new source, and leaves the recorded one alone on a re-seed.
              */
             query?: string | null;
             /**

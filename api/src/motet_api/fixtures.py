@@ -160,12 +160,19 @@ def check_startup(env: Mapping[str, str] | None = None) -> None:
         return
     environment = (resolve_deployment_environment(environ) or "").strip().lower()
     if environment in PRODUCTION_ENVIRONMENTS or PRODUCTION_MARKER in environment:
-        raise FixturesRefused(
+        message = (
             f"{TEST_FIXTURES_ENV}=1 in the {environment!r} environment. The test harness "
             "seeds credentials and deletes a user's sources, items and episodes; it exists "
             "for staging and must never be reachable in production. Unset the variable on "
             "this service."
         )
+        # Logged *before* the raise, and that ordering is the whole point: the lifespan
+        # flushes telemetry on the way out so that a failing revision leaves a record on
+        # the obs stack (invariant 11), and a flush ships only what was emitted. uvicorn's
+        # own "Application startup failed" traceback lands after the log pipeline has
+        # closed, in Cloud Logging, which no agent can read.
+        logger.error("%s", message)
+        raise FixturesRefused(message)
     if not environment:
         logger.warning(
             "%s=1 and no deployment.environment is set, so this process cannot tell which "

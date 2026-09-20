@@ -80,7 +80,6 @@ _RESET_STEPS: Final[tuple[tuple[str, str], ...]] = (
     ("news_items", "DELETE FROM news_items WHERE user_id = %(user_id)s"),
     ("source_items", "DELETE FROM source_items WHERE user_id = %(user_id)s"),
     ("source_credentials", "DELETE FROM source_credentials WHERE user_id = %(user_id)s"),
-    ("oauth_states", "DELETE FROM oauth_states WHERE user_id = %(user_id)s"),
     ("browser_states", "DELETE FROM browser_states WHERE user_id = %(user_id)s"),
     (
         "sources",
@@ -107,6 +106,13 @@ _RESET_STEPS: Final[tuple[tuple[str, str], ...]] = (
 #:   ``mcp_oauth_refresh_tokens`` — sign-in and MCP-client grants, which are the same case
 #:   as ``auth_sessions``: they are how a caller is *holding* this connection, and the
 #:   harness has no business deciding a client must authorize again.
+#: * ``oauth_states`` — an authorization *in flight*: a browser mid-sign-in, a phone
+#:   mid-handoff, an MCP client at its consent screen. Deleting one turns the callback into
+#:   "unknown or already used" for a person who did nothing wrong, which is the same
+#:   argument as the row above one step earlier. The one kind of state a reset *should*
+#:   remove — a mailbox consent for a source it deletes — cascades from ``sources`` on its
+#:   own (``oauth_states.source_id`` references it), so an explicit statement would only
+#:   ever reach the ones that must stay.
 #:
 #: **This list is complete against the schema, and that is a property worth keeping.** It
 #: is reported on the wire as "tables a reset never touches", so a caller asserting a
@@ -118,6 +124,7 @@ RESET_KEEPS: Final[tuple[str, ...]] = (
     "users",
     "auth_sessions",
     "auth_handoffs",
+    "oauth_states",
     "feed_tokens",
     "connectors",
     "settings",
@@ -224,14 +231,15 @@ def newest_job_for(
     """The newest job on ``queue`` about ``subject_id`` — the one the enqueue just made.
 
     ``subject`` is the operator view's own COALESCE over the three payload keys a queue can
-    name its subject under, so this asks the same question of ``poll`` (a source id) and of
-    ``assemble`` (an episode id) without either spelling being repeated here.
-
-    Read back rather than returned by the enqueue helpers, because those are shared with
-    the worker's own re-arms and with the product routes: widening their signatures to
-    carry a job id out to one caller would change five call sites for a field four of them
-    have no use for. Called inside the transaction that did the enqueue, so the row it
-    finds is that one.
+    name its subject under. **It is a sequential scan of ``jobs``**, because that COALESCE
+    is what none of the partial expression indexes can serve — bounded by ``jobs.prune``'s
+    retention windows rather than by the deployment's age, and paid once per episode
+    trigger on a test harness. So it is used only where nothing better exists:
+    ``enqueue_episode`` returns the episode id and not its assemble job's, and widening a
+    helper the product route and the worker share for one harness caller is the wrong
+    trade. ``enqueue_source_poll`` *does* return the job id, and the poll trigger reads
+    that row by primary key instead. Called inside the transaction that did the enqueue, so
+    the row it finds is that one.
     """
     row = _maybe_one(
         conn,

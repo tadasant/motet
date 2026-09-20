@@ -1352,6 +1352,17 @@ components:
             \ is right and the SDK did not start \u2014 check the startup log."
           title: Telemetry Exporting
           type: boolean
+        test_fixtures:
+          default: false
+          description: "Whether the staging test harness \u2014 the four authenticated routes under /v1/testing,\
+            \ two of which delete data \u2014 is switched on in this deployment (MOTET_TEST_FIXTURES=1).\
+            \ Reported for vault_ready's reason: a deployment with the harness on and one without look\
+            \ identical from outside, and an agent about to drive a staging loop should be able to ask\
+            \ before it seeds. True on staging only; a production process with the flag set refuses to\
+            \ start, so this is never true there. The routes still need a bearer, so reporting the switch\
+            \ advertises nothing a caller could use without one."
+          title: Test Fixtures
+          type: boolean
         vault_backend:
           description: "Which credential vault this process resolved: 'kms' or 'local'. 'local' in a deployed\
             \ environment is a misconfiguration the process refuses to serve under \u2014 see vault_ready."
@@ -2520,8 +2531,8 @@ components:
           - type: 'null'
           description: Which mailbox the refresh token is for. Recorded so that a token for some other
             account disconnects the source on the next poll instead of quietly ingesting the wrong inbox.
-            Unset falls back to the address this deployment was configured with, and then to recording
-            whatever the first poll sees.
+            Unset falls back to the address this deployment was configured with; with neither, a new source
+            records whatever the first poll sees and a re-seed keeps the address already recorded.
           title: Mailbox
         name:
           default: Staging test inbox
@@ -2536,7 +2547,8 @@ components:
           - maxLength: 500
             type: string
           - type: 'null'
-          description: The Gmail search this source polls. Unset means the default filter.
+          description: The Gmail search this source polls. Unset means the default filter on a new source,
+            and leaves the recorded one alone on a re-seed.
           title: Query
         scopes:
           description: Granted scopes. Empty means Gmail read-only, which is what a connect grants.

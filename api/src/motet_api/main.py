@@ -707,6 +707,7 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         # the worker's copy of the same switch plus its service URL — a worker with neither
         # records every one as skipped and integrates it on its preview.
         enrich_enabled=enrich_config().enabled,
+        test_fixtures=fixtures_enabled(),
     )
 
 
@@ -3750,10 +3751,10 @@ def seed_gmail_source(
 
     phase2.set_source_active(conn, source_id, active=True)
     phase2.set_source_error(conn, source_id, None)
-    enqueue_source_poll(conn, source_id)
+    poll_job_id = enqueue_source_poll(conn, source_id)
     nudge.arm(DrainReason.SOURCE_POLL)
 
-    job = fixtures_repo.newest_job_for(conn, queue=Queue.POLL.value, subject_id=source_id)
+    job = fixtures_repo.job_status(conn, poll_job_id)
     assert job is not None, "the poll job was enqueued in this transaction"
     return SeedGmailSourceResponse(
         source_id=source_id,
@@ -3822,12 +3823,13 @@ def trigger_testing_job(
     """
     if body.kind == "gmail_poll":
         source_id = _fixture_poll_source(conn, user_id=user_id, requested=body.source_id)
-        enqueue_source_poll(conn, source_id)
+        # The helper hands back the job id, so the row is read by primary key — no scan,
+        # and no way for two concurrent triggers on one source to be handed each other's.
+        job = fixtures_repo.job_status(conn, enqueue_source_poll(conn, source_id))
         nudge.arm(DrainReason.SOURCE_POLL)
-        queue, subject = Queue.POLL, source_id
     else:
         title = (body.title or "").strip() or f"Episode — {datetime.now(UTC):%Y-%m-%d}"
-        subject = enqueue_episode(
+        episode_id = enqueue_episode(
             conn,
             user_id=user_id,
             title=title,
@@ -3835,9 +3837,10 @@ def trigger_testing_job(
             keep_in_backlog=body.keep_in_backlog,
         )
         nudge.arm(DrainReason.EPISODE)
-        queue = Queue.ASSEMBLE
+        # This helper returns the episode, not its job, so the job is found by subject —
+        # `newest_job_for` says what that costs and why it is confined to this case.
+        job = fixtures_repo.newest_job_for(conn, queue=Queue.ASSEMBLE.value, subject_id=episode_id)
 
-    job = fixtures_repo.newest_job_for(conn, queue=queue.value, subject_id=subject)
     assert job is not None, "the job was enqueued in this transaction"
     return _job_response(job)
 

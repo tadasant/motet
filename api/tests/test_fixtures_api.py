@@ -115,9 +115,20 @@ def test_the_flag_is_exactly_one_and_nothing_else() -> None:
     assert not fixtures_enabled({})
 
 
-@pytest.mark.parametrize("environment", ["production", "prod", "PRODUCTION", " Production "])
-def test_the_harness_refuses_to_start_in_production(environment: str) -> None:
-    with pytest.raises(FixturesRefused) as refusal:
+@pytest.mark.parametrize(
+    "environment",
+    ["production", "prod", "PRODUCTION", " Production ", "prod-eu", "motet-production"],
+)
+def test_the_harness_refuses_to_start_in_production(
+    environment: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refuses — and says so at ERROR *before* raising, which is what the lifespan's flush
+    ships. A refusal that only raised would leave the obs stack with no record of why the
+    revision failed; uvicorn's own traceback lands after the log pipeline has closed."""
+    with (
+        caplog.at_level("ERROR", logger="motet.api.fixtures"),
+        pytest.raises(FixturesRefused) as refusal,
+    ):
         check_startup(
             {
                 TEST_FIXTURES_ENV: "1",
@@ -125,6 +136,10 @@ def test_the_harness_refuses_to_start_in_production(environment: str) -> None:
             }
         )
     assert TEST_FIXTURES_ENV in str(refusal.value)
+    assert any(
+        record.levelname == "ERROR" and TEST_FIXTURES_ENV in record.getMessage()
+        for record in caplog.records
+    ), "the refusal must be logged at ERROR so the flush has something to ship"
 
 
 def test_a_production_deployment_with_the_flag_off_starts_normally() -> None:
@@ -177,10 +192,18 @@ def test_every_route_is_off_without_the_flag(
     monkeypatch.setenv("MOTET_API_TOKEN", TOKEN)
     monkeypatch.setenv("DATABASE_URL", _migrated)
     monkeypatch.delenv(TEST_FIXTURES_ENV, raising=False)
+    reset_store()
     with TestClient(app) as client:
         answer = _call(client, method, path, body)
+        assert client.get("/internal/health").json()["test_fixtures"] is False
     assert answer.status_code == 503
     assert TEST_FIXTURES_ENV in answer.json()["detail"]
+
+
+def test_health_reports_the_harness_is_on(api: TestClient) -> None:
+    """For ``vault_ready``'s reason: a deployment with the harness on and one without look
+    identical from outside, and an agent should be able to ask before it seeds."""
+    assert api.get("/internal/health").json()["test_fixtures"] is True
 
 
 @pytest.mark.parametrize(("method", "path", "body"), HARNESS_CALLS)

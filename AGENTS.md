@@ -3513,10 +3513,12 @@ left behind, and fails on the next drain against a row that does not exist. The 
 are deleted explicitly rather than left to `ON DELETE CASCADE`, so the per-table counts in
 the response are a baseline a caller can assert rather than trust. `RESET_KEEPS` is the
 other list, with a reason each: the account, **the session the caller is holding** (a reset
-that revoked it would log the agent out halfway through its own run), the feed token a
-podcast client is subscribed to, the connectors a human added behind a one-time step, the
-spend ledger, and the seeded `src_paste` row — deleting which would take paste-in down in a
-way that reads as an application bug.
+that revoked it would log the agent out halfway through its own run), every authorization
+in flight and every grant a client holds (`oauth_states` and the sign-in and MCP tables —
+the same argument one step earlier; a mailbox consent for a deleted source still cascades
+from `sources`), the feed token a podcast client is subscribed to, the connectors a human
+added behind a one-time step, the spend ledger, and the seeded `src_paste` row — deleting
+which would take paste-in down in a way that reads as an application bug.
 
 **The trigger routes add a job id, not a trigger.** `POST /v1/sources/{id}/poll` and
 `POST /v1/episodes` already enqueue exactly these jobs, and `POST /v1/testing/jobs` calls
@@ -3567,9 +3569,13 @@ The match is the two exact spellings **plus any name containing `prod`**, so `pr
 `motet-production` refuse too — a denylist over a string written in a repo this one cannot
 read is the wrong shape, and that substring is as far as it can be pushed from here. The
 residue is stated rather than closed: a production environment named `prd` or `live` would
-boot. **The refusal flushes telemetry before it propagates**, because the lifespan's own
-`finally` starts at the `yield` — a refusal that skipped it would go down still holding the
-line that says why, on a revision that is failing to start.
+boot. **The refusal logs at ERROR and then flushes telemetry before it propagates**, because
+the lifespan's own `finally` starts at the `yield` and a flush ships only what was emitted —
+a refusal that merely raised would leave uvicorn's traceback in Cloud Logging, which no agent
+can read, and nothing on the obs stack saying why the revision failed. `/internal/health`
+reports `test_fixtures` for `vault_ready`'s reason: an agent about to drive a staging loop
+can ask before it seeds, and the routes still need a bearer, so the field advertises nothing
+a caller could use without one.
 
 **`RESET_KEEPS` is complete against the schema, and a test holds it so.** It is reported on
 the wire as "tables a reset never touches", which a caller asserting a baseline reads as

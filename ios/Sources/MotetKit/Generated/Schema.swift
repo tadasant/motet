@@ -1019,6 +1019,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var status: String
     public var telemetryConfigured: Bool
     public var telemetryExporting: Bool
+    public var testFixtures: Bool?
     public var vaultBackend: String
     public var vaultReady: Bool
     public var voiceConfigured: Bool?
@@ -1040,6 +1041,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         status: String,
         telemetryConfigured: Bool,
         telemetryExporting: Bool,
+        testFixtures: Bool? = nil,
         vaultBackend: String,
         vaultReady: Bool,
         voiceConfigured: Bool? = nil
@@ -1060,6 +1062,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.status = status
         self.telemetryConfigured = telemetryConfigured
         self.telemetryExporting = telemetryExporting
+        self.testFixtures = testFixtures
         self.vaultBackend = vaultBackend
         self.vaultReady = vaultReady
         self.voiceConfigured = voiceConfigured
@@ -1082,6 +1085,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case status
         case telemetryConfigured = "telemetry_configured"
         case telemetryExporting = "telemetry_exporting"
+        case testFixtures = "test_fixtures"
         case vaultBackend = "vault_backend"
         case vaultReady = "vault_ready"
         case voiceConfigured = "voice_configured"
