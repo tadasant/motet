@@ -140,7 +140,12 @@ public final class AudioLevelMeter: @unchecked Sendable {
             unprepare: nil,
             process: tapProcess
         )
-        var created: Unmanaged<MTAudioProcessingTap>?
+        // `MTAudioProcessingTap` is CF-bridged and ARC-managed here, so the out parameter
+        // is the tap itself rather than an `Unmanaged` of one — no `takeRetainedValue` to
+        // balance. The `passRetained` above is a different reference (the meter's) and is
+        // still ours to undo on the failure path, because a tap that was never created
+        // will never run the finalize callback that would have released it.
+        var created: MTAudioProcessingTap?
         let status = MTAudioProcessingTapCreate(
             kCFAllocatorDefault,
             &callbacks,
@@ -150,14 +155,12 @@ public final class AudioLevelMeter: @unchecked Sendable {
             &created
         )
         guard status == noErr, let created else {
-            // The retain above is ours to undo: with no tap, no finalize callback will
-            // ever run to release it.
             Unmanaged<AudioLevelMeter>.fromOpaque(clientInfo).release()
             Self.logger.error("audio level: MTAudioProcessingTapCreate failed (\(status))")
             return nil
         }
         let parameters = AVMutableAudioMixInputParameters(track: track)
-        parameters.audioTapProcessor = created.takeRetainedValue()
+        parameters.audioTapProcessor = created
         let mix = AVMutableAudioMix()
         mix.inputParameters = [parameters]
         return mix
