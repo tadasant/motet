@@ -851,10 +851,20 @@ class SourceSyncProgress(BaseModel):
     )
     waiting_on_worker: bool = Field(
         description=(
-            "True when work is waiting and no worker has run in the last five minutes and "
-            "none is running any of it — so nothing will move until one runs. A queued "
-            "sync that is merely waiting its turn is false."
+            "True when work is waiting, no worker has run in the last five minutes, none is "
+            "running any of it, and none is being started — so nothing will move until one "
+            "runs. A queued sync that is merely waiting its turn is false, and so is one "
+            "whose worker is still booting: that is ``worker_starting``."
         )
+    )
+    worker_starting: bool = Field(
+        default=False,
+        description=(
+            "True when a worker was asked for and may still be starting: this deployment "
+            "runs the worker on demand, and the container takes a minute or two to appear. "
+            "Mutually exclusive with ``waiting_on_worker`` — say 'a worker is starting' "
+            "rather than 'nothing will run this'. Optional so an older client decodes."
+        ),
     )
 
 

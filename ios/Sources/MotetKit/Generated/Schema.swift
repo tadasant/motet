@@ -2375,6 +2375,7 @@ public struct SourceSyncProgress: Codable, Hashable, Sendable {
     public var stage: String
     public var startedAt: Date?
     public var waitingOnWorker: Bool
+    public var workerStarting: Bool?
 
     public init(
         error: String? = nil,
@@ -2387,7 +2388,8 @@ public struct SourceSyncProgress: Codable, Hashable, Sendable {
         remaining: Int,
         stage: String,
         startedAt: Date? = nil,
-        waitingOnWorker: Bool
+        waitingOnWorker: Bool,
+        workerStarting: Bool? = nil
     ) {
         self.error = error
         self.failed = failed
@@ -2400,6 +2402,7 @@ public struct SourceSyncProgress: Codable, Hashable, Sendable {
         self.stage = stage
         self.startedAt = startedAt
         self.waitingOnWorker = waitingOnWorker
+        self.workerStarting = workerStarting
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2414,6 +2417,7 @@ public struct SourceSyncProgress: Codable, Hashable, Sendable {
         case stage
         case startedAt = "started_at"
         case waitingOnWorker = "waiting_on_worker"
+        case workerStarting = "worker_starting"
     }
 }
 

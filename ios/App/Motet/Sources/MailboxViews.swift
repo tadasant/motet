@@ -202,8 +202,11 @@ struct MailboxDetailView: View {
         sync == .requesting || SourceStatus.syncInFlight(source.syncProgress)
     }
 
-    /// The poll route enqueues and answers with the sync already "queued"; the model puts
-    /// that row in place, and the watch below carries it from there.
+    /// The poll route enqueues and answers with the sync already "queued" — it writes the
+    /// job row in the same transaction it reads the progress from — so the model puts that
+    /// row in place and the watch below starts on it. Until the API did that the answer
+    /// carried no progress at all, `isSyncing` went straight back to false, and pressing
+    /// Sync now started no watch: the screen went quiet instead of showing the sync.
     private func syncNow(_ source: SourceResponse) async {
         sync = .requesting
         do {
@@ -395,6 +398,14 @@ struct SyncProgressView: View {
                 Text(count)
                     .font(Theme.body(14, relativeTo: .footnote))
                     .monospacedDigit()
+            }
+            // How long it has been going, so "slow" and "stuck" are tellable apart — the
+            // question somebody watching a long first sync is actually asking.
+            if let elapsed = description.elapsed {
+                Text("running for \(elapsed)")
+                    .font(Theme.body(13, relativeTo: .caption))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkSoft)
             }
             if let detail = description.detail {
                 Text(detail)

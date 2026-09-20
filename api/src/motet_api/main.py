@@ -2318,6 +2318,10 @@ def _sync_progress(
             jobs.get(source.id, phase2.SourceSyncJobs()),
             now=now,
             worker_last_seen_at=seen,
+            # Whether an enqueue starts a worker here, which is what tells a worker that is
+            # *booting* apart from one that is never coming. The trigger is a process-level
+            # singleton, so this is a flag read and not a call.
+            drain_trigger_enabled=drain_trigger().enabled,
         )
         for source in polled
     }
@@ -2549,6 +2553,13 @@ def poll_source(
 
     Enqueues; it does not fetch. Polling is serialized per source, so asking twice in a row
     produces one run and one deferral rather than two overlapping fetches.
+
+    Answers with ``sync_progress`` already saying ``queued``: the job row is written in
+    this transaction, so ``_source_response``'s own read sees it. That is what lets a client
+    which *keeps* this answer — the iOS app puts the row straight into its list and watches
+    it — start watching immediately rather than waiting for its next list fetch. It arrives
+    through a default argument rather than from anything this route says, so nothing here
+    would notice it stop; ``api/tests/test_sync_progress.py`` is what pins it.
     """
     source = phase2.get_source(conn, source_id, user_id=user_id)
     if source is None:

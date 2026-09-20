@@ -276,11 +276,32 @@ public enum SourceStatus {
         public var headline: String
         public var count: String?
         public var detail: String?
+        /// How long the sync has been running, once its first poll has run. Nil before that.
+        public var elapsed: String?
         public var fraction: Double?
         public var tone: Tone
     }
 
     static let noWorker = "No worker has run in the last five minutes, so this will not move until one does."
+    /// A worker has been asked for and its container has not appeared yet. Saying "no
+    /// worker will run this" over that is what motet#136 shipped: where the API starts the
+    /// worker itself, that is every sync's first minute or two. The wording stops at the ask
+    /// deliberately — `MOTET_DRAIN_TRIGGER` says an ask was made, never that Cloud Run
+    /// accepted it.
+    static let workerStarting = "A worker has been asked for — that usually takes a minute or two."
+
+    /// `2m 10s`, from the sync's own start. A first sync of a large mailbox is many polls
+    /// over many minutes, and without this the screen cannot tell "slow" from "stuck" —
+    /// which is the question somebody watching it is actually asking. Recomputed on every
+    /// poll, so it ticks without a timer of its own. The SPA's `elapsedSince`.
+    public static func elapsedSince(_ startedAt: Date, now: Date) -> String? {
+        let seconds = Int(now.timeIntervalSince(startedAt).rounded(.down))
+        if seconds < 0 { return nil }
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m \(seconds % 60)s" }
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
 
     /// `1,480`, as the SPA's `toLocaleString('en-US')` writes it. By hand rather than a
     /// FormatStyle so the Linux build and the phone cannot disagree about a separator.
@@ -298,8 +319,13 @@ public enum SourceStatus {
         "\(number(value)) message\(value == 1 ? "" : "s")"
     }
 
-    public static func describeSyncProgress(_ progress: SourceSyncProgress) -> SyncDescription {
+    public static func describeSyncProgress(
+        _ progress: SourceSyncProgress, now: Date = Date()
+    ) -> SyncDescription {
         let stalled = progress.waitingOnWorker
+        // Optional on the wire, so an older API — or this app's own cache of one — decodes.
+        let starting = progress.workerStarting ?? false
+        let elapsed = progress.startedAt.flatMap { elapsedSince($0, now: now) }
         let atLeast = progress.foundIsLowerBound ? "at least " : ""
         let count = progress.found > 0
             ? "Pulled in \(number(progress.pulledIn)) of \(atLeast)\(number(progress.found)) · \(number(progress.remaining)) left"
@@ -310,14 +336,18 @@ public enum SourceStatus {
             : nil
         func working(_ headline: String, _ detail: String?, bar: Double?) -> SyncDescription {
             SyncDescription(
-                headline: headline, count: count, detail: stalled ? noWorker : detail,
-                fraction: bar, tone: stalled ? .stalled : .working
+                headline: headline, count: count,
+                detail: stalled ? noWorker : (starting ? workerStarting : detail),
+                elapsed: elapsed, fraction: bar, tone: stalled ? .stalled : .working
             )
         }
 
         switch progress.stage {
         case "queued":
-            return working("Waiting for a worker to start the sync", nil, bar: nil)
+            return working(
+                starting ? "Starting a worker to run the sync" : "Waiting for a worker to start the sync",
+                nil, bar: nil
+            )
         case "retrying":
             return working(
                 "Could not reach the mailbox — trying again",
@@ -348,6 +378,9 @@ public enum SourceStatus {
                     ? "Sync finished · \(messages(progress.pulledIn)) pulled in" : "Sync finished · nothing new",
                 count: nil,
                 detail: failedNote ?? (progress.found > 0 ? "New items are held for you to ingest." : nil),
+                // A settled sync has stopped: an elapsed time that kept counting up would
+                // be a running clock over something that is not running.
+                elapsed: nil,
                 fraction: progress.found > 0 ? 1 : nil,
                 tone: .done
             )
@@ -359,7 +392,7 @@ public enum SourceStatus {
             }
             return SyncDescription(
                 headline: "The sync gave up", count: tally, detail: progress.error,
-                fraction: fraction, tone: .error
+                elapsed: nil, fraction: fraction, tone: .error
             )
         default:
             // A stage this build does not know — a newer API. Said plainly, not guessed at.

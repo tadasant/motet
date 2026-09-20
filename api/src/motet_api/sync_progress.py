@@ -6,10 +6,16 @@ what the search has *found*. The job queue says what is still *happening* — a 
 waiting or running, extract jobs still open. A sync is "done" only when both agree: the
 search is exhausted and nothing it queued is still in flight.
 
-Pure, over values, so every stage is a unit test with no database. The one judgement in
-it is :data:`WORKER_FRESH`, and it is the Processing panel's own five minutes: a queued
-sync with no worker alive is a sync nothing will run, and saying "queued" alone over it is
-the never-infer-"no errors"-from-"no data" trap wearing a progress bar (motet#38).
+Pure, over values, so every stage is a unit test with no database. Two judgements are in
+it, and they are the same trap read from opposite ends. :data:`WORKER_FRESH` is the
+Processing panel's own five minutes: a queued sync with no worker alive is a sync nothing
+will run, and saying "queued" alone over it is the never-infer-"no errors"-from-"no data"
+trap wearing a progress bar (motet#38). :data:`WORKER_STARTING` is its mirror, and it was
+motet#136's residue: where the API starts the worker itself (motet#71), *no* heartbeat is
+fresh at the moment somebody presses "Sync now", so reading the heartbeat alone reports
+"nothing will move until a worker runs" over a container that is booting. Inferring
+"nothing is coming" from "nothing has run" is the same mistake as inferring "no errors"
+from "no data".
 """
 
 from __future__ import annotations
@@ -24,6 +30,23 @@ from .schemas import SourceSyncProgress
 
 #: A heartbeat older than this is a worker that is not running. The SPA's ``WORKER_FRESH_MS``.
 WORKER_FRESH = timedelta(minutes=5)
+
+#: How long after a poll was enqueued a worker may still be *starting* for it.
+#:
+#: Where ``MOTET_DRAIN_TRIGGER`` is on, the API asks Cloud Run to run the worker job in the
+#: same request that enqueued the poll (motet#71) — but Cloud Run's job scheduling latency,
+#: the gap between an execution being created and its container starting, was measured at
+#: 90-165 seconds. An environment whose worker is one-shot and started on demand therefore
+#: has *no* heartbeat inside ``WORKER_FRESH`` at the moment anybody presses "Sync now": the
+#: last worker exited when it finished, and the next one has not booted yet. Read by the
+#: heartbeat alone, every such sync opens by telling its owner that nothing will move until
+#: a worker runs — while the worker it is waiting for is two minutes from starting. That is
+#: production, and it is what "stuck on Syncing…" looked like.
+#:
+#: Comfortably past the 165-second ceiling so a slow start is not called a stall, and below
+#: :data:`WORKER_FRESH` so that a nudge which never produced a container surrenders to the
+#: heartbeat's reading rather than claiming a worker is coming forever.
+WORKER_STARTING = timedelta(minutes=4)
 
 #: How long a finished or failed sync stays on the screen. Long enough that someone who
 #: pressed "Sync now" and wandered off comes back to "done, 480 found" rather than to no
@@ -51,8 +74,18 @@ def sync_progress(
     *,
     now: datetime,
     worker_last_seen_at: datetime | None,
+    drain_trigger_enabled: bool = False,
 ) -> SourceSyncProgress | None:
-    """The stage and the counts, or ``None`` when there is no sync to report."""
+    """The stage and the counts, or ``None`` when there is no sync to report.
+
+    ``drain_trigger_enabled`` is whether this deployment starts a worker when it enqueues
+    (``MOTET_DRAIN_TRIGGER``, :mod:`motet_api.drain`). It is the half of "a worker is
+    starting" that no row can carry: the nudge is fire-and-forget and leaves no record, so
+    what is inferred is that *this API asked for a worker when it wrote this poll job*.
+    Deliberately conservative in both directions — it never fires where the switch is off,
+    and :data:`WORKER_STARTING` expires it, so a nudge Cloud Run refused reverts to the
+    heartbeat's own reading within four minutes rather than promising a worker forever.
+    """
     raw = sync_state.get("sync_run")
     run: Mapping[str, Any] = raw if isinstance(raw, dict) else {}
     status = run.get("status")
@@ -63,6 +96,8 @@ def sync_progress(
     # and so is still "listing". Any other open poll starts a new sync, so the old run's
     # numbers are not this one's and are not shown.
     continuing = status == "listing"
+    starting = _worker_starting(jobs, now=now, enabled=drain_trigger_enabled)
+    alive = _worker_alive(worker_last_seen_at, now)
     stage: Stage
     if jobs.poll_state is not None and not continuing:
         if jobs.poll_state == "running":
@@ -82,7 +117,8 @@ def sync_progress(
             failed=0,
             pages=0,
             error=jobs.poll_error if stage == "retrying" else None,
-            waiting_on_worker=stage != "connecting" and not _worker_alive(worker_last_seen_at, now),
+            waiting_on_worker=stage != "connecting" and not alive and not starting,
+            worker_starting=stage != "connecting" and not alive and starting,
         )
     if not run or started_at is None:
         return None
@@ -121,6 +157,7 @@ def sync_progress(
 
     in_flight = stage in ("listing", "fetching")
     someone_on_it = jobs.poll_state == "running" or jobs.extract_running > 0
+    unattended = in_flight and not someone_on_it and not alive
     return SourceSyncProgress(
         stage=stage,
         started_at=started_at,
@@ -132,14 +169,36 @@ def sync_progress(
         failed=failed,
         pages=_count(run.get("pages")),
         error=error,
-        waiting_on_worker=in_flight
-        and not someone_on_it
-        and not _worker_alive(worker_last_seen_at, now),
+        waiting_on_worker=unattended and not starting,
+        worker_starting=unattended and starting,
     )
 
 
 def _worker_alive(seen: datetime | None, now: datetime) -> bool:
     return seen is not None and now - seen <= WORKER_FRESH
+
+
+def _worker_starting(jobs: SourceSyncJobs, *, now: datetime, enabled: bool) -> bool:
+    """Whether a worker was asked for, recently enough that it may still be booting.
+
+    Read off the **poll** job alone, because that is the one this API enqueues and nudges
+    for. An extract job or a further link of a poll chain is written by the worker itself,
+    which fires no trigger (:mod:`motet_api.drain` says why the nudge lives in the request
+    path and not in the ``enqueue_*`` helpers) — so a worker-written job must not be read as
+    an execution starting. What keeps that true is *not* this function: it is that a worker
+    which just wrote one is alive, and every caller gates on the heartbeat being stale.
+
+    Two things carry that gate, and both are load-bearing rather than incidental. ``drain``
+    writes the heartbeat before each claim and ``Queue.POLL`` is first in
+    ``queues.PIPELINE``, so the six later drains of one pass each refresh it; and
+    :data:`WORKER_STARTING` sits a minute inside :data:`WORKER_FRESH`. A worker killed
+    immediately after committing a chain link therefore leaves a heartbeat older than the
+    job by the handler's own duration, and only a handler slower than that minute could
+    open a window where this reads a worker-written job as a starting one. Moving the
+    heartbeat, reordering ``PIPELINE``, or closing that minute would each make it reachable.
+    """
+    enqueued = jobs.poll_enqueued_at
+    return enabled and enqueued is not None and timedelta() <= now - enqueued <= WORKER_STARTING
 
 
 def _count(value: Any) -> int:

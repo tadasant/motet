@@ -33,12 +33,14 @@ final class SourceStatusTests: XCTestCase {
         remaining: Int = 0,
         failed: Int = 0,
         error: String? = nil,
-        waitingOnWorker: Bool = false
+        waitingOnWorker: Bool = false,
+        workerStarting: Bool? = nil,
+        startedAt: Date? = nil
     ) -> SourceSyncProgress {
         SourceSyncProgress(
             error: error, failed: failed, found: found, foundIsLowerBound: lowerBound,
             listed: listed, pages: 0, pulledIn: pulledIn, remaining: remaining, stage: stage,
-            startedAt: nil, waitingOnWorker: waitingOnWorker
+            startedAt: startedAt, waitingOnWorker: waitingOnWorker, workerStarting: workerStarting
         )
     }
 
@@ -79,6 +81,52 @@ final class SourceStatusTests: XCTestCase {
         let shown = SourceStatus.describeSyncProgress(stalled)
         XCTAssertEqual(shown.tone, .stalled)
         XCTAssertEqual(shown.detail, "No worker has run in the last five minutes, so this will not move until one does.")
+    }
+
+    func testAWorkerBeingStartedIsNotAWorkerThatWillNeverCome() {
+        // Where the API starts the worker itself (motet#71) no heartbeat is fresh at the
+        // moment Sync now is pressed, so the heartbeat alone announces a stall over a
+        // container that is booting. That is what "stuck on Syncing…" looked like.
+        let starting = progress(stage: "queued", workerStarting: true)
+        let shown = SourceStatus.describeSyncProgress(starting)
+        XCTAssertEqual(shown.headline, "Starting a worker to run the sync")
+        XCTAssertEqual(shown.tone, .working)
+        XCTAssertEqual(
+            shown.detail,
+            "A worker has been asked for — that usually takes a minute or two."
+        )
+        // And it is worth watching at the fast interval: it is about to move.
+        XCTAssertTrue(SourceStatus.syncMoving(starting))
+    }
+
+    func testAnOlderAPIWithoutTheFieldStillReadsAsWaiting() {
+        // `worker_starting` is optional on the wire, so a build talking to an API that
+        // predates it — or decoding its own cached copy — must not crash or invent one.
+        let shown = SourceStatus.describeSyncProgress(
+            progress(stage: "queued", waitingOnWorker: true, workerStarting: nil)
+        )
+        XCTAssertEqual(shown.tone, .stalled)
+        XCTAssertEqual(shown.detail, "No worker has run in the last five minutes, so this will not move until one does.")
+    }
+
+    func testHowLongASyncHasBeenRunningIsSaid() {
+        let now = Date(timeIntervalSince1970: 1_789_000_000)
+        let shown = SourceStatus.describeSyncProgress(
+            progress(stage: "listing", found: 60, lowerBound: true, startedAt: now.addingTimeInterval(-130)),
+            now: now
+        )
+        XCTAssertEqual(shown.elapsed, "2m 10s")
+        XCTAssertEqual(SourceStatus.elapsedSince(now.addingTimeInterval(-45), now: now), "45s")
+        XCTAssertEqual(SourceStatus.elapsedSince(now.addingTimeInterval(-6000), now: now), "1h 40m")
+        // Clock skew between the phone and the API must not produce "-3s".
+        XCTAssertNil(SourceStatus.elapsedSince(now.addingTimeInterval(3), now: now))
+        // A settled sync has stopped: a clock that kept counting would be running over nothing.
+        XCTAssertNil(
+            SourceStatus.describeSyncProgress(
+                progress(stage: "done", found: 1, pulledIn: 1, startedAt: now.addingTimeInterval(-130)),
+                now: now
+            ).elapsed
+        )
     }
 
     func testAMidChainRetryAndAFinishWithFailuresAreSaidHonestly() {
