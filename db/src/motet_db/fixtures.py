@@ -102,6 +102,9 @@ _RESET_STEPS: Final[tuple[tuple[str, str], ...]] = (
 #:   spend ledger. Deleting the second would destroy the record of money already spent.
 #: * ``worker_heartbeats`` — a statement about the deployment, not about this user.
 #: * ``waitlist_signups`` — other people's addresses.
+#: * ``api_tokens`` — the personal access tokens (motet#142), which is the credential the
+#:   agent driving this very loop holds. Same case as ``auth_sessions``, one key along: a
+#:   reset that revoked it would answer its own next request with a 401.
 #: * ``auth_handoffs``, ``mcp_oauth_clients``, ``mcp_oauth_codes``,
 #:   ``mcp_oauth_refresh_tokens`` — sign-in and MCP-client grants, which are the same case
 #:   as ``auth_sessions``: they are how a caller is *holding* this connection, and the
@@ -123,6 +126,7 @@ _RESET_STEPS: Final[tuple[tuple[str, str], ...]] = (
 RESET_KEEPS: Final[tuple[str, ...]] = (
     "users",
     "auth_sessions",
+    "api_tokens",
     "auth_handoffs",
     "oauth_states",
     "feed_tokens",

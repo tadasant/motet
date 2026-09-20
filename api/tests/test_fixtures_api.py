@@ -605,6 +605,52 @@ def test_a_scope_motet_never_asks_google_for_is_refused(api: TestClient) -> None
     assert granted.json()["scopes"] == list(LABEL_SYNC_SCOPES)
 
 
+def test_a_personal_access_token_drives_the_harness_and_survives_a_reset(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The credential the staging agent actually holds (motet#142), through the whole loop.
+
+    The harness takes ``User`` like every other ``/v1`` route, so a personal access token
+    reaches it with nothing added here — that is the integration point, and this is the
+    proof it works rather than the assumption. The reset keeps ``api_tokens`` for
+    ``auth_sessions``' reason: the agent is *holding* one, and a reset that revoked it
+    would answer its own next request with a 401.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from motet_api.auth import ALLOWED_EMAILS_ENV, FAKE_EMAIL
+    from motet_api.config import CALLBACK_PATH
+
+    origin = "https://app.motet.test"
+    monkeypatch.setenv("MOTET_APP_BASE_URL", origin)
+    monkeypatch.setenv(ALLOWED_EMAILS_ENV, FAKE_EMAIL)
+    # A token is minted by a signed-in person, so sign in the way a browser does first.
+    started = api.post("/v1/auth/google/start", json={"redirect_uri": f"{origin}{CALLBACK_PATH}"})
+    assert started.status_code == 200, started.text
+    query = parse_qs(urlsplit(started.json()["authorization_url"]).query)
+    signed_in = api.post(
+        "/v1/auth/google/callback", json={"state": query["state"][0], "code": query["code"][0]}
+    )
+    assert signed_in.status_code == 200, signed_in.text
+    session = {"Authorization": f"Bearer {signed_in.json()['token']}"}
+    minted = api.post("/v1/auth/tokens", json={"label": "staging agent"}, headers=session)
+    assert minted.status_code == 201, minted.text
+    pat = {"Authorization": f"Bearer {minted.json()['token']}"}
+
+    seeded = api.post("/v1/testing/gmail-source", headers=pat, json={})
+    assert seeded.status_code == 201, seeded.text
+    triggered = api.post("/v1/testing/jobs", headers=pat, json={"kind": "gmail_poll"})
+    assert triggered.status_code == 201, triggered.text
+    assert api.get(f"/v1/testing/jobs/{triggered.json()['job_id']}", headers=pat).status_code == 200
+
+    reset = api.post("/v1/testing/reset", headers=pat)
+    assert reset.status_code == 200, reset.text
+    assert "api_tokens" in reset.json()["kept"]
+    # Still authenticated after the reset it just ran — the loop can go round again.
+    assert api.get("/v1/auth/session", headers=pat).status_code == 200
+    assert api.post("/v1/testing/gmail-source", headers=pat, json={}).status_code == 201
+
+
 def test_a_reset_keeps_the_session_the_caller_is_holding(
     api: TestClient, db: psycopg.Connection[Any]
 ) -> None:

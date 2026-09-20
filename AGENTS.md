@@ -3514,9 +3514,10 @@ are deleted explicitly rather than left to `ON DELETE CASCADE`, so the per-table
 the response are a baseline a caller can assert rather than trust. `RESET_KEEPS` is the
 other list, with a reason each: the account, **the session the caller is holding** (a reset
 that revoked it would log the agent out halfway through its own run), every authorization
-in flight and every grant a client holds (`oauth_states` and the sign-in and MCP tables —
-the same argument one step earlier; a mailbox consent for a deleted source still cascades
-from `sources`), the feed token a podcast client is subscribed to, the connectors a human
+in flight and every grant a client holds (`oauth_states`, `api_tokens` and the sign-in and
+MCP tables — the same argument one key along, and the personal access token is the very
+credential the agent driving the loop holds; a mailbox consent for a deleted source still
+cascades from `sources`), the feed token a podcast client is subscribed to, the connectors a human
 added behind a one-time step, the spend ledger, and the seeded `src_paste` row — deleting
 which would take paste-in down in a way that reads as an application bug.
 
@@ -3591,6 +3592,12 @@ process's environment. Hiding them would buy no secrecy either — the code is i
 repo. They are in `mcp/registry.py`'s `EXCLUDED` for the same reason they are not a product
 capability, and `test_fixtures_api.py` walks `app.routes` to prove no route under
 `/v1/testing` escaped the guard, which is the `/v1/admin` walk one surface along.
+
+**A personal access token reaches every one of these routes with nothing added here.**
+They take `User` like the rest of `/v1`, and motet#142 taught `require_caller` a third key,
+so the credential the agent holds is the credential the harness takes — asserted end to end
+in `test_fixtures_api.py`, mint through reset and back, because the integration point that
+was left "obvious" is only obvious once it is a passing test.
 
 **What is reachable with the flag on, stated so the change can be reviewed on that basis:**
 an authenticated `/v1` caller can seed a Gmail source from the staging refresh token, delete
