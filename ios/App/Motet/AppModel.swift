@@ -102,7 +102,11 @@ final class AppModel: ObservableObject {
         probeReporter.start()
     }
 
-    private func observeSnapshots() {
+    /// Not private: the playback-probe fixture starts this without `start()`, because it
+    /// renders with no server and no session and must not take the path that needs one.
+    /// Without it nothing tracks the loaded episode, and the probe reporter — which only
+    /// logs about an episode it knows the id of — stays silent for the whole run.
+    func observeSnapshots() {
         snapshotTask?.cancel()
         let controller = self.controller
         let nowPlaying = environment.nowPlaying
@@ -188,7 +192,7 @@ final class AppModel: ObservableObject {
                     "This phone would not give Motet the audio output: \(error.localizedDescription)"
             )
         }
-        probeReporter.noteDiscontinuity()
+        await probeReporter.noteDiscontinuity()
         do {
             let source = try await library.source(forEpisode: episode)
             try await controller.load(episode: episode, source: source, autoplay: true)
@@ -223,7 +227,7 @@ final class AppModel: ObservableObject {
         // Before the command, not after: the engine echoes a position for a seek straight
         // away, and a sample taken between the two would fold the jump into the window
         // that decides whether the clock is advancing.
-        if command.movesThePlayhead { probeReporter.noteDiscontinuity() }
+        if command.movesThePlayhead { await probeReporter.noteDiscontinuity() }
         await controller.perform(command)
         switch command {
         case .setRate, .cycleRate:

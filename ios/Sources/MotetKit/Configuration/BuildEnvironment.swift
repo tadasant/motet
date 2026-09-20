@@ -39,13 +39,11 @@ public enum BuildEnvironment: String, Hashable, Sendable, CaseIterable {
         self = BuildEnvironment(rawValue: trimmed) ?? .production
     }
 
-    /// Whether this build should say out loud which server it is on.
+    /// The chip's text, and by its nil-ness whether this build says out loud which server
+    /// it is on at all. Short, because it sits in a title bar.
     ///
-    /// Production does not: the badge is there to stop somebody trusting staging data, and
-    /// a permanent "PRODUCTION" chip over a product with one user is noise.
-    public var announcesItself: Bool { self != .production }
-
-    /// The chip's text. Short, because it sits in a title bar.
+    /// **Production has none**: the badge is there to stop somebody trusting staging data,
+    /// and a permanent "PRODUCTION" chip over a product with one user is noise.
     public var badge: String? {
         switch self {
         case .production: return nil

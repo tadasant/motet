@@ -124,7 +124,12 @@ public final class AudioLevelMeter: @unchecked Sendable {
             let status = MTAudioProcessingTapGetSourceAudio(
                 tap, frames, bufferList, flagsOut, nil, framesOut
             )
-            guard status == noErr else { return }
+            guard status == noErr else {
+                // The framework reads this after the callback returns; on the error path
+                // it would otherwise hold whatever happened to be there.
+                framesOut.pointee = 0
+                return
+            }
             let meter = Unmanaged<AudioLevelMeter>
                 .fromOpaque(MTAudioProcessingTapGetStorage(tap))
                 .takeUnretainedValue()
@@ -207,13 +212,24 @@ public final class AudioLevelMeter: @unchecked Sendable {
             counted += count
         }
         guard counted > 0 else { return }
-        lock.withLock {
-            roll(at: Date())
-            hasEverReceived = true
-            current.frames += counted
-            current.sumSquares += sumSquares
-            if peak > current.peak { current.peak = peak }
-        }
+        // `try()`, never a blocking `lock()`. This runs on the real-time render thread and
+        // the only other taker is a main-actor poll twice a second, so contention is rare —
+        // and waiting for it would be a priority inversion on the one thread that must
+        // never wait. A dropped buffer is an abstention, which this design already
+        // tolerates; a glitched render is the thing this file promises not to cause. The
+        // clock is read outside the critical section for the same reason.
+        let now = Date()
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        // A buffer from the *previous* item's tap, which does not die until its mix is
+        // released — `reset()` clears this flag and only the new tap's `prepare` sets it,
+        // so this is what stops the last episode's frames landing in this one's window.
+        guard isMeasurableFormat else { return }
+        roll(at: now)
+        hasEverReceived = true
+        current.frames += counted
+        current.sumSquares += sumSquares
+        if peak > current.peak { current.peak = peak }
     }
 
     /// Advance the two buckets. Caller holds the lock.

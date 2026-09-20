@@ -57,3 +57,6 @@ xcuserdata/
 .DS_Store
 .idea/
 .vscode/
+
+# ios/bin/ui-test writes its video, screenshot and result bundle here by default.
+ios/.ui-test/

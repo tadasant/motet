@@ -58,10 +58,6 @@ public actor PlaybackProbeRecorder {
     private var watch = PlaybackClockWatch()
     private var latest = PlaybackProbe()
     private var episodeId: String?
-    /// When `isAudible` last flipped, so "silent for eleven seconds" is answerable without
-    /// a second timer somewhere else.
-    private var lastVerdictChange: Date?
-    private var lastVerdict: Bool?
 
     public init(
         engine: any PlaybackEngineProbe,
@@ -109,20 +105,11 @@ public actor PlaybackProbeRecorder {
             errorMessage: facts.errorMessage,
             episodeId: episodeId
         )
-        if lastVerdict != probe.isAudible {
-            lastVerdict = probe.isAudible
-            lastVerdictChange = now
-        }
         latest = probe
         return probe
     }
 
     public func current() -> PlaybackProbe { latest }
-
-    /// How long the current verdict has held, or nil before the first sample.
-    public func verdictAgeSeconds() -> TimeInterval? {
-        lastVerdictChange.map { clock.now.timeIntervalSince($0) }
-    }
 
     /// Whether the window is wide enough for ``PlaybackProbe/advancedMs`` to be evidence.
     /// A caller that raises an alarm on a frozen clock must wait for this; a caller that

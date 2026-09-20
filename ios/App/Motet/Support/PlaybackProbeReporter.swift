@@ -54,12 +54,22 @@ final class PlaybackProbeReporter {
         self.recorder = recorder
     }
 
-    /// No `deinit` cancelling the task, deliberately: the loop below holds `self` weakly
-    /// and returns the moment this object goes, and a `deinit` on a `@MainActor` type
-    /// reaching isolated state is a hazard Swift 6 is right to complain about.
+    /// Start sampling, for the life of the process.
     ///
-    /// Start sampling. Idempotent — a second call replaces the first rather than running
-    /// two loops, which is what a `reconfigure()` would otherwise do.
+    /// **There is no `stop()`, and that is deliberate rather than an omission.** The
+    /// obvious place to call one would be the app going to the background — which is
+    /// exactly the situation this exists to report on, because background audio is the
+    /// product and a dog walk is where a silent player gets discovered. A probe that slept
+    /// in the background would be blind for the whole of the only session that matters.
+    /// What it pays for that is a `timeControlStatus` read and a lock every two seconds
+    /// while nothing is playing.
+    ///
+    /// No `deinit` cancelling the task either: the loop below holds `self` weakly and
+    /// returns the moment this object goes, and a `deinit` on a `@MainActor` type reaching
+    /// isolated state is a hazard Swift 6 is right to complain about.
+    ///
+    /// Idempotent — a second call replaces the first rather than running two loops, which
+    /// is what a `reconfigure()` would otherwise do.
     func start() {
         task?.cancel()
         task = Task { [weak self] in
@@ -74,11 +84,6 @@ final class PlaybackProbeReporter {
         }
     }
 
-    func stop() {
-        task?.cancel()
-        task = nil
-    }
-
     /// The episode the probe's lines are about.
     func track(episodeId: String?) {
         Task { await recorder.track(episodeId: episodeId) }
@@ -87,8 +92,13 @@ final class PlaybackProbeReporter {
     /// A seek, a load, or a resume: the position moved without being played, so the window
     /// that judges "is the clock advancing" has to be thrown away rather than reading the
     /// jump as a second of listening.
-    func noteDiscontinuity() {
-        Task { await recorder.discontinuity() }
+    ///
+    /// **Awaited, and the caller awaits it before the command.** An unstructured `Task`
+    /// here would carry no ordering against either the seek or the sampling loop's own
+    /// job, so the reset could land *after* the post-seek sample had been folded into the
+    /// window — which is the false `audible=true` this exists to prevent.
+    func noteDiscontinuity() async {
+        await recorder.discontinuity()
     }
 
     private func publish(_ probe: PlaybackProbe) {

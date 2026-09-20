@@ -230,7 +230,9 @@ jobs:
     if: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && needs.ios-changes.outputs.ios == 'true' }}
     needs: ios-changes
     runs-on: macos-latest
-    timeout-minutes: 45
+    # Raised from 45 when the simulator run joined the job: it is a second full app build
+    # plus a boot and a two-test run on top of the three steps that were already here.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4

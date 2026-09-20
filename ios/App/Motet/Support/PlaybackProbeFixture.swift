@@ -31,6 +31,17 @@ enum PlaybackProbeFixture {
         ProcessInfo.processInfo.arguments.contains("-MotetPlaybackProbe")
     }
 
+    /// `-MotetPlaybackProbeAutoplay` alongside it: start playing as soon as the tone is
+    /// loaded, with nobody to press the button.
+    ///
+    /// It exists because `xcrun simctl` can take a screenshot and cannot tap anything, and
+    /// a picture of the probe reading `SILENT: notPlaying` proves nothing worth having. The
+    /// UI test deliberately does **not** use it — its whole assertion is the transition,
+    /// which needs a press.
+    static var autoplays: Bool {
+        ProcessInfo.processInfo.arguments.contains("-MotetPlaybackProbeAutoplay")
+    }
+
     static let durationMs = 20_000
     static let episodeId = "probe-tone"
 
@@ -59,8 +70,12 @@ enum PlaybackProbeFixture {
     static func writeTone() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("motet-probe-tone.wav")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try wav(seconds: Double(durationMs) / 1_000).write(to: url, options: .atomic)
+        let tone = wav(seconds: Double(durationMs) / 1_000)
+        // Length as well as existence: a run killed mid-write leaves a truncated file that
+        // existence alone would reuse forever on a simulator nobody erases.
+        let onDisk = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int
+        if onDisk != tone.count {
+            try tone.write(to: url, options: .atomic)
         }
         return url
     }
@@ -151,7 +166,13 @@ struct PlaybackProbeView: View {
         guard !isReady, loadError == nil else { return }
         let environment = AppEnvironment.shared
         await environment.activate()
+        // Both, and the second is easy to forget: `MotetApp` skips `model.start()` for this
+        // fixture, so without it nothing subscribes to the controller's snapshots — the
+        // button below would read "Play" while audio was playing, and the probe reporter,
+        // which only logs about an episode it knows the id of, would stay silent for the
+        // whole run. That is the one place this repo actually runs the app.
         model.observePlayback()
+        model.observeSnapshots()
         await environment.applyAudioSessionShape()
         // Reported, never fatal: a simulator that refuses the session is a finding the
         // probe should show rather than a reason to render nothing.
@@ -166,6 +187,9 @@ struct PlaybackProbeView: View {
                 autoplay: false
             )
             isReady = true
+            if PlaybackProbeFixture.autoplays {
+                await model.perform(.play)
+            }
         } catch {
             loadError = "load: \(String(describing: error))"
         }

@@ -156,8 +156,12 @@ public struct AudioLevel: Hashable, Sendable {
     public var rms: Double
     /// The largest absolute sample in the window, 0…1.
     public var peak: Double
-    /// How many frames the measurement covers. Zero means the tap is installed and has
-    /// been handed nothing — which is *not* silence, and is why this is carried.
+    /// How many frames the current window covers.
+    ///
+    /// Zero here **is** evidence of silence, and the abstention lives one layer out:
+    /// `AudioLevelMeter.level()` answers `nil` until a buffer has ever arrived and for a
+    /// format it cannot read, so an `AudioLevel` existing at all means something measured.
+    /// Given that, a window with no frames is a render that produced nothing.
     public var frames: Int
 
     public init(rms: Double, peak: Double, frames: Int) {
@@ -178,10 +182,6 @@ public struct AudioLevel: Hashable, Sendable {
     /// Whether this measurement is of audio rather than of silence. Peak rather than RMS,
     /// because RMS over a window containing one loud word and a lot of pause is small.
     public var isSounding: Bool { frames > 0 && peak > Self.silenceFloor }
-
-    public var decibels: Double {
-        peak <= 0 ? -Double.infinity : 20 * log10(peak)
-    }
 }
 
 /// The audio session as iOS has it, rather than as it was asked for.

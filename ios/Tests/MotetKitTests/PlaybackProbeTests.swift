@@ -124,10 +124,11 @@ final class PlaybackProbeVerdictTests: XCTestCase {
         XCTAssertTrue(probe.summary.contains("wait=toMinimizeStalls"))
     }
 
-    func test_a_measurement_of_no_frames_is_not_a_measurement_of_silence() {
-        // The tap is installed and has been handed nothing. `AudioLevelMeter` answers nil
-        // until a buffer has ever arrived, and this is the belt on that braces: even if a
-        // zero-frame level reached here it must not vote.
+    func test_a_window_with_no_frames_is_not_sounding() {
+        // The abstention lives one layer out — `AudioLevelMeter.level()` answers nil until
+        // a buffer has ever arrived and for a format it cannot read. Given an `AudioLevel`
+        // exists at all, something measured, so an empty window is a render that produced
+        // nothing rather than a question nobody asked.
         let level = AudioLevel(rms: 0, peak: 0, frames: 0)
         XCTAssertFalse(level.isSounding)
     }
@@ -308,9 +309,8 @@ final class BuildEnvironmentTests: XCTestCase {
 
     func test_only_a_non_production_build_announces_itself() {
         XCTAssertNil(BuildEnvironment.production.badge)
-        XCTAssertFalse(BuildEnvironment.production.announcesItself)
         XCTAssertEqual(BuildEnvironment.staging.badge, "STAGING")
-        XCTAssertTrue(BuildEnvironment.staging.announcesItself)
+        XCTAssertEqual(BuildEnvironment.development.badge, "DEV")
     }
 
     func test_the_target_reports_a_host_and_where_it_came_from() {

@@ -23,6 +23,7 @@ final class PlaybackProbeUITests: XCTestCase {
     private let verdictTimeout: TimeInterval = 20
 
     override func setUp() {
+        super.setUp()
         continueAfterFailure = false
     }
 
@@ -56,8 +57,14 @@ final class PlaybackProbeUITests: XCTestCase {
 
         // Playing: the transport says so, the clock is moving, and — where the tap is
         // working — the mix is rendering audio above the silence floor.
+        // `audible` in the predicate as well as the assertions: without it the wait can
+        // return in the narrow window where the clock has moved and the tap's current
+        // window happens to hold no frames, and the assertion below would then fail on a
+        // player that was working. The timeout already covers the extra moment.
         let playing = try waitForProbe(app, timeout: verdictTimeout) {
-            $0["transport"] == "playing" && (Int($0["advanced_ms"] ?? "0") ?? 0) > 0
+            $0["transport"] == "playing"
+                && (Int($0["advanced_ms"] ?? "0") ?? 0) > 0
+                && $0["audible"] == "true"
         }
         attach(playing, named: "probe-while-playing")
         XCTAssertEqual(playing["transport"], "playing", "\(playing)")
@@ -146,7 +153,15 @@ final class PlaybackProbeUITests: XCTestCase {
             XCTAssertEqual(fields["env"], expectedEnv, "\(fields)")
         }
         if !expectedHost.isEmpty {
-            XCTAssertEqual(fields["host"], expectedHost, "\(fields)")
+            // The message names neither side. This repository is public, the workflow log
+            // is public with it, and a deployment's hostname is the one thing
+            // `ios-ui-tests.yml` masks — a failure message that interpolated either value
+            // would be printing exactly what the mask exists to keep out. `env` and
+            // `source` above are safe and say what went wrong nearly as well.
+            XCTAssertEqual(
+                fields["host"], expectedHost,
+                "the app reported a different host from the one the build was given"
+            )
         }
     }
 

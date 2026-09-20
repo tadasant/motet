@@ -109,12 +109,22 @@ jobs:
             https://*) ;;
             *) echo "::error::${WANTED} must hold an https:// URL."; exit 1 ;;
           esac
-          # Deliberately masked. The variable holds a deployment's hostname, this
-          # repository is public, and a workflow log is public with it — so the value is
-          # used and never printed. That is the opposite of `testflight.yml`, whose
-          # `MOTET_IOS_API_BASE_URL` is the product's already-public API name.
+          # Masked in BOTH spellings, and that is the whole of it rather than belt and
+          # braces: `::add-mask::` is exact-substring replacement, and `ios/bin/ui-test`
+          # derives the bare host from the URL to compare against what the app reports. A
+          # failed assertion prints that bare host, which the full-URL mask would not have
+          # touched. This repository is public and a workflow log is public with it.
+          host="${url#https://}"; host="${host%%[:/]*}"
           echo "::add-mask::$url"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$host"
+          # Heredoc rather than `k=v`: a newline in the variable's value would otherwise
+          # let it inject step outputs of its own.
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            printf 'url<<%s\n' "$delimiter"
+            printf '%s\n' "$url"
+            printf '%s\n' "$delimiter"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved ${WANTED}."
 
       - name: Run the app on a simulator
@@ -133,8 +143,15 @@ jobs:
             --configuration "$MOTET_UI_TEST_CONFIGURATION" \
             --artifacts "$RUNNER_TEMP/ui-test"
 
+      # ONLY when no real server was named, and that is a disclosure rule rather than a
+      # size one. A workflow artifact on a public repository is downloadable by any GitHub
+      # user, and `::add-mask::` does nothing to file contents — while the run's video and
+      # screenshot show the app's own build-target line, and the result bundle carries the
+      # built `Info.plist`. So a run pointed at a real deployment keeps its evidence in the
+      # log (masked) and uploads nothing; `ci.yml`'s run, which builds against a
+      # reserved-by-RFC-2606 name that can never resolve, uploads everything.
       - name: Keep what the run produced
-        if: ${{ always() }}
+        if: ${{ always() && inputs.api_base_url_variable == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: ios-ui-test-${{ inputs.configuration }}

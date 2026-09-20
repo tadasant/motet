@@ -358,8 +358,11 @@
 				// DEBUG stays defined: the debug-only affordances a UI test drives — the
 				// screenshot fixture, the playback probe screen, the on-screen probe strip
 				// — are the whole reason this configuration exists, and a Staging build
-				// without them could not be exercised by anything automated.
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG MOTET_STAGING $(inherited)";
+				// without them could not be exercised by anything automated. Deliberately
+				// no MOTET_STAGING condition of its own: nothing branches on the
+				// configuration in code, and an unused one is a trap for whoever assumes
+				// something does.
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
 			};
@@ -415,7 +418,7 @@
 			};
 			name = Debug;
 		};
-		AA000000000000000000006A /* Debug */ = {
+		AA000000000000000000006A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
@@ -435,7 +438,7 @@
 			};
 			name = Release;
 		};
-		AA000000000000000000006B /* Debug */ = {
+		AA000000000000000000006B /* Staging */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;

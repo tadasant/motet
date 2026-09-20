@@ -106,6 +106,15 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, PlaybackEngineProbe, 
         Task { [weak self] in
             guard let mix = await meter.audioMix(for: handoff.asset) else { return }
             guard let self, self.lock.withLock({ self.itemGeneration }) == generation else { return }
+            // **Abstain rather than re-plumb a graph that is already rendering.** Setting
+            // `audioMix` on a ready item reconfigures the audio processing graph, which is
+            // either an audible discontinuity or a tap that never installs — and this
+            // diagnostic is not allowed to cost a listener either. The tap normally lands
+            // first, because the player needs the same container header this waited on.
+            guard handoff.item.status != .readyToPlay else {
+                Self.logger.notice("audio level: item was ready before the tap; not attaching")
+                return
+            }
             handoff.item.audioMix = mix
         }
     }
