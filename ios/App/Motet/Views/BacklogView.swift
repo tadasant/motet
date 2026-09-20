@@ -8,6 +8,10 @@ import SwiftUI
 /// is the product's memory, and being unable to undo is worse than never having marked it.
 struct BacklogView: View {
     @EnvironmentObject private var model: AppModel
+    /// The held list's own model. The Backlog tab has no `SourcesModel` — that one is scoped
+    /// to the Sources tab — and "what has been pulled in and not yet ingested" is a Backlog
+    /// question: the Backlog is where a person looks for mail that has arrived (motet#139).
+    @StateObject private var heldHolder = SourcesModelHolder()
     @State private var showingRead = false
     @State private var isPasting = false
     /// Picking stories for an episode made of just those. Off, a row is a row; on, a tap
@@ -48,6 +52,9 @@ struct BacklogView: View {
             VStack(spacing: 0) {
                 ConnectionBanner(message: model.connectionMessage)
                 List {
+                    if let held = heldHolder.model, !held.held.isEmpty, !isSelecting {
+                        heldBanner(held)
+                    }
                     if visibleItems.isEmpty {
                         ContentUnavailableView {
                             VStack(spacing: 12) {
@@ -106,6 +113,13 @@ struct BacklogView: View {
             .background(Theme.parchment)
             .navigationTitle(isSelecting ? selectionTitle : "Backlog")
             .toolbar { toolbar }
+            .task {
+                // Bound and refreshed in one place: `.onAppear` and `.task` have no
+                // guaranteed order between them, so binding in the first and reading the
+                // model in the second could read a `nil` that is filled a tick later.
+                heldHolder.bind(model)
+                await heldHolder.model?.refresh()
+            }
             .sheet(isPresented: $isPasting) { PasteView() }
             .sheet(isPresented: $isGenerating) {
                 PickedEpisodeView(items: pickedItems, keepInBacklog: keepInBacklogByDefault) {
@@ -119,6 +133,30 @@ struct BacklogView: View {
 
     private var selectionTitle: String {
         selection.isEmpty ? "Pick stories" : "\(selection.count) picked"
+    }
+
+    /// What has been pulled in and is waiting for a person, above the stories that already
+    /// went through dedup.
+    ///
+    /// Above rather than below for the SPA's reason: "where did the mail I just synced go"
+    /// is asked immediately, and an answer under a long list of older stories is an answer
+    /// nobody scrolls to. Before this, the phone answered it nowhere at all — the list here
+    /// is news items, and a held item is deliberately not one yet.
+    @ViewBuilder
+    private func heldBanner(_ sources: SourcesModel) -> some View {
+        NavigationLink {
+            HeldItemsView().environmentObject(sources)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(sources.held.count) pulled in, waiting for you")
+                    .font(Theme.body(16, weight: 600))
+                Text("Synced from your sources and not yet processed. Nothing has cost inference — pick what you want in your next episode.")
+                    .font(Theme.body(13, relativeTo: .footnote))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+            .padding(.vertical, 4)
+        }
+        .listRowBackground(Theme.surface)
     }
 
     @ViewBuilder

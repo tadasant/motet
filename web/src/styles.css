@@ -755,6 +755,11 @@ details > summary:hover { color: var(--ink); }
 .waiting-hint .linkish { color: var(--ink); font-weight: 600; }
 
 .source-detail .actions { margin: 1rem 0 0; }
+/* "Sync further back" (motet#137): a label, a window and a button on one line, with the
+   explanation under them. The select would otherwise stretch to the row's full width and
+   read as the panel's primary control, which "Sync now" above it is. */
+.source-detail .resync select { max-width: 13rem; }
+.source-detail .resync .hint { flex-basis: 100%; margin: 0; }
 /* A sync in flight: the step, then pulled-in-of-found with a bar (sources/SyncProgress.tsx).
    The bar wears the voices, like every other progress bar; a stalled or failed sync drops
    them for ink and the error red, because a moving rainbow over "nothing will run this"

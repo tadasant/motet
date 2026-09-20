@@ -343,7 +343,7 @@ export const api = {
     ),
   completeConnectorOAuth: (state: string, code: string, iss?: string) =>
     apiPost('/v1/connectors/oauth/callback', { state, code, iss: iss ?? null }),
-  connectSource: (name: string, query: string, redirectUri: string) =>
+  connectSource: (name: string, query: string, redirectUri: string, firstSyncDays: number) =>
     apiPost('/v1/sources/connect', {
       provider: 'gmail',
       name,
@@ -351,6 +351,9 @@ export const api = {
       // an empty string.
       query: query || null,
       redirect_uri: redirectUri,
+      // Always sent, so the window a person was shown on the connect screen is the window
+      // they get — rather than whatever the worker's environment happens to say.
+      first_sync_days: firstSyncDays,
     }),
   completeOAuth: (state: string, code: string) =>
     apiPost('/v1/sources/callback', { state, code }),
@@ -392,6 +395,16 @@ export const api = {
       '/v1/sources/{source_id}/label-sync',
       `/v1/sources/${encodeURIComponent(id)}/label-sync`,
       { remove_label: removeLabel || null, add_label: addLabel || null },
+    ),
+  // Search a mailbox again from `days` ago, and keep that as its window (motet#139).
+  // The repair for a first sync that did not reach far enough: widening the window alone
+  // changes nothing, because it is read only where a search begins. Already-ingested mail
+  // is skipped before it is fetched, so this cannot duplicate anything.
+  resyncSource: (id: string, days: number) =>
+    apiPostPath(
+      '/v1/sources/{source_id}/resync',
+      `/v1/sources/${encodeURIComponent(id)}/resync`,
+      { first_sync_days: days },
     ),
   reauthorizeSource: (id: string, redirectUri: string) =>
     apiPostPath(

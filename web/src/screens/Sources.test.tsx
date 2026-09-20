@@ -407,6 +407,54 @@ describe('the catalog', () => {
   })
 })
 
+describe('reaching further back', () => {
+  it('offers a window, says what the next first sync would reach, and asks for a fresh search', async () => {
+    // The mailbox Tadas connected: a first sync that reached seven days, and 200-odd
+    // newsletters older than that which no ordinary poll will ever look behind (motet#139).
+    const narrow: Source = { ...CONNECTED_GMAIL, first_sync_days: 7, configured_first_sync_days: 7 }
+    const calls = mockApi({
+      '/v1/sources': [PASTE_SOURCE, narrow],
+      'POST /v1/sources/src_2/resync': { ...narrow, configured_first_sync_days: 365 },
+    })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+
+    // The window it used is stated, which is the sentence that was missing entirely.
+    expect(within(detail).getByText(/The first sync reached back 7 days/)).toBeDefined()
+
+    const picker = within(detail).getByLabelText('Sync further back') as HTMLSelectElement
+    expect(picker.value).toBe('7')
+    fireEvent.change(picker, { target: { value: '365' } })
+    fireEvent.click(within(detail).getByRole('button', { name: 'Search again' }))
+
+    await waitFor(() => {
+      const resync = calls.find((call) => call.url.includes('/v1/sources/src_2/resync'))
+      expect(resync?.method).toBe('POST')
+      expect(resync?.body).toEqual({ first_sync_days: 365 })
+    })
+  })
+
+  it('says what the next first sync would reach when it differs from the last one', async () => {
+    const widened: Source = {
+      ...CONNECTED_GMAIL,
+      first_sync_days: 7,
+      configured_first_sync_days: 365,
+    }
+    mockApi({ '/v1/sources': [PASTE_SOURCE, widened] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    expect(within(detail).getByText(/The next one would reach the last year/)).toBeDefined()
+  })
+
+  it('offers nothing to search again on a mailbox with no credential', async () => {
+    const gone: Source = { ...CONNECTED_GMAIL, connected: false, active: false }
+    mockApi({ '/v1/sources': [PASTE_SOURCE, gone] })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    const detail = await screen.findByRole('region', { name: 'Gmail details' })
+    expect(within(detail).queryByRole('button', { name: 'Search again' })).toBeNull()
+  })
+})
+
 describe('when something goes wrong', () => {
   it('reports a sync that gave up as a failure with its reason, and stops spinning', async () => {
     const gaveUp = withProgress(
@@ -609,6 +657,7 @@ describe('connecting a mailbox', () => {
     fireEvent.change(screen.getByLabelText('Gmail search (optional)'), {
       target: { value: 'from:newsletter@example.test' },
     })
+    fireEvent.change(screen.getByLabelText('First sync reaches back'), { target: { value: '90' } })
     fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
 
     await waitFor(() => expect(navigate).toHaveBeenCalled())
@@ -620,10 +669,33 @@ describe('connecting a mailbox', () => {
       query: 'from:newsletter@example.test',
       // Registered on the OAuth client, and matched by Google as an exact string.
       redirect_uri: `${window.location.origin}/oauth/callback`,
+      // The window the form showed rides on the request, so what a person was told they
+      // would get is what they get rather than the worker's own default (motet#139).
+      first_sync_days: 90,
     })
     expect(navigate).toHaveBeenCalledWith('https://accounts.google.test/o/oauth2/v2/auth?client_id=x')
     // Remembered before the redirect: after it, nothing in this tab gets to run.
     expect(window.sessionStorage.getItem('motet.oauthState')).toBe('st_1')
+  })
+
+  it('defaults the first sync to a month, and says so before you connect', async () => {
+    mockApi({
+      '/v1/sources/connect': { source_id: 'src_3', authorization_url: 'https://accounts.google.test/', state: 'st_3' },
+    })
+    render(<Sources navigate={vi.fn()} now={NOW} />)
+    await screen.findByRole('form', { name: 'Connect Gmail' })
+
+    const picker = screen.getByLabelText('First sync reaches back') as HTMLSelectElement
+    expect(picker.value).toBe('30')
+    // Every choice a person can make is offered, including one that is effectively
+    // "everything" — 7 days with nothing saying so is what motet#139 was.
+    expect([...picker.options].map((option) => option.value)).toEqual([
+      '7',
+      '30',
+      '90',
+      '365',
+      '3650',
+    ])
   })
 
   it('sends a blank query as null, which is what asks for the provider default', async () => {

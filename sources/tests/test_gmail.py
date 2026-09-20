@@ -22,6 +22,7 @@ from motet_sources import GmailMailClient, SourceError
 from motet_sources.gmail import (
     DEFAULT_FIRST_SYNC_DAYS,
     FIRST_SYNC_DAYS_ENV,
+    MAX_FIRST_SYNC_DAYS,
     WATERMARK_OVERLAP_SECONDS,
 )
 
@@ -149,19 +150,76 @@ def test_the_window_is_a_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     assert page.first_sync_days == 60
 
 
-def test_a_window_wider_than_the_epoch_is_clamped_and_its_cursor_still_resumes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A negative bound would never decode, and a first sync would restart on every poll."""
+def test_a_window_wider_than_the_ceiling_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absurd window is bounded rather than honoured, whoever asked for it.
+
+    A typo'd env value or a stored ``first_sync_days`` is the realistic source of one, and
+    an unbounded search is a crawl of the whole archive — so both go through the same
+    ceiling, and the page reports what it actually used rather than what it was asked for.
+    """
     monkeypatch.setenv(FIRST_SYNC_DAYS_ENV, "40000")
-    stub = StubGmail(mail=backlog(80))
-    first = client(stub).list_messages(query=FILTER, cursor=None, limit=50)
+    stub = StubGmail()
+    page = client(stub).list_messages(query=FILTER, cursor=None, limit=50)
+    assert stub.queries == [f"({FILTER}) after:{NOW - MAX_FIRST_SYNC_DAYS * DAY}"]
+    assert page.first_sync_days == MAX_FIRST_SYNC_DAYS
+
+    stub = StubGmail()
+    asked = client(stub).list_messages(
+        query=FILTER, cursor=None, limit=50, window_days=MAX_FIRST_SYNC_DAYS * 10
+    )
+    assert asked.first_sync_days == MAX_FIRST_SYNC_DAYS
+
+
+def test_a_window_reaching_past_the_epoch_is_clamped_and_its_cursor_still_resumes() -> None:
+    """A negative bound would never decode, and a first sync would restart on every poll.
+
+    The ceiling above makes this unreachable on any real clock — ten years before now is
+    comfortably after 1970 — so it is driven by a clock young enough for the window to
+    outrun it, which is the only way the floor can still be observed.
+    """
+    young = MAX_FIRST_SYNC_DAYS * DAY - 60  # the window is wider than this clock's "now"
+    stub = StubGmail(mail=[Mail(id=f"nl_{i:04d}", at=young - 60 - i * 60) for i in range(80)])
+    first = client(stub, now=young).list_messages(
+        query=FILTER, cursor=None, limit=50, window_days=MAX_FIRST_SYNC_DAYS
+    )
     assert stub.queries == [f"({FILTER}) after:0"]
     assert first.more is True
 
-    second = client(stub).list_messages(query=FILTER, cursor=first.cursor, limit=50)
+    second = client(stub, now=young).list_messages(query=FILTER, cursor=first.cursor, limit=50)
     assert second.first_sync_days is None, "resumed, not restarted"
     assert stub.requests[-1][1]["pageToken"] == "50"
+
+
+def test_the_source_s_own_window_outranks_the_deployment_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """motet#139: the window is per mailbox, and the env is only the fallback.
+
+    Narrowest scope wins — the owner chose this mailbox's window, and a deployment-wide
+    variable must not quietly override a choice made on a connect screen.
+    """
+    monkeypatch.setenv(FIRST_SYNC_DAYS_ENV, "7")
+    stub = StubGmail()
+    page = client(stub).list_messages(query=FILTER, cursor=None, limit=50, window_days=90)
+    assert stub.queries == [f"({FILTER}) after:{NOW - 90 * DAY}"]
+    assert page.first_sync_days == 90
+
+
+def test_the_window_is_read_only_where_a_search_begins() -> None:
+    """A wider window mid-search changes nothing — which is why a resync drops the cursor.
+
+    This is the property that makes ``POST /v1/sources/{id}/resync`` necessary rather than
+    a convenience: without it, widening a source's window would be a setting that silently
+    did nothing for ever.
+    """
+    stub = StubGmail(mail=backlog(80))
+    first = client(stub).list_messages(query=FILTER, cursor=None, limit=50, window_days=7)
+    assert first.more is True
+    resumed = client(stub).list_messages(
+        query=FILTER, cursor=first.cursor, limit=50, window_days=3650
+    )
+    assert resumed.first_sync_days is None, "mid-pass: still the window the pass began with"
+    assert stub.queries[-1] == f"({FILTER}) after:{NOW - 7 * DAY}"
 
 
 @pytest.mark.parametrize("raw", ["", "soon", "0", "-3"])
@@ -182,7 +240,8 @@ def test_the_watermark_is_in_seconds_not_milliseconds() -> None:
     stub = StubGmail()
     client(stub).list_messages(query=FILTER, cursor=None, limit=50)
     after = int(stub.queries[0].rsplit("after:", 1)[1])
-    assert NOW - 30 * DAY < after < NOW
+    assert after == NOW - DEFAULT_FIRST_SYNC_DAYS * DAY
+    assert NOW - (DEFAULT_FIRST_SYNC_DAYS + 1) * DAY < after < NOW
 
 
 # --- motet#94: a search longer than a page ---------------------------------------------

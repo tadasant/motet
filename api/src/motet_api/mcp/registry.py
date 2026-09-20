@@ -102,6 +102,7 @@ ALL_TOOLS: tuple[ToolDef, ...] = (
     ToolDef("list_sources", "sources", False, (("GET", "/v1/sources"),)),
     ToolDef("connect_source", "sources", True, (("POST", "/v1/sources/connect"),)),
     ToolDef("poll_source", "sources", True, (("POST", "/v1/sources/{source_id}/poll"),)),
+    ToolDef("resync_source", "sources", True, (("POST", "/v1/sources/{source_id}/resync"),)),
     ToolDef(
         "set_label_sync",
         "sources",

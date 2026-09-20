@@ -13,6 +13,7 @@ import { useState } from 'react'
 import { ApiError, type Source, api } from '../../api/client'
 import { LabelSync } from '../LabelSync'
 import { DEFAULT_QUERY } from './ConnectGmail'
+import { DEFAULT_FIRST_SYNC_DAYS, FIRST_SYNC_CHOICES, windowLabel } from './firstSync'
 import { StatusPill } from './IntegrationCard'
 import { SyncProgress } from './SyncProgress'
 import {
@@ -56,6 +57,11 @@ export function SourceDetail({
   const [sync, setSync] = useState<Sync>({ kind: 'idle' })
   const [disconnect, setDisconnect] = useState<Disconnect>({ kind: 'idle' })
   const [remove, setRemove] = useState<Remove>({ kind: 'idle' })
+  // The window "Sync further back" would use. Starts on this source's own, so re-opening
+  // the panel shows what it is set to rather than resetting to a default.
+  const [resyncDays, setResyncDays] = useState(
+    source.configured_first_sync_days ?? DEFAULT_FIRST_SYNC_DAYS,
+  )
   const status = rowStatus(source)
   const shownSyncAt = lastSyncedAt(source)
   const progress = source.sync_progress ?? null
@@ -67,6 +73,20 @@ export function SourceDetail({
     setSync({ kind: 'requesting' })
     try {
       await api.pollSource(source.id)
+      await onRefresh()
+      setSync({ kind: 'idle' })
+    } catch (err) {
+      setSync({ kind: 'error', message: err instanceof ApiError ? err.message : String(err) })
+    }
+  }
+
+  // Widening the window alone would do nothing — the adapter reads it only where a search
+  // begins, and this source's search is long past its start — so this is its own route,
+  // which sets the window *and* asks the next poll to start a fresh search over it.
+  const resync = async () => {
+    setSync({ kind: 'requesting' })
+    try {
+      await api.resyncSource(source.id, resyncDays)
       await onRefresh()
       setSync({ kind: 'idle' })
     } catch (err) {
@@ -166,6 +186,12 @@ export function SourceDetail({
                 <dd>
                   The first sync reached back {source.first_sync_days} day
                   {source.first_sync_days === 1 ? '' : 's'}; older mail was not pulled in.
+                  {source.configured_first_sync_days !== source.first_sync_days && (
+                    <span className="hint">
+                      {' '}
+                      The next one would reach {windowLabel(source.configured_first_sync_days)}.
+                    </span>
+                  )}
                 </dd>
               </>
             )}
@@ -232,6 +258,37 @@ export function SourceDetail({
               {sync.message}
             </span>
           )}
+        </div>
+      )}
+      {/* "Sync now" picks up what has arrived since the last poll; this reaches *backwards*,
+          which no ordinary poll ever does. Separate controls because they are separate
+          questions, and only one of them can pull in mail older than the first sync. */}
+      {isPollable(source) && status !== 'awaiting_consent' && source.connected && source.active && (
+        <div className="row actions resync">
+          <label htmlFor={`resync-${source.id}`}>Sync further back</label>
+          <select
+            id={`resync-${source.id}`}
+            value={resyncDays}
+            onChange={(e) => setResyncDays(Number(e.target.value))}
+            disabled={syncing}
+          >
+            {FIRST_SYNC_CHOICES.map((choice) => (
+              <option key={choice.days} value={choice.days}>
+                {choice.label}
+              </option>
+            ))}
+          </select>
+          {/* Keeps its own label while a sync runs rather than becoming a second
+              "Syncing…" — two controls saying the same word is a screen that cannot say
+              which of them is working. "Sync now" above is the one that reports progress. */}
+          <button type="button" onClick={() => void resync()} disabled={syncing}>
+            Search again
+          </button>
+          <p className="hint">
+            Searches this mailbox again from the chosen point and keeps that as its window.
+            Mail already pulled in is skipped before it is fetched, so nothing is duplicated
+            and nothing already ingested is charged for twice.
+          </p>
         </div>
       )}
       {isPollable(source) && progress && <SyncProgress progress={progress} />}

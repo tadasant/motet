@@ -409,17 +409,20 @@ public struct CompleteLoginRequest: Codable, Hashable, Sendable {
 
 /// Begin connecting a mailbox. Returns a URL for the user to visit.
 public struct ConnectSourceRequest: Codable, Hashable, Sendable {
+    public var firstSyncDays: Int?
     public var name: String?
     public var provider: String?
     public var query: String?
     public var redirectUri: String
 
     public init(
+        firstSyncDays: Int? = nil,
         name: String? = nil,
         provider: String? = nil,
         query: String? = nil,
         redirectUri: String
     ) {
+        self.firstSyncDays = firstSyncDays
         self.name = name
         self.provider = provider
         self.query = query
@@ -427,6 +430,7 @@ public struct ConnectSourceRequest: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case firstSyncDays = "first_sync_days"
         case name
         case provider
         case query
@@ -1883,6 +1887,24 @@ public struct RedeemNativeLoginRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// Ask a connected mailbox to search its whole window again, from a chosen start.
+///
+/// The repair for "my first sync was too short": widening the window alone changes
+/// nothing, because the window is read only when a search *begins* and this source's
+/// search is already under way. This sets the window and asks the next poll to begin a
+/// fresh one.
+public struct ResyncRequest: Codable, Hashable, Sendable {
+    public var firstSyncDays: Int
+
+    public init(firstSyncDays: Int) {
+        self.firstSyncDays = firstSyncDays
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case firstSyncDays = "first_sync_days"
+    }
+}
+
 /// How many sessions a revoke-everywhere took out.
 public struct RevokedResponse: Codable, Hashable, Sendable {
     public var revoked: Int
@@ -2246,6 +2268,7 @@ public struct SourceItemResponse: Codable, Hashable, Sendable {
 /// existed has it null, and its ``last_polled_at`` is the only tell.
 public struct SourceResponse: Codable, Hashable, Sendable {
     public var active: Bool
+    public var configuredFirstSyncDays: Int?
     public var connected: Bool
     public var createdAt: Date
     public var disconnectedAt: Date?
@@ -2265,6 +2288,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
 
     public init(
         active: Bool,
+        configuredFirstSyncDays: Int? = nil,
         connected: Bool,
         createdAt: Date,
         disconnectedAt: Date? = nil,
@@ -2283,6 +2307,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
         syncProgress: SourceSyncProgress? = nil
     ) {
         self.active = active
+        self.configuredFirstSyncDays = configuredFirstSyncDays
         self.connected = connected
         self.createdAt = createdAt
         self.disconnectedAt = disconnectedAt
@@ -2303,6 +2328,7 @@ public struct SourceResponse: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case active
+        case configuredFirstSyncDays = "configured_first_sync_days"
         case connected
         case createdAt = "created_at"
         case disconnectedAt = "disconnected_at"
@@ -2909,6 +2935,11 @@ public enum MotetEndpoints {
     /// `POST /v1/sources/{source_id}/reauthorize` — Reauthorize Source
     public static func reauthorizeSource(sourceId: String) -> HTTPEndpoint {
         return HTTPEndpoint(method: "POST", path: "/v1/sources/\(MotetPathComponent(sourceId))/reauthorize")
+    }
+
+    /// `POST /v1/sources/{source_id}/resync` — Resync Source
+    public static func resyncSource(sourceId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/sources/\(MotetPathComponent(sourceId))/resync")
     }
 
     /// `GET /v1/voice` — Voice Status

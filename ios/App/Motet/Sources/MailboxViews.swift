@@ -13,6 +13,9 @@ struct MailboxDetailView: View {
     @State private var confirmingDisconnect = false
     @State private var actionError: String?
     @State private var working = false
+    /// What "Search again" would use. Seeded from the source when the section appears, so it
+    /// reads as the mailbox's current setting rather than resetting to a default.
+    @State private var resyncDays = FirstSyncWindow.defaultDays
 
     /// "Sync now" itself — the request, not the sync. The sync is `source.syncProgress`,
     /// which the API assembles from the worker's running totals and the job queue.
@@ -74,9 +77,16 @@ struct MailboxDetailView: View {
                     }
                     .listRowBackground(Theme.parchment)
                     if counts.held > 0 {
-                        Text("**\(counts.held) item\(counts.held == 1 ? "" : "s") waiting** — pulled in and not yet processed. Ingest them from the Backlog.")
-                            .font(Theme.body(14, relativeTo: .footnote))
-                            .listRowBackground(Theme.surface)
+                        // A count used to be the whole of it, and the list it counted was on
+                        // no screen this app has — so 55 pulled-in newsletters were a number
+                        // and nothing else (motet#139). It is a link now.
+                        NavigationLink {
+                            HeldItemsView(sourceId: source.id)
+                        } label: {
+                            Text("**\(counts.held) item\(counts.held == 1 ? "" : "s") waiting** — pulled in and not yet processed. Review and ingest them.")
+                                .font(Theme.body(14, relativeTo: .footnote))
+                        }
+                        .listRowBackground(Theme.surface)
                     }
                 } header: {
                     Text("Pulled in").brandLabel()
@@ -104,6 +114,33 @@ struct MailboxDetailView: View {
                     }
                 }
                 .listRowBackground(Theme.surface)
+
+                // "Sync now" looks forward from the watermark and can never reach mail older
+                // than the first sync did. This is the only control that reaches backwards.
+                if source.connected, source.active {
+                    Section {
+                        Picker("Search from", selection: $resyncDays) {
+                            ForEach(FirstSyncWindow.choices) { choice in
+                                Text(choice.label).tag(choice.days)
+                            }
+                        }
+                        // Keeps its own label while a sync runs rather than becoming a
+                        // second "Syncing…": "Sync now" above is the one reporting progress.
+                        Button("Search again") {
+                            Task { await resync(source) }
+                        }
+                        .font(Theme.body(16, weight: 600))
+                        .disabled(isSyncing(source))
+                    } header: {
+                        Text("Sync further back").brandLabel()
+                    } footer: {
+                        Text("Searches this mailbox again from the chosen point and keeps that as its window. Mail already pulled in is skipped before it is fetched, so nothing is duplicated and nothing already ingested is charged for twice.")
+                            .font(Theme.aside(14))
+                            .foregroundStyle(Theme.inkSoft)
+                    }
+                    .listRowBackground(Theme.surface)
+                    .onAppear { resyncDays = FirstSyncWindow.starting(from: source) }
+                }
             }
 
             if SourceStatus.isPollable(source), source.connected, let labels = source.labelSync {
@@ -185,7 +222,10 @@ struct MailboxDetailView: View {
                 Fact("Filter", query == SourceStatus.defaultQuery ? "\(query) (the default)" : query)
             }
             if let days = source.firstSyncDays {
-                Fact("Sync window", "The first sync reached back \(days) day\(days == 1 ? "" : "s"); older mail was not pulled in.")
+                let next = source.configuredFirstSyncDays == days
+                    ? ""
+                    : " The next one would reach \(FirstSyncWindow.label(days: source.configuredFirstSyncDays))."
+                Fact("Sync window", "The first sync reached back \(days) day\(days == 1 ? "" : "s"); older mail was not pulled in.\(next)")
             }
         }
         if status != .awaitingConsent {
@@ -211,6 +251,16 @@ struct MailboxDetailView: View {
         sync = .requesting
         do {
             try await model.syncNow(source)
+            sync = .idle
+        } catch {
+            sync = .failed(SourcesModel.describe(error))
+        }
+    }
+
+    private func resync(_ source: SourceResponse) async {
+        sync = .requesting
+        do {
+            try await model.resync(source, days: resyncDays)
             sync = .idle
         } catch {
             sync = .failed(SourcesModel.describe(error))
@@ -483,6 +533,9 @@ struct ConnectMailboxView: View {
     @Environment(\.webAuthenticationSession) private var webAuthenticationSession
     @State private var name = "Gmail"
     @State private var query = ""
+    /// Asked rather than assumed, because the answer is the whole of what comes back and it
+    /// was invisible before (motet#139).
+    @State private var firstSyncDays = FirstSyncWindow.defaultDays
 
     var body: some View {
         NavigationStack {
@@ -505,6 +558,21 @@ struct ConnectMailboxView: View {
                     Text("Name and Gmail search").brandLabel()
                 } footer: {
                     Text("Which messages count as newsletters, in Gmail’s own search syntax. Left blank it is the default above, which needs no setup.")
+                        .font(Theme.aside(14))
+                        .foregroundStyle(Theme.inkSoft)
+                }
+                .listRowBackground(Theme.surface)
+
+                Section {
+                    Picker("First sync reaches back", selection: $firstSyncDays) {
+                        ForEach(FirstSyncWindow.choices) { choice in
+                            Text(choice.label).tag(choice.days)
+                        }
+                    }
+                } header: {
+                    Text("How far back").brandLabel()
+                } footer: {
+                    Text("How far back the first sync looks. Only this once — after it, every new message is picked up whatever this says. Nothing here costs inference: everything found waits for you to ingest it, so a wide window is safe, and you can widen it again later.")
                         .font(Theme.aside(14))
                         .foregroundStyle(Theme.inkSoft)
                 }
@@ -543,7 +611,9 @@ struct ConnectMailboxView: View {
     }
 
     private func connect() async {
-        let connected = await model.connectMailbox(name: name, query: query) { url in
+        let connected = await model.connectMailbox(
+            name: name, query: query, firstSyncDays: firstSyncDays
+        ) { url in
             await ConsentSheet.present(url, appDomain: model.appLinkDomain, using: webAuthenticationSession)
         }
         if connected { dismiss() }

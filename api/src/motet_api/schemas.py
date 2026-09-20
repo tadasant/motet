@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
+from motet_sources import MAX_FIRST_SYNC_DAYS
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -953,6 +954,16 @@ class SourceResponse(BaseModel):
             "a first sync has run."
         ),
     )
+    configured_first_sync_days: int | None = Field(
+        default=None,
+        description=(
+            "The window a first sync would use for this source from now on, as chosen when "
+            "it was connected or by a later 'sync further back'. Null means nobody chose "
+            "one and the deployment's own default applies — which the worker resolves, not "
+            "this service, so it is deliberately not guessed at here. Distinct from "
+            "`first_sync_days`, which is what the last first sync actually reached."
+        ),
+    )
     last_sync: SourceSyncResult | None = Field(
         description="The most recent poll's result. Null until one has run."
     )
@@ -1025,6 +1036,36 @@ class ConnectSourceRequest(BaseModel):
             "Where the provider sends the user back to. Supplied by the client rather "
             "than configured, because the SPA, a local dev server, and a future iOS app "
             "each have a different one."
+        ),
+    )
+    first_sync_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_FIRST_SYNC_DAYS,
+        description=(
+            "How far back the first sync of this mailbox should reach, in days. Omitted "
+            "leaves it to the deployment's default; every Motet client sends it, so that "
+            "the window a person will get is the one the connect screen showed them. The "
+            "ceiling is ten years, which is what a client offers as 'Everything'."
+        ),
+    )
+
+
+class ResyncRequest(BaseModel):
+    """Ask a connected mailbox to search its whole window again, from a chosen start.
+
+    The repair for "my first sync was too short": widening the window alone changes
+    nothing, because the window is read only when a search *begins* and this source's
+    search is already under way. This sets the window and asks the next poll to begin a
+    fresh one.
+    """
+
+    first_sync_days: int = Field(
+        ge=1,
+        le=MAX_FIRST_SYNC_DAYS,
+        description=(
+            "How far back to search, in days, counted from now. Becomes this source's "
+            "window from here on, so a later reconnect or resync starts from it."
         ),
     )
 

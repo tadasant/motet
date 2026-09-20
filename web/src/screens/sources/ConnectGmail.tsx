@@ -10,6 +10,7 @@ import { useState } from 'react'
 
 import { ApiError, api } from '../../api/client'
 import { beginConsent, redirectUri, rememberState } from '../../oauth'
+import { DEFAULT_FIRST_SYNC_DAYS, FIRST_SYNC_CHOICES } from './firstSync'
 
 /** Motet's default search (`motet_sources.gmail.DEFAULT_QUERY`), shown so the field reads as "override this". */
 export const DEFAULT_QUERY = 'category:updates OR category:promotions'
@@ -27,13 +28,16 @@ export function ConnectGmail({
 }) {
   const [name, setName] = useState('Gmail')
   const [query, setQuery] = useState('')
+  // Asked here rather than assumed, because the answer is the whole of what a person gets
+  // back and it was invisible before (motet#139).
+  const [days, setDays] = useState(DEFAULT_FIRST_SYNC_DAYS)
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
 
   const connect = async (event: React.FormEvent) => {
     event.preventDefault()
     setStatus({ kind: 'busy' })
     try {
-      const connection = await api.connectSource(name.trim(), query.trim(), redirectUri())
+      const connection = await api.connectSource(name.trim(), query.trim(), redirectUri(), days)
       // Remembered before the redirect, not after: once `navigate` runs, nothing else in
       // this tab gets to execute.
       rememberState(connection.state)
@@ -85,6 +89,24 @@ export function ConnectGmail({
         <p className="hint">
           Which messages count as newsletters, in Gmail&rsquo;s own search syntax. Left blank
           it is <code>{DEFAULT_QUERY}</code>, which needs no setup.
+        </p>
+        <label htmlFor="source-first-sync">First sync reaches back</label>
+        <select
+          id="source-first-sync"
+          value={days}
+          onChange={(e) => setDays(Number(e.target.value))}
+        >
+          {FIRST_SYNC_CHOICES.map((choice) => (
+            <option key={choice.days} value={choice.days}>
+              {choice.label}
+            </option>
+          ))}
+        </select>
+        <p className="hint">
+          How far back the first sync looks. Only this once — after it, every new message is
+          picked up whatever this says. Nothing here costs inference: everything found waits
+          on the Backlog until you ingest it, so a wide window is safe and you can widen it
+          again later.
         </p>
         <button
           type="submit"

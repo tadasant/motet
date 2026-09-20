@@ -2431,12 +2431,83 @@ Four things about it are the design, and each is a failure the first version had
   "already handed on" — without that half, a receipt extraction skipped has no source item
   and would be fetched again on every poll inside the overlap.
 - **The window is a fact on the source, not a constant in the adapter.** A first sync is
-  bounded to `MOTET_GMAIL_FIRST_SYNC_DAYS` (default 7), and the run that starts one records
-  the value in `sync_state.first_sync_days`. Each run records `sync_state.last_sync` (`at`,
+  bounded to the source's own `config.first_sync_days`, else `MOTET_GMAIL_FIRST_SYNC_DAYS`,
+  else 30 days, and the run that starts one records the value it used in
+  `sync_state.first_sync_days`. Each run records `sync_state.last_sync` (`at`,
   `seen`, `queued`, `caught_up`, `error`); a poll that gives up after its retries writes its
   reason there and on `sources.last_error` through the `poll` failure recorder, because its
   own transaction is the one that rolled back. `SourceResponse` reports `query`,
   `first_sync_days` and `last_sync`; the cursor stays the adapter's and is never reported.
+
+#### The window is the owner's, per mailbox, and reaching further back is its own route
+
+`gmail.first_sync_days`, `sources.config['first_sync_days']`, `POST
+/v1/sources/{id}/resync`, `ingest.pending_resync`. **The default was 7 days and nothing on
+any screen said so** (motet#139). The first production connect searched `label:Newsletters`
+over a week, found 55 messages, paged through them correctly — 50 then 5, then "caught up" —
+and the owner, who expected the 200-odd in that label, read the cap as a pagination bug. It
+was not: `sources/tests/test_gmail.py` pins the paging, and the production logs show the
+chain running to its end. **A bound nobody is told about is indistinguishable from a bug**,
+and that is the defect rather than the number.
+
+Three things came out of it, and the third is the one that is easy to get wrong:
+
+- **The default is 30 days**, which is the shortest window in which a newsletter backlog
+  looks like a backlog. Widening costs no inference: extraction is free and deterministic
+  and every message stops at the held gate (motet#91) until a person picks it, so a wide
+  window buys fetches rather than model calls.
+- **The window is chosen per mailbox, at connect, and reported back.** `config` rather than
+  a column, because it is the same kind of fact as `query`: the owner's standing instruction
+  about one mailbox. Both clients send it on every connect, so the window a person was shown
+  is the window they get. `MAX_FIRST_SYNC_DAYS` is ten years — offered as "Everything", and a
+  real bound rather than a decoration, because it is what stops a typo turning one connect
+  into an archive crawl. `SourceResponse.configured_first_sync_days` is what the *next* first
+  sync would use, beside `first_sync_days`, which is what the last one actually reached;
+  **null means nobody chose, and the API deliberately does not resolve the fallback**, which
+  is a variable only the worker is given.
+- **Widening a window on its own does nothing, so the repair is a route.** The adapter reads
+  the window only on the page that *begins* a search, and a connected mailbox is long past
+  that: its watermark has moved, and no later poll ever looks behind it. `resync` therefore
+  writes the window *and* asks the next poll to start a fresh search.
+
+**The request is parked in `config`, and that placement is the whole mechanism.** The
+obvious implementation — have the route delete `sync_state.cursor` — loses the request
+whenever a sync is in flight, and loses it *silently*: `handle_poll` rewrites the whole of
+`sync_state` at the end of every run from the snapshot it started with, so the deleted
+cursor is simply written back. `config` is the owner's intent and no poll rewrites it, so a
+request parked there survives a concurrent run and is honoured by the next link of the chain
+— which the route's own `enqueue_source_poll` guarantees exists. A poll honours it when
+`config.resync_requested_at` is newer than `sync_state.resync_done_at`, and stamps *the value
+it was asked for* rather than its own clock, so a second press during a run is not swallowed.
+
+**A resync is cheap and safe to press twice.** It re-lists mail this mailbox has already
+pulled in, and the poll's pre-check drops a message that has a row or an extract job before
+it is fetched — so what it costs is listing. `source_items` is unique on `(source_id,
+external_id)`, so nothing is duplicated and nothing already ingested is charged for twice.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** A key in `sources.config` used
+the way `query` and the label-sync settings already are, a key in `sync_state`, an optional
+argument on an existing `MailClient` method, one route on the existing API and its MCP
+counterpart, and a field on an existing response. No deployable, datastore, vendor, seam,
+queue mechanism, inference stage, model call, or resource in the private repo.
+
+#### The phone can see what has been pulled in
+
+`ios/App/Motet/Sources/HeldItemsView.swift`. The other half of motet#139, and the answer to
+"why can't I see the 55 that did sync". They synced: all 55 became source items and every one
+logged `held for ingest`. **The app had the count and nothing behind it** — a number on the
+Sources screen — because the Backlog tab lists *news items* and a held item is deliberately
+not one yet (motet#91). So from an iPhone, 55 newsletters pulled in correctly were
+indistinguishable from 55 that were never fetched, and the only surface that could tell them
+apart was the SPA's "Pulled in, waiting for you" panel on a laptop.
+
+It is that panel, rule for rule: oldest message first, select, one button that spends and one
+that discards, and a dismiss that asks first because nothing un-dismisses. Reachable from the
+mailbox's own count *and* from a banner above the Backlog — above, for the SPA's reason, that
+"where did the mail I just synced go" is asked immediately and an answer under a long list of
+older stories is an answer nobody scrolls to. The Backlog tab builds its own `SourcesModel`,
+because that model is scoped to the Sources tab and "what has arrived and is waiting" is a
+Backlog question.
 
 **A cursor the adapter did not write is a bounded first sync, not an error.** A source
 connected before the change carries a history id; re-reading its window is the repair, and

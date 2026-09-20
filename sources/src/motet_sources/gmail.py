@@ -79,20 +79,51 @@ GOOGLE_TOKEN_ENDPOINT: Final = "https://oauth2.googleapis.com/token"
 
 DEFAULT_TIMEOUT_SECONDS: Final = 30.0
 
-#: What a first sync pulls in. A mailbox has years of newsletters and ingesting them all
-#: would spend a fortune on dedup and produce a backlog nobody would ever clear. Days
-#: rather than a message count, because "the last week of newsletters" is a thing a user
-#: can predict and "the last 50 messages" is not.
-DEFAULT_FIRST_SYNC_DAYS: Final = 7
+#: What a first sync pulls in when nobody chose. Days rather than a message count, because
+#: "the last month of newsletters" is a thing a user can predict and "the last 50 messages"
+#: is not.
+#:
+#: **It was 7, and 7 was too short to be useful** (motet#139). The first production connect
+#: searched ``label:Newsletters`` over a week, found 55 messages, paged through them
+#: correctly and reported "caught up" — and the owner, who expected the 200-odd in that
+#: label, read the cap as a pagination bug. A month is the shortest window in which a
+#: newsletter backlog looks like a backlog. Nothing here costs inference: extraction is
+#: free and deterministic, and every message stops at the held gate (motet#91) until a
+#: person picks it, so a wider window buys fetches rather than model calls.
+DEFAULT_FIRST_SYNC_DAYS: Final = 30
+
+#: The ceiling on a chosen window, and what the clients offer as "Everything". Ten years is
+#: past the age of any mailbox this product is for, and the bound is real rather than
+#: decorative: it is what stops a typo'd ``first_sync_days`` from turning one connect into
+#: an unbounded archive crawl. The *run* is bounded separately and always was — a poll
+#: queues at most ``POLL_PAGE_SIZE`` over ``MAX_PAGES_PER_POLL`` pages and re-arms itself —
+#: so a wide window is a longer chain of short jobs, never one long one.
+MAX_FIRST_SYNC_DAYS: Final = 3650
 
 #: Overrides :data:`DEFAULT_FIRST_SYNC_DAYS` for one deployment. Read at the point of use
 #: rather than at import, so a local session can widen the window without a restart of
-#: anything but the worker.
+#: anything but the worker. A window chosen on the source itself outranks it: the env is
+#: the deployment's default, and the source's is the owner's decision about one mailbox.
 FIRST_SYNC_DAYS_ENV: Final = "MOTET_GMAIL_FIRST_SYNC_DAYS"
 
 
-def first_sync_days() -> int:
-    """How many days back a first sync reaches: the env override, else the default."""
+def clamp_first_sync_days(days: int) -> int:
+    """A window inside :data:`MAX_FIRST_SYNC_DAYS`, or the default for anything unusable."""
+    if days <= 0:
+        return DEFAULT_FIRST_SYNC_DAYS
+    return min(days, MAX_FIRST_SYNC_DAYS)
+
+
+def first_sync_days(configured: int | None = None) -> int:
+    """How many days back a first sync reaches.
+
+    Precedence is the source's own window, then the deployment's env override, then the
+    default — narrowest scope first, which is the order every other configuration in this
+    repo reads. ``configured`` is what ``sources.config['first_sync_days']`` holds, and it
+    is clamped here rather than trusted, because the column outlives whatever validated it.
+    """
+    if configured is not None:
+        return clamp_first_sync_days(configured)
     raw = os.environ.get(FIRST_SYNC_DAYS_ENV, "").strip()
     if not raw:
         return DEFAULT_FIRST_SYNC_DAYS
@@ -103,7 +134,27 @@ def first_sync_days() -> int:
             "%s=%r is not an integer; using %d", FIRST_SYNC_DAYS_ENV, raw, DEFAULT_FIRST_SYNC_DAYS
         )
         return DEFAULT_FIRST_SYNC_DAYS
-    return days if days > 0 else DEFAULT_FIRST_SYNC_DAYS
+    return clamp_first_sync_days(days)
+
+
+#: The ``sources.config`` key a chosen first-sync window lives under. Config rather than a
+#: column because it is the same kind of fact as ``query``: the owner's standing instruction
+#: about one mailbox, read by the adapter and by nothing else.
+FIRST_SYNC_DAYS_CONFIG_KEY: Final = "first_sync_days"
+
+
+def config_first_sync_days(config: Mapping[str, Any]) -> int | None:
+    """The window chosen for this source, or ``None`` when nobody chose one.
+
+    Anything that is not a positive integer reads as "not chosen" rather than raising: this
+    is a JSONB document, and a source connected before the key existed simply has none.
+    ``bool`` is excluded explicitly because it is an ``int`` in Python and ``True`` days is
+    not a window.
+    """
+    value = config.get(FIRST_SYNC_DAYS_CONFIG_KEY)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 #: How far behind the start of the last completed pass the next one begins. Gmail's search
@@ -361,7 +412,9 @@ class GmailMailClient:
         # watermark is read from.
         self._clock = clock
 
-    def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
+    def list_messages(
+        self, *, query: str, cursor: str | None, limit: int, window_days: int | None = None
+    ) -> MessagePage:
         """One page of the source's search, oldest first within the page.
 
         **Every page is a ``messages.list`` search carrying the source's filter**, first
@@ -383,10 +436,16 @@ class GmailMailClient:
         stored before listing moved to search — is the same search bounded to the last
         :func:`first_sync_days` days, and the page that starts it reports the window it
         chose. An unbounded first sync would ingest an archive.
+
+        ``window_days`` is the window the *source* chose, passed down by the caller that
+        read it off ``sources.config``; ``None`` falls back to the deployment's env override
+        and then to the default. It is read only on the page that begins a first sync, so
+        widening a source's window changes nothing until its cursor is cleared — which is
+        exactly what ``POST /v1/sources/{id}/resync`` does (motet#139).
         """
         now = int(self._clock())
         state = _SearchCursor.decode(cursor) if cursor else None
-        window_days: int | None = None
+        chosen_days: int | None = None
         if state is None:
             if cursor:
                 # Not an error: a source connected before this adapter searched carries a
@@ -396,12 +455,12 @@ class GmailMailClient:
                     "cursor %r is not a search watermark; starting a bounded first sync",
                     cursor[:40],
                 )
-            window_days = first_sync_days()
-            logger.info("first sync: bounded to the last %d days", window_days)
+            chosen_days = first_sync_days(window_days)
+            logger.info("first sync: bounded to the last %d days", chosen_days)
             # Clamped at the epoch: a window wider than 1970 would otherwise write a negative
             # bound, which `decode` refuses — and a cursor that never decodes is a first sync
             # restarted on every poll, re-arming itself for ever.
-            state = _SearchCursor(after=max(0, now - window_days * _SECONDS_PER_DAY))
+            state = _SearchCursor(after=max(0, now - chosen_days * _SECONDS_PER_DAY))
         if state.page_token is None:
             state = _SearchCursor(after=state.after, started=now)
 
@@ -447,7 +506,7 @@ class GmailMailClient:
             messages=messages,
             cursor=next_state.encode(),
             more=next_state.page_token is not None,
-            first_sync_days=window_days,
+            first_sync_days=chosen_days,
         )
 
     def _search(self, *, query: str, state: _SearchCursor, limit: int) -> Any:

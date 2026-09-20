@@ -50,6 +50,7 @@ from motet_db import waitlist as waitlist_repo
 from motet_inference.llm import LlmConfigError, LlmStage
 from motet_inference.llm import load_config as load_llm_config
 from motet_sources import (
+    FIRST_SYNC_DAYS_CONFIG_KEY,
     GMAIL_MODIFY_SCOPE,
     GMAIL_READONLY_SCOPE,
     LABEL_SYNC_SCOPES,
@@ -58,6 +59,7 @@ from motet_sources import (
     LabelSettingsError,
     SourceError,
     build_oauth_client,
+    config_first_sync_days,
     new_oauth_state,
     new_pkce_pair,
 )
@@ -83,6 +85,7 @@ from motet_storage import ObjectStore, StorageError
 from motet_vault import DekWrapper, VaultError, vault_status
 from motet_workers import (
     DEFAULT_MAX_ATTEMPTS,
+    RESYNC_REQUESTED_CONFIG_KEY,
     enqueue_episode,
     enqueue_integration,
     enqueue_paste,
@@ -202,6 +205,7 @@ from .schemas import (
     ReadStateRequest,
     ReauthorizeSourceRequest,
     RedeemNativeLoginRequest,
+    ResyncRequest,
     RevokedResponse,
     SaveHighlightRequest,
     SegmentResponse,
@@ -2397,12 +2401,19 @@ def connect_source(body: ConnectSourceRequest, conn: Conn, user_id: User) -> Con
             "a spend decision that has not been made.",
         )
 
+    config: dict[str, Any] = {}
+    if body.query and body.query.strip():
+        config["query"] = body.query.strip()
+    if body.first_sync_days is not None:
+        # Written at creation rather than after consent, so the window a person picked on
+        # the connect screen is already on the row when the callback's first poll reads it.
+        config[FIRST_SYNC_DAYS_CONFIG_KEY] = body.first_sync_days
     source = phase2.create_source(
         conn,
         user_id=user_id,
         kind=SourceKind.GMAIL.value,
         name=body.name.strip(),
-        config={"query": body.query.strip()} if body.query and body.query.strip() else {},
+        config=config,
     )
     # Inactive until a credential exists: a source with no token would otherwise be
     # picked up by the poll scheduler and fail on every run.
@@ -2569,6 +2580,52 @@ def poll_source(
     enqueue_source_poll(conn, source.id)
     nudge.arm(DrainReason.SOURCE_POLL)
     return _source_response(conn, source)
+
+
+@app.post("/v1/sources/{source_id}/resync", response_model=SourceResponse, tags=["sources"])
+def resync_source(
+    body: ResyncRequest,
+    conn: Conn,
+    user_id: User,
+    source_id: Annotated[str, Path()],
+    nudge: Nudge,
+) -> SourceResponse:
+    """Search this mailbox again from a chosen number of days ago, and keep that window.
+
+    **The repair for a first sync that was too short** (motet#139). A mailbox's window is
+    read only by the page that *begins* a search, so widening it on a source already part
+    way through one changes nothing — the watermark has moved past the older mail and no
+    later poll ever looks behind it. This writes the new window and asks the next poll to
+    begin a fresh search over it.
+
+    **Cheap, and safe to press twice.** The re-listed messages are mostly ones already
+    ingested, and the poll's pre-check drops a message that has a row or an extract job
+    before it is fetched — so what this costs is listing. Nothing is re-extracted, nothing
+    is re-deduped, and nothing already in the backlog is duplicated: ``source_items`` is
+    unique on ``(source_id, external_id)``.
+
+    Requesting and honouring are deliberately separate: the request is parked in the
+    source's ``config``, which no poll rewrites, so pressing this while a sync is in flight
+    is honoured by the next link of the chain rather than lost under the running poll's own
+    ``sync_state`` write.
+    """
+    source = phase2.get_source(conn, source_id, user_id=user_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such source.")
+    if source.kind != SourceKind.GMAIL.value:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a mailbox is polled.")
+    if not source.active:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This source is paused or not connected yet.")
+
+    phase2.set_source_config_key(conn, source.id, FIRST_SYNC_DAYS_CONFIG_KEY, body.first_sync_days)
+    phase2.set_source_config_key(
+        conn, source.id, RESYNC_REQUESTED_CONFIG_KEY, datetime.now(UTC).isoformat()
+    )
+    enqueue_source_poll(conn, source.id)
+    nudge.arm(DrainReason.SOURCE_POLL)
+    updated = phase2.get_source(conn, source.id, user_id=user_id)
+    assert updated is not None
+    return _source_response(conn, updated)
 
 
 @app.put("/v1/sources/{source_id}/label-sync", response_model=SourceResponse, tags=["sources"])
@@ -3316,7 +3373,12 @@ def sync_facts(source: StoredSource) -> dict[str, Any]:
     cursor is deliberately not among them: it is the adapter's own, and opaque above it.
     """
     if source.kind != SourceKind.GMAIL.value:
-        return {"query": None, "first_sync_days": None, "last_sync": None}
+        return {
+            "query": None,
+            "first_sync_days": None,
+            "configured_first_sync_days": None,
+            "last_sync": None,
+        }
     days = source.sync_state.get("first_sync_days")
     raw = source.sync_state.get("last_sync")
     last: SourceSyncResult | None = None
@@ -3330,6 +3392,9 @@ def sync_facts(source: StoredSource) -> dict[str, Any]:
     return {
         "query": source_query(source.config),
         "first_sync_days": days if isinstance(days, int) and not isinstance(days, bool) else None,
+        # What the source itself chose, never the deployment's fallback: resolving that
+        # would mean this service reading a variable only the worker is given (motet#139).
+        "configured_first_sync_days": config_first_sync_days(source.config),
         "last_sync": last,
     }
 

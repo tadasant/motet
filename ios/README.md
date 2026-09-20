@@ -330,12 +330,23 @@ the phone for good.
 ## Sources and connectors on the phone
 
 The **Sources** tab is the SPA's Sources and Credentials screens (motet#90, motet#102) on the
-phone: every mailbox with its status, last sync and what it pulled in; Sync now; label sync
-and its re-consent (motet#96); Disconnect, and removing a consent that never finished; the
-built-in Paste source; and the sites and MCP servers enrichment may use — added, authorized
-and removed. It calls the same routes the SPA does and adds none. The rules — what a row
-means, what a card says, which counts belong to which mailbox — are `SourceStatus` and
-`ConnectorStatus` in MotetKit, ported from the SPA's `status.ts` and tested on Linux.
+phone: every mailbox with its status, last sync and what it pulled in; Sync now; how far back
+its first sync reached and a "Sync further back" that searches again from a chosen point
+(motet#139); label sync and its re-consent (motet#96); Disconnect, and removing a consent that
+never finished; the built-in Paste source; and the sites and MCP servers enrichment may use —
+added, authorized and removed. It calls the same routes the SPA does and adds none. The rules
+— what a row means, what a card says, which counts belong to which mailbox, what a sync window
+is called — are `SourceStatus`, `ConnectorStatus` and `FirstSyncWindow` in MotetKit, ported
+from the SPA and tested on Linux.
+
+**Held items are a screen, not a number** (`HeldItemsView`). A connected mailbox polls,
+fetches and extracts on its own and stops; inference is spent only when a person picks items
+and says ingest (motet#91). The app used to show only the *count* of what was waiting, on the
+Sources screen, with nothing behind it — so from a phone, 55 newsletters that had been pulled
+in correctly were indistinguishable from 55 that were never synced, because the Backlog tab
+lists news items and a held item is deliberately not one yet (motet#139). It is now the SPA's
+"Pulled in, waiting for you" panel, rule for rule, reachable from the mailbox's own count and
+from a banner above the Backlog.
 
 **A consent comes back to the phone through the web app's callback page.** Google returns
 every consent to the one address registered on Motet's OAuth client, the web app's

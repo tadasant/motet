@@ -93,14 +93,19 @@ final class SourcesModel: ObservableObject {
     /// Connect a mailbox: mint the source and consent URL, show Google's page in the sheet,
     /// and finish the consent with this phone's own session.
     func connectMailbox(
-        name: String, query: String, present: @MainActor (URL) async -> ConsentFlow.Presentation
+        name: String,
+        query: String,
+        firstSyncDays: Int,
+        present: @MainActor (URL) async -> ConsentFlow.Presentation
     ) async -> Bool {
         guard let redirect = ConsentCallback.redirectURI(appDomain: appLinkDomain), canConsentHere else {
             consentNeedsWebApp = true
             return false
         }
         return await runConsent(what: "your mailbox", present: present) { api in
-            let started = try await api.connectSource(name: name, query: query, redirectURI: redirect)
+            let started = try await api.connectSource(
+                name: name, query: query, redirectURI: redirect, firstSyncDays: firstSyncDays
+            )
             return .init(url: started.authorizationUrl, state: started.state, createdSourceId: started.sourceId)
         } finish: { api, code, state, _ in
             let source = try await api.completeSourceConsent(code: code, state: state)
@@ -128,6 +133,34 @@ final class SourcesModel: ObservableObject {
     func syncNow(_ source: SourceResponse) async throws {
         let updated = try await api.pollSource(id: source.id)
         replace(updated)
+    }
+
+    /// Search a mailbox again from `days` ago, and keep that as its window (motet#139).
+    ///
+    /// Distinct from `syncNow`, which looks forward from the watermark and can never reach
+    /// mail older than the first sync. This is the only call that reaches backwards.
+    func resync(_ source: SourceResponse, days: Int) async throws {
+        let updated = try await api.resyncSource(id: source.id, days: days)
+        replace(updated)
+    }
+
+    /// Spend inference on held items — the gate between free work and paid work (motet#91).
+    ///
+    /// Refreshes rather than patching: an ingested item leaves `held` and appears in
+    /// `ingestion`, which is two of the three lists this screen is derived from.
+    @discardableResult
+    func ingest(ids: [String]) async throws -> IntegrateResponse {
+        let result = try await api.integrateSourceItems(ids: ids)
+        await refresh()
+        return result
+    }
+
+    /// Discard held items without spending on them. Nothing un-dismisses.
+    @discardableResult
+    func dismiss(ids: [String]) async throws -> DismissResponse {
+        let result = try await api.dismissSourceItems(ids: ids)
+        await refresh()
+        return result
     }
 
     func disconnect(_ source: SourceResponse) async throws {
