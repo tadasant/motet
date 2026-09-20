@@ -22,6 +22,21 @@ afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
+/** The built `_headers` policy, as directive -> sources, so a test can assert the whole of it. */
+function contentSecurityPolicy(headers) {
+  const line = headers
+    .split('\n')
+    .map((row) => row.trim())
+    .find((row) => row.startsWith('Content-Security-Policy:'))
+  assert.ok(line, '_headers must set a Content-Security-Policy')
+  const policy = {}
+  for (const directive of line.slice('Content-Security-Policy:'.length).split(';')) {
+    const [name, ...sources] = directive.trim().split(/\s+/)
+    if (name) policy[name] = sources
+  }
+  return policy
+}
+
 describe('resolveApiOrigin', () => {
   it('defaults to the local API off Cloudflare, and says it did', () => {
     assert.deepEqual(resolveApiOrigin({}), { origin: LOCAL_API_ORIGIN, defaulted: true })
@@ -78,9 +93,54 @@ describe('build', () => {
     for (const action of forms) assert.equal(action, 'https://api.example.test/v1/waitlist')
 
     const headers = readFileSync(join(out, '_headers'), 'utf8')
-    assert.match(headers, /connect-src https:\/\/api\.example\.test;/)
-    assert.match(headers, /form-action https:\/\/api\.example\.test;/)
+    const policy = contentSecurityPolicy(headers)
+    assert.deepEqual(policy['connect-src'], ["'self'", 'https://api.example.test'])
+    assert.deepEqual(policy['form-action'], ['https://api.example.test'])
     assert.ok(!html.includes(PLACEHOLDER) && !headers.includes(PLACEHOLDER))
+  })
+
+  it('lets Cloudflare\u2019s analytics beacon load and report, and nothing else', () => {
+    // Cloudflare injects the beacon into every proxied HTML response on this zone, so the
+    // page's own markup never mentions it and only this policy decides whether it runs.
+    // Observed against the live site: the script comes from static.cloudflareinsights.com
+    // under a changing build suffix, and the automatic injection reports to this origin's
+    // own /cdn-cgi/rum. See the comment at the top of src/_headers.
+    const out = tempDir()
+    build({ src: join(here, 'src'), out, env: {} })
+    const policy = contentSecurityPolicy(readFileSync(join(out, '_headers'), 'utf8'))
+
+    assert.deepEqual(policy['script-src'], ["'self'", 'https://static.cloudflareinsights.com'])
+    assert.ok(policy['connect-src'].includes("'self'"))
+
+    // The host, never a path: the injected URL is /beacon.min.js/<build>, and a CSP path
+    // without a trailing slash matches exactly, so a path source would block the beacon.
+    assert.ok(!policy['script-src'].some((source) => /cloudflareinsights\.com\//.test(source)))
+    // Automatic injection posts same-origin, so the reporting host is deliberately absent.
+    assert.ok(!policy['connect-src'].includes('https://cloudflareinsights.com'))
+  })
+
+  it('keeps the policy free of wildcards and inline escapes', () => {
+    const out = tempDir()
+    build({ src: join(here, 'src'), out, env: {} })
+    const policy = contentSecurityPolicy(readFileSync(join(out, '_headers'), 'utf8'))
+
+    assert.deepEqual(policy['default-src'], ["'self'"])
+    assert.deepEqual(policy['object-src'], ["'none'"])
+    assert.deepEqual(policy['frame-ancestors'], ["'none'"])
+    // Every source is a keyword, `data:`, or one exact host. No `*`, no bare scheme, no
+    // inline escape — a beacon is not a reason to reach for any of them.
+    const keyword = /^'(self|none)'$/
+    const exactHost = /^https:\/\/[a-z0-9.-]+$/
+    for (const [directive, sources] of Object.entries(policy)) {
+      for (const source of sources) {
+        const allowed =
+          keyword.test(source) ||
+          exactHost.test(source) ||
+          source === 'data:' ||
+          source === LOCAL_API_ORIGIN
+        assert.ok(allowed, `${directive} must not widen to ${source}`)
+      }
+    }
   })
 
   it('keeps every waitlist form a real form with the honeypot and a status line', () => {

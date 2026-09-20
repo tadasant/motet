@@ -1,12 +1,29 @@
 # Cloudflare Pages response headers (https://developers.cloudflare.com/pages/configuration/headers/).
 #
 # The policy is narrow because the page is: its own stylesheet, script and icon, the two
-# webfonts from Google Fonts, and one cross-origin request — the waitlist form, to the Motet
-# API. The API origin below is a placeholder build.mjs fills in, so a preview build's
-# policy allows its own API and nothing else. No inline script and no inline style attribute is used anywhere,
-# which is what lets script-src and style-src stay 'self'.
+# webfonts from Google Fonts, one cross-origin request — the waitlist form, to the Motet
+# API — and Cloudflare's analytics beacon. The API origin below is a placeholder build.mjs
+# fills in, so a preview build's policy allows its own API and nothing else. No inline
+# script and no inline style attribute is used anywhere, which is what lets script-src stay
+# 'self' apart from the beacon, and style-src stay 'self' apart from Google Fonts.
+#
+# **The two beacon entries are one feature, and each is the narrowest source that works.**
+# Cloudflare injects the beacon into every proxied HTML response on this zone (Web Analytics,
+# auto-install), so the page's own markup does not mention it and nothing here can be
+# switched off by editing the page. The browser loads it from static.cloudflareinsights.com
+# — script-src — and it reports back over XHR — connect-src. Two details decide how narrow
+# each entry can be:
+#
+#   * The script's path carries a build suffix (`/beacon.min.js/v31edd6df95cf…`) that changes
+#     whenever Cloudflare ships a new beacon, and a CSP path without a trailing slash is an
+#     *exact* match — so the documented `…/beacon.min.js` source would block the very URL
+#     Cloudflare injects. The host on its own is therefore the narrowest source that holds.
+#   * The report goes to this site's own origin, `/cdn-cgi/rum`, because the injection is
+#     automatic; only a hand-embedded snippet posts to cloudflareinsights.com. So 'self' is
+#     enough and that host is deliberately absent. Observed: POST https://getmotet.com/cdn-cgi/rum
+#     → 204. If the beacon is ever embedded by hand instead, this is the line that needs it.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src %%MOTET_API_ORIGIN%%; form-action %%MOTET_API_ORIGIN%%; base-uri 'self'; object-src 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' %%MOTET_API_ORIGIN%%; form-action %%MOTET_API_ORIGIN%%; base-uri 'self'; object-src 'none'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=()
