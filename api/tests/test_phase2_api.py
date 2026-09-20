@@ -23,7 +23,7 @@ from motet_api.deps import dek_wrapper, reset_store
 from motet_db import CredentialPurpose, phase2, repo
 from motet_sources import DEFAULT_QUERY
 from motet_vault import BACKEND_ENV, KMS_KEY_ENV, CloudKmsKeyManager
-from motet_workers import Queue, drain
+from motet_workers import RESYNC_REQUESTED_CONFIG_KEY, Queue, drain
 
 TOKEN = "test-api-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -127,6 +127,125 @@ def test_connecting_a_mailbox_seals_a_credential_and_queues_a_poll(
         )
         row = cur.fetchone()
     assert row is not None and row["n"] == 1, "connecting should start ingesting"
+
+
+def test_the_first_sync_window_is_chosen_at_connect_and_reported_back(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    """motet#139: the window a connect screen showed is the window the mailbox gets.
+
+    It used to be a constant in the worker that no screen mentioned, so a first sync that
+    stopped at seven days read as a pagination bug rather than as the cap it was.
+    """
+    started = api.post(
+        "/v1/sources/connect",
+        json={
+            "provider": "gmail",
+            "name": "Gmail",
+            "redirect_uri": REDIRECT,
+            "first_sync_days": 90,
+        },
+        headers=AUTH,
+    )
+    assert started.status_code == 201, started.text
+    source_id = started.json()["source_id"]
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.config["first_sync_days"] == 90, "on the row before consent completes"
+
+    api.post(
+        "/v1/sources/callback",
+        json={"state": started.json()["state"], "code": "fake-auth-code"},
+        headers=AUTH,
+    )
+    listed = {row["id"]: row for row in api.get("/v1/sources", headers=AUTH).json()}
+    assert listed[source_id]["configured_first_sync_days"] == 90
+    # What the *last* first sync reached is a different fact and is still null: no poll has
+    # run. Conflating the two is how a screen ends up claiming a window nothing searched.
+    assert listed[source_id]["first_sync_days"] is None
+
+
+def test_a_window_nobody_chose_is_reported_as_unset_rather_than_guessed_at(
+    api: TestClient,
+) -> None:
+    """The fallback is a variable only the worker is given, so the API does not invent it."""
+    source_id = connect_gmail(api)
+    listed = {row["id"]: row for row in api.get("/v1/sources", headers=AUTH).json()}
+    assert listed[source_id]["configured_first_sync_days"] is None
+
+
+@pytest.mark.parametrize("days", [0, -1, 3651])
+def test_an_impossible_window_is_refused(api: TestClient, days: int) -> None:
+    """The ceiling is a real bound: a typo must not turn one connect into an archive crawl."""
+    refused = api.post(
+        "/v1/sources/connect",
+        json={
+            "provider": "gmail",
+            "name": "Gmail",
+            "redirect_uri": REDIRECT,
+            "first_sync_days": days,
+        },
+        headers=AUTH,
+    )
+    assert refused.status_code == 422, refused.text
+
+
+def test_a_resync_sets_the_window_asks_for_a_fresh_search_and_queues_a_poll(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    """motet#139's repair, from the API's side.
+
+    Two writes and an enqueue: the window the next search will use, the request that makes
+    the next poll *begin* one, and the poll itself. The request goes in ``config`` because
+    ``handle_poll`` rewrites the whole of ``sync_state`` and would put back a cursor this
+    route had deleted — silently, whenever a sync happened to be in flight.
+    """
+    source_id = connect_gmail(api)
+    _clear_poll_jobs(db)
+
+    answered = api.post(
+        f"/v1/sources/{source_id}/resync", json={"first_sync_days": 365}, headers=AUTH
+    )
+    assert answered.status_code == 200, answered.text
+    assert answered.json()["configured_first_sync_days"] == 365
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.config["first_sync_days"] == 365
+    assert isinstance(source.config[RESYNC_REQUESTED_CONFIG_KEY], str)
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM jobs WHERE queue = %s AND state = 'ready'",
+            (Queue.POLL.value,),
+        )
+        row = cur.fetchone()
+    assert row is not None and row["n"] == 1, "something has to run the fresh search"
+
+
+def test_a_resync_is_refused_for_anything_that_is_not_a_live_mailbox(
+    api: TestClient,
+) -> None:
+    body = {"first_sync_days": 30}
+    assert api.post("/v1/sources/src_nope/resync", json=body, headers=AUTH).status_code == 404
+    paste = api.post(f"/v1/sources/{repo.PASTE_SOURCE_ID}/resync", json=body, headers=AUTH)
+    assert paste.status_code == 409, "a paste source is not searched"
+
+    source_id = connect_gmail(api)
+    api.delete(f"/v1/sources/{source_id}/credentials", headers=AUTH)
+    disconnected = api.post(f"/v1/sources/{source_id}/resync", json=body, headers=AUTH)
+    assert disconnected.status_code == 409, "nothing to search with"
+
+    refused = api.post(
+        f"/v1/sources/{source_id}/resync", json={"first_sync_days": 3651}, headers=AUTH
+    )
+    assert refused.status_code == 422
+
+
+def _clear_poll_jobs(db: psycopg.Connection[Any]) -> None:
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM jobs WHERE queue = %s", (Queue.POLL.value,))
+    db.commit()
 
 
 def test_the_credential_never_appears_in_a_response(api: TestClient) -> None:

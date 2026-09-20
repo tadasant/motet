@@ -16,11 +16,23 @@ public protocol SourcesAPI: Sendable {
 
     /// Start connecting a mailbox. `redirectURI` is the web app's `/oauth/callback`,
     /// the one address registered on the Google OAuth client (see `ConsentCallback`).
-    func connectSource(name: String, query: String?, redirectURI: String) async throws -> ConnectSourceResponse
+    func connectSource(
+        name: String, query: String?, redirectURI: String, firstSyncDays: Int?
+    ) async throws -> ConnectSourceResponse
     /// Finish connecting (or re-authorizing) a mailbox with the code Google returned.
     func completeSourceConsent(code: String, state: String) async throws -> SourceResponse
     /// Queue a poll now. Answers at once; the sync has *run* when `last_sync.at` moves.
     func pollSource(id: String) async throws -> SourceResponse
+    /// Search this mailbox again from `days` ago, and keep that as its window (motet#139).
+    ///
+    /// The repair for a first sync that did not reach far enough. `pollSource` looks
+    /// *forward* from the watermark and can never pull in older mail; this is the only call
+    /// that reaches backwards. Mail already pulled in is skipped before it is fetched.
+    func resyncSource(id: String, days: Int) async throws -> SourceResponse
+    /// Spend inference on held items: the gate between free work and paid work (motet#91).
+    func integrateSourceItems(ids: [String]) async throws -> IntegrateResponse
+    /// Discard held items without spending on them. Nothing un-dismisses.
+    func dismissSourceItems(ids: [String]) async throws -> DismissResponse
     /// Forget the mailbox's credential. What it pulled in stays.
     func disconnectSource(id: String) async throws
     /// Remove a consent attempt that never finished. Refused for anything that ever connected.
@@ -55,12 +67,13 @@ extension MotetHTTPClient: SourcesAPI {
     }
 
     public func connectSource(
-        name: String, query: String?, redirectURI: String
+        name: String, query: String?, redirectURI: String, firstSyncDays: Int?
     ) async throws -> ConnectSourceResponse {
         let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines)
         return try await send(
             MotetEndpoints.connectSource,
             body: ConnectSourceRequest(
+                firstSyncDays: firstSyncDays,
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                 provider: "gmail",
                 query: (trimmed?.isEmpty ?? true) ? nil : trimmed,
@@ -80,6 +93,30 @@ extension MotetHTTPClient: SourcesAPI {
 
     public func pollSource(id: String) async throws -> SourceResponse {
         try await send(MotetEndpoints.pollSource(sourceId: id), as: SourceResponse.self)
+    }
+
+    public func resyncSource(id: String, days: Int) async throws -> SourceResponse {
+        try await send(
+            MotetEndpoints.resyncSource(sourceId: id),
+            body: ResyncRequest(firstSyncDays: days),
+            as: SourceResponse.self
+        )
+    }
+
+    public func integrateSourceItems(ids: [String]) async throws -> IntegrateResponse {
+        try await send(
+            MotetEndpoints.integrateSourceItems,
+            body: SourceItemIdsRequest(ids: ids),
+            as: IntegrateResponse.self
+        )
+    }
+
+    public func dismissSourceItems(ids: [String]) async throws -> DismissResponse {
+        try await send(
+            MotetEndpoints.dismissSourceItems,
+            body: SourceItemIdsRequest(ids: ids),
+            as: DismissResponse.self
+        )
     }
 
     public func disconnectSource(id: String) async throws {

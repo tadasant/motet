@@ -114,15 +114,18 @@ class FakeMailClient:
     #: Which mailbox this is, as ``users.getProfile`` would say.
     address: str = "owner@example.invalid"
 
-    def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
+    def list_messages(
+        self, *, query: str, cursor: str | None, limit: int, window_days: int | None = None
+    ) -> MessagePage:
         from .gmail import first_sync_days, search_query  # noqa: PLC0415
 
         state = _fake_cursor(cursor)
-        window_days: int | None = None
+        chosen_days: int | None = None
         if state is None:
-            # The fake's window is the whole mailbox; it reports the configured one so the
-            # caller's handling of the reported window is exercised all the same.
-            window_days = first_sync_days()
+            # The fake's window is the whole mailbox; it reports the one it was asked for so
+            # the caller's handling of the reported window is exercised all the same — which
+            # is what lets a test prove the source's chosen window reached the adapter.
+            chosen_days = first_sync_days(window_days)
             state = (0, None, 0)
         after, started, offset = state
         if started is None:
@@ -137,7 +140,7 @@ class FakeMailClient:
             messages=tuple(MessageRef(id=message.id) for message in reversed(page)),
             cursor=f"fake:{after}:{started}:{offset + size}" if more else f"fake:{started}",
             more=more,
-            first_sync_days=window_days,
+            first_sync_days=chosen_days,
         )
 
     def fetch_message(self, message_id: str) -> RawMessage:

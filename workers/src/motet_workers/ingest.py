@@ -54,6 +54,7 @@ from motet_sources import (
     SourceError,
     build_mail_client,
     build_oauth_client,
+    config_first_sync_days,
     extract_newsletter,
 )
 from motet_sources.labels import (
@@ -85,6 +86,22 @@ POLL_PAGE_SIZE = 50
 #: of messages that are all already queued costs a request and queues nothing, and a long
 #: overlap of those must not keep one job listing for longer than its lease is worth.
 MAX_PAGES_PER_POLL = 10
+
+#: ``sources.config``: when a "sync further back" was last asked for. ``sync_state``: when
+#: a poll last honoured one. A poll restarts its search from scratch — a fresh first sync
+#: over the source's *current* window — exactly when the first is newer than the second.
+#:
+#: **Two documents rather than one, and that is the whole mechanism** (motet#139). Widening
+#: a window changes nothing on its own, because the adapter reads it only on the page that
+#: begins a first sync and this source has a cursor. Something has to drop that cursor — and
+#: a route that deleted it directly would lose the request whenever a poll was in flight,
+#: silently: ``handle_poll`` rewrites the *whole* of ``sync_state`` at the end of every run
+#: from the snapshot it started with, so the deleted cursor would simply be written back.
+#: ``config`` is the owner's standing intent and no poll ever rewrites it, so a request
+#: parked there survives a concurrent run and is honoured by the next link of the chain —
+#: which the route's own ``enqueue_source_poll`` guarantees exists.
+RESYNC_REQUESTED_CONFIG_KEY = "resync_requested_at"
+RESYNC_DONE_KEY = "resync_done_at"
 
 #: The ``sync_state`` key a sync's running totals live under, across every link of its chain.
 #: ``last_sync`` is one *run's* result and is overwritten by the next link, so a 480-message
@@ -143,14 +160,32 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
             return
     stored = source.sync_state.get("cursor")
     cursor = stored if isinstance(stored, str) else None
+    restart = pending_resync(source)
+    if restart is not None:
+        # A wider window was asked for. Dropping the cursor is what turns the next page
+        # into a first sync over it; everything the earlier window already pulled in is
+        # dropped before a fetch by the pre-check below, so this costs listing and not
+        # extraction.
+        logger.info(
+            "source %s: restarting the search — a first sync was asked for again", source_id
+        )
+        cursor = None
     query = source_query(source.config)
+    # The owner's window for *this* mailbox, chosen at connect or by a "sync further back"
+    # (motet#139). Read on every poll and used only by the page that begins a first sync;
+    # `None` leaves the bound to the deployment's default.
+    window = config_first_sync_days(source.config)
 
-    run_before = continuing_sync_run(source.sync_state)
+    # A restart is a new sync, so its totals start from zero rather than continuing a
+    # chain the old window began.
+    run_before = None if restart is not None else continuing_sync_run(source.sync_state)
     seen = queued = pages = 0
     window_days: int | None = None
     more = True
     while more and queued < POLL_PAGE_SIZE and pages < MAX_PAGES_PER_POLL:
-        page = client.list_messages(query=query, cursor=cursor, limit=POLL_PAGE_SIZE)
+        page = client.list_messages(
+            query=query, cursor=cursor, limit=POLL_PAGE_SIZE, window_days=window
+        )
         pages += 1
         seen += len(page.messages)
         if page.first_sync_days is not None:
@@ -205,6 +240,8 @@ def handle_poll(context: Context, payload: Mapping[str, Any]) -> None:
             more=more,
         ),
     }
+    if restart is not None:
+        sync_state[RESYNC_DONE_KEY] = restart
     if window_days is not None:
         # The window of the most recent first sync, as a fact on the source. Recorded only
         # by the run that started one, so it describes what was actually searched rather
@@ -311,6 +348,39 @@ def source_query(config: Mapping[str, Any]) -> str:
     """The search a source is polled with: its own, or the default. Used by every poll."""
     query = config.get("query")
     return query.strip() if isinstance(query, str) and query.strip() else DEFAULT_QUERY
+
+
+def _as_moment(value: Any) -> datetime | None:
+    """An ISO-8601 string as a datetime, or ``None`` for anything else.
+
+    Parsed rather than compared as text: both sides are written by ``isoformat()`` today
+    and would compare correctly as strings, but a future writer with a different offset or
+    precision would make the string comparison quietly wrong in one direction only.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def pending_resync(source: StoredSource) -> str | None:
+    """The resync marker this poll should honour, or ``None`` when there is none.
+
+    Returns the requested value verbatim so the poll can stamp *that* rather than its own
+    clock: a second press while a poll is running writes a newer marker, and stamping "now"
+    would record a moment past it and swallow the second request.
+    """
+    requested = source.config.get(RESYNC_REQUESTED_CONFIG_KEY)
+    asked = _as_moment(requested)
+    if asked is None:
+        return None
+    done = _as_moment(source.sync_state.get(RESYNC_DONE_KEY))
+    if done is not None and done >= asked:
+        return None
+    assert isinstance(requested, str)
+    return requested
 
 
 def record_poll_failure(

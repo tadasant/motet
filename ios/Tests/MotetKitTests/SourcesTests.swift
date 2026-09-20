@@ -367,7 +367,8 @@ final class SourcesWireTests: XCTestCase {
         transport.enqueueJSON(#"{"source_id":"src_1","authorization_url":"https://accounts.example/o","state":"s1"}"#, status: 201)
 
         let started = try await client(transport).connectSource(
-            name: " Mail ", query: "  ", redirectURI: "https://app.example.test/oauth/callback"
+            name: " Mail ", query: "  ", redirectURI: "https://app.example.test/oauth/callback",
+            firstSyncDays: 90
         )
 
         let request = try XCTUnwrap(transport.recordedRequests().first)
@@ -380,7 +381,46 @@ final class SourcesWireTests: XCTestCase {
         XCTAssertEqual(body["redirect_uri"] as? String, "https://app.example.test/oauth/callback")
         // A blank search is Motet's default, which is the API's to apply.
         XCTAssertNil(body["query"])
+        // The window the connect sheet showed rides on the request, so what a person was
+        // told they would get is what they get — and not the worker's own default (motet#139).
+        XCTAssertEqual(body["first_sync_days"] as? Int, 90)
         XCTAssertEqual(started.state, "s1")
+    }
+
+    func testResyncingAsksForAFreshSearchOverTheChosenWindow() async throws {
+        let transport = StubTransport()
+        transport.enqueueJSON(Self.sourceJSON)
+
+        _ = try await client(transport).resyncSource(id: "src_1", days: FirstSyncWindow.maxDays)
+
+        let request = try XCTUnwrap(transport.recordedRequests().first)
+        XCTAssertEqual(request.method, "POST")
+        XCTAssertEqual(request.url.path, "/v1/sources/src_1/resync")
+        XCTAssertEqual(try json(request)["first_sync_days"] as? Int, 3650)
+    }
+
+    func testAWindowIsDescribedForAPersonAndAnUnsetOneIsNotGuessedAt() {
+        XCTAssertEqual(FirstSyncWindow.label(days: 30), "the last 30 days")
+        XCTAssertEqual(FirstSyncWindow.label(days: FirstSyncWindow.maxDays), "everything")
+        XCTAssertEqual(FirstSyncWindow.label(days: 14), "the last 14 days")
+        // Null is "nobody chose" — the fallback lives in the worker's environment, which
+        // neither the API nor this app can read, so it is named rather than invented.
+        XCTAssertEqual(FirstSyncWindow.label(days: nil), "the deployment default")
+    }
+
+    func testTheResyncControlStartsOnTheSourcesOwnWindow() {
+        let when = Date(timeIntervalSince1970: 0)
+        let chosen = SourceResponse(
+            active: true, configuredFirstSyncDays: 365, connected: true, createdAt: when,
+            id: "src_1", itemsIntegrated: 0, itemsPulledIn: 0, kind: "gmail", name: "Mail",
+            scopes: []
+        )
+        let never = SourceResponse(
+            active: true, connected: true, createdAt: when, id: "src_2", itemsIntegrated: 0,
+            itemsPulledIn: 0, kind: "gmail", name: "Mail", scopes: []
+        )
+        XCTAssertEqual(FirstSyncWindow.starting(from: chosen), 365)
+        XCTAssertEqual(FirstSyncWindow.starting(from: never), FirstSyncWindow.defaultDays)
     }
 
     func testTheConsentFinishesAtTheRouteTheSPAWouldHaveCalled() async throws {
@@ -458,6 +498,9 @@ actor FakeSourcesAPI: SourcesAPI {
     private(set) var removed: [String] = []
     private(set) var completed: [String] = []
     var finishFailure: MotetError?
+    /// The window the last `connectSource` carried, and every `resyncSource` as `id:days`.
+    var connectedWithWindow: Int?
+    var resynced: [String] = []
 
     func setFinishFailure(_ error: MotetError?) { finishFailure = error }
 
@@ -473,8 +516,13 @@ actor FakeSourcesAPI: SourcesAPI {
     func processingStatus() async throws -> ProcessingStatusResponse {
         ProcessingStatusResponse(now: Self.when, queues: [], readiness: [])
     }
-    func connectSource(name: String, query: String?, redirectURI: String) async throws -> ConnectSourceResponse {
-        ConnectSourceResponse(authorizationUrl: "https://accounts.example/o", sourceId: "src_new", state: "s1")
+    func connectSource(
+        name: String, query: String?, redirectURI: String, firstSyncDays: Int?
+    ) async throws -> ConnectSourceResponse {
+        connectedWithWindow = firstSyncDays
+        return ConnectSourceResponse(
+            authorizationUrl: "https://accounts.example/o", sourceId: "src_new", state: "s1"
+        )
     }
     func completeSourceConsent(code: String, state: String) async throws -> SourceResponse {
         if let finishFailure { throw finishFailure }
@@ -482,6 +530,16 @@ actor FakeSourcesAPI: SourcesAPI {
         return source("src_new")
     }
     func pollSource(id: String) async throws -> SourceResponse { source(id) }
+    func resyncSource(id: String, days: Int) async throws -> SourceResponse {
+        resynced.append("\(id):\(days)")
+        return source(id)
+    }
+    func integrateSourceItems(ids: [String]) async throws -> IntegrateResponse {
+        IntegrateResponse(queued: ids.count, skipped: 0)
+    }
+    func dismissSourceItems(ids: [String]) async throws -> DismissResponse {
+        DismissResponse(dismissed: ids.count, skipped: 0)
+    }
     func disconnectSource(id: String) async throws {}
     func removeSource(id: String) async throws { removed.append(id) }
     func setLabelSync(id: String, removeLabel: String?, addLabel: String?) async throws -> SourceResponse { source(id) }
@@ -510,7 +568,11 @@ final class ConsentFlowTests: XCTestCase {
         await ConsentFlow.run(
             api: api, what: "your mailbox",
             start: { api in
-                let started = try await api.connectSource(name: "Mail", query: nil, redirectURI: "https://app.example.test/oauth/callback")
+                let started = try await api.connectSource(
+                    name: "Mail", query: nil,
+                    redirectURI: "https://app.example.test/oauth/callback",
+                    firstSyncDays: FirstSyncWindow.defaultDays
+                )
                 return .init(url: started.authorizationUrl, state: started.state, createdSourceId: started.sourceId)
             },
             present: { _ in presentation },

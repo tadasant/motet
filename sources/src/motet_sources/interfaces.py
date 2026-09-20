@@ -116,7 +116,9 @@ class MailClient(Protocol):
     """List and fetch newsletter messages from one connected mailbox — and, when its owner
     has asked for it, move one between labels."""
 
-    def list_messages(self, *, query: str, cursor: str | None, limit: int) -> MessagePage:
+    def list_messages(
+        self, *, query: str, cursor: str | None, limit: int, window_days: int | None = None
+    ) -> MessagePage:
         """One page of what matches ``query`` since ``cursor``, oldest first.
 
         ``query`` is the provider's own search syntax, carried from the source's config so
@@ -125,6 +127,11 @@ class MailClient(Protocol):
         sync, which the adapter bounds itself — a first poll must not ingest a decade of
         archive. At most ``limit`` messages come back, and ``more`` says whether another
         page is waiting behind them.
+
+        ``window_days`` is how far back that first sync should reach, carried from the
+        source's config exactly as ``query`` is. ``None`` leaves the bound to the adapter's
+        own default, so a caller that has no opinion needs to know nothing about windows.
+        It is read only on the page that *begins* a first sync and ignored on every other.
         """
         ...
 

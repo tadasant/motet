@@ -25,7 +25,11 @@ from motet_sources import (
     RawMessage,
     SourceAuthError,
 )
-from motet_sources.gmail import DEFAULT_FIRST_SYNC_DAYS, FIRST_SYNC_DAYS_ENV
+from motet_sources.gmail import (
+    DEFAULT_FIRST_SYNC_DAYS,
+    FIRST_SYNC_DAYS_CONFIG_KEY,
+    FIRST_SYNC_DAYS_ENV,
+)
 from motet_storage import LocalObjectStore
 from motet_vault import build_key_manager
 from motet_workers import Queue, drain, enqueue_integration, enqueue_source_poll, poll_key
@@ -33,6 +37,8 @@ from motet_workers.handlers import Context, PermanentFailure
 from motet_workers.ingest import (
     MAX_PAGES_PER_POLL,
     POLL_PAGE_SIZE,
+    RESYNC_DONE_KEY,
+    RESYNC_REQUESTED_CONFIG_KEY,
     SYNC_RUN_KEY,
     _sent_at,
     handle_extract,
@@ -466,6 +472,129 @@ def test_the_first_sync_window_is_a_fact_on_the_source(
     source = phase2.get_source(db, source_id)
     assert source is not None
     assert source.sync_state["first_sync_days"] == 30, "what was searched, not today's setting"
+
+
+def test_a_source_s_own_window_outranks_the_deployment_s(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """motet#139: the window is the owner's choice about one mailbox, per source.
+
+    A deployment-wide variable must not quietly override what a person picked on a connect
+    screen — so the config key wins, and the run records what it actually searched.
+    """
+    monkeypatch.setenv(FIRST_SYNC_DAYS_ENV, "7")
+    source_id = connected_source(db)
+    phase2.set_source_config_key(db, source_id, FIRST_SYNC_DAYS_CONFIG_KEY, 365)
+    db.commit()
+
+    handle_poll(context(db), {"source_id": source_id})
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.sync_state["first_sync_days"] == 365
+
+
+def test_widening_the_window_alone_changes_nothing_and_a_resync_is_what_does(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The defect motet#139 opened on, and its repair, in one test.
+
+    A mailbox's window is read only where a search *begins*. Once a source has a cursor,
+    changing the window is a setting that silently does nothing — which is why the repair
+    has to drop the cursor as well as write the window, and why that is its own route.
+    """
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(3)))
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    before = phase2.get_source(db, source_id)
+    assert before is not None and before.sync_state["first_sync_days"] == DEFAULT_FIRST_SYNC_DAYS
+
+    # Widened, and nothing else: the next poll is an ordinary incremental one.
+    phase2.set_source_config_key(db, source_id, FIRST_SYNC_DAYS_CONFIG_KEY, 365)
+    db.commit()
+    handle_poll(context(db), {"source_id": source_id})
+    unchanged = phase2.get_source(db, source_id)
+    assert unchanged is not None
+    assert unchanged.sync_state["first_sync_days"] == DEFAULT_FIRST_SYNC_DAYS, "no new first sync"
+
+    # Asking for one is what restarts the search, over the window now on the source.
+    asked = datetime.now(UTC).isoformat()
+    phase2.set_source_config_key(db, source_id, RESYNC_REQUESTED_CONFIG_KEY, asked)
+    db.commit()
+    handle_poll(context(db), {"source_id": source_id})
+    after = phase2.get_source(db, source_id)
+    assert after is not None
+    assert after.sync_state["first_sync_days"] == 365
+    assert after.sync_state[RESYNC_DONE_KEY] == asked, "stamped with what was asked for"
+
+
+def test_a_resync_is_honoured_once_and_re_listed_mail_is_not_ingested_twice(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker is spent by the poll that honours it, and the repair is cheap.
+
+    Cheap is the half worth pinning: a resync re-lists mail this mailbox has already pulled
+    in, and the poll's pre-check drops a message that has a row or an extract job before it
+    is fetched — so a second search queues nothing and cannot duplicate a newsletter.
+    """
+    use_mailbox(monkeypatch, FakeMailClient(messages=synthesized_mailbox(4)))
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    first = {job["payload"]["message_id"] for job in _jobs(db, Queue.EXTRACT)}
+    assert len(first) == 4
+
+    phase2.set_source_config_key(
+        db, source_id, RESYNC_REQUESTED_CONFIG_KEY, datetime.now(UTC).isoformat()
+    )
+    db.commit()
+    handle_poll(context(db), {"source_id": source_id})
+    assert {job["payload"]["message_id"] for job in _jobs(db, Queue.EXTRACT)} == first
+
+    source = phase2.get_source(db, source_id)
+    assert source is not None
+    assert source.sync_state["last_sync"]["seen"] == 4, "re-listed"
+    assert source.sync_state["last_sync"]["queued"] == 0, "and dropped before a fetch"
+
+    # Spent: the next poll is an ordinary incremental one again, not a third search.
+    stamped = source.sync_state[RESYNC_DONE_KEY]
+    handle_poll(context(db), {"source_id": source_id})
+    again = phase2.get_source(db, source_id)
+    assert again is not None
+    assert again.sync_state[RESYNC_DONE_KEY] == stamped
+    assert again.sync_state["first_sync_days"] == DEFAULT_FIRST_SYNC_DAYS
+
+
+def test_a_resync_asked_for_during_a_poll_is_honoured_by_the_next_one(
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why the request lives in ``config`` and not in ``sync_state``.
+
+    ``handle_poll`` rewrites the whole of ``sync_state`` from the snapshot it started with,
+    so a cursor deleted mid-poll would simply be written back and the request lost without
+    a trace. Parked in ``config``, which no poll rewrites, it survives — and the route's own
+    enqueued poll is the link that honours it.
+    """
+    mailbox = FakeMailClient(messages=synthesized_mailbox(170), page_size=20)
+    use_mailbox(monkeypatch, mailbox)
+    source_id = connected_source(db)
+    handle_poll(context(db), {"source_id": source_id})
+    mid = phase2.get_source(db, source_id)
+    assert mid is not None and mid.sync_state["cursor"] is not None
+
+    asked = datetime.now(UTC).isoformat()
+    phase2.set_source_config_key(db, source_id, RESYNC_REQUESTED_CONFIG_KEY, asked)
+    db.commit()
+
+    handle_poll(context(db), {"source_id": source_id})
+    after = phase2.get_source(db, source_id)
+    assert after is not None
+    assert after.sync_state[RESYNC_DONE_KEY] == asked
+    assert after.sync_state["first_sync_days"] == DEFAULT_FIRST_SYNC_DAYS, "a fresh first sync"
+    # A restart is a new sync, so the totals start again rather than continuing the chain
+    # the old window began: the run's running total is exactly this poll's own count, not
+    # the first poll's added to it.
+    assert after.sync_state[SYNC_RUN_KEY]["listed"] == after.sync_state["last_sync"]["seen"]
+    assert mid.sync_state[SYNC_RUN_KEY]["listed"] > 0, "which the earlier run had already added to"
 
 
 def test_a_message_extraction_skipped_is_not_fetched_again_when_re_listed(

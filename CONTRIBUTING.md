@@ -316,12 +316,20 @@ backlog drains on its own, one bounded poll after another, and stops once it is 
 `GET /v1/sources` says where it got to: `last_sync.caught_up`, and `seen` / `queued` for the
 most recent run.
 
-**The first sync reads only the last `MOTET_GMAIL_FIRST_SYNC_DAYS` days** (7 when unset;
-read by the worker, at the moment a first sync starts). Older matching mail is not
-ingested, on purpose — an unbounded first sync would ingest an archive and bill dedup for
-all of it. The window a source's first sync used is reported as `first_sync_days`. There is
-no supported way to re-read an already-synced source with a wider window yet; that is an
-open question on motet#94, not a missing step.
+**The first sync reads only one window**, chosen when the mailbox is connected and stored
+as `config.first_sync_days`; `MOTET_GMAIL_FIRST_SYNC_DAYS` is the deployment's fallback and
+30 days is the default. Read by the worker, at the moment a first sync starts. Older
+matching mail is not ingested, on purpose — an unbounded first sync would ingest an archive
+— but the ceiling is ten years, which the clients offer as "Everything". The window a
+source's first sync actually used is reported as `first_sync_days`; the one the next would
+use is `configured_first_sync_days`.
+
+**To re-read an already-synced source further back, `POST /v1/sources/{id}/resync`** with
+`{"first_sync_days": 365}` — "Sync further back" on the Sources screen, in the SPA and on
+the phone. It sets the window *and* asks the next poll to begin a fresh search, which is
+two things rather than one because the window is read only where a search begins: widening
+it alone would silently do nothing. Cheap and safe to repeat — re-listed mail that has
+already been pulled in is dropped before it is fetched.
 
 ### Going back
 

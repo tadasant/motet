@@ -1435,6 +1435,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sources/{source_id}/resync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resync Source
+         * @description Search this mailbox again from a chosen number of days ago, and keep that window.
+         *
+         *     **The repair for a first sync that was too short** (motet#139). A mailbox's window is
+         *     read only by the page that *begins* a search, so widening it on a source already part
+         *     way through one changes nothing — the watermark has moved past the older mail and no
+         *     later poll ever looks behind it. This writes the new window and asks the next poll to
+         *     begin a fresh search over it.
+         *
+         *     **Cheap, and safe to press twice.** The re-listed messages are mostly ones already
+         *     ingested, and the poll's pre-check drops a message that has a row or an extract job
+         *     before it is fetched — so what this costs is listing. Nothing is re-extracted, nothing
+         *     is re-deduped, and nothing already in the backlog is duplicated: ``source_items`` is
+         *     unique on ``(source_id, external_id)``.
+         *
+         *     Requesting and honouring are deliberately separate: the request is parked in the
+         *     source's ``config``, which no poll rewrites, so pressing this while a sync is in flight
+         *     is honoured by the next link of the chain rather than lost under the running poll's own
+         *     ``sync_state`` write.
+         */
+        post: operations["resync_source_v1_sources__source_id__resync_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/voice": {
         parameters: {
             query?: never;
@@ -1792,6 +1829,11 @@ export interface components {
          * @description Begin connecting a mailbox. Returns a URL for the user to visit.
          */
         ConnectSourceRequest: {
+            /**
+             * First Sync Days
+             * @description How far back the first sync of this mailbox should reach, in days. Omitted leaves it to the deployment's default; every Motet client sends it, so that the window a person will get is the one the connect screen showed them. The ceiling is ten years, which is what a client offers as 'Everything'.
+             */
+            first_sync_days?: number | null;
             /**
              * Name
              * @default Gmail
@@ -3091,6 +3133,22 @@ export interface components {
             code_verifier: string;
         };
         /**
+         * ResyncRequest
+         * @description Ask a connected mailbox to search its whole window again, from a chosen start.
+         *
+         *     The repair for "my first sync was too short": widening the window alone changes
+         *     nothing, because the window is read only when a search *begins* and this source's
+         *     search is already under way. This sets the window and asks the next poll to begin a
+         *     fresh one.
+         */
+        ResyncRequest: {
+            /**
+             * First Sync Days
+             * @description How far back to search, in days, counted from now. Becomes this source's window from here on, so a later reconnect or resync starts from it.
+             */
+            first_sync_days: number;
+        };
+        /**
          * RevokedResponse
          * @description How many sessions a revoke-everywhere took out.
          */
@@ -3401,6 +3459,11 @@ export interface components {
              * @description False means connected but paused: it is not polled, and nothing is lost.
              */
             active: boolean;
+            /**
+             * Configured First Sync Days
+             * @description The window a first sync would use for this source from now on, as chosen when it was connected or by a later 'sync further back'. Null means nobody chose one and the deployment's own default applies — which the worker resolves, not this service, so it is deliberately not guessed at here. Distinct from `first_sync_days`, which is what the last first sync actually reached.
+             */
+            configured_first_sync_days?: number | null;
             /**
              * Connected
              * @description Whether a credential is stored for this source. Answered without decrypting anything — only workers can do that (invariant 8).
@@ -5608,6 +5671,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConnectSourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resync_source_v1_sources__source_id__resync_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResyncRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceResponse"];
                 };
             };
             /** @description Validation Error */

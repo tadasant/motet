@@ -28,12 +28,18 @@ from .handlers import (
     enqueue_paste,
     enqueue_smart_episode,
 )
-from .ingest import enqueue_source_poll, poll_key, source_query
+from .ingest import (
+    RESYNC_REQUESTED_CONFIG_KEY,
+    enqueue_source_poll,
+    poll_key,
+    source_query,
+)
 from .jobs import DEFAULT_MAX_ATTEMPTS, Job, QueueReadiness, enqueue, queue_depths, queue_readiness
 from .loop import drain
 from .queues import Queue
 
 __all__ = [
+    "RESYNC_REQUESTED_CONFIG_KEY",
     "DEFAULT_MAX_ATTEMPTS",
     "Context",
     "EnrichConfig",

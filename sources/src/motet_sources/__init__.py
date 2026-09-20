@@ -22,14 +22,20 @@ from .extract import (
 )
 from .fakes import FAKE_LABELS, FakeMailClient, FakeOAuthClient, load_fixture_messages
 from .gmail import (
+    DEFAULT_FIRST_SYNC_DAYS,
     DEFAULT_QUERY,
+    FIRST_SYNC_DAYS_CONFIG_KEY,
     GMAIL_MODIFY_SCOPE,
     GMAIL_READONLY_SCOPE,
     LABEL_SYNC_SCOPES,
+    MAX_FIRST_SYNC_DAYS,
     PROVIDER,
     GmailConfigError,
     GmailMailClient,
     GmailOAuthClient,
+    clamp_first_sync_days,
+    config_first_sync_days,
+    first_sync_days,
 )
 from .interfaces import (
     Label,
@@ -47,11 +53,14 @@ from .labels import LabelSettings, LabelSettingsError
 from .registry import build_mail_client, build_oauth_client, new_oauth_state, new_pkce_pair
 
 __all__ = [
+    "DEFAULT_FIRST_SYNC_DAYS",
     "DEFAULT_QUERY",
+    "FIRST_SYNC_DAYS_CONFIG_KEY",
     "FAKE_LABELS",
     "GMAIL_MODIFY_SCOPE",
     "GMAIL_READONLY_SCOPE",
     "LABEL_SYNC_SCOPES",
+    "MAX_FIRST_SYNC_DAYS",
     "MAX_TEXT_CHARS",
     "MIN_TEXT_CHARS",
     "PROVIDER",
@@ -74,6 +83,9 @@ __all__ = [
     "SourceError",
     "StaleReferenceError",
     "TokenGrant",
+    "clamp_first_sync_days",
+    "config_first_sync_days",
+    "first_sync_days",
     "build_mail_client",
     "build_oauth_client",
     "extract_newsletter",

@@ -13,11 +13,18 @@ from ...schemas import (
     ConnectSourceResponse,
     LabelSyncRequest,
     ReauthorizeSourceRequest,
+    ResyncRequest,
     SourceResponse,
 )
 from ..context import ActionResult, RouteCall, routes, run
 
 _SOURCE_ID = Field(description="The source's id, from list_sources.")
+_FIRST_SYNC_DAYS = Field(
+    description=(
+        "How far back the first sync reaches, in days. Omit to use the deployment's "
+        "default. The ceiling is 3650 (ten years), which is effectively 'everything'."
+    )
+)
 _REDIRECT = Field(
     description=(
         "Where Google returns the person after consent. Omit it to use this deployment's "
@@ -54,6 +61,7 @@ def connect_source(
         Field(description="A Gmail search filter, e.g. 'label:newsletters'. Omit for all mail."),
     ] = None,
     redirect_uri: Annotated[str | None, _REDIRECT] = None,
+    first_sync_days: Annotated[int | None, _FIRST_SYNC_DAYS] = None,
 ) -> ConnectSourceResponse:
     """Start connecting a Gmail mailbox, read-only. Returns a consent URL a person must open.
 
@@ -69,6 +77,7 @@ def connect_source(
                 name=name,
                 query=query,
                 redirect_uri=consent_redirect(c.config, redirect_uri),
+                first_sync_days=first_sync_days,
             ),
             conn=c.conn,
             user_id=c.user_id,
@@ -87,6 +96,29 @@ def poll_source(source_id: Annotated[str, _SOURCE_ID]) -> SourceResponse:
         "poll_source",
         lambda c: routes.poll_source(
             conn=c.conn, user_id=c.user_id, source_id=source_id, nudge=c.nudge
+        ),
+    )
+
+
+def resync_source(
+    source_id: Annotated[str, _SOURCE_ID],
+    first_sync_days: Annotated[int, _FIRST_SYNC_DAYS],
+) -> SourceResponse:
+    """Search a mailbox again from `first_sync_days` ago, and keep that as its window.
+
+    The repair for a first sync that did not reach far enough: a mailbox's window is read
+    only when a search begins, so widening it alone changes nothing once a source is part
+    way through one. Mail already pulled in is skipped before it is fetched, so this cannot
+    duplicate anything in the backlog. Queues the poll; it does not fetch.
+    """
+    return run(
+        "resync_source",
+        lambda c: routes.resync_source(
+            body=ResyncRequest(first_sync_days=first_sync_days),
+            conn=c.conn,
+            user_id=c.user_id,
+            source_id=source_id,
+            nudge=c.nudge,
         ),
     )
 
@@ -172,6 +204,7 @@ TOOLS = (
     list_sources,
     connect_source,
     poll_source,
+    resync_source,
     set_label_sync,
     reauthorize_source,
     disconnect_source,
