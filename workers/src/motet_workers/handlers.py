@@ -35,6 +35,7 @@ from motet_inference import (
     estimate_duration_ms,
     join_audio,
     record_tts_characters,
+    sniff_media_type,
 )
 from motet_sources.extract import find_links, merge_links
 from motet_storage import ObjectStore, episode_audio_key
@@ -603,6 +604,20 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
     extension = _EXTENSIONS.get(audio.media_type)
     if extension is None:
         raise PermanentFailure(f"synthesizer returned unsupported media type {audio.media_type!r}")
+
+    # How a player identifies this file is entirely the label, never the bytes: a streaming
+    # client reads the content type off the response, and a podcast client — and
+    # AVFoundation following the signed URL — also reads the extension off the key. Both are
+    # derived from `audio.media_type`, and nothing has yet compared that field to the bytes
+    # it describes: the synthesizer parsed each *segment*, and what is uploaded is the join.
+    # Mislabelled, an object fails nowhere in this pipeline and only in the player, as
+    # "this media format is not supported", days later and with nothing in any log.
+    sniffed = sniff_media_type(audio.data)
+    if sniffed != audio.media_type:
+        raise PermanentFailure(
+            f"refusing to publish {len(audio.data)} bytes as {audio.media_type!r}: they begin "
+            f"as {sniffed or 'nothing playable'} ({audio.data[:12]!r})"
+        )
 
     key = episode_audio_key(episode.user_id, episode_id, extension)
     context.store.put(key, audio.data, content_type=audio.media_type)

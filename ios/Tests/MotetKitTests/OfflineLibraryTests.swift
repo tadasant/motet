@@ -59,11 +59,178 @@ final class OfflineLibraryTests: XCTestCase {
         let local = try await library.download(episodeId: "ep-1", from: url)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: local.path))
-        XCTAssertEqual(try Data(contentsOf: local), Data("audio-bytes".utf8))
+        XCTAssertEqual(try Data(contentsOf: local), Audio.mp3)
         let ids = try await library.downloadedEpisodeIds()
         XCTAssertEqual(ids, ["ep-1"])
         let bytes = try await library.totalBytes()
-        XCTAssertEqual(bytes, 11)
+        XCTAssertEqual(bytes, Audio.mp3.count)
+    }
+
+    // MARK: - The file has to be named what it is
+
+    /// The bug behind `AVFoundationErrorDomain -11828` on a downloaded episode: AVFoundation
+    /// picks a reader for a *local* file from its path extension and from nothing else, so
+    /// the `.audio` every download used to be named made a perfectly good MP3 unopenable.
+    func testADownloadIsNamedAfterTheFormatItsBytesActuallyAre() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let downloader = FakeDownloader()
+        let library = try makeLibrary(downloader: downloader, directory: directory)
+
+        let local = try await library.download(
+            episodeId: "ep-1", from: URL(string: "https://example.invalid/a")!
+        )
+
+        XCTAssertEqual(local.pathExtension, "mp3")
+        XCTAssertNotNil(
+            AudioFileFormat(pathExtension: local.pathExtension),
+            "a local file whose extension AVFoundation does not know fails to open with -11828"
+        )
+    }
+
+    func testAWavEpisodeIsNamedWav() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let downloader = FakeDownloader()
+        downloader.payload = Audio.wav
+        let library = try makeLibrary(downloader: downloader, directory: directory)
+
+        let local = try await library.download(
+            episodeId: "ep-1", from: URL(string: "https://example.invalid/a")!
+        )
+
+        XCTAssertEqual(local.pathExtension, "wav")
+    }
+
+    /// A 200 carrying a sign-in page is one of the ways -11828 arrives, and filing it would
+    /// be worse than failing: `source(forEpisode:)` prefers the device, so a held HTML file
+    /// shadows the API for that episode on every future tap.
+    func testSomethingThatIsNotAudioIsNotFiledAsAnEpisode() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let downloader = FakeDownloader()
+        downloader.payload = Audio.signInPage
+        let library = try makeLibrary(downloader: downloader, directory: directory)
+
+        do {
+            _ = try await library.download(
+                episodeId: "ep-1", from: URL(string: "https://example.invalid/a")!
+            )
+            XCTFail("an unplayable download must not be filed")
+        } catch is UnplayableAudioError {
+            // expected
+        }
+
+        let ids = try await library.downloadedEpisodeIds()
+        XCTAssertTrue(ids.isEmpty)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path), [],
+            "the staged file has to go too, or it is a leak and a phantom"
+        )
+    }
+
+    func testAnEmptyDownloadIsRefused() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let downloader = FakeDownloader()
+        downloader.payload = Data()
+        let library = try makeLibrary(downloader: downloader, directory: directory)
+
+        do {
+            _ = try await library.download(
+                episodeId: "ep-1", from: URL(string: "https://example.invalid/a")!
+            )
+            XCTFail("a zero-byte download must not be filed")
+        } catch let error as UnplayableAudioError {
+            XCTAssertEqual(error.byteCount, 0)
+        }
+    }
+
+    /// What happens on Tadas's phone when this build replaces the one that wrote `.audio`:
+    /// the bytes are good, so they are renamed rather than re-fetched over cellular.
+    func testAnEpisodeDownloadedByAnOlderBuildIsRenamedRatherThanRefetched() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let store = InMemoryKeyValueStore()
+        let legacy = directory.appendingPathComponent("ep-1.audio")
+        try Audio.mp3.write(to: legacy)
+        try store.setValue(
+            [DownloadedEpisode(
+                episodeId: "ep-1",
+                fileName: "ep-1.audio",
+                byteCount: Audio.mp3.count,
+                downloadedAt: Date(timeIntervalSince1970: 1_800_000_000)
+            )],
+            forKey: "offline.manifest"
+        )
+
+        let downloader = FakeDownloader()
+        let library = try makeLibrary(store: store, downloader: downloader, directory: directory)
+        let local = try await library.localURL(forEpisode: "ep-1")
+
+        XCTAssertEqual(local?.lastPathComponent, "ep-1.mp3")
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(local)), Audio.mp3)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+        XCTAssertEqual(downloader.recordedDownloads(), [], "renaming must not cost a download")
+
+        // And it survives the relaunch after the one that repaired it.
+        let next = try makeLibrary(store: store, directory: directory)
+        let again = try await next.localURL(forEpisode: "ep-1")
+        XCTAssertEqual(again?.lastPathComponent, "ep-1.mp3")
+    }
+
+    /// A crash between the download landing at `ep-1.mp3` and the manifest recording it,
+    /// on a build before this one, leaves a `.mp3` the manifest does not know about beside
+    /// the `.audio` it does. The repair has to replace it, not fail on it.
+    func testARepairReplacesAFileAlreadyAtTheTargetName() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let store = InMemoryKeyValueStore()
+        try Audio.mp3.write(to: directory.appendingPathComponent("ep-1.audio"))
+        try Audio.wav.write(to: directory.appendingPathComponent("ep-1.mp3"))
+        try store.setValue(
+            [DownloadedEpisode(
+                episodeId: "ep-1",
+                fileName: "ep-1.audio",
+                byteCount: Audio.mp3.count,
+                downloadedAt: Date(timeIntervalSince1970: 1_800_000_000)
+            )],
+            forKey: "offline.manifest"
+        )
+
+        let library = try makeLibrary(store: store, directory: directory)
+        let local = try await library.localURL(forEpisode: "ep-1")
+
+        XCTAssertEqual(local?.lastPathComponent, "ep-1.mp3")
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(local)), Audio.mp3, "the manifest's bytes win")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["ep-1.mp3"])
+    }
+
+    /// A transfer that died between landing its bytes and naming them leaves a `.download`
+    /// nothing references; the next load sweeps it rather than leaving it to sit forever.
+    func testAStagingFileOrphanedByACrashIsSweptOnLoad() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        try Audio.mp3.write(to: directory.appendingPathComponent("ep-9.download"))
+        let library = try makeLibrary(directory: directory)
+
+        _ = try await library.downloadedEpisodeIds()
+
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+    }
+
+    func testAnOlderBuildsFileThatIsNotAudioIsDroppedSoTheNextSyncRefetchesIt() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let store = InMemoryKeyValueStore()
+        try Audio.signInPage.write(to: directory.appendingPathComponent("ep-1.audio"))
+        try store.setValue(
+            [DownloadedEpisode(
+                episodeId: "ep-1",
+                fileName: "ep-1.audio",
+                byteCount: Audio.signInPage.count,
+                downloadedAt: Date(timeIntervalSince1970: 1_800_000_000)
+            )],
+            forKey: "offline.manifest"
+        )
+
+        let library = try makeLibrary(store: store, directory: directory)
+
+        let ids = try await library.downloadedEpisodeIds()
+        XCTAssertTrue(ids.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
     }
 
     func testDownloadingTwiceDoesNotFetchTwice() async throws {
