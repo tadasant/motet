@@ -33,7 +33,7 @@ import os
 /// **Unverified here.** The simulator has an audio session API that accepts all of this and
 /// a host OS that does not enforce it: background audio, the mute switch, and ducking are
 /// device behaviours. See `ios/README.md`.
-public final class AudioSessionController: @unchecked Sendable {
+public final class AudioSessionController: AudioRouteProbe, @unchecked Sendable {
     private static let logger = Logger(subsystem: "com.getmotet.app", category: "audio-session")
 
     public init() {}
@@ -74,6 +74,44 @@ public final class AudioSessionController: @unchecked Sendable {
 
     public func activate() throws {
         try AVAudioSession.sharedInstance().setActive(true)
+    }
+
+    // MARK: - AudioRouteProbe
+
+    /// The session as iOS **has** it, not as it was asked for.
+    ///
+    /// That difference is the whole value: `configure()` above records which rung took,
+    /// and this records what the system is actually on — which can be neither, because the
+    /// category is process-wide and Play Live, a route change, or another app's session
+    /// can move it after the last rung was accepted. A briefing playing into the earpiece
+    /// under `.playAndRecord` is exactly that disagreement, and it is invisible in every
+    /// other signal the app has.
+    ///
+    /// Never throws and never activates anything: it is a read, called a couple of times a
+    /// second while something is playing.
+    public func routeFacts() -> AudioRoute? {
+        let session = AVAudioSession.sharedInstance()
+        return AudioRoute(
+            category: session.category.rawValue.replacingOccurrences(
+                of: "AVAudioSessionCategory", with: ""
+            ),
+            mode: session.mode.rawValue.replacingOccurrences(
+                of: "AVAudioSessionMode", with: ""
+            ),
+            policy: Self.policyName(session.routeSharingPolicy),
+            outputs: session.currentRoute.outputs.map { $0.portType.rawValue },
+            isOtherAudioPlaying: session.isOtherAudioPlaying
+        )
+    }
+
+    private static func policyName(_ policy: AVAudioSession.RouteSharingPolicy) -> String {
+        switch policy {
+        case .default: return "default"
+        case .longFormAudio: return "longFormAudio"
+        case .longFormVideo: return "longFormVideo"
+        case .independent: return "independent"
+        @unknown default: return "unknown"
+        }
     }
 
     /// Hand the session back when nothing is playing, so other apps resume.

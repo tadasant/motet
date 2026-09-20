@@ -49,6 +49,18 @@ final class AppEnvironment {
     /// when the server changes, but replacing the engine would drop whatever is playing.
     private let engine = AVPlayerPlaybackEngine()
 
+    /// **"Is sound actually coming out", asked of the engine rather than of the events it
+    /// emitted.** One for the life of the process, like the engine it reads, and unchanged
+    /// by `reconfigure()` for the same reason: pointing the app at another server does not
+    /// replace the thing making noise.
+    ///
+    /// It reads the audio session too, because the other half of a silent phone is a
+    /// category iOS refused — and a refusal leaves every signal except the route saying
+    /// playback is fine.
+    private(set) lazy var playbackProbe = PlaybackProbeRecorder(
+        engine: engine, route: audioSession
+    )
+
     /// Set when this launch found an API token an earlier build let somebody paste, and
     /// removed it. Read by `AppModel` to say so, once.
     let removedPastedToken: Bool

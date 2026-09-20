@@ -53,6 +53,14 @@ struct SettingsView: View {
     /// Last, and folded: the server is set once by the build and almost never changed.
     private var advancedSection: some View {
         Section {
+            // Which deployment this build was made for, and which server it is on. Two
+            // facts rather than one, because they disagree the moment somebody saves a
+            // server below — and an automated run reads this line to prove which API a
+            // build resolved without the hostname ever being written in this repository.
+            LabeledContent("Build", value: model.buildTarget.summary)
+                .font(.system(.caption, design: .monospaced))
+                .listRowBackground(Theme.surface)
+                .accessibilityIdentifier("build-target")
             DisclosureGroup("Advanced", isExpanded: $showingAdvanced) {
                 ServerField(server: $server, defaultServer: model.defaultServerURL)
                 Button("Save server") {

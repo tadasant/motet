@@ -17,7 +17,7 @@ import os
 /// behaviours that matter most here — a real interruption from a phone call, route changes
 /// when AirPods disconnect, playback continuing with the screen locked — differ between the
 /// simulator and a device. See `ios/README.md` for what remains unproven.
-public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
+public final class AVPlayerPlaybackEngine: PlaybackEngine, PlaybackEngineProbe, @unchecked Sendable {
     private static let logger = Logger(subsystem: "com.getmotet.app", category: "playback")
 
     private let player = AVPlayer()
@@ -40,6 +40,17 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
     /// The episode's own start offset. Always 0 today — one episode is one audio file —
     /// but it is the hook for a future queue where an item is not the whole episode.
     private var itemStartOffsetMs = 0
+    /// Measures the audio the mix renders, which is the one observation here that is not
+    /// the player's own opinion of itself. See `AudioLevelMeter`.
+    private let levelMeter = AudioLevelMeter()
+    /// Bumped by every `load`, so a tap that finished attaching after the item it was for
+    /// was replaced touches nothing. The attach is off the critical path precisely so that
+    /// it can finish late.
+    private var itemGeneration = 0
+    /// The last failure this engine reported, kept for `engineFacts()`. `AVPlayerItem`
+    /// clears nothing on its way out, so without this a probe taken after a failure would
+    /// have to reconstruct it from the event stream it is meant to be independent of.
+    private var lastErrorMessage: String?
 
     public init() {
         player.automaticallyWaitsToMinimizeStalling = true
@@ -60,14 +71,109 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
     }
 
     public func load(url: URL, startingAtMs: Int) async throws {
-        let item = AVPlayerItem(url: url)
+        // From an asset rather than a URL, because the audio-level tap needs the asset's
+        // audio track and loading it twice would fetch the container header twice.
+        let asset = AVURLAsset(url: url)
+        let item = AVPlayerItem(asset: asset)
         replaceObservations(for: item)
+        let generation = lock.withLock { () -> Int in
+            itemGeneration += 1
+            lastErrorMessage = nil
+            return itemGeneration
+        }
+        levelMeter.reset()
         player.replaceCurrentItem(with: item)
         itemStartOffsetMs = 0
         if startingAtMs > 0 {
             await player.seek(to: Self.time(fromMs: startingAtMs), toleranceBefore: .zero, toleranceAfter: .zero)
         }
         installTimeObserverIfNeeded()
+        attachLevelTap(to: item, asset: asset, generation: generation)
+    }
+
+    /// Put the audio-level tap on the item, without making anybody wait for it.
+    ///
+    /// **Deliberately not awaited.** Loading an asset's tracks reads the container header,
+    /// which for a remote episode is a network round trip — and a diagnostic must never be
+    /// on the path between pressing play and hearing something. The tap usually lands
+    /// before the player is ready anyway, since the player needs that same header; when it
+    /// lands later, `audioMix` is assigned to an item that may already be playing, which
+    /// AVFoundation supports. When it never lands, `AudioLevelMeter.level()` answers nil
+    /// and the probe abstains rather than reporting silence it did not measure.
+    private func attachLevelTap(to item: AVPlayerItem, asset: AVAsset, generation: Int) {
+        let meter = levelMeter
+        let handoff = TapHandoff(item: item, asset: asset)
+        Task { [weak self] in
+            guard let mix = await meter.audioMix(for: handoff.asset) else { return }
+            guard let self, self.lock.withLock({ self.itemGeneration }) == generation else { return }
+            handoff.item.audioMix = mix
+        }
+    }
+
+    /// Carries the item and its asset into the attach task.
+    ///
+    /// `AVPlayerItem` and `AVAsset` are not `Sendable`, so Swift 6 refuses to let a
+    /// `@Sendable` closure capture them — correctly, in general. It is sound here for the
+    /// same reason the whole class is `@unchecked Sendable`: exactly one task ever touches
+    /// this pair, the generation check above drops it if a newer `load` has happened since,
+    /// and assigning `audioMix` is the one thing done with it. Widening what crosses this
+    /// boundary is the thing to think twice about.
+    private struct TapHandoff: @unchecked Sendable {
+        let item: AVPlayerItem
+        let asset: AVAsset
+    }
+
+    // MARK: - PlaybackEngineProbe
+
+    /// What the player says about itself right now, read live.
+    ///
+    /// Live rather than folded out of the event stream, because two of these are only
+    /// answerable in the moment: `reasonForWaitingToPlay` is nil the instant the wait ends,
+    /// and a level is a measurement over a window rather than an event. Reading them here
+    /// also keeps the probe independent of whether the controller happened to receive an
+    /// event — which matters, since the bug this exists for is a player that emits none.
+    public func engineFacts() async -> EngineFacts {
+        let status = player.timeControlStatus
+        let wantsToPlay = lock.withLock { self.wantsToPlay }
+        return EngineFacts(
+            transport: Self.transport(status, wantsToPlay: wantsToPlay),
+            positionMs: Self.ms(fromTime: player.currentTime()) + itemStartOffsetMs,
+            rate: Double(player.rate),
+            waitReason: Self.waitReason(status, wantsToPlay: wantsToPlay, player: player),
+            level: levelMeter.level(),
+            errorMessage: lock.withLock { lastErrorMessage }
+        )
+    }
+
+    /// The same three-way reading `evaluate()` makes, and it has to stay the same one.
+    ///
+    /// **`.paused` while the player was told to play is a wait, not a pause** — that is the
+    /// case `.notStarted` exists for, and `timeControlStatus` alone cannot see it. A probe
+    /// that read the status by itself would report `transport=paused` about a player
+    /// somebody pressed Play on, which is the exact reassuring answer this whole mechanism
+    /// exists to stop the app giving.
+    private static func transport(
+        _ status: AVPlayer.TimeControlStatus, wantsToPlay: Bool
+    ) -> PlaybackTransport {
+        switch status {
+        case .playing: return .playing
+        case .waitingToPlayAtSpecifiedRate: return .waiting
+        case .paused: return wantsToPlay ? .waiting : .paused
+        @unknown default: return wantsToPlay ? .waiting : .paused
+        }
+    }
+
+    private static func waitReason(
+        _ status: AVPlayer.TimeControlStatus, wantsToPlay: Bool, player: AVPlayer
+    ) -> PlaybackWaitReason? {
+        switch status {
+        case .waitingToPlayAtSpecifiedRate:
+            return reason(player.reasonForWaitingToPlay)
+        case .paused:
+            return wantsToPlay ? .notStarted : nil
+        default:
+            return nil
+        }
     }
 
     public func play() async {
@@ -122,6 +228,11 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
     }
 
     private func emit(_ event: PlaybackEngineEvent) {
+        // Kept for `engineFacts()`: the probe answers without consulting the controller,
+        // so the failure has to be readable here too.
+        if case .failed(let message) = event {
+            lock.withLock { lastErrorMessage = message }
+        }
         // AVFoundation's callbacks are synchronous and arrive on a dispatch queue, so the
         // hop into the controller's actor is unavoidable here — and unstructured `Task`s
         // carry NO ordering guarantee, so the controller must not assume events arrive in

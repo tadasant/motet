@@ -27,8 +27,14 @@ final class AppModel: ObservableObject {
     /// Why the loaded episode's audio would not load, as the audio route answered — nil
     /// until it has been asked, and whenever nothing is wrong.
     @Published private(set) var playbackProblem: AudioProblem?
+    /// **Whether sound is actually coming out**, measured rather than inferred from the
+    /// events the player emitted — the one question the app could not answer about itself,
+    /// and the one no cloud device service can answer from outside. See
+    /// `PlaybackProbeReporter`.
+    @Published private(set) var playbackProbe = PlaybackProbe()
 
     private let environment: AppEnvironment
+    private let probeReporter: PlaybackProbeReporter
     private var snapshotTask: Task<Void, Never>?
     private var liveSession: LiveSession?
     private var liveTask: Task<Void, Never>?
@@ -39,9 +45,14 @@ final class AppModel: ObservableObject {
 
     init(environment: AppEnvironment) {
         self.environment = environment
+        self.probeReporter = PlaybackProbeReporter(recorder: environment.playbackProbe)
         // `AppEnvironment` has already reconciled the Keychain with the address.
         self.signedInEmail = environment.credentials.signedInEmail
     }
+
+    /// Which deployment this build was made for, and which server it is on — the two facts
+    /// that can disagree, and that nothing on screen used to say.
+    var buildTarget: BuildTarget { environment.credentials.buildTarget }
 
     /// The gate `RootView` asks: nothing but the sign-in screen renders until this is true.
     var isSignedIn: Bool { signedInEmail != nil }
@@ -74,7 +85,21 @@ final class AppModel: ObservableObject {
         await environment.activate()
         settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
         observeSnapshots()
+        observePlayback()
         await refresh()
+    }
+
+    /// Start the playback probe and republish what it says.
+    ///
+    /// Separate from `observeSnapshots()` on purpose: that stream is what the *controller*
+    /// believes, and this is what the engine and the audio session actually report. The
+    /// bug this answers is precisely the two disagreeing, so one must not be derived from
+    /// the other.
+    func observePlayback() {
+        probeReporter.onProbe = { [weak self] probe in
+            self?.playbackProbe = probe
+        }
+        probeReporter.start()
     }
 
     private func observeSnapshots() {
@@ -85,7 +110,11 @@ final class AppModel: ObservableObject {
             for await snapshot in await controller.snapshots() {
                 guard let self else { return }
                 let previousError = self.playback.errorMessage
+                let previousEpisodeId = self.playback.episodeId
                 self.playback = snapshot
+                if previousEpisodeId != snapshot.episodeId {
+                    self.probeReporter.track(episodeId: snapshot.episodeId)
+                }
                 nowPlaying.update(with: snapshot)
                 // The player's error says nothing about *why*; the audio route does — a file
                 // that is gone (a 410 since motet#129), or a feed token rotated since this
@@ -159,6 +188,7 @@ final class AppModel: ObservableObject {
                     "This phone would not give Motet the audio output: \(error.localizedDescription)"
             )
         }
+        probeReporter.noteDiscontinuity()
         do {
             let source = try await library.source(forEpisode: episode)
             try await controller.load(episode: episode, source: source, autoplay: true)
@@ -190,6 +220,10 @@ final class AppModel: ObservableObject {
     }
 
     func perform(_ command: PlaybackCommand) async {
+        // Before the command, not after: the engine echoes a position for a seek straight
+        // away, and a sample taken between the two would fold the jump into the window
+        // that decides whether the clock is advancing.
+        if command.movesThePlayhead { probeReporter.noteDiscontinuity() }
         await controller.perform(command)
         switch command {
         case .setRate, .cycleRate:

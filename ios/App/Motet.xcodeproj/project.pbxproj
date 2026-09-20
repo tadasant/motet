@@ -11,6 +11,20 @@
 // Project > App named "Motet", delete the generated sources, drag `App/Motet` in as a
 // folder reference, and add `ios` as a local package dependency (MotetKit + MotetPlayback).
 // The sources are the deliverable; this file is a convenience.
+//
+// THREE CONFIGURATIONS, and the third is not a copy of the first two by accident.
+// `Staging` is `Debug` plus `MOTET_BUILD_ENVIRONMENT = staging`, so a build can be pointed
+// at the staging deployment and *say so* — the label is not a hostname, which is what lets
+// it live in a public repository when `MOTET_DEFAULT_API_BASE_URL` cannot. Both of those
+// settings are empty or inherited here and passed on the command line by `ios/bin/build-app`
+// and `ios/bin/testflight`; no deployment's host is written in this file or any other.
+//
+// TWO TARGETS. `MotetUITests` drives the app on a booted simulator, because the one
+// question this project could never answer about itself — is sound actually coming out —
+// has no answer from outside the app (no cloud device service captures iOS audio) and no
+// answer from a compiler either. It is deliberately NOT in the `Motet` scheme's testables:
+// `ios/bin/testflight` reads `-showBuildSettings -scheme Motet` to decide which
+// entitlements file is signed in, and that guard reasons about the blocks it gets back.
 {
 	archiveVersion = 1;
 	classes = {
@@ -25,6 +39,7 @@
 
 /* Begin PBXFileReference section */
 		AA0000000000000000000002 /* Motet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Motet.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000061 /* MotetUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MotetUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -48,6 +63,11 @@
 			path = Motet;
 			sourceTree = "<group>";
 		};
+		AA0000000000000000000065 /* MotetUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MotetUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +80,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0000000000000000000063 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -67,6 +94,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000001 /* Motet */,
+				AA0000000000000000000065 /* MotetUITests */,
 				AA0000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -75,6 +103,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000002 /* Motet.app */,
+				AA0000000000000000000061 /* MotetUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -106,7 +135,38 @@
 			productReference = AA0000000000000000000002 /* Motet.app */;
 			productType = "com.apple.product-type.application";
 		};
+		AA0000000000000000000060 /* MotetUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA0000000000000000000068 /* Build configuration list for PBXNativeTarget "MotetUITests" */;
+			buildPhases = (
+				AA0000000000000000000062 /* Sources */,
+				AA0000000000000000000063 /* Frameworks */,
+				AA0000000000000000000064 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AA0000000000000000000066 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				AA0000000000000000000065 /* MotetUITests */,
+			);
+			name = MotetUITests;
+			productName = MotetUITests;
+			productReference = AA0000000000000000000061 /* MotetUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		AA0000000000000000000067 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000008 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0000000000000000000020;
+			remoteInfo = Motet;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXProject section */
 		AA0000000000000000000008 /* Project object */ = {
@@ -118,6 +178,10 @@
 				TargetAttributes = {
 					AA0000000000000000000020 = {
 						CreatedOnToolsVersion = 16.0;
+					};
+					AA0000000000000000000060 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = AA0000000000000000000020;
 					};
 				};
 			};
@@ -139,12 +203,28 @@
 			projectRoot = "";
 			targets = (
 				AA0000000000000000000020 /* Motet */,
+				AA0000000000000000000060 /* MotetUITests */,
 			);
 		};
 /* End PBXProject section */
 
+/* Begin PBXTargetDependency section */
+		AA0000000000000000000066 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA0000000000000000000020 /* Motet */;
+			targetProxy = AA0000000000000000000067 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin PBXResourcesBuildPhase section */
 		AA0000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA0000000000000000000064 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -155,6 +235,13 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		AA0000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA0000000000000000000062 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -217,6 +304,9 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				MOTET_APP_LINK_DOMAIN = "";
+				// A laptop or simulator build has no default server of its own, so it says
+				// so rather than claiming to be the production app.
+				MOTET_BUILD_ENVIRONMENT = development;
 				MOTET_DEFAULT_API_BASE_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -243,6 +333,10 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				MOTET_APP_LINK_DOMAIN = "";
+				// Empty, which `BuildEnvironment` reads as production — the direction that
+				// never puts a "this is disposable" badge over real data. `testflight.yml`
+				// builds Release and passes nothing here.
+				MOTET_BUILD_ENVIRONMENT = "";
 				MOTET_DEFAULT_API_BASE_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -250,6 +344,116 @@
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
+		};
+		AA0000000000000000000054 /* Staging */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				// DEBUG stays defined: the debug-only affordances a UI test drives — the
+				// screenshot fixture, the playback probe screen, the on-screen probe strip
+				// — are the whole reason this configuration exists, and a Staging build
+				// without them could not be exercised by anything automated.
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG MOTET_STAGING $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Staging;
+		};
+		AA0000000000000000000055 /* Staging */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Motet/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				MOTET_APP_LINK_DOMAIN = "";
+				// A label, never a hostname. The server itself still arrives on the command
+				// line in MOTET_DEFAULT_API_BASE_URL, which is empty here as it is
+				// everywhere else in this public repository.
+				MOTET_BUILD_ENVIRONMENT = staging;
+				MOTET_DEFAULT_API_BASE_URL = "";
+				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Staging;
+		};
+		AA0000000000000000000069 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Motet;
+			};
+			name = Debug;
+		};
+		AA000000000000000000006A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Motet;
+			};
+			name = Release;
+		};
+		AA000000000000000000006B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.getmotet.app.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Motet;
+			};
+			name = Staging;
 		};
 /* End XCBuildConfiguration section */
 
@@ -259,6 +463,7 @@
 			buildConfigurations = (
 				AA0000000000000000000050 /* Debug */,
 				AA0000000000000000000051 /* Release */,
+				AA0000000000000000000054 /* Staging */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -268,6 +473,17 @@
 			buildConfigurations = (
 				AA0000000000000000000052 /* Debug */,
 				AA0000000000000000000053 /* Release */,
+				AA0000000000000000000055 /* Staging */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA0000000000000000000068 /* Build configuration list for PBXNativeTarget "MotetUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA0000000000000000000069 /* Debug */,
+				AA000000000000000000006A /* Release */,
+				AA000000000000000000006B /* Staging */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

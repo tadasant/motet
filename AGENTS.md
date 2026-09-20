@@ -875,6 +875,27 @@ is workflow-wide and `all-checks-pass` has to keep aggregating exactly one workf
 skipped job is already a first-class outcome for that gate, so this reuses the existing
 design rather than working around it.
 
+**The `ios` job also *runs* the app now, and that is the only place in this repo anything
+does.** `ios/bin/ui-test` boots a simulator, plays a locally generated tone through the
+shipping player, and asserts the app's own measurement of whether audio came out (see "The
+iOS app measures its own audio" below). It rides the existing macOS job rather than a
+second one: the runner is already up and Xcode is already warm, so what it adds is a
+simulator boot plus one build-and-run — roughly 5 to 10 minutes — where a job of its own
+would have doubled the iOS cost at the higher multiplier for the same coverage. It is
+gated by `ios-changes` like everything else in that job, and its video, screenshot and
+result bundle are uploaded on `always()`, because a red run is the one nobody here has a
+Mac to reproduce.
+
+**`ios-ui-tests.yml` is the same script behind a `workflow_dispatch`, and it is the entry
+point an agent can start.** It exists for the case CI cannot cover: pointing a build at a
+server this repo does not know about. It holds **no credential** — a simulator build needs
+no identity, which is what separates it from the two workflows below — and it names no
+host: the server arrives as the *name* of a repository variable, and the value is masked
+out of the log. Its guard is not `ci.yml`'s: there is no `pull_request` trigger, so that
+expression would be false forever; what it carries instead is the repository check, and
+`pull_request` / `pull_request_target` must never be added without the fork guard coming
+with them.
+
 Deploy workflows are a different matter — they live in the private repo, **with one
 exception: `testflight.yml`.** Asked for by Tadas on 2026-09-13 ("get it into
 TestFlight"), in Zimmer session 17604, and built in session 17805. It is here rather than in
@@ -2360,6 +2381,69 @@ reaches data only through Motet's API, now over MCP instead of bespoke HTTP.
 API: both are configuration in the private repo, `MOTET_VOICE_API_BASE_URL` has never been
 set in either environment, and Play Live is dormant until one is. The first real tool call is
 a listener's.
+
+### The iOS app measures its own audio, because nothing outside it can
+
+`ios/Sources/MotetKit/Diagnostics/`, `ios/Sources/MotetPlayback/AudioLevelMeter.swift`,
+`ios/App/MotetUITests/`, `ios/bin/ui-test`. motet#138 fixed a player that produced no sound
+and said nothing; this is the other half — making that symptom *machine-detectable*, so it
+cannot recur silently.
+
+**The constraint that shapes all of it: no cloud device service captures iOS audio.** AWS
+Device Farm's session artifacts are video, logs and screenshots with no audio track
+documented anywhere; Appetize supported iOS audio output in the past, deprecated it with no
+plans to restore it, and has never supported microphone input on any platform. So "is sound
+coming out" is answerable only from inside the process, and a probe nobody reads is the same
+silence one layer in — which is why there is a reader in every configuration, not only a
+screen in Debug.
+
+`PlaybackProbe` is three layers: what the player says it is doing, whether its clock
+actually **moved** over a window, and an RMS/peak measurement off an `MTAudioProcessingTap`
+on the item's audio mix. The second is the one that catches the failure that happened —
+`.waitingToPlayAtSpecifiedRate` sets no error, emits no further event and never ticks — and
+the third is the only one that is not the player's own opinion of itself.
+
+**A missing layer abstains rather than voting no.** The meter answers nil until a buffer has
+ever arrived and for any sample format it cannot read, and `isAudible` treats nil as
+"nothing measured". Reporting it as silence would make a build where the tap did not install
+report a fault on every perfectly good episode — the never-infer-"no errors"-from-"no data"
+trap with its sign flipped, and the same trap `telemetry_configured` versus
+`telemetry_exporting` exists for.
+
+**The rules live in `MotetKit` and the AVFoundation file only reads hardware**, which is
+`AudioSessionPlan`'s split one seam along: the window that decides "is the clock moving",
+the abstention, the verdict and the locale-proof `key=value` formatting are all tested on
+Linux in `bin/ci`. Whether the tap fires is a claim about a running `AVPlayer`, and
+`ios/bin/ui-test` is what makes it — the one thing in this repo that boots a simulator and
+runs the app.
+
+**What that UI test can reach is bounded by something already settled: an agent cannot sign
+in.** Google refuses an automated browser at the identifier step, so no automated run gets
+past the app's front door. The flow therefore drives a Debug-only fixture that plays a
+generated tone through the real engine, the real audio session and the real controller, and
+asserts that the signal *changes* between playing and paused — both directions, because
+either alone would pass against a hard-wired answer. The network half of playback is
+deliberately not in it.
+
+**A third build configuration, `Staging`, says which deployment a build is for.** Pointing a
+build somewhere else was already a command-line setting; knowing which one you were on was
+not, and the two look like one problem. `MOTET_BUILD_ENVIRONMENT` is a **label and never a
+hostname**, which is exactly what lets it have a value in this public repo when
+`MOTET_DEFAULT_API_BASE_URL` cannot — and an unlabelled build reads as production, because
+a badge over real data is the worse of the two ways to be wrong. Reaching the real staging
+API is one variable in the private repo; nothing here names a host.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** This adds no deployable, no
+datastore, no queue mechanism, no vendor, no seam to one, no inference stage, no model call
+and no resource in the private infrastructure repo — the staging server is a *value* for a
+variable the build already reads, not a new one. Invariant 1 is untouched and is the reason
+a staging variant is configuration at all: the client speaks only Motet's own API, so
+pointing it at another deployment is a base URL. What it does add inside this repo is a
+build configuration, a test target, a CI step and a dispatch workflow — CI and test
+scaffolding, which invariant 12 names on the "does not count" side, and none of which
+changes the package graph or the system diagram. The one judgement worth stating: the
+probe reads `AVPlayer`'s audio mix through `MTAudioProcessingTap`, which is a new *use* of
+an SDK the app already links rather than a new dependency.
 
 ### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
 

@@ -31,13 +31,16 @@ on:
   # ios/Sources/MotetKit/Generated/Schema.swift. openapi.yaml is deliberately NOT listed:
   # the upload never reads it, and bin/ci fails any commit where it and Schema.swift
   # disagree, so a contract change that reaches the app lands under ios/ in the same commit.
-  # The README and the SwiftPM tests are excluded because they are not in the app.
+  # The README and the SwiftPM tests are excluded because they are not in the app, and
+  # App/MotetUITests for the same reason one step along: it is a target of its own, it
+  # is not in the `Motet` scheme this workflow archives, and it ships in no build.
   push:
     branches: [main]
     paths:
       - "ios/**"
       - "!ios/README.md"
       - "!ios/Tests/**"
+      - "!ios/App/MotetUITests/**"
       - ".github/workflows/testflight.yml"
   workflow_dispatch:
     inputs:
