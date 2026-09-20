@@ -1,2 +1,6 @@
 User-agent: *
 Allow: /
+
+# 2026-09-20: appended to trigger a Cloudflare Pages build of `main`. The project builds
+# only on a commit touching `site/`, and the CSP fix in motet#141 had landed without one.
+# The content of this comment is deliberately inert — the commit existed to be a push.
