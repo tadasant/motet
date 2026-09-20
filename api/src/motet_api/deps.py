@@ -36,6 +36,7 @@ list, because a rename would break it silently.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import threading
 from collections.abc import Iterator
@@ -54,6 +55,7 @@ from motet_vault import DekWrapper, VaultConfigError, build_dek_wrapper
 from .auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV, is_allowed
 from .config import Settings
 from .drain import DrainNudge, DrainTrigger, build_trigger
+from .slack import WEBHOOK_ENV, SlackAlerter, WaitlistAlert, build_alerter, deployment_label
 from .throttle import auth_failures, failed_auth
 
 logger = logging.getLogger("motet.api")
@@ -61,6 +63,8 @@ logger = logging.getLogger("motet.api")
 _store: ObjectStore | None = None
 _trigger: DrainTrigger | None = None
 _trigger_lock = threading.Lock()
+_alerter: SlackAlerter | None = None
+_alerter_lock = threading.Lock()
 
 
 def settings() -> Settings:
@@ -100,6 +104,45 @@ def drain_nudge(trigger: Annotated[DrainTrigger, Depends(drain_trigger)]) -> Dra
     dependency rather than something hung off ``Request.state``.
     """
     return DrainNudge(trigger)
+
+
+def slack_alerter() -> SlackAlerter:
+    """One alerter per process, resolved from the environment on first use.
+
+    Cached like ``store`` and ``drain_trigger`` and for the same reason: it holds an HTTP
+    client, and rebuilding it per request would open a connection pool per signup.
+    """
+    global _alerter
+    alerter = _alerter
+    if alerter is None:
+        # Locked for `drain_trigger`'s reason: sync routes run in a threadpool, so two
+        # first requests arriving together would each build one and leak a client.
+        with _alerter_lock:
+            if _alerter is None:
+                _alerter = build_alerter(os.environ.get(WEBHOOK_ENV))
+            alerter = _alerter
+    return alerter
+
+
+def reset_slack_alerter() -> None:
+    """Drop the cached alerter. For tests that change the environment between cases."""
+    global _alerter
+    _alerter = None
+
+
+def waitlist_alert(
+    alerter: Annotated[SlackAlerter, Depends(slack_alerter)],
+    config: Annotated[Settings, Depends(settings)],
+) -> WaitlistAlert:
+    """This request's intent to announce a signup, armed by the route and fired by commit.
+
+    The drain nudge's shape exactly — a per-request object so that the thing the route
+    arms is the thing ``connection`` fires. The environment label is resolved here rather
+    than in the alerter because ``Settings`` is already in hand, and because a label
+    resolved per process would be wrong in exactly one situation nobody would notice: a
+    test that changes the environment between cases.
+    """
+    return WaitlistAlert(alerter, environment=deployment_label(config.public_base_url))
 
 
 def store() -> ObjectStore:
@@ -152,6 +195,7 @@ def dek_wrapper() -> DekWrapper:
 def connection(
     config: Annotated[Settings, Depends(settings)],
     nudge: Annotated[DrainNudge, Depends(drain_nudge)],
+    alert: Annotated[WaitlistAlert, Depends(waitlist_alert)],
 ) -> Iterator[psycopg.Connection[Any]]:
     """A connection per request, committed on success and rolled back on failure.
 
@@ -160,12 +204,13 @@ def connection(
     The transaction boundary is the *request*, so a route that writes two rows either
     writes both or neither.
 
-    **It is also where a drain gets nudged**, which is why the transaction and the trigger
-    meet here rather than in a route. A route that enqueued and then asked Cloud Run to
-    drain would be asking on behalf of a job row no other process can see yet, and would
-    still be asking on behalf of a request that goes on to fail — the rollback path below
-    re-raises, so the fire never happens. Firing here, after the commit, makes "there is
-    work" and "start a worker" the same event.
+    **It is also where a drain gets nudged and a waitlist signup gets announced**, which is
+    why the transaction and those two best-effort calls meet here rather than in a route.
+    A route that enqueued and then asked Cloud Run to drain would be asking on behalf of a
+    job row no other process can see yet, and would still be asking on behalf of a request
+    that goes on to fail — the rollback path below re-raises, so the fire never happens.
+    Firing here, after the commit, makes "there is work" and "start a worker" the same
+    event, and makes "an address is on the list" and "Slack was told" the same event too.
 
     Deliberately **not** a background task, which is where a best-effort call belongs on
     most runtimes. Cloud Run throttles a container's CPU between requests unless the
@@ -200,9 +245,11 @@ def connection(
     finally:
         conn.close()
     # Reached only when the transaction committed: every other path above re-raises, and
-    # a raise here would skip this line rather than nudge for work that was rolled back.
-    # `fire` swallows everything it can go wrong with, so this cannot fail the request.
+    # a raise here would skip these lines rather than nudge for work, or announce a row,
+    # that was rolled back. Both `fire`s swallow everything they can go wrong with, so
+    # neither can fail the request.
     nudge.fire()
+    alert.fire()
 
 
 @dataclass(frozen=True)

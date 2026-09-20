@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ...deps import drain_trigger
+from ...deps import drain_trigger, slack_alerter
 from ...schemas import (
     HealthResponse,
     ProcessingStatusResponse,
@@ -31,7 +31,10 @@ def get_health() -> HealthResponse:
     authorization each say whether they are actually wired. The same answer as
     `GET /internal/health`.
     """
-    return run("get_health", lambda c: routes.health(config=c.config, trigger=drain_trigger()))
+    return run(
+        "get_health",
+        lambda c: routes.health(config=c.config, trigger=drain_trigger(), alerter=slack_alerter()),
+    )
 
 
 def get_voice_status() -> VoiceStatusResponse:

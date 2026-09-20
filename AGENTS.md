@@ -3889,6 +3889,73 @@ the owner named), one table, one public and one admin route on the existing API,
 vendor, seam, queue mechanism, model call or resource in the private infrastructure repo
 beyond the Pages project and its DNS, which are human-owned. Deliberately not added: a
 confirmation email (a vendor), a redirect variable, and a rate limiter.
+
+#### A stored address also tells Slack, and the webhook is the whole of the configuration
+
+`motet_api.slack`, `deps.waitlist_alert`, `motet.api.waitlist_alerts{outcome}`.
+**Asked for by Tadas on 2026-09-20**, who named the mechanism as well as the outcome: an
+incoming webhook, posting to `#motet-updates` in the Tadasant Slack, whose URL Cloud Run
+injects from Secret Manager as `SLACK_WEBHOOK_URL`. The table was already the record and
+the operator view already showed it; what was missing is that nobody was told, and a
+waitlist you have to remember to go and look at is a waitlist nobody reads.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** A new vendor and a secret in
+the private repo are two of its bullets, so this needs a sign-off and the owner's request
+*is* it — he chose the vendor, the credential shape and the variable's name, and a parallel
+session on the `motet-production` root is provisioning the secret. What it adds beyond that
+is one module, one field on an existing response, a counter, and a second best-effort call
+on the post-commit hook the drain nudge already uses: no deployable, datastore, queue
+mechanism, inference stage or model call. Deliberately not added: a retry, a queue, a
+second variable naming the channel, and a second variable naming the environment.
+
+- **It is the drain nudge's shape, one route along.** The route arms the alert beside the
+  write and `deps.connection` sends it after `conn.commit()` — so an alert is never sent
+  for a row that rolled back, and a request that fails on its way to the response sends
+  nothing. Deliberately **not** a background task, for the reason `deps.connection` already
+  records: Cloud Run throttles a container's CPU between requests, so a task scheduled
+  after the response may not run until the next one arrives. The cost is a bounded three
+  seconds inside the request, which is shorter than the drain trigger's five because it
+  buys less — a drain that does not fire delays somebody's paste, an alert that does not
+  fire costs a message about a row that is already safely stored.
+- **Off unless `SLACK_WEBHOOK_URL` is set, and that is the *normal* state rather than an
+  error.** This merges and runs in both environments before the secret exists, so unset is
+  one DEBUG line per submission and no request. A URL that is *set* and is not https with a
+  host says so at ERROR at startup — somebody meant to wire it and the value is wrong,
+  which is a different thing — and the refusal never repeats the value.
+  `/internal/health` reports `waitlist_alerts` for `vault_ready`'s reason: a deployment
+  nobody has wired and one whose webhook was revoked look identical from outside.
+- **The URL is the credential, so it is never logged, never echoed and never in a repr.**
+  Anyone holding it can post into the channel. Failures are reported by exception *type*
+  and status code, never with `logger.exception` — a traceback out of httpx carries the
+  request URL, and the error reporter captures frame locals. Slack's refusal body *is*
+  logged, because `invalid_token` is what tells a revoked webhook from a broken one, and it
+  is **redacted first**: Slack does not echo the URL today, and that is a promise about a
+  vendor rather than a property of this code. A test asserts it against a body that does.
+- **No channel is sent.** An incoming webhook binds its own destination when it is created,
+  so the payload is `{"text": …}` and nothing else, and this repo names no channel.
+- **The address is the payload, and the promise one section up is intact.** "No address
+  reaches a log line or a metric" still holds: the address goes to Slack the way it already
+  goes to the table and the admin screen, and to nowhere else. The metric carries an
+  outcome and nothing else. The address is escaped for Slack's markup before it goes,
+  because `normalize_email` is deliberately loose and does not exclude the three characters
+  Slack reserves.
+- **Which deployment sent it is read from what the deploy already sets**, never from a
+  variable of its own: `deployment.environment` in `OTEL_RESOURCE_ATTRIBUTES` — the label
+  every span and metric already wears — falling back to the *host* of
+  `MOTET_PUBLIC_BASE_URL`, which a deployed environment sets anyway. Both environments can
+  post to a webhook, so an unlabelled alert is ambiguous, and inventing a second pair of
+  variables for a fact the deploy already states is what invariant 11 warns against.
+- **A resubmission of a known address is announced too, and says so.** Every outcome that
+  carries a real address arms an alert; a refusal has none, and the honeypot's 200 is a lie
+  told to a bot on purpose, so alerting on it would make the endpoint an oracle in a
+  channel instead of in a response. The cost, named rather than discovered: there is no
+  rate limit on this route by design, so a script replaying one address posts one Slack
+  message per submission. `motet.api.waitlist_alerts{outcome}` is what would say so, and
+  the one-line fix is to arm only on `joined`.
+
+**What no test here can tell you** is whether the real webhook works: nothing in this repo
+reaches Slack (every test drives the real client over `httpx.MockTransport`), the secret
+does not exist yet in either environment, and the first real alert is a visitor's.
 ### Models, spend, and the settings that only staging honours
 
 **Sign-off: PENDING-TADAS — this line is replaced with the owner's answer before the PR

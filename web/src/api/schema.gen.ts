@@ -1737,6 +1737,12 @@ export interface paths {
          *     no preflight. Answers JSON when the caller's ``Accept`` asks for it and a small HTML
          *     page otherwise, which is what a form posted without JavaScript lands on. A new
          *     address, a known one and a submission that filled the honeypot all get the same 200.
+         *
+         *     **A stored address also arms a Slack alert**, which ``deps.connection`` sends after
+         *     this request's transaction commits — see `motet_api.slack`. Only the two outcomes that
+         *     carry a real address arm one: a refusal has no address to announce, and the honeypot's
+         *     answer is a lie told to a bot on purpose, so alerting on it would make this endpoint an
+         *     oracle in a channel instead of in a response.
          */
         post: operations["join_waitlist_v1_waitlist_post"];
         delete?: never;
@@ -2671,6 +2677,12 @@ export interface components {
              * @default false
              */
             voice_configured: boolean;
+            /**
+             * Waitlist Alerts
+             * @description Whether a waitlist signup posts an alert to Slack here: SLACK_WEBHOOK_URL is set and is an https URL. Configured, not proven — whether Slack *accepts* the posts is motet.api.waitlist_alerts{outcome} on the obs stack. False is the expected state in both environments until the secret is wired, and is what a laptop and CI always report. Reported for 'vault_ready''s reason: a deployment nobody has wired and one whose webhook was revoked look identical from outside. The webhook URL is a bearer credential and is never reported anywhere.
+             * @default false
+             */
+            waitlist_alerts: boolean;
         };
         /**
          * HeldSourceItemResponse

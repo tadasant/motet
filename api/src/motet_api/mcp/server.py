@@ -48,8 +48,9 @@ from starlette.routing import BaseRoute, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config import Settings
-from ..deps import Caller, connection, drain_trigger, require_caller
+from ..deps import Caller, connection, drain_trigger, require_caller, slack_alerter
 from ..drain import DrainNudge
+from ..slack import WaitlistAlert
 from . import registry
 from .context import request_scope, selected_tools
 from .oauth import MCP_PATH, PROTECTED_RESOURCE_PATH, oauth_routes, oauth_setup
@@ -140,7 +141,8 @@ def authenticate(authorization: str | None) -> Caller | Response:
     """
     config = Settings.from_env()
     try:
-        with contextlib.contextmanager(connection)(config, DrainNudge(drain_trigger())) as conn:
+        nudge, alert = DrainNudge(drain_trigger()), WaitlistAlert(slack_alerter())
+        with contextlib.contextmanager(connection)(config, nudge, alert) as conn:
             return require_caller(config=config, conn=conn, authorization=authorization)
     except HTTPException as exc:
         headers = dict(exc.headers or {})

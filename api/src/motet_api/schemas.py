@@ -157,6 +157,18 @@ class HealthResponse(BaseModel):
             "sign-in is not configured."
         )
     )
+    waitlist_alerts: bool = Field(
+        default=False,
+        description=(
+            "Whether a waitlist signup posts an alert to Slack here: SLACK_WEBHOOK_URL is "
+            "set and is an https URL. Configured, not proven — whether Slack *accepts* the "
+            "posts is motet.api.waitlist_alerts{outcome} on the obs stack. False is the "
+            "expected state in both environments until the secret is wired, and is what a "
+            "laptop and CI always report. Reported for 'vault_ready''s reason: a deployment "
+            "nobody has wired and one whose webhook was revoked look identical from outside. "
+            "The webhook URL is a bearer credential and is never reported anywhere."
+        ),
+    )
     enrich_enabled: bool = Field(
         default=False,
         description=(

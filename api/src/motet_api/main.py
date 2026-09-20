@@ -138,7 +138,9 @@ from .deps import (
     require_feed_token,
     require_session,
     settings,
+    slack_alerter,
     store,
+    waitlist_alert,
 )
 from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
 from .feed import (
@@ -251,6 +253,8 @@ from .schemas import (
     WaitlistJoinResponse,
 )
 from .shownotes import SourceExcerpt, chapters_json, transcript_vtt
+from .slack import Signup as SlackSignup
+from .slack import SlackAlerter, WaitlistAlert
 from .sync_progress import WORKER_FRESH, run_started_at, sync_progress
 from .voice import (
     VoiceConfig,
@@ -292,6 +296,7 @@ Wrapper = Annotated[DekWrapper, Depends(dek_wrapper)]
 #: Whether this deployment starts a worker execution when it enqueues work. Reported on
 #: ``/internal/health``; off unless ``MOTET_DRAIN_TRIGGER`` opts in.
 Trigger = Annotated[DrainTrigger, Depends(drain_trigger)]
+Alerter = Annotated[SlackAlerter, Depends(slack_alerter)]
 #: This request's intent to nudge the worker. A route **arms** it beside its enqueue and
 #: `deps.connection` fires it after the commit — see `DrainNudge` for why the two are
 #: split. Every route taking this also takes `Conn`, which is what guarantees a fire.
@@ -651,7 +656,7 @@ def publishable_revision(service_version: str | None) -> str | None:
 
 
 @app.get(HEALTH_PATH, response_model=HealthResponse, tags=["ops"])
-def health(config: Config, trigger: Trigger) -> HealthResponse:
+def health(config: Config, trigger: Trigger, alerter: Alerter) -> HealthResponse:
     """Liveness, plus whether telemetry and authentication are actually wired.
 
     The flags are not decoration. Exporters no-op silently when unconfigured, so without
@@ -701,6 +706,11 @@ def health(config: Config, trigger: Trigger) -> HealthResponse:
         llm_overrides_in_force=admin_llm.overrides_in_force(config.database_url, os.environ),
         mcp_tools=len(mcp_registry.ALL_TOOLS),
         mcp_oauth_configured=mcp_oauth_setup(config) is not None,
+        # Not the webhook, and not a hint of it: the URL *is* the credential. The boolean
+        # is the whole question — "would a signup here reach Slack" — and it is
+        # `vault_ready`'s argument again, since this ships and runs in both environments
+        # before the secret exists.
+        waitlist_alerts=alerter.configured,
         # The API's own routing switch, which is the whole of what this process decides:
         # it never calls the enrichment service and is deliberately not told where one is
         # (that is topology, and this repo is public). Whether a queued item then *runs* is
@@ -1776,7 +1786,9 @@ _WAITLIST_FORM_SCHEMA: Final = {
     },
 )
 def join_waitlist(
-    conn: Conn, submission: Annotated[Submission, Depends(read_submission)]
+    conn: Conn,
+    submission: Annotated[Submission, Depends(read_submission)],
+    alert: Annotated[WaitlistAlert, Depends(waitlist_alert)],
 ) -> Response:
     """Put an address on the landing page's waitlist. Public; no credential.
 
@@ -1784,6 +1796,12 @@ def join_waitlist(
     no preflight. Answers JSON when the caller's ``Accept`` asks for it and a small HTML
     page otherwise, which is what a form posted without JavaScript lands on. A new
     address, a known one and a submission that filled the honeypot all get the same 200.
+
+    **A stored address also arms a Slack alert**, which ``deps.connection`` sends after
+    this request's transaction commits — see `motet_api.slack`. Only the two outcomes that
+    carry a real address arm one: a refusal has no address to announce, and the honeypot's
+    answer is a lie told to a bot on purpose, so alerting on it would make this endpoint an
+    oracle in a channel instead of in a response.
     """
     if submission.refused is not None or submission.email is None:
         return waitlist_answer(
@@ -1791,6 +1809,11 @@ def join_waitlist(
         )
     try:
         joined = waitlist_repo.join(conn, submission.email)
+        # Inside the same transaction and the same try, because by the time the alert is
+        # sent there is no connection left to ask — and because a count that failed must
+        # cost the number in the message rather than the signup. `None` renders as no
+        # line at all rather than as a wrong one.
+        total: int | None = waitlist_repo.count(conn)
     except Exception as exc:
         # Caught, and reported by type alone, because this is the one route where letting an
         # exception escape would leak the thing it promises never to log: the error reporter
@@ -1800,6 +1823,7 @@ def join_waitlist(
             conn.rollback()
         logger.error("waitlist: storing a submission failed (%s)", type(exc).__name__)
         return waitlist_answer(WaitlistOutcome.STORE_FAILED, wants_json=submission.wants_json)
+    alert.arm(SlackSignup(email=submission.email, returning=not joined, total=total))
     outcome = WaitlistOutcome.JOINED if joined else WaitlistOutcome.ALREADY_LISTED
     return waitlist_answer(outcome, wants_json=submission.wants_json)
 
