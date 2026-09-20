@@ -1,12 +1,42 @@
 # Cloudflare Pages response headers (https://developers.cloudflare.com/pages/configuration/headers/).
 #
 # The policy is narrow because the page is: its own stylesheet, script and icon, the two
-# webfonts from Google Fonts, and one cross-origin request — the waitlist form, to the Motet
-# API. The API origin below is a placeholder build.mjs fills in, so a preview build's
-# policy allows its own API and nothing else. No inline script and no inline style attribute is used anywhere,
-# which is what lets script-src and style-src stay 'self'.
+# webfonts from Google Fonts, one cross-origin request — the waitlist form, to the Motet
+# API — and Cloudflare's analytics beacon. The API origin below is a placeholder build.mjs
+# fills in, so a preview build's policy allows its own API and nothing else. No inline
+# script and no inline style attribute is used anywhere, which is what lets script-src stay
+# 'self' apart from the beacon, and style-src stay 'self' apart from Google Fonts.
+#
+# **The two beacon entries are one feature, and each is the narrowest source that works.**
+# Cloudflare injects the beacon into every proxied HTML response on this zone (Web Analytics,
+# auto-install), so the page's own markup does not mention it and nothing here can be
+# switched off by editing the page. The browser loads it from static.cloudflareinsights.com
+# — script-src — and it reports back over XHR — connect-src. Two details decide how narrow
+# each entry can be:
+#
+#   * **The host is pinned and the path deliberately is not**, and it is worth being exact
+#     about why, because the narrow-sounding answer is the broken one. The injected URL
+#     carries a build suffix (`/beacon.min.js/v31edd6df95cf…`) that moves whenever
+#     Cloudflare ships a new beacon. Cloudflare's own documented source,
+#     `…/beacon.min.js`, has no trailing slash and is therefore an *exact* path match — it
+#     would block the very URL Cloudflare injects. The trailing-slash form,
+#     `…/beacon.min.js/`, is a prefix match and would work, and is genuinely narrower than
+#     the host. It is refused anyway: the path is Cloudflare's to reorganise, and the day
+#     it does, the beacon stops silently — which is the failure this whole comment exists
+#     because of. Robustness, not narrowness, is the reason; say so rather than the other.
+#   * The report goes to this site's own origin, `/cdn-cgi/rum`, because the injection is
+#     automatic; only a hand-embedded snippet posts to cloudflareinsights.com. So 'self' is
+#     enough and that host is deliberately absent. Observed: POST https://getmotet.com/cdn-cgi/rum
+#     → 204. If the beacon is ever embedded by hand instead, this is the line that needs it.
+#
+# **What no test here can tell you** is what Cloudflare injects tomorrow. The tag arrives at
+# the edge, after this build, so nothing in this repo ever sees it: if the beacon ever became
+# an *inline* script, `script-src` with no nonce would block it again and every check here
+# would still be green. Today's tag is external (`type="module"`, `src=…`), verified in a
+# browser against the live site; an analytics graph that flatlines is the only signal that
+# would change.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src %%MOTET_API_ORIGIN%%; form-action %%MOTET_API_ORIGIN%%; base-uri 'self'; object-src 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' %%MOTET_API_ORIGIN%%; form-action %%MOTET_API_ORIGIN%%; base-uri 'self'; object-src 'none'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=()
