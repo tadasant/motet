@@ -27,7 +27,8 @@
 // because the shared token still works and is still the answer when there is no Google
 // account to hand; it has just stopped being the thing a human is expected to type into a
 // phone. **A browser that does hold one never sees the door**: `inShell` is true as soon
-// as there is a token (or the deployment is open), and it renders the shell.
+// as there is a token (or the deployment is open) and no callback is in the address, and
+// it renders the shell.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 

@@ -1113,7 +1113,9 @@ describe('signing in', () => {
     mockApi()
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
+    // Level pinned: the hero's h1 was the door's only one, so a regression to <h2> would
+    // leave the whole screen without a top-level heading and an unlevelled query green.
+    expect(await screen.findByRole('heading', { name: 'Sign in', level: 1 })).toBeDefined()
     expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeDefined()
     expect(screen.queryByRole('navigation', { name: 'Screens' })).toBeNull()
   })
@@ -1126,11 +1128,15 @@ describe('signing in', () => {
     mockApi()
     render(<App />)
 
-    await screen.findByRole('heading', { name: 'Sign in' })
-    expect(screen.queryByText(/Many voices/)).toBeNull()
+    await screen.findByRole('heading', { name: 'Sign in', level: 1 })
+    // `Many voices.` with the stop, because the eyebrow deliberately keeps the lowercase
+    // "A motet: many voices, one piece." — it is the brand line, not the pitch.
+    expect(screen.queryByText(/Many voices\./)).toBeNull()
     expect(screen.queryByText(/worth hearing/)).toBeNull()
     expect(screen.queryByText(/interactive podcast/)).toBeNull()
     expect(screen.queryByRole('button', { name: 'Start listening' })).toBeNull()
+    // The motif was the hero's most visible element; assert it by its caption.
+    expect(screen.queryByText('Four sources you trust, sung as one podcast.')).toBeNull()
     // One button, so a failure has one place to print. There used to be two calling the
     // same function and only the upper one could show an error.
     expect(screen.getAllByRole('button', { name: /Sign in with Google/ })).toHaveLength(1)
@@ -1144,7 +1150,7 @@ describe('signing in', () => {
     mockApi()
     render(<App />)
 
-    await screen.findByRole('heading', { name: 'Sign in' })
+    await screen.findByRole('heading', { name: 'Sign in', level: 1 })
     expect(screen.getByText(`${window.location.origin}/oauth/callback`)).toBeDefined()
   })
 
@@ -1156,7 +1162,7 @@ describe('signing in', () => {
 
     expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
     expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
-    expect(screen.queryByRole('heading', { name: 'Sign in' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Sign in', level: 1 })).toBeNull()
     expect(screen.queryByRole('link', { name: 'getmotet.com' })).toBeNull()
   })
 

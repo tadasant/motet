@@ -77,11 +77,9 @@ export function SignIn({
       <p className="subhead">
         Motet has one account, and signing in is how this browser proves it may use it.
       </p>
-      <div className="ctas">
-        <button type="button" className="btn-primary" onClick={signIn} disabled={status.kind === 'busy'}>
-          {status.kind === 'busy' ? 'Redirecting…' : 'Sign in with Google'}
-        </button>
-      </div>
+      <button type="button" className="btn-primary" onClick={signIn} disabled={status.kind === 'busy'}>
+        {status.kind === 'busy' ? 'Redirecting…' : 'Sign in with Google'}
+      </button>
       {status.kind === 'error' && (
         <p className="error" role="alert">
           {status.message}

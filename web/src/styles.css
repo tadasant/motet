@@ -266,7 +266,6 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
   font-size: clamp(17px, 1.35vw, 20px); line-height: 1.55; color: var(--ink-soft);
   max-width: 30em; margin: 0 0 32px; text-wrap: pretty;
 }
-.ctas { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
 .signin > .error { margin: 1.25rem 0 0; }
 .signin .hint { max-width: 34em; }
 .signin .token { margin: 1.75rem 0 0; background: var(--surface); border-radius: 20px; padding: 1.4rem 1.6rem; }
@@ -276,7 +275,9 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
   font-size: 14px; color: var(--ink-mute);
 }
 
-/* The motif: four waveforms on staves converging into one ink line (brand/Motif.tsx). */
+/* The motif: four waveforms on staves converging into one ink line (brand/Motif.tsx).
+   Its one caller is Backlog's empty state, which asks for `quiet` — the full-size rules
+   below are kept for a surface that may want it, not because one does today. */
 .motif { position: relative; z-index: 1; margin: 0; width: 100%; display: flex; flex-direction: column; }
 .motif .score { width: 100%; aspect-ratio: 5 / 3.1; max-height: 440px; }
 .motif .score svg { width: 100%; height: 100%; display: block; overflow: visible; }
@@ -314,7 +315,6 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
   .motif .voice, .motif .one { stroke-width: 6; }
 }
 @media (max-width: 420px) {
-  .ctas { gap: 18px; }
   .btn-primary { padding: 15px 22px; font-size: 15px; }
 }
 
@@ -345,7 +345,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   box-shadow: var(--shadow-ink);
   text-decoration: none;
 }
-.btn-primary { padding: 17px 28px 17px 26px; font-size: 16px; }
+/* Symmetric since the play glyph went with the hero: the 26px left was its circle. */
+.btn-primary { padding: 17px 28px; font-size: 16px; }
 .btn-primary::before, button.primary::before {
   content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
   background: var(--voices-stops); opacity: .95;
