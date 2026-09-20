@@ -82,7 +82,6 @@ function renderScreen(episode: Episode = EPISODE, autoPlay = false) {
   const view = render(
     <EpisodeScreen
       episode={episode}
-      processing={null}
       autoPlay={autoPlay}
       onPositionReported={onPositionReported}
       onBacklogChanged={onBacklogChanged}
@@ -289,7 +288,6 @@ describe('the in-page player', () => {
     rerender(
       <EpisodeScreen
         episode={{ ...EPISODE, listened_through_ms: EPISODE.duration_ms }}
-        processing={null}
         onPositionReported={vi.fn()}
         onBacklogChanged={vi.fn()}
       />,

@@ -2155,6 +2155,156 @@ with the newest, and the only way to another was an inline "Other episodes:" lin
   first arrives — a render that finished while somebody was on the Backlog is a shelf, not
   a detail — and a later refresh never moves the screen.
 
+#### An episode being built reports its step, its count and its clock
+
+`api/src/motet_api/episode_progress.py`, `EpisodeBuildProgress`, `repo.episode_jobs`,
+migration 0025, `web/src/screens/episodeProgress.ts`,
+`ios/Sources/MotetKit/Model/EpisodeProgress.swift`. Tadas made an episode in production
+(2026-09-19): *"Says queued but unclear to me when it's gonna process."* That is
+motet#136's Gmail complaint one surface along, and the cause is the same — the only thing
+either client could show was a bare state word, which cannot say whether a worker has the
+job, which attempt it is on, or how far through the longest stage it is.
+
+**His episode was slow rather than stuck**, and the 93 seconds break down in a way the
+screen has to be honest about: 72 of them were Cloud Run's job-scheduling latency before a
+worker existed at all, and 21 were the whole pipeline (`ep_1f2c8dc8486c`: created 02:26:29Z,
+assembled 02:27:41, scripted 02:27:52, published 02:28:02). So **most of a build is the
+queued step**, which is exactly the step that used to say the least — and the drain-trigger
+note above already names that latency as the thing an enqueue cannot remove.
+
+**Two fields, not one, and the split is the design.** `SourceSyncProgress` folds "which
+work" and "what is happening to it" into one `stage`, because a sync has a single kind of
+work. An episode has three, so `step` is `assemble` / `script` / `tts` and `stage` is
+`queued` / `running` / `retrying` / `ready` / `failed`. Two small vocabularies rather than
+one nine-member enum with half its members verbs and half nouns; a client branches on
+`stage` for its tone and reads `step` for its noun.
+
+**The state and the job are read in one statement, and that is what makes "no job" mean
+anything.** `repo.episode_builds` re-reads `episodes.state` beside the job rather than
+trusting the copy a list route read a statement earlier. The API's connection is READ
+COMMITTED and `_execute` commits a handler's work and `jobs.complete` separately, so
+between those two commits a list read says `rendering` and a later job read correctly finds
+nothing — and the two together would say *stopped* about an episode that had just
+published, on the happy path's final instant, with both clients then treating it as
+terminal and no longer polling. Read together, "no job" is a lost row, which is the only
+thing it should ever mean.
+
+**The step comes off the episode row and the stage off the job row, and that order is
+load-bearing.** A worker that dies between committing its work and completing its job
+leaves a stale `running` row on the stage it *finished*, beside the `ready` row of the
+stage it handed on to (motet#50, motet#53) — so naming the step off the job would report
+such an episode as having gone backwards. The state and the next stage's job row are
+written in one transaction, so naming it off the state cannot. **The query prefers the job
+on the step's own queue** for the mirror-image reason: taking the stale row's *stage* would
+say "a worker is running this" over a job nothing has claimed, which is motet#38's lie in
+exactly the case `waiting_on_worker` exists to catch. The job row is still what answers
+"queued or running", "which attempt", and "what did the last one say": an episode climbing
+the retry ladder has no `last_error` of its own, because `episode_failed` writes one only
+when the attempts run out. That is migration 0005's argument, on the other half of the
+pipeline, and migration 0025's index is 0005's twin.
+
+**A settled build's window runs from when it stopped, and for a failure that is
+`episodes.updated_at`.** `published_at` answers it for a ready episode and nothing else
+records it for a failed one — so measuring from `created_at` would have closed the window
+before the failure happened: `BACKOFF_SECONDS` over `DEFAULT_MAX_ATTEMPTS` is about 755
+seconds of backoff alone, before five attempts' runtime and five Cloud Run starts, so an
+exhausted ladder always gives up past minute thirteen. The failure panel would have
+rendered only for a `PermanentFailure` inside the first ten minutes, and never for the
+commonest way a build fails. `settled_at` is the one function both the window and the
+elapsed clock ask.
+
+**Only one step has an inside worth counting, and it is the one that costs.** Dedup and
+scripting are a single model call each — there is nothing between "started" and "finished"
+to report — but TTS is a loop over segments, and it is the slowest and most expensive
+stage. So `handle_tts` writes `episodes.rendered_segments` as each segment comes back, on a
+**side connection**: its own transaction stays open for the whole render, so a count
+written on it becomes visible at the moment it stops being worth anything. That is
+`enrich_status = 'running'`'s mechanism and its reason (motet#102). It is reset to zero when
+a render starts, so a reclaimed job counts *this* attempt; it never fails the render, and a
+first failure turns the reporter off rather than retrying once per segment; and **nothing
+downstream reads it** — the audio, the durations and the claim timings all still come from
+what TTS returned. Assembly and scripting report `news_items` and `claims` instead, which
+are real from the moment the stage before them wrote them and zero before that.
+
+**The estimate is measured, labelled, and never a countdown.** `estimate_ms` is the median
+of the **caller's own** last ten finished episodes, because the two largest terms in a
+build — Cloud Run's scheduling latency and how much backlog there is — are facts about the
+deployment on the day rather than constants, and because a backlog is per person. Per user
+rather than per deployment is indistinguishable while there is one account (`repo.recent_build_times_ms`
+takes a `user_id`), and it is the reading that stays right when there is not. The median rather than the mean: the
+distribution has a long right tail and no left one, so one slow build would move a mean past
+every build it is meant to predict. **Below three finished episodes there is no estimate at
+all** and the clients show elapsed time and the step, which is the honest answer when there
+is no basis for more. Both clients render it as *"1m 12s so far · usually about 2m 21s (an
+estimate, from the last 5 episodes)"* rather than as time remaining, because subtracting one
+from the other produces a number that goes negative and then sits there.
+
+**`worker_starting` is the sync panel's field, read off the assemble job, and it is what
+keeps production honest in a build's first minute.** Where the worker is one-shot and
+started on demand — production — its heartbeat is *always* stale at the moment an episode
+is created, and the container the API just asked for is 90–165 seconds away; read by the
+heartbeat alone, every build would open on "nothing will build this" over a worker that is
+booting because of that very request. So a queued `assemble` job younger than
+`WORKER_STARTING` in a deployment with `MOTET_DRAIN_TRIGGER` on reads as a worker
+*starting*, mutually exclusive with `waiting_on_worker`, with the sync panel's own sentence
+(motet#137) so the two panels on one screen never disagree about what that is called. The
+assemble job **only**, because it is the one job this API enqueues and nudges for; the
+script and tts jobs are the worker's own, and a young one beside a stale heartbeat is a
+worker that died. The claim expires with the window rather than standing forever, because
+the nudge is fire-and-forget and a refused one leaves no record.
+
+**`waiting_on_worker` asks the step's own queue, not "has any worker anywhere run".** A
+worker is started per queue in the `runner <queue> --poll-seconds N` shape, so an
+`integrate` worker heartbeating every few seconds would otherwise vouch for a `tts` job
+nothing will ever claim. In the `runner all` shape every pass heartbeats every queue, so
+the two readings agree there — which is both deployed environments, and is why this is the
+cheaper half of a distinction that only shows up in the other shape.
+
+**It is the Processing panel's five minutes, and it is false for a running
+job however long it has been running.** A large render outlives the heartbeat's freshness
+window, and accusing a worker that is at that moment paying Cartesia is worse than saying
+nothing — which is the care the episode screen's hand-rolled banner used to take by only
+firing in `pending`, now taken by the API for every step. It replaced that banner *and* the
+"Working… assembly, script, then audio. This page polls." line, which said the same thing
+for all three steps and all four minutes.
+
+**An unfinished episode with no job on any queue is reported as stopped, not as queued.**
+Every stage enqueues the next in the transaction that completes its own, so this is a lost
+row rather than a gap between two stages, and nothing will ever move it — "queued" over an
+empty queue is precisely motet#38's lie.
+
+**A failed build's bar is determinate.** The indeterminate one sweeps, which is what makes
+it read as "something is happening"; drawing it over a build that has stopped says the
+opposite of what happened. `steps_done` is therefore the index of the step that stopped it
+— a render that gave up got two steps in — and only `ready` is three of three.
+
+**Reported for ten minutes after an episode settles, then null.** Shorter than a sync's
+hour, because there is something to *do* with the result the moment it lands; the window is
+for the person who pressed "Make it" and is still watching, so it says "ready · made in
+1m 33s" rather than vanishing, which would read as the screen losing its place. Past it the
+episode's own state and duration are the whole answer, and a shelf of fifty ready episodes
+asks the job queue about none of them (`reports_progress`, before any of the three reads).
+
+**The same picture as the sync panel, and deliberately not shared with it.** On both
+clients this is a second component (`EpisodeProgressPanel`, `EpisodeProgressView`) beside
+the Sources screen's, with its own `.build-*` CSS. They share four of five parts — an
+episode adds the elapsed-and-estimate line — so merging them is tempting and was tried;
+what it costs is a diff reaching into `sources/`, and this shipped alongside a branch that
+owns those files. Thirty lines of duplication against a cross-lane edit and, on the phone,
+a protocol over two Swift types. **A third caller is the moment to merge them**, not
+before. What is *not* duplicated is the reading: both clients get their words from a pure
+`describe…` function, and the web's and the phone's are ports of each other assertion for
+assertion.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** A computed field on an existing
+response, a column on an existing table used the way that table is already used, an index
+that is migration 0005's twin one queue along, and a read of the job table as
+`list_ingestion` already reads it: no new deployable, datastore, queue mechanism, vendor,
+seam, inference stage, model call or resource in the private repo. The one piece that is
+more than a read is the render counter's side connection, and it is `handle_enrich`'s
+existing mechanism rather than a new one — the same `context.database_url`, for the same
+reason, in the handler next door.
+
 ### The episode detail has a player, which reverses a Phase 1 decision
 
 `web/src/screens/EpisodeScreen.tsx`, motet#89. **The owner's go for shipping it came with

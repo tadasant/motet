@@ -794,3 +794,32 @@ details > summary:hover { color: var(--ink); }
 .chain { display: flex; flex-wrap: wrap; gap: .15rem .5rem; margin-top: .25rem; font-size: 11px; font-family: var(--mono); }
 .chain .won { color: var(--teal); font-weight: 600; }
 .chain .lost { color: var(--ink-mute); }
+
+/* Where an episode is between "make it" and a file to play (`EpisodeProgressPanel`).
+   The Sources screen's `.sync-*` picture over a different pipeline, and a second family
+   rather than a shared one for the reason that component gives: merging the two would
+   put this change into `sources/`, which a concurrent branch owns. The extra part is
+   `.build-timing`, the elapsed-and-estimate line an episode has and a sync does not. */
+.build-progress { margin: .85rem 0 0; padding: .7rem .9rem; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); }
+.build-progress p { margin: 0; }
+.build-headline { font-weight: 600; }
+.build-count { margin-top: .45rem !important; font-variant-numeric: tabular-nums; }
+.build-timing { margin-top: .3rem !important; color: var(--ink-soft); font-size: 14px; font-variant-numeric: tabular-nums; }
+.build-detail { margin-top: .3rem !important; color: var(--ink-soft); font-size: 14px; }
+.build-bar { position: relative; height: 6px; margin-top: .55rem; background: var(--rule); border-radius: 6px; overflow: hidden; }
+.build-bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--voices); border-radius: 6px; transition: width .6s ease; }
+/* Its own keyframes rather than `sync-sweep`: borrowing that one would make this bar
+   stop moving if the block above ever renamed it, and silently. */
+.build-bar.indeterminate .build-bar-fill { width: 30%; animation: build-sweep 1.6s ease-in-out infinite; }
+@keyframes build-sweep { from { left: -30%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .build-bar.indeterminate .build-bar-fill { animation: none; left: 0; width: 100%; opacity: .35; }
+  .build-bar-fill { transition: none; }
+}
+.build-stalled .build-bar-fill { background: var(--ink-soft); }
+.build-stalled .build-bar.indeterminate .build-bar-fill { animation: none; left: 0; width: 100%; opacity: .25; }
+.build-stalled.build-progress { border-color: var(--ink); }
+.build-error.build-progress { border-color: var(--vermilion); }
+.build-error .build-headline, .build-error .build-detail { color: var(--error-text); }
+.build-error .build-bar-fill { background: var(--vermilion); }
+.build-done .build-headline { color: var(--ink); }

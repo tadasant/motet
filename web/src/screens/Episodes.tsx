@@ -16,8 +16,9 @@
 
 import { useState } from 'react'
 
-import { ApiError, type Episode, type ProcessingStatus } from '../api/client'
+import { ApiError, type Episode } from '../api/client'
 import { EpisodeScreen, IN_PROGRESS } from './EpisodeScreen'
+import { describeRowProgress } from './episodeProgress'
 import { formatClock, listenState, markEpisodeListened } from './listening'
 
 /** Listened rows are folded away once there are more than this many. */
@@ -50,7 +51,6 @@ export function Episodes({
   openId,
   loaded,
   unavailable,
-  processing,
   onOpen,
   onBack,
   onPositionReported,
@@ -64,7 +64,6 @@ export function Episodes({
   loaded: boolean
   /** Whether the last attempt to ask failed. */
   unavailable: boolean
-  processing: ProcessingStatus | null
   onOpen: (episode: Episode) => void
   onBack: () => void
   onPositionReported: (episodeId: string, listenedThroughMs: number) => void
@@ -96,7 +95,6 @@ export function Episodes({
         {unavailable && <StaleNote />}
         <EpisodeScreen
           episode={open}
-          processing={processing}
           autoPlay={playId === open.id}
           onPositionReported={onPositionReported}
           onBacklogChanged={onChanged}
@@ -225,8 +223,14 @@ function EpisodeRow({
   marking?: boolean
 }) {
   const listen = listenState(episode)
-  const working = IN_PROGRESS.has(episode.state)
-  const failed = episode.state === 'failed'
+  const building = episode.build_progress
+  // An episode can be `scripting` and have no job on any queue — a row that was lost, which
+  // nothing will ever move (`build_progress.stage === 'failed'`). The state word still says
+  // `scripting`, so without this the row would wear a Working… badge over a line that says
+  // it stopped. The server's reading wins; it is the one that looked at the queue.
+  const stopped = building?.stage === 'failed'
+  const working = IN_PROGRESS.has(episode.state) && !stopped
+  const failed = episode.state === 'failed' || stopped
   const ready = episode.state === 'ready'
   const stories = episode.segments.length
   const play = listen === 'in_progress' ? 'Resume' : 'Play'
@@ -262,7 +266,13 @@ function EpisodeRow({
           {formatDate(episode.published_at ?? episode.created_at)}
           {ready && ` · ${formatClock(episode.duration_ms)}`}
           {` · ${stories} ${stories === 1 ? 'story' : 'stories'}`}
-          {working && ` · ${episode.state}`}
+          {/* The bare state word — `pending`, `scripting` — used to be the whole of what a
+              row said about a build, which is the complaint this is fixing. What it says
+              now is the step and the clock, from the server. A row is a glance, so it is
+              one line: the bar and the counts live on the detail, one click in. */}
+          {working && building && ` · ${describeRowProgress(building)}`}
+          {working && !building && ` · ${episode.state}`}
+          {stopped && ' · stopped'}
         </p>
         {listen === 'in_progress' && (
           <div className="episode-progress">
@@ -281,7 +291,17 @@ function EpisodeRow({
             </span>
           </div>
         )}
-        {failed && episode.last_error && <p className="hint episode-error">{episode.last_error}</p>}
+        {/* A build nothing will run does not read as one that is merely slow. The row is
+            where somebody looks first, so the stall is said here rather than only on the
+            detail — it is the one in-flight state that needs a person. */}
+        {working && building?.waiting_on_worker && (
+          <p className="stalled episode-error" role="status">
+            Not moving: no worker has run in the last five minutes.
+          </p>
+        )}
+        {failed && (episode.last_error ?? building?.error) && (
+          <p className="hint episode-error">{episode.last_error ?? building?.error}</p>
+        )}
       </div>
       <div className="episode-actions" onClick={(event) => event.stopPropagation()}>
         {ready && (

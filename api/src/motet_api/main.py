@@ -143,6 +143,12 @@ from .deps import (
     waitlist_alert,
 )
 from .drain import ENABLED_ENV, DrainNudge, DrainReason, DrainTrigger
+from .episode_progress import (
+    BUILDING_STATE_NAMES,
+    ESTIMATE_SAMPLE_SIZE,
+    build_progress,
+    reports_progress,
+)
 from .feed import (
     ARTWORK_MEDIA_TYPE,
     ARTWORK_PATH,
@@ -196,6 +202,7 @@ from .schemas import (
     EnrichStepResponse,
     EnrichTranscriptEntryResponse,
     EnrichTranscriptResponse,
+    EpisodeBuildProgress,
     EpisodeResponse,
     FeedInfoResponse,
     HealthResponse,
@@ -2041,13 +2048,15 @@ def create_episode(
     nudge.arm(DrainReason.EPISODE)
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     assert episode is not None
-    return _episode(conn, episode)
+    return _episode(conn, episode, progress=_one_build_progress(conn, user_id, episode))
 
 
 @app.get("/v1/episodes", response_model=list[EpisodeResponse], tags=["episodes"])
 def list_episodes(conn: Conn, user_id: User) -> list[EpisodeResponse]:
     """Every episode, newest first, whatever state it is in."""
-    return [_episode(conn, episode) for episode in repo.list_episodes(conn, user_id)]
+    episodes = repo.list_episodes(conn, user_id)
+    progress = _build_progress(conn, user_id, episodes)
+    return [_episode(conn, episode, progress=progress.get(episode.id)) for episode in episodes]
 
 
 @app.get("/v1/episodes/{episode_id}", response_model=EpisodeResponse, tags=["episodes"])
@@ -2056,7 +2065,7 @@ def get_episode(conn: Conn, user_id: User, episode_id: Annotated[str, Path()]) -
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     if episode is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.")
-    return _episode(conn, episode)
+    return _episode(conn, episode, progress=_one_build_progress(conn, user_id, episode))
 
 
 @app.post(
@@ -2454,8 +2463,17 @@ def start_voice_session(
     )
 
 
-def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeResponse:
+def _episode(
+    conn: psycopg.Connection[Any],
+    episode: StoredEpisode,
+    *,
+    progress: EpisodeBuildProgress | None = None,
+) -> EpisodeResponse:
     """Build the episode view, resolving every claim's span to the text it cites.
+
+    ``progress`` is passed in rather than resolved here, because the list route asks for
+    every episode's in one statement (:func:`_build_progress`) and the voice route, which
+    needs an episode view only to compose a session config, should ask for none at all.
 
     The resolution happens here rather than in the client because it is the whole point of
     the screen: a claim shown next to the sentence it came from is the product's argument
@@ -2515,8 +2533,58 @@ def _episode(conn: psycopg.Connection[Any], episode: StoredEpisode) -> EpisodeRe
         published_at=episode.published_at,
         listened_through_ms=episode.listened_through_ms,
         keep_in_backlog=episode.keep_in_backlog,
+        build_progress=progress,
         segments=segments,
     )
+
+
+def _build_progress(
+    conn: psycopg.Connection[Any], user_id: str, episodes: Sequence[StoredEpisode]
+) -> dict[str, EpisodeBuildProgress | None]:
+    """Each episode's build progress, from one job-queue read, one heartbeat and one median.
+
+    Three statements for a whole shelf rather than three per episode, which is what makes
+    this affordable on a route the SPA polls every three seconds while anything is being
+    made. An episode that settled longer ago than ``SETTLED_VISIBLE`` is skipped before any
+    of them: a shelf of fifty ready episodes asks the job queue about none of them.
+    """
+    now, beats = repo.worker_heartbeats(conn)
+    watched = [episode for episode in episodes if reports_progress(episode, now=now)]
+    if not watched:
+        return {}
+    builds = repo.episode_builds(conn, [episode.id for episode in watched])
+    # Only where something is still building: an estimate is reported for nothing else, and
+    # a shelf whose newest episode went ready two minutes ago is still inside the window.
+    # Read off the freshly-read state, so an episode that finished since the list read does
+    # not buy the whole request a query for a number nothing will use.
+    building = any(build.state in BUILDING_STATE_NAMES for build in builds.values())
+    samples = (
+        repo.recent_build_times_ms(conn, user_id, limit=ESTIMATE_SAMPLE_SIZE) if building else []
+    )
+    # Per queue, because a worker is started per queue in one of the two supported shapes
+    # and "some worker somewhere ran" does not answer "will anything claim *this* job".
+    heartbeats = {beat.queue: beat.last_seen_at for beat in beats}
+    # Whether an enqueue starts a worker here, which is what tells a worker that is
+    # *booting* apart from one that is never coming — the same flag read `_sync_progress`
+    # makes, for the same reason (motet#137). A process-level singleton, so a flag read.
+    enabled = drain_trigger().enabled
+    return {
+        episode.id: build_progress(
+            episode,
+            builds.get(episode.id),
+            now=now,
+            heartbeats=heartbeats,
+            samples=samples,
+            drain_trigger_enabled=enabled,
+        )
+        for episode in watched
+    }
+
+
+def _one_build_progress(
+    conn: psycopg.Connection[Any], user_id: str, episode: StoredEpisode
+) -> EpisodeBuildProgress | None:
+    return _build_progress(conn, user_id, [episode]).get(episode.id)
 
 
 # --- Phase 2: connected sources ------------------------------------------------------
@@ -3390,7 +3458,7 @@ def create_smart_episode(
     nudge.arm(DrainReason.SMART_EPISODE)
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
     assert episode is not None
-    return _episode(conn, episode)
+    return _episode(conn, episode, progress=_one_build_progress(conn, user_id, episode))
 
 
 # --- Phase 2: read state from the audio side -----------------------------------------

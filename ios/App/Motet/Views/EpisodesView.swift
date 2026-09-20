@@ -3,8 +3,18 @@ import SwiftUI
 
 /// The listening surface: what there is to hear, and what is already on the phone.
 struct EpisodesView: View {
+    /// How often to re-read while an episode is being built, and while one is stuck.
+    /// A build nothing will run moves when a worker appears, which is not a two-second
+    /// question — so the watch slows rather than polling a stall forever (motet#136's
+    /// rule, one pipeline along).
+    private static let buildPoll: Duration = .seconds(2)
+    private static let stalledPoll: Duration = .seconds(10)
+
     @EnvironmentObject private var model: AppModel
     @State private var isCreating = false
+
+    /// Whether any episode is still being made, which is what the watch runs on.
+    private var building: Bool { model.episodes.contains(where: \.isBuilding) }
 
     var body: some View {
         NavigationStack {
@@ -56,6 +66,20 @@ struct EpisodesView: View {
                 }
             }
             .sheet(isPresented: $isCreating) { NewEpisodeView() }
+            .task(id: building) { await watchBuilds() }
+        }
+    }
+
+    /// Re-read for as long as the server says an episode is being built — not for a fixed
+    /// window. A first episode off a full backlog is minutes of work, and the progress is
+    /// the server's, so it can be watched to the end. Before this the phone showed
+    /// "Queued" until somebody pulled to refresh.
+    private func watchBuilds() async {
+        while !Task.isCancelled, building {
+            let moving = model.episodes.contains { EpisodeProgress.moving($0.build) }
+            try? await Task.sleep(for: moving ? Self.buildPoll : Self.stalledPoll)
+            guard !Task.isCancelled else { return }
+            await model.refresh()
         }
     }
 }
@@ -96,7 +120,15 @@ struct EpisodeRow: View {
                 HStack(spacing: 6) {
                     Text(Format.duration(episode.durationMs))
                     if !episode.episodeState.isPlayable {
-                        Text("· \(episode.episodeState.displayName)")
+                        // The bare state word — "Queued", "Recording" — was the whole of
+                        // what a row said about a build, which is the complaint this is
+                        // fixing. What it says now is the step and the clock, from the
+                        // server; the state word is the fallback for an API without one.
+                        if let build = episode.build {
+                            Text("· \(EpisodeProgress.describeRow(build))")
+                        } else {
+                            Text("· \(episode.episodeState.displayName)")
+                        }
                     }
                     if isDownloaded {
                         Label("Downloaded", systemImage: "arrow.down.circle.fill")
@@ -142,7 +174,15 @@ struct EpisodeRow: View {
                     .foregroundStyle(Theme.inkSoft)
                 }
 
-                if let error = episode.lastError, episode.episodeState == .failed {
+                // The full reading — the bar, the counts, the estimate and the remedy —
+                // under the row it belongs to. The phone has no episode detail screen, so
+                // there is nowhere else for it to be; a ready episode does not get one,
+                // because the duration beside the title is already the whole answer.
+                if let build = episode.build,
+                   EpisodeProgress.inFlight(build) || build.stage == "failed" {
+                    EpisodeProgressView(description: EpisodeProgress.describe(build))
+                } else if let error = episode.lastError, episode.episodeState == .failed {
+                    // An API older than `build_progress`: the failure still has to read.
                     Text(error)
                         .font(Theme.body(12, relativeTo: .caption2))
                         .foregroundStyle(Theme.errorText)

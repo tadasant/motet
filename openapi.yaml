@@ -1136,6 +1136,152 @@ components:
       - entries
       title: EnrichTranscriptResponse
       type: object
+    EpisodeBuildProgress:
+      description: "Where an episode is between \"make it\" and a file to play.\n\nAn episode is created\
+        \ in ``pending`` and built on three queues \u2014 ``assemble``,\n``script``, ``tts`` \u2014 so\
+        \ it is a minute or several of work a client can otherwise only\nshow as the bare word in ``state``.\
+        \ This is that work joined to the job queue, so a\nscreen can say which step it is on, whether\
+        \ anything has picked it up, how far through\nthe render it is, and roughly how much longer, instead\
+        \ of \"queued\".\n\n**Two fields, not one.** ``step`` is which work; ``stage`` is what is happening\
+        \ to it.\n``SourceSyncProgress`` folds both into one enum because a sync has a single kind of\n\
+        work; an episode has three, and a nine-member enum of half-verbs would be worse than\ntwo small\
+        \ vocabularies. Branch on ``stage`` for the tone and read ``step`` for the noun.\n\n``step``:\n\
+        \n- ``assemble`` \u2014 choosing which unread stories fit inside the duration cap.\n- ``script``\
+        \ \u2014 writing the briefing, one model call over every chosen story.\n- ``tts`` \u2014 synthesizing\
+        \ each segment's audio, joining and uploading it.\n- ``null`` \u2014 no step is outstanding, which\
+        \ is ``stage: ready``.\n\n``stage``:\n\n- ``queued`` \u2014 the step's job is waiting for a worker\
+        \ to claim it.\n- ``running`` \u2014 a worker has it right now.\n- ``retrying`` \u2014 the step\
+        \ failed and is waiting to try again; ``error`` says why and\n  ``next_attempt_at`` says when.\
+        \ Not the same as ``failed``: the episode carries no\n  error of its own until the attempts run\
+        \ out.\n- ``ready`` \u2014 the audio exists and the episode is playable.\n- ``failed`` \u2014\
+        \ a step gave up; ``error`` says why.\n\nReported for ten minutes after an episode settles, then\
+        \ null \u2014 an episode that has been\nready since yesterday is described by its own state and\
+        \ duration."
+      properties:
+        attempt:
+          description: Which attempt the outstanding job is on. Zero before it has been claimed once,
+            and zero for an episode that is not building.
+          title: Attempt
+          type: integer
+        claims:
+          description: Claims the script wrote. Zero until scripting has finished.
+          title: Claims
+          type: integer
+        elapsed_ms:
+          description: How long this episode has been building, computed on the server so no client has
+            to reconcile its clock with ours. Stops at publication for a ready one.
+          title: Elapsed Ms
+          type: integer
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Why the build failed (``failed``), or what the last attempt said (``retrying``).
+            Null otherwise.
+          title: Error
+        estimate_ms:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: "A rough total, the median of the caller's own last few finished episodes. **An\
+            \ estimate, and clients must label it as one.** Null when fewer than three have finished,\
+            \ because there is then no sound basis for a number \u2014 show the elapsed time and the step\
+            \ instead of inventing one. Null for an episode that is no longer building."
+          title: Estimate Ms
+        estimate_samples:
+          description: 'How many finished episodes were available to compute ``estimate_ms`` from, so
+            a client can say what it is made of rather than presenting it as a promise. It is how many
+            were *found*, not how many were used: below the three-sample floor ``estimate_ms`` is null
+            and this still reports the one or two there were.'
+          title: Estimate Samples
+          type: integer
+        max_attempts:
+          description: 'How many attempts a step gets before it gives up. Reported rather than restated:
+            it is the queue''s own ``DEFAULT_MAX_ATTEMPTS``.'
+          title: Max Attempts
+          type: integer
+        news_items:
+          description: Stories in the episode. Zero until assembly has chosen them, so it is real from
+            the script step onward.
+          title: News Items
+          type: integer
+        next_attempt_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When a retrying step tries again. Null unless ``stage`` is ``retrying``.
+          title: Next Attempt At
+        segments_rendered:
+          description: Segments whose audio has been synthesized, out of ``news_items``. Only counted
+            while ``step`` is ``tts``; zero otherwise, because outside the render it would be a count
+            of work that is not happening.
+          title: Segments Rendered
+          type: integer
+        stage:
+          description: What is happening to that step. The one field to branch on.
+          enum:
+          - queued
+          - running
+          - retrying
+          - ready
+          - failed
+          title: Stage
+          type: string
+        step:
+          anyOf:
+          - enum:
+            - assemble
+            - script
+            - tts
+            type: string
+          - type: 'null'
+          description: Which pipeline step is outstanding. Null once the episode is ready.
+          title: Step
+        steps_done:
+          description: "How many of the three steps are behind it \u2014 0 while assembling, 3 once ready.\
+            \ A coarse bar that is always available, unlike the counts below."
+          title: Steps Done
+          type: integer
+        steps_total:
+          description: How many steps a build has. Three today.
+          title: Steps Total
+          type: integer
+        waiting_on_worker:
+          description: "True when a step is waiting, no worker has run its queue in the last five minutes,\
+            \ and none is being started \u2014 so nothing will move until one runs. False for a step a\
+            \ worker is running, however long it has been running for: a large render outlives the freshness\
+            \ window, and accusing the worker paying Cartesia is worse than saying nothing. Also false\
+            \ while a worker is still booting: that is ``worker_starting``."
+          title: Waiting On Worker
+          type: boolean
+        worker_starting:
+          default: false
+          description: "True when a worker was asked for and may still be starting: this deployment runs\
+            \ the worker on demand, and the container takes a minute or two to appear. Only ever true\
+            \ on the assemble step, which is the one job the API itself enqueues and nudges for. Mutually\
+            \ exclusive with ``waiting_on_worker`` \u2014 say 'a worker is starting' rather than 'nothing\
+            \ will run this'. Optional so an older client decodes."
+          title: Worker Starting
+          type: boolean
+      required:
+      - step
+      - stage
+      - steps_done
+      - steps_total
+      - news_items
+      - claims
+      - segments_rendered
+      - elapsed_ms
+      - estimate_ms
+      - estimate_samples
+      - attempt
+      - max_attempts
+      - next_attempt_at
+      - error
+      - waiting_on_worker
+      title: EpisodeBuildProgress
+      type: object
     EpisodeResponse:
       properties:
         audio_bytes:
@@ -1148,6 +1294,13 @@ components:
           - type: string
           - type: 'null'
           title: Audio Media Type
+        build_progress:
+          anyOf:
+          - $ref: '#/components/schemas/EpisodeBuildProgress'
+          - type: 'null'
+          description: Where this episode is between creation and playable, for the ten minutes after
+            it settles as well as while it builds. Null for an episode that finished longer ago than that,
+            and absent on an API older than this field.
         created_at:
           format: date-time
           title: Created At

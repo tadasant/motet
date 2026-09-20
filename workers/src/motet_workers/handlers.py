@@ -15,8 +15,9 @@ dedup call must never re-synthesize twenty minutes of audio that was already pai
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -64,6 +65,15 @@ _EXTENSIONS = {MPEG_MEDIA_TYPE: "mp3", WAV_MEDIA_TYPE: "wav"}
 #: knows the length until the script exists, and this only has to be close enough that
 #: the trim downstream is a backstop rather than the normal path.
 SCRIPT_EXPANSION = 3
+
+#: How long the render-progress reporter waits to connect, and for its one statement.
+#:
+#: Both are small on purpose: this connection exists to move a number on a screen, and the
+#: render it runs inside is minutes of billed vendor calls. Either limit expiring turns the
+#: reporter off for the rest of the render and costs the count; neither can cost the audio.
+#: See :func:`_render_reporter`.
+REPORT_CONNECT_TIMEOUT = 5
+REPORT_STATEMENT_TIMEOUT = 2
 
 
 class HandlerError(RuntimeError):
@@ -593,11 +603,20 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
     # unchanged, so counting here counts what is billed. Without it an episode's audio
     # cost was recoverable only from a vendor dashboard, by timestamp.
     characters = 0
-    for segment in episode.segments:
-        if not segment.text.strip():
-            raise PermanentFailure(f"segment {segment.id} has no text to speak")
-        characters += len(segment.text)
-        rendered.append(context.stages.speech_synthesizer.synthesize(segment.text))
+    with _render_reporter(context, episode_id) as report:
+        # Zero first, so the count is *this* render's. A reclaimed job whose predecessor
+        # got six segments in must not open on "6 of 9 recorded" and then go backwards.
+        # Two *live* claims of one job is the case this does not cover — the second one's
+        # zero rewinds the first's count — and it is not worth covering: that is the
+        # duplicated render `MAX_LEASE_EXTENSION_SECONDS` accepts, where a rewound progress
+        # bar is the least of what is going wrong.
+        report(0)
+        for index, segment in enumerate(episode.segments):
+            if not segment.text.strip():
+                raise PermanentFailure(f"segment {segment.id} has no text to speak")
+            characters += len(segment.text)
+            rendered.append(context.stages.speech_synthesizer.synthesize(segment.text))
+            report(index + 1)
     record_tts_characters(characters)
 
     audio = join_audio(rendered)
@@ -652,6 +671,83 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
         characters,
         key,
     )
+
+
+@contextlib.contextmanager
+def _render_reporter(context: Context, episode_id: str) -> Iterator[Callable[[int], None]]:
+    """A "``n`` segments are recorded" writer for one render, or a no-op.
+
+    **A side connection, and that is the whole reason this exists rather than being one
+    more statement in the handler.** ``handle_tts`` holds its transaction for the entire
+    render — every Cartesia call, the upload, the durations — which is minutes, and the
+    longest single thing the pipeline does. A count written on ``context.conn`` would
+    become visible the instant it stopped being worth anything. The precedent is
+    ``enrich``'s ``enrich_status = 'running'``, written the same way for the same reason
+    (motet#102).
+
+    **It never fails the render, and it never blocks it either** — two promises, and the
+    second is the one that takes work. Everything it does is swallowed and logged: a
+    permission the worker's role does not have, a column an older database does not have
+    yet. A render is the most expensive thing Motet does and a number on a screen is the
+    cheapest, so the order of those two is not a judgement call. A first failure turns the
+    reporter off for the rest of the render rather than retrying once per segment against
+    something that is not going to start working.
+
+    Not blocking it is :data:`REPORT_CONNECT_TIMEOUT` and
+    :data:`REPORT_STATEMENT_TIMEOUT`, and each closes a different hang. The *connect* is
+    synchronous inside the render — the first one happens before any Cartesia call — so
+    against an unreachable Postgres it would wait out the OS TCP timeout before the
+    swallow could fire, which is why ``loop._hold_lease`` passes one on the connection
+    next door for the same job. The *statement* takes a row lock on ``episodes``, and the
+    one thing that reliably holds that lock is ``publish_episode`` in a duplicate render —
+    which is precisely the outcome ``MAX_LEASE_EXTENSION_SECONDS`` accepts rather than
+    prevents. Both are ``repo.connect``'s, so the connection also gets the row factory the
+    rest of that module assumes rather than psycopg's default.
+
+    With no ``database_url`` on the context — which is every test that builds one by hand,
+    and a ``drain()`` called without one — it is a no-op that says so once at debug. The URL
+    comes off the context rather than out of the environment, for ``enrich``'s reason: a
+    drain pointed at an explicit database must not write its progress to a different one.
+    """
+    database_url = context.database_url
+    if not database_url:
+        logger.debug("no database URL on the context; not reporting render progress")
+        yield lambda _count: None
+        return
+
+    #: The connection, opened by the first report rather than here, and the switch that
+    #: turns the whole thing off after one failure. The laziness buys nothing today —
+    #: ``handle_tts`` calls ``report(0)`` as the first statement inside the block, so a
+    #: render always opens one — and it is kept because it is what makes the no-op arm
+    #: above a genuine no-op and a future caller that reports only on real progress
+    #: free. It is not a claim that a render costs no connection.
+    open_conn: psycopg.Connection[Any] | None = None
+    live = True
+
+    def report(count: int) -> None:
+        nonlocal open_conn, live
+        if not live:
+            return
+        try:
+            if open_conn is None:
+                open_conn = repo.connect(database_url, connect_timeout=REPORT_CONNECT_TIMEOUT)
+                open_conn.autocommit = True
+                open_conn.execute(f"SET statement_timeout = {int(REPORT_STATEMENT_TIMEOUT * 1000)}")
+            repo.record_rendered_segments(open_conn, episode_id, count)
+        except Exception:
+            live = False
+            logger.warning(
+                "could not report render progress for episode %s; the render continues",
+                episode_id,
+                exc_info=True,
+            )
+
+    try:
+        yield report
+    finally:
+        if open_conn is not None:
+            with contextlib.suppress(Exception):
+                open_conn.close()
 
 
 def apportion_claim_timings(

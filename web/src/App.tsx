@@ -57,6 +57,7 @@ import { Backlog } from './screens/Backlog'
 import { Credentials } from './screens/Credentials'
 import { ConnectorCallback } from './screens/credentials/ConnectorCallback'
 import { IN_PROGRESS } from './screens/EpisodeScreen'
+import { buildInFlight, buildMoving } from './screens/episodeProgress'
 import { Episodes, newestFirst } from './screens/Episodes'
 import { McpAuthorizeCallback } from './screens/McpAuthorizeCallback'
 import { AppConsentHandoff } from './screens/AppConsentHandoff'
@@ -74,6 +75,8 @@ import { usePath } from './shell/useLocation'
 // a paste which integrates in seconds is seen to integrate, and it only runs while
 // something is pending.
 const POLL_MS = 3_000
+/** ...and when the only thing outstanding is waiting on a worker that is not running. */
+const STALLED_POLL_MS = 10_000
 
 export default function App() {
   // The path is state, and the section is a function of it. Read in an initializer like
@@ -259,12 +262,17 @@ export default function App() {
   // own the moment nothing is pending, so an idle tab makes no requests.
   // An episode mid-pipeline counts too — any of them, not only an open one. The refresh is
   // what moves a shelf row from Working… to ready and what moves the open detail along its
-  // stages, and it fetches `processing`, without which the detail's "is anything draining
-  // the queues" banner would be computed from a heartbeat frozen at mount — going stale on
-  // its own after a few minutes and accusing a worker that is running fine.
+  // steps: `build_progress` is computed per request against the server's own clock and
+  // heartbeat, so what the episode screen shows is only as fresh as the last refresh —
+  // which is the same reason the ingestion list is polled rather than watched.
   const waiting =
     ingestion.some((item) => item.state === 'pending') ||
-    episodes.some((entry) => IN_PROGRESS.has(entry.state))
+    episodes.some((entry) =>
+      // The server's reading where there is one: an episode whose state is `scripting` but
+      // whose job row is gone is not coming, and polling it every three seconds forever is
+      // the tab making requests about something that will never change.
+      entry.build_progress ? buildInFlight(entry.build_progress) : IN_PROGRESS.has(entry.state),
+    )
   // The badge counts what needs you (motet#98): held items, which nothing will
   // move until somebody picks them, and failed ones, which nothing will move at all. An
   // item a worker is still carrying is not counted — it needs nobody, and the Processing
@@ -276,11 +284,23 @@ export default function App() {
   const failedCount = ingestion.filter((item) => item.state === 'failed').length
   const anyFailed = failedCount > 0
   const needsYou = heldCount + failedCount
+  // Slowly when the only thing outstanding is a build nothing will run: it moves when a
+  // worker appears, which is not a three-second question, and the phone already backs off
+  // the same way. Fast whenever an ingestion item is pending or any build is being worked
+  // on — those resolve in seconds and have to resolve *on screen*.
+  const moving =
+    ingestion.some((item) => item.state === 'pending') ||
+    episodes.some((entry) =>
+      // Same fallback as `waiting` above, and for the same reason: with no reading from
+      // the server — an API older than `build_progress` — the honest default is the
+      // behaviour that predates it, which is to keep asking quickly.
+      entry.build_progress ? buildMoving(entry.build_progress) : IN_PROGRESS.has(entry.state),
+    )
   useEffect(() => {
     if (!waiting || callback || !(token || unlocked)) return
-    const timer = window.setInterval(refresh, POLL_MS)
+    const timer = window.setInterval(refresh, moving ? POLL_MS : STALLED_POLL_MS)
     return () => window.clearInterval(timer)
-  }, [waiting, callback, refresh, token, unlocked])
+  }, [waiting, moving, callback, refresh, token, unlocked])
 
   // The landing rule, applied the first time the Episodes section is shown with the list
   // in hand (motet#89, question 4). The shelf is the landing — except when an episode is
@@ -556,7 +576,6 @@ export default function App() {
           openId={openEpisodeId}
           loaded={episodesLoaded}
           unavailable={episodesUnavailable}
-          processing={processing}
           onOpen={(next) => setOpenEpisodeId(next.id)}
           onBack={() => setOpenEpisodeId(null)}
           onPositionReported={positionReported}
