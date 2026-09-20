@@ -34,7 +34,7 @@ from motet_api.episode_progress import (
 from motet_db import EpisodeKind, EpisodeState
 from motet_db.models import StoredClaim, StoredEpisode, StoredSegment
 from motet_db.repo import EpisodeBuild, EpisodeJob
-from motet_workers import DEFAULT_MAX_ATTEMPTS, Queue, drain
+from motet_workers import DEFAULT_MAX_ATTEMPTS, Queue, drain, handlers
 from motet_workers.queues import PIPELINE
 from psycopg.rows import dict_row
 
@@ -367,6 +367,19 @@ def test_a_failed_episode_whose_job_row_was_pruned_still_reports_its_error() -> 
     assert shown is not None
     assert shown.step is None
     assert (shown.stage, shown.error) == ("failed", "no news items match this rule")
+    # **None of three, not three of three.** The step is unknowable — `episodes` records
+    # that a stage gave up and never which, and the job row that would have said is gone
+    # — and reading "no step" as "every step" drew a *full* bar under "This episode could
+    # not be made", which is the one thing the determinate bar exists to avoid saying.
+    assert shown.steps_done == 0
+
+
+def test_a_build_that_stopped_with_no_step_to_name_draws_an_empty_bar_not_a_full_one() -> None:
+    """The same rule from the client's side, since the bar is what a person actually sees."""
+    stored = episode(EpisodeState.SCRIPTING, segments=4)
+    shown = progress(stored, None)
+    assert shown is not None
+    assert (shown.stage, shown.step, shown.steps_done) == ("failed", "script", 1)
 
 
 def test_an_unfinished_episode_with_no_job_anywhere_is_reported_stopped_not_queued() -> None:
@@ -388,11 +401,22 @@ def test_a_stale_running_row_on_a_finished_stage_does_not_report_a_step_backward
     that "running" describes the job the step names.
     """
     stored = episode(EpisodeState.RENDERING, segments=6, rendered=2)
-    real = job("tts")
-    # Both rows present: the query's ORDER BY hands back the one on the step's own queue.
-    shown = progress(stored, real)
+    # What `episode_builds` hands back once its ORDER BY has chosen — the tts row, not the
+    # stale script one. That the *query* chooses it is a claim about SQL and is pinned
+    # against a real Postgres in `test_the_query_prefers_the_job_on_the_steps_own_queue`;
+    # this is the reading on top of that answer.
+    shown = progress(stored, job("tts"))
     assert shown is not None
     assert (shown.step, shown.stage) == ("tts", "queued")
+    # And if the stale row were somehow all there was, the step *still* comes off the
+    # episode, which has moved on — so the reading never reports a build going backwards
+    # to `script`. The stage would read `running` off that row, which is why choosing
+    # between the two rows is the query's job rather than this function's: both rows do
+    # exist in the case that produces a stale one, because the work the dead worker
+    # committed is what enqueued the tts job.
+    stale_only = progress(stored, job("script", "running"))
+    assert stale_only is not None
+    assert stale_only.step == "tts"
 
 
 def test_a_long_render_is_never_accused_of_having_no_worker() -> None:
@@ -548,6 +572,54 @@ def test_a_worker_reports_its_render_segment_by_segment(
     assert rendered is not None and rendered["rendered_segments"] == len(seen)
 
 
+def test_a_reporter_that_cannot_write_never_fails_the_render_and_stops_trying(
+    api: TestClient,
+    db: psycopg.Connection[Any],
+    _migrated: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The side connection's two promises, and neither was pinned by anything.
+
+    A render is minutes of billed Cartesia calls and the count is a number on a screen, so
+    the order of those two is not a judgement call: every failure of the reporter is
+    swallowed and the render finishes. And a *first* failure turns the reporter off rather
+    than being retried once per segment, because whatever refused the first write — a role
+    without ``UPDATE``, a column an older database has not got, a lock timeout — is not
+    going to start working inside the same render.
+
+    Deleting either the ``except`` or the ``live = False`` in ``_render_reporter`` left
+    every other test green, which is why this one is here: the behaviour it protects is
+    only visible when something is already broken.
+    """
+    calls: list[int] = []
+
+    def refuse(_conn: Any, _episode_id: str, count: int) -> None:
+        calls.append(count)
+        raise psycopg.OperationalError("the worker role may not update episodes")
+
+    monkeypatch.setattr(handlers.repo, "record_rendered_segments", refuse)
+
+    for index, text in enumerate(
+        ("First story, about one thing.", "Second story, about a different thing.")
+    ):
+        api.post("/v1/sources/paste", json={"title": f"Story {index}", "text": text}, headers=AUTH)
+    drain(Queue.INTEGRATE, _migrated)
+    created = api.post(
+        "/v1/episodes", json={"title": "Episode", "max_duration_ms": 1_200_000}, headers=AUTH
+    ).json()
+    drain(Queue.ASSEMBLE, _migrated)
+    drain(Queue.SCRIPT, _migrated)
+    drain(Queue.TTS, _migrated)
+
+    # The audio was made and published, which is the promise that matters.
+    assert api.get(f"/v1/episodes/{created['id']}", headers=AUTH).json()["state"] == "ready"
+    # And the reporter asked exactly once — the reset to zero — rather than once per
+    # segment against something that was never going to answer.
+    assert calls == [0]
+    row = db.execute("SELECT rendered_segments FROM episodes").fetchone()
+    assert row is not None and row["rendered_segments"] == 0
+
+
 def test_a_queued_episode_says_so_when_no_worker_has_run_in_five_minutes(
     api: TestClient, db: psycopg.Connection[Any], _migrated: str
 ) -> None:
@@ -592,15 +664,114 @@ def test_the_three_spellings_of_the_pipeline_queues_agree() -> None:
     assert f"queue IN ({', '.join(repr(q) for q in EPISODE_QUEUES)})" in migration
 
 
+def test_the_query_prefers_the_job_on_the_steps_own_queue(
+    db: psycopg.Connection[Any],
+) -> None:
+    """The LATERAL's ``ORDER BY``, against a real Postgres and two real rows.
+
+    This is the ordering the whole query is shaped around, and it is not a claim a pure
+    function can make: a worker that died between committing its work and completing its
+    job leaves a stale ``running`` row on the stage it *finished*, beside the ``ready``
+    row of the stage its own commit enqueued. Both rows exist at once. Taking the stale
+    one's stage would announce "a worker is running this" over a job nothing has claimed
+    — motet#38's lie, in exactly the case ``waiting_on_worker`` exists to catch.
+    """
+    from motet_db import repo
+    from motet_workers import jobs
+
+    episode_id = repo.create_episode(
+        db, user_id="motet-owner", title="two rows", max_duration_ms=600_000
+    )
+    repo.set_episode_state(db, episode_id, EpisodeState.RENDERING)
+    # The stale one first, and claimed, so it is both older *and* `running` — every key
+    # ahead of `id DESC` would pick it if the queue key were not there.
+    jobs.enqueue(db, Queue.SCRIPT, {"episode_id": episode_id})
+    assert jobs.claim(db, Queue.SCRIPT) is not None
+    jobs.enqueue(db, Queue.TTS, {"episode_id": episode_id})
+    db.commit()
+
+    build = repo.episode_builds(db, [episode_id])[episode_id]
+    assert build.job is not None
+    assert (build.job.queue, build.job.state) == ("tts", "ready")
+
+    # And a `failed` row loses to a live one on the same queue, so a step that is being
+    # retried reads as retrying rather than as the last attempt that gave up.
+    db.execute("UPDATE jobs SET state = 'failed' WHERE queue = 'tts'")
+    jobs.enqueue(db, Queue.TTS, {"episode_id": episode_id})
+    db.commit()
+    again = repo.episode_builds(db, [episode_id])[episode_id]
+    assert again.job is not None
+    assert (again.job.queue, again.job.state) == ("tts", "ready")
+
+
 def test_the_episode_job_read_is_answered_by_the_partial_index(
     db: psycopg.Connection[Any],
 ) -> None:
-    """Polled every three seconds while anything is being made; a scan here is motet#49."""
-    plan = "\n".join(
-        row["QUERY PLAN"]
-        for row in db.execute(
-            "EXPLAIN SELECT 1 FROM jobs WHERE queue IN ('assemble', 'script', 'tts') "
-            "AND state <> 'done' AND payload ->> 'episode_id' = 'x'"
-        ).fetchall()
+    """Polled every three seconds while anything is being made; a scan here is motet#49.
+
+    **Three things about how this is written are the test**, and the first version of it
+    had none of them — it EXPLAINed a hand-written ``SELECT 1 FROM jobs WHERE …`` over an
+    empty table, which is a query that tests itself and a table on which a sequential
+    scan is the *right* plan.
+
+    *The real statement*, LATERAL and all, because the claim is about that one.
+
+    *A seeded table*, so that taking the index is a choice the planner made rather than a
+    tie between two cheap plans.
+
+    *A forced generic plan*, which is the mode in which the two spellings of the queue
+    filter could differ at all: a generic plan holds no parameter values, so a bound
+    ``queue = ANY($n)`` gives the planner nothing to prove the partial index's predicate
+    from, where literals give it everything. psycopg prepares after five executions, so
+    generic is what a polled route settles into.
+
+    **What this does not claim, having been measured:** that the bound spelling would
+    scan *here*. On a bare `SELECT … WHERE queue = ANY($1) AND …` it does — forced
+    generic, 20,000 rows, cost 1,214 on ``Seq Scan`` against 271 on the index. On this
+    statement both spellings take the index, because the ``unnest`` join drives a nested
+    loop keyed on ``payload ->> 'episode_id' = e.id`` and the index wins on that alone.
+    The literals are the spelling that cannot go wrong; `_EPISODE_QUEUE_LITERALS` says so
+    in those words rather than claiming a regression this query was seen to have.
+    """
+    from motet_db import repo
+    from motet_workers import jobs
+
+    episode_id = repo.create_episode(
+        db, user_id="motet-owner", title="a full queue", max_duration_ms=600_000
     )
+    db.execute(
+        """
+        INSERT INTO jobs (queue, payload, run_at)
+        SELECT 'tts', jsonb_build_object('episode_id', 'ep_seed_' || g), now()
+        FROM generate_series(1, 20000) g
+        """
+    )
+    jobs.enqueue(db, Queue.ASSEMBLE, {"episode_id": episode_id})
+    db.execute("ANALYZE jobs")
+
+    db.execute("SET plan_cache_mode = force_generic_plan")
+    try:
+        plan = "\n".join(
+            str(row["QUERY PLAN"])
+            for row in db.execute(
+                "EXPLAIN " + repo._EPISODE_BUILD_SQL, ([episode_id],), prepare=True
+            ).fetchall()
+        )
+    finally:
+        db.execute("SET plan_cache_mode = auto")
     assert "jobs_episode_idx" in plan, plan
+    assert "Seq Scan on jobs" not in plan, plan
+
+
+def test_the_queue_names_reach_the_statement_as_literals() -> None:
+    """The structural half of the argument above, and the only deterministic half.
+
+    The EXPLAIN test would stay green if the queues went back to being bound, because on
+    this statement both spellings take the index. So what actually pins the spelling is
+    reading it: the names are in the SQL text, and the statement takes exactly the one
+    parameter — the episode ids — that it is called with.
+    """
+    from motet_db.repo import _EPISODE_BUILD_SQL, EPISODE_QUEUES
+
+    assert f"queue IN ({', '.join(repr(q) for q in EPISODE_QUEUES)})" in _EPISODE_BUILD_SQL
+    assert _EPISODE_BUILD_SQL.count("%s") == 1

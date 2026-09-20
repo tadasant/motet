@@ -2421,12 +2421,12 @@ export interface components {
             error: string | null;
             /**
              * Estimate Ms
-             * @description A rough total, the median of the last few finished episodes on this deployment. **An estimate, and clients must label it as one.** Null when fewer than three have finished, because there is then no sound basis for a number — show the elapsed time and the step instead of inventing one. Null for an episode that is no longer building.
+             * @description A rough total, the median of the caller's own last few finished episodes. **An estimate, and clients must label it as one.** Null when fewer than three have finished, because there is then no sound basis for a number — show the elapsed time and the step instead of inventing one. Null for an episode that is no longer building.
              */
             estimate_ms: number | null;
             /**
              * Estimate Samples
-             * @description How many finished episodes ``estimate_ms`` is the median of, so a client can say what it is made of rather than presenting it as a promise.
+             * @description How many finished episodes were available to compute ``estimate_ms`` from, so a client can say what it is made of rather than presenting it as a promise. It is how many were *found*, not how many were used: below the three-sample floor ``estimate_ms`` is null and this still reports the one or two there were.
              */
             estimate_samples: number;
             /**

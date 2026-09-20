@@ -700,9 +700,12 @@ def _render_reporter(context: Context, episode_id: str) -> Iterator[Callable[[in
         yield lambda _count: None
         return
 
-    #: The connection, opened on the first report rather than here, so a render that
-    #: raises on its first segment costs none; and the switch that turns the whole thing
-    #: off after one failure.
+    #: The connection, opened by the first report rather than here, and the switch that
+    #: turns the whole thing off after one failure. The laziness buys nothing today —
+    #: ``handle_tts`` calls ``report(0)`` as the first statement inside the block, so a
+    #: render always opens one — and it is kept because it is what makes the no-op arm
+    #: above a genuine no-op and a future caller that reports only on real progress
+    #: free. It is not a claim that a render costs no connection.
     open_conn: psycopg.Connection[Any] | None = None
     live = True
 

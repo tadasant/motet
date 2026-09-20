@@ -828,20 +828,30 @@ def publish_episode(
 #: "queued" forever.
 EPISODE_QUEUES: Final = ("assemble", "script", "tts")
 
-#: ``'assemble', 'script', 'tts'`` as SQL literals, for :data:`_EPISODE_JOB_SQL`.
+#: ``'assemble', 'script', 'tts'`` as SQL literals, for :data:`_EPISODE_BUILD_SQL`.
 #:
-#: **Spelled into the statement rather than bound as a parameter, and that is the difference
-#: between using migration 0025's index and sequentially scanning the job table.** Postgres
-#: uses a partial index only when it can prove the query's own restriction implies the
-#: index's predicate, and the predicate here is a constant ``IN`` list. With the queues
-#: bound as ``queue = ANY($2)`` it can still prove it while it is building a *custom* plan,
-#: because then it has the values — so the first few executions look fine. psycopg prepares
-#: a statement after five executions, and on a route the SPA polls every three seconds that
-#: is the first quarter-minute; from the *generic* plan on, the parameter has no value to
-#: reason about and the proof fails. Measured over 20,000 job rows: the literal form plans
-#: at cost 82 with ``Index Scan using jobs_episode_idx``, the parameterized one at 8,909
-#: with ``Seq Scan on jobs``. That the index is the one used is asserted in
-#: ``api/tests/test_episode_progress.py``.
+#: **Spelled into the statement rather than bound as a parameter, so that the planner can
+#: always prove migration 0025's partial-index predicate.** Postgres uses a partial index
+#: only where it can show the query's own restriction implies the index's ``WHERE``, and
+#: that predicate is a constant ``IN`` list. Written as literals the proof is immediate in
+#: every plan the planner builds. Bound as ``queue = ANY($n)`` it holds only while the plan
+#: is *custom*, because a **generic** plan has no parameter value to reason about — and
+#: psycopg prepares a statement after five executions, which on a route the SPA polls every
+#: three seconds is the first quarter-minute.
+#:
+#: **Be precise about how much that is worth here, because the obvious claim overstates
+#: it.** On a bare ``SELECT … FROM jobs WHERE queue = ANY($1) AND state <> 'done' AND
+#: payload ->> 'episode_id' = $2`` the difference is total: forced generic, over 20,000 job
+#: rows, the literal form plans at cost 271 on ``Bitmap Index Scan using jobs_episode_idx``
+#: and the bound one at 1,214 on ``Seq Scan on jobs``. On *this* statement it is not — the
+#: ``unnest`` join drives a nested loop whose inner side is keyed on
+#: ``payload ->> 'episode_id' = e.id``, so the index wins on that condition alone and both
+#: spellings were measured taking it, generic plan or not. So the literals are the spelling
+#: that cannot go wrong rather than a fix for a regression this query was seen to have:
+#: worth keeping for one import-time check, and worth not overselling.
+#: ``api/tests/test_episode_progress.py`` asserts the index is used on the real statement
+#: under a forced generic plan, and — because that assertion would survive the bound
+#: spelling — reads the SQL text for the literals separately.
 #:
 #: Safe to interpolate because the values are this module's own literals and never reach
 #: here from a caller — checked below, so that a future queue name carrying a quote is an

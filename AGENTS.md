@@ -2227,9 +2227,11 @@ what TTS returned. Assembly and scripting report `news_items` and `claims` inste
 are real from the moment the stage before them wrote them and zero before that.
 
 **The estimate is measured, labelled, and never a countdown.** `estimate_ms` is the median
-of the last ten finished episodes on this deployment, because the two largest terms in a
+of the **caller's own** last ten finished episodes, because the two largest terms in a
 build — Cloud Run's scheduling latency and how much backlog there is — are facts about the
-deployment on the day rather than constants. The median rather than the mean: the
+deployment on the day rather than constants, and because a backlog is per person. Per user
+rather than per deployment is indistinguishable while there is one account (`repo.recent_build_times_ms`
+takes a `user_id`), and it is the reading that stays right when there is not. The median rather than the mean: the
 distribution has a long right tail and no left one, so one slow build would move a mean past
 every build it is meant to predict. **Below three finished episodes there is no estimate at
 all** and the clients show elapsed time and the step, which is the honest answer when there

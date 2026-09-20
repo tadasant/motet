@@ -235,8 +235,13 @@ def build_progress(
     in_flight = stage in ("queued", "running", "retrying")
     # How many steps are *behind* it. For a failed episode that is the index of the step
     # that stopped it — a render that gave up got two steps in, and reporting three would
-    # draw a full bar over an episode that produced nothing. Only `ready` is three of three.
-    steps_done = len(STEP_ORDER) if step is None else STEP_ORDER.index(step)
+    # draw a full bar over an episode that produced nothing. **Keyed on the stage rather
+    # than on the step being absent**, because those are not the same question and the
+    # difference is visible: a `failed` episode whose job row was pruned has no step to
+    # take an index from either, and reading "no step" as "every step" drew the full,
+    # finished-looking bar over exactly the build that produced nothing. Only `ready` is
+    # three of three; an unattributable failure is none of three.
+    steps_done = len(STEP_ORDER) if stage == "ready" else (STEP_ORDER.index(step) if step else 0)
 
     # What each stage has to show for itself. Assembly writes one segment per chosen story
     # and scripting rewrites them with text and claims, so `news_items` is real from
