@@ -365,12 +365,14 @@ gh workflow run ios-ui-tests.yml --ref main \
 ```
 
 It boots a simulator, builds, records video, runs two XCUITests, and keeps the result
-bundle, the video and **two** screenshots. Two because the obvious one is worthless alone:
-XCUITest terminates the app when the run ends, so a `simctl` screenshot taken then catches
-the springboard. The second relaunches the app with `-MotetPlaybackProbeAutoplay` and
-photographs the probe while it is actually playing — `simctl` can screenshot and cannot
-tap, which is the whole reason that launch argument exists. The UI test does not use it:
-its assertion is the transition, which needs a press. **XCUITest rather than Maestro**: the project
+bundle, the video and **three** screenshots. Three because the obvious one is worthless
+alone: XCUITest terminates the app when the run ends, so a `simctl` screenshot taken then
+catches the springboard. The other two relaunch the app and photograph the probe idle and
+then — with `-MotetPlaybackProbeAutoplay` — playing, because `simctl` can screenshot and
+cannot tap, which is the whole reason that launch argument exists. **A pair, because
+either alone proves nothing**: a probe hard-wired to AUDIBLE would take the second and one
+hard-wired to SILENT would take the first. The UI test does not use autoplay — its
+assertion is the same transition, which needs a press. **XCUITest rather than Maestro**: the project
 already has Swift, an Xcode project and a macOS runner, and Maestro would add a JVM, a YAML
 dialect and a second thing to keep in step with the app's accessibility identifiers for no
 capability this needs.

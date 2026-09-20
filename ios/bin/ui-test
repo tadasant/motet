@@ -221,9 +221,19 @@ xcrun simctl io "$udid" screenshot "$artifacts/last-screen.png" 2>/dev/null || t
 
 app="$derived/Build/Products/$configuration-iphonesimulator/Motet.app"
 if [ -d "$app" ]; then
-  printf '==> photographing the probe screen while it plays
-'
+  printf '==> photographing the probe screen, idle and then playing\n'
   xcrun simctl install "$udid" "$app" >/dev/null 2>&1 || true
+
+  # A PAIR, because one of them proves nothing on its own: a probe hard-wired to
+  # "AUDIBLE" would take the second picture and a probe hard-wired to "SILENT" would take
+  # the first. The signal *changing* is the claim, and it is the same claim
+  # `test_the_playback_signal_moves_between_playing_and_paused` makes — this is what it
+  # looks like.
+  xcrun simctl launch "$udid" "$BUNDLE_ID" -MotetPlaybackProbe >/dev/null 2>&1 || true
+  /bin/sleep 6
+  xcrun simctl io "$udid" screenshot "$artifacts/probe-idle.png" 2>/dev/null || true
+  xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
+
   xcrun simctl launch "$udid" "$BUNDLE_ID" \
     -MotetPlaybackProbe -MotetPlaybackProbeAutoplay >/dev/null 2>&1 || true
   # Long enough for the tone to be written, the item to become ready, the tap to install
@@ -235,7 +245,7 @@ if [ -d "$app" ]; then
 fi
 
 # The derived data is a gigabyte of object files nobody wants in an artifact bundle; the
-# result bundle, the video and the two screenshots are the evidence.
+# result bundle, the video and the three screenshots are the evidence.
 rm -rf "$derived"
 
 if [ "$status" -ne 0 ]; then
