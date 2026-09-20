@@ -9,7 +9,7 @@
 // What differs between the surfaces is only what the title looks like when it is *not*
 // being edited, which is the caller's `children`.
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 import { ApiError, type Episode, api } from '../api/client'
 
@@ -28,6 +28,12 @@ export function EpisodeTitle({
   const [value, setValue] = useState(episode.title)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Which attempt is current. Cancelling bumps it, so a request that was already in
+  // flight cannot report its failure afterwards: `save` captures the number it started
+  // on and writes nothing once it has moved. Without it, Cancel-then-the-request-fails
+  // parks a `role="alert"` beside the Rename button — the symptom `cancel` exists to
+  // remove, one path along.
+  const attempt = useRef(0)
 
   const open = () => {
     setValue(episode.title)
@@ -39,6 +45,8 @@ export function EpisodeTitle({
   // an attempt that is over, and the non-editing branch renders it too — so leaving it set
   // would park a `role="alert"` beside the Rename button until the row unmounted.
   const cancel = () => {
+    attempt.current += 1
+    setBusy(false)
     setError('')
     setEditing(false)
   }
@@ -51,15 +59,19 @@ export function EpisodeTitle({
       cancel()
       return
     }
+    const mine = attempt.current
     setBusy(true)
     try {
-      onRenamed(await api.renameEpisode(episode.id, title))
+      const renamed = await api.renameEpisode(episode.id, title)
+      if (attempt.current !== mine) return
+      onRenamed(renamed)
       setEditing(false)
       setError('')
     } catch (err) {
+      if (attempt.current !== mine) return
       setError(err instanceof ApiError ? err.message : String(err))
     } finally {
-      setBusy(false)
+      if (attempt.current === mine) setBusy(false)
     }
   }
 

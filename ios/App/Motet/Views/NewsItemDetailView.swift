@@ -44,7 +44,7 @@ struct NewsItemDetailView: View {
                             .font(Theme.display(17, relativeTo: .headline))
                             .foregroundStyle(Theme.ink)
                     }
-                    Text("Previews couldn't be loaded.")
+                    Text(failure ?? "Previews couldn\u{2019}t be loaded.")
                         .font(Theme.body(13, relativeTo: .footnote))
                         .foregroundStyle(Theme.inkSoft)
                 } else {

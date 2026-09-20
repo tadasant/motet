@@ -216,7 +216,9 @@ struct EpisodeRow: View {
                 Task { await model.rename(episode: episode, to: title) }
             }
         }
-        .swipeActions(edge: .leading) {
+        // `allowsFullSwipe` off: Rename is the first button, and a full swipe would
+        // otherwise fire it where it used to mark the episode listened.
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button {
                 draftTitle = episode.title
                 isRenaming = true

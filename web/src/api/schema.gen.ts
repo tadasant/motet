@@ -3700,7 +3700,10 @@ export interface components {
          *     a client reads it to decide whether a failed episode's report is still worth showing.
          */
         RenameEpisodeRequest: {
-            /** Title */
+            /**
+             * Title
+             * @description Trimmed before it is stored, and refused when nothing is left: whitespace is characters and no title.
+             */
             title: string;
         };
         /**

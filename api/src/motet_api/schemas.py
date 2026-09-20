@@ -926,7 +926,14 @@ class RenameEpisodeRequest(BaseModel):
     a client reads it to decide whether a failed episode's report is still worth showing.
     """
 
-    title: str = Field(min_length=1, max_length=500)
+    title: str = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Trimmed before it is stored, and refused when nothing is left: whitespace is "
+            "characters and no title."
+        ),
+    )
 
     @field_validator("title")
     @classmethod

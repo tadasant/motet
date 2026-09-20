@@ -13,7 +13,7 @@ test here is which *stored* string a route chooses, not what a model writes.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -109,6 +109,13 @@ class TestWhatABacklogRowIsCalled:
         assert display_title("Dedup's title", ["   "]) == "Dedup's title"
         assert display_title("Dedup's title", []) == "Dedup's title"
 
+    def test_surrounding_whitespace_is_trimmed_but_the_words_are_not_touched(self) -> None:
+        """A subject line with a leading space renders padded in a SwiftUI `Text`, where
+        HTML would have collapsed it. Trimming the ends is not a departure from verbatim."""
+        assert display_title("Dedup's title", ["  Platformer: the inquiry  "]) == (
+            "Platformer: the inquiry"
+        )
+
 
 class TestTheProvenanceBehindARow:
     def test_a_merged_story_names_every_source_in_the_order_it_accumulated(
@@ -172,19 +179,29 @@ class TestTheProvenanceBehindARow:
         assert api.get("/v1/news-items/ni_nope", headers=AUTH).status_code == 404
 
 
+def today_or_tomorrow() -> set[str]:
+    """The two days a request made now could legitimately be named after.
+
+    Recomputing ``now`` in the assertion is a flake waiting for a run that straddles UTC
+    midnight — rare, and a red CI run nobody can reproduce.
+    """
+    now = datetime.now(UTC)
+    return {f"{now:%Y-%m-%d}", f"{now + timedelta(minutes=5):%Y-%m-%d}"}
+
+
 class TestWhatAnEpisodeIsCalled:
     def test_an_episode_nobody_named_is_named_after_the_day(self, api: TestClient) -> None:
         created = api.post("/v1/episodes", json={"max_duration_ms": 600_000}, headers=AUTH)
 
         assert created.status_code == 201
-        assert created.json()["title"] == f"{datetime.now(UTC):%Y-%m-%d}"
+        assert created.json()["title"] in today_or_tomorrow()
 
     def test_a_blank_title_is_the_same_as_none(self, api: TestClient) -> None:
         created = api.post(
             "/v1/episodes", json={"title": "   ", "max_duration_ms": 600_000}, headers=AUTH
         )
 
-        assert created.json()["title"] == f"{datetime.now(UTC):%Y-%m-%d}"
+        assert created.json()["title"] in today_or_tomorrow()
 
     def test_a_title_somebody_typed_is_kept(self, api: TestClient) -> None:
         created = api.post(
@@ -199,7 +216,7 @@ class TestWhatAnEpisodeIsCalled:
         created = api.post("/v1/episodes/smart", json={"max_duration_ms": 600_000}, headers=AUTH)
 
         assert created.status_code == 201
-        assert created.json()["title"] == f"{datetime.now(UTC):%Y-%m-%d}"
+        assert created.json()["title"] in today_or_tomorrow()
 
     def test_the_default_is_composed_in_one_place(self) -> None:
         """Three clients used to build their own; this is the only one that remains."""

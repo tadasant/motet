@@ -137,6 +137,58 @@ describe('renaming an episode', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('does not leave an alert after Escape either', async () => {
+    mockFetch({})
+    render(
+      <EpisodeTitle episode={EPISODE} onRenamed={() => {}}>
+        <span>{EPISODE.title}</span>
+      </EpisodeTitle>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename 2026-09-20' }))
+    fireEvent.change(screen.getByLabelText('Episode title'), { target: { value: 'Nope' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByRole('alert')
+
+    fireEvent.keyDown(screen.getByLabelText('Episode title'), { key: 'Escape' })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Rename/ })).toBeDefined())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('drops the answer to a rename that was cancelled while it was in flight', async () => {
+    // Cancel is reachable while Save says "Saving…", and the request fails *after* the
+    // editor has closed — so the message would otherwise land in the non-editing branch
+    // and park an alert on the row.
+    let refuse: () => void = () => {}
+    const blocked = new Promise<void>((resolve) => {
+      refuse = resolve
+    })
+    const onRenamed = vi.fn()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await blocked
+        return { ok: false, status: 500, statusText: 'Server Error', json: async () => ({}) } as Response
+      }),
+    )
+    render(
+      <EpisodeTitle episode={EPISODE} onRenamed={onRenamed}>
+        <span>{EPISODE.title}</span>
+      </EpisodeTitle>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename 2026-09-20' }))
+    fireEvent.change(screen.getByLabelText('Episode title'), { target: { value: 'Nope' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    refuse()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Rename/ })).toBeDefined())
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(onRenamed).not.toHaveBeenCalled()
+  })
+
   it('cancels on Escape without writing', async () => {
     const calls = mockFetch({ 'PUT /v1/episodes/ep_1/title': EPISODE })
     render(
