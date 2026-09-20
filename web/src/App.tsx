@@ -19,12 +19,16 @@
 // authorizing an MCP server from Credentials, and an MCP client's authorization of Motet —
 // and the `state` says which, because it is the only thing that survives the round trip.
 //
-// **A browser holding no token sees the door and nothing else.** That is the whole point
-// of Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN"
-// is now a button. The disclosure stays — on the door, and in the account menu once
-// inside — because the shared token still works and is still the answer when there is no
-// Google account to hand; it has just stopped being the thing a human is expected to
-// type into a phone.
+// **A browser holding no token sees the door and nothing else** — and since the landing
+// page moved to `getmotet.com` (`site/`), the door is a sign-in and nothing else either:
+// no hero, no pitch, no second copy of what that site says. That is the whole point of
+// Google Sign-In here: what used to be "open the disclosure and paste MOTET_API_TOKEN" is
+// now a button. The disclosure stays — on the door, and in the account menu once inside —
+// because the shared token still works and is still the answer when there is no Google
+// account to hand; it has just stopped being the thing a human is expected to type into a
+// phone. **A browser that does hold one never sees the door**: `inShell` is true as soon
+// as there is a token (or the deployment is open) and no callback is in the address, and
+// it renders the shell.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -449,7 +453,7 @@ export default function App() {
         <header className="door-bar">
           <Wordmark className="brand" />
         </header>
-        <main className="door-main narrow">
+        <main className="door-main">
           <AppHandoff onDone={() => navigate('/')} />
         </main>
       </div>
@@ -462,9 +466,7 @@ export default function App() {
         <header className="door-bar">
           <Wordmark className="brand" />
         </header>
-        {/* The landing is a hero and runs full width; a callback is a message and a button,
-            so it gets a reading column. */}
-        <main className={`door-main${callback ? ' narrow' : ''}`}>
+        <main className="door-main">
           {errorLine}
           {/* The app's handoff first: exchanging its code here would spend it without the
               app's session. Then MCP: its state is neither a sign-in's nor a mailbox's, and

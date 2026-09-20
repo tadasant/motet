@@ -1113,9 +1113,57 @@ describe('signing in', () => {
     mockApi()
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
-    expect(screen.getByRole('button', { name: 'Start listening' })).toBeDefined()
+    // Level pinned: the hero's h1 was the door's only one, so a regression to <h2> would
+    // leave the whole screen without a top-level heading and an unlevelled query green.
+    expect(await screen.findByRole('heading', { name: 'Sign in', level: 1 })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeDefined()
     expect(screen.queryByRole('navigation', { name: 'Screens' })).toBeNull()
+  })
+
+  it('is a door and not a landing: the pitch is getmotet.com own job', async () => {
+    // The duplication this replaced: the door rendered the same reference hero the
+    // `site/` landing is built from, in front of the one thing somebody who typed the
+    // app's address came for.
+    window.localStorage.clear()
+    mockApi()
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'Sign in', level: 1 })
+    // `Many voices.` with the stop, because the eyebrow deliberately keeps the lowercase
+    // "A motet: many voices, one piece." — it is the brand line, not the pitch.
+    expect(screen.queryByText(/Many voices\./)).toBeNull()
+    expect(screen.queryByText(/worth hearing/)).toBeNull()
+    expect(screen.queryByText(/interactive podcast/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Start listening' })).toBeNull()
+    // The motif was the hero's most visible element; assert it by its caption.
+    expect(screen.queryByText('Four sources you trust, sung as one podcast.')).toBeNull()
+    // One button, so a failure has one place to print. There used to be two calling the
+    // same function and only the upper one could show an error.
+    expect(screen.getAllByRole('button', { name: /Sign in with Google/ })).toHaveLength(1)
+    // And a way out for whoever wanted the pitch after all.
+    const away = screen.getByRole('link', { name: 'getmotet.com' })
+    expect(away.getAttribute('href')).toBe('https://getmotet.com/')
+  })
+
+  it('shows the registered redirect URI, because a mismatch is invisible from in here', async () => {
+    window.localStorage.clear()
+    mockApi()
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'Sign in', level: 1 })
+    expect(screen.getByText(`${window.location.origin}/oauth/callback`)).toBeDefined()
+  })
+
+  it('shows the shell and no door content once this browser holds a token', async () => {
+    // The other half of the split: the app's address with a credential in the slot goes
+    // to the app, never to anything landing-shaped.
+    mockApi()
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Backlog', level: 1 })).toBeDefined()
+    expect(screen.getByRole('navigation', { name: 'Screens' })).toBeDefined()
+    expect(screen.queryByRole('heading', { name: 'Sign in', level: 1 })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'getmotet.com' })).toBeNull()
   })
 
   it('keeps the API token as a way in, because the feed and every script still use it', () => {
@@ -1138,7 +1186,7 @@ describe('signing in', () => {
     const navigate = vi.fn()
     render(<SignIn navigate={navigate} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Start listening' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
 
     await waitFor(() => expect(navigate).toHaveBeenCalled())
     const started = calls.find((call) => call.url.includes('/v1/auth/google/start'))
@@ -1163,7 +1211,7 @@ describe('signing in', () => {
     )
     render(<SignIn navigate={vi.fn()} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Start listening' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
 
     expect(await screen.findByText(/MOTET_ALLOWED_EMAILS is unset/)).toBeDefined()
   })

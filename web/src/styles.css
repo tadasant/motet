@@ -223,10 +223,11 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
   padding: 0 clamp(20px, 5vw, 72px); border-bottom: 1px solid var(--rule);
 }
 .door-bar .brand { margin: 0; font-size: 30px; }
-.door-main { width: 100%; max-width: none; margin: 0; padding: 0; }
-/* A callback is a message and a button, not a landing page: a reading column. */
-.door-main.narrow { max-width: 40rem; margin: 4rem auto; padding: 0 clamp(20px, 5vw, 72px); }
-.door-main > .error { max-width: 40rem; margin: 1.5rem auto 0; padding: 0 clamp(20px, 5vw, 72px); }
+/* One reading column for all of it. There used to be a full-width variant as well, for
+   the landing hero this screen carried; the landing is getmotet.com (`site/`) now, and
+   what is left — a sign-in, and the OAuth callbacks — is a message and one action. */
+.door-main { width: 100%; max-width: 40rem; margin: 4rem auto; padding: 0 clamp(20px, 5vw, 72px); }
+.door-main > .error { margin: 0 0 1.5rem; }
 
 /* Below ~800px the sidebar is a bar across the top and the nav is behind a menu button. */
 @media (max-width: 800px) {
@@ -248,50 +249,35 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
   .door-bar .brand { font-size: 26px; }
 }
 
-/* ---- The landing: the reference hero (SignIn.tsx) ----------------------------------- */
+/* ---- The door: signing in, and nothing else (SignIn.tsx) ---------------------------- */
+/* The pitch lives at getmotet.com (`site/`). What used to be here was the reference hero
+   in front of it — the headline, the motif, a "Start listening" CTA — which was the same
+   page twice once that site went live. A reading column, one action, its footnotes. */
 
-.hero {
-  min-height: calc(100vh - 88px);
-  display: grid;
-  grid-template-columns: minmax(0, 11fr) minmax(0, 12fr);
-  gap: clamp(32px, 5vw, 80px);
-  align-items: center;
-  padding: 40px clamp(20px, 5vw, 72px);
-  position: relative;
-  overflow: hidden;
-}
-.hero-copy { max-width: 600px; position: relative; z-index: 1; }
-.headline {
-  font-size: clamp(46px, 5.4vw, 78px);
-  line-height: 1.02;
+.signin { padding: 0 0 3rem; }
+.signin-heading {
+  font-size: clamp(38px, 4vw, 54px);
+  line-height: 1.04;
   letter-spacing: -0.015em;
-  font-variation-settings: "SOFT" 100, "opsz" 144;
-  text-wrap: balance;
-  margin: 0 0 30px;
+  font-variation-settings: "SOFT" 100, "opsz" 72;
+  margin: 0 0 18px;
 }
-.headline em { font-style: italic; }
 .subhead {
   font-size: clamp(17px, 1.35vw, 20px); line-height: 1.55; color: var(--ink-soft);
-  max-width: 30em; margin: 0 0 40px; text-wrap: pretty;
+  max-width: 30em; margin: 0 0 32px; text-wrap: pretty;
 }
-.ctas { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
-.hero-copy .error { margin: 1.25rem 0 0; }
-.hero-meta {
-  margin-top: 52px; display: flex; gap: 32px; flex-wrap: wrap;
-  font-size: 13.5px; color: var(--ink-mute);
-}
-.hero-meta span { display: inline-flex; align-items: center; gap: 9px; }
-.hero-meta span::before { content: ""; width: 14px; height: 1.5px; background: currentColor; opacity: .6; }
-/* A soft acoustic glow behind the motif. */
-.hero::after {
-  content: ""; position: absolute; z-index: 0; right: -8%; top: 10%; width: 60%; height: 80%;
-  background:
-    radial-gradient(closest-side, rgba(217, 164, 65, .14), transparent 70%),
-    radial-gradient(closest-side at 70% 60%, rgba(42, 127, 134, .10), transparent 70%);
-  filter: blur(20px); pointer-events: none;
+.signin > .error { margin: 1.25rem 0 0; }
+.signin .hint { max-width: 34em; }
+.signin .token { margin: 1.75rem 0 0; background: var(--surface); border-radius: 20px; padding: 1.4rem 1.6rem; }
+/* The way out, for somebody who typed the app's address wanting the pitch. */
+.signin-away {
+  margin: 2.25rem 0 0; padding-top: 1.25rem; border-top: 1px solid var(--rule);
+  font-size: 14px; color: var(--ink-mute);
 }
 
-/* The motif: four waveforms on staves converging into one ink line (brand/Motif.tsx). */
+/* The motif: four waveforms on staves converging into one ink line (brand/Motif.tsx).
+   Its one caller is Backlog's empty state, which asks for `quiet` — the full-size rules
+   below are kept for a surface that may want it, not because one does today. */
 .motif { position: relative; z-index: 1; margin: 0; width: 100%; display: flex; flex-direction: column; }
 .motif .score { width: 100%; aspect-ratio: 5 / 3.1; max-height: 440px; }
 .motif .score svg { width: 100%; height: 100%; display: block; overflow: visible; }
@@ -303,13 +289,11 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
 .motif .one { fill: none; stroke: var(--ink); stroke-width: 5; stroke-linecap: round; }
 .motif .score-label { font-family: var(--body); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; fill: var(--ink-mute); }
 .motif .score-label.ink { fill: var(--ink); opacity: .7; }
-.motif .transport { margin-top: 22px; }
-.now-playing, .motif-caption {
+.motif-caption {
   font-family: var(--display); font-style: italic; font-size: 15px;
   font-variation-settings: "SOFT" 100, "opsz" 14;
+  margin-top: 22px; text-align: right; color: var(--ink-mute);
 }
-.now-playing { margin: 14px 0 0; color: var(--ink-soft); }
-.motif-caption { margin-top: 22px; text-align: right; color: var(--ink-mute); }
 /* Smaller, on an empty backlog: the motif without its player. */
 .motif.quiet { max-width: 30rem; margin: 1.5rem 0 0; }
 .motif.quiet .score { max-height: 220px; }
@@ -317,33 +301,20 @@ main { width: 100%; max-width: 62rem; margin: 0 auto; padding: 2rem var(--gutter
 /* At this size the stave labels are specks, so the quiet score goes without them. */
 .motif.quiet .score-label { display: none; }
 
-/* Below the fold on the landing: what "Start listening" does, and the other key. */
-.door-panel {
-  border-top: 1px solid var(--rule);
-  padding: 64px clamp(20px, 5vw, 72px) 80px;
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 80px);
-}
+/* The OAuth-callback panel (ConnectorCallback.tsx), and it is a block rather than a grid.
+   It used to be the landing's two-column strip below the hero, sized for the full width —
+   which inside the door's reading column laid a linear message out in two columns, on top
+   of itself. One consumer, one column. */
+.door-panel { padding: 0 0 3rem; }
 .door-panel h2 { margin: 0 0 .75rem; font-size: clamp(30px, 3vw, 42px); }
-.door-panel .kicker {
-  display: flex; align-items: center; gap: 12px; margin: 0 0 14px;
-  font-size: 12px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-mute);
-}
-.door-panel .kicker::before { content: ""; width: 28px; height: 1px; background: var(--ink); opacity: .35; }
 .door-panel .hint { max-width: 34em; }
-.door-panel .token { margin: 0; background: var(--surface); border-radius: 20px; padding: 1.4rem 1.6rem; align-self: start; }
 
 @media (max-width: 860px) {
-  .hero { grid-template-columns: 1fr; min-height: 0; padding-top: 56px; padding-bottom: 48px; gap: 48px; }
-  .hero::after { display: none; }
-  .headline { font-size: clamp(40px, 11vw, 56px); }
-  .hero-meta { margin-top: 36px; gap: 18px; }
   .motif .score { max-height: none; }
   .motif .score-label { font-size: 14px; }
   .motif .voice, .motif .one { stroke-width: 6; }
-  .door-panel { grid-template-columns: 1fr; padding-top: 48px; padding-bottom: 56px; }
 }
 @media (max-width: 420px) {
-  .ctas { gap: 18px; }
   .btn-primary { padding: 15px 22px; font-size: 15px; }
 }
 
@@ -374,7 +345,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   box-shadow: var(--shadow-ink);
   text-decoration: none;
 }
-.btn-primary { padding: 17px 28px 17px 26px; font-size: 16px; }
+/* Symmetric since the play glyph went with the hero: the 26px left was its circle. */
+.btn-primary { padding: 17px 28px; font-size: 16px; }
 .btn-primary::before, button.primary::before {
   content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
   background: var(--voices-stops); opacity: .95;
@@ -384,20 +356,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   box-shadow: 0 1px 0 rgba(27, 26, 46, .2), 0 18px 36px -14px rgba(27, 26, 46, .7);
 }
 .btn-primary:disabled, button.primary:disabled { color: rgba(244, 239, 230, .7); opacity: .6; box-shadow: none; }
-/* The play glyph in a parchment circle. */
-.btn-primary .play-glyph { width: 22px; height: 22px; border-radius: 50%; background: var(--parchment); position: relative; flex: none; }
-.btn-primary .play-glyph::after {
-  content: ""; position: absolute; left: 9px; top: 6px;
-  border-left: 7px solid var(--ink); border-top: 5px solid transparent; border-bottom: 5px solid transparent;
-}
-
-.btn-text, .linkish {
+.linkish {
   background: none; border: 0; border-radius: 0; padding: 0 0 2px;
   font-weight: 500; color: var(--ink); text-decoration: none;
   border-bottom: 1px solid var(--rule);
 }
-.btn-text { font-size: 16px; }
-.btn-text:hover, .linkish:hover:not(:disabled) { background: none; border-bottom-color: var(--ink); }
+.linkish:hover:not(:disabled) { background: none; border-bottom-color: var(--ink); }
 .linkish:disabled { border-bottom-color: transparent; }
 
 button.danger { color: var(--error-text); border-color: rgba(214, 75, 42, .45); }
@@ -801,8 +765,6 @@ details > summary:hover { color: var(--ink); }
 .connect-another .row h4 { margin: 0; }
 .connect-another-hint { margin: .85rem 0 0; }
 
-/* A pill drawn rather than pressed — the landing's picture of the transport. */
-.pill-static { border: 1px solid var(--rule); border-radius: 999px; color: var(--ink); }
 .wordmark-link { text-decoration: none; }
 
 /* /admin "Models & spend" (motet#92) */

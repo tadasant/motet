@@ -63,18 +63,16 @@ const STAVES = [70, 212, 354, 496]
 
 /**
  * The motif: four waveforms, each on its own stave, converging into one ink waveform under
- * "One podcast". A hero and empty-state element, never wallpaper.
+ * "One podcast". An empty-state element, never wallpaper — it used to be the door's hero
+ * too, and that hero is the getmotet.com landing's job now.
  */
 export function Motif({
   quiet = false,
   caption,
-  children,
 }: {
   /** The empty-state size: smaller, no glow, no player under it. */
   quiet?: boolean
   caption: ReactNode
-  /** Whatever sits under the score — on the landing, a picture of the transport. */
-  children?: ReactNode
 }) {
   // Per instance, so two scores on one page never share a gradient id.
   const fade = `staff-fade-${useId().replace(/:/g, '')}`
@@ -123,7 +121,6 @@ export function Motif({
           </text>
         </svg>
       </div>
-      {children}
       <figcaption className="motif-caption">{caption}</figcaption>
     </figure>
   )

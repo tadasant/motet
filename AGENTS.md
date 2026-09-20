@@ -1969,7 +1969,8 @@ brand on 2026-09-12**: "Polyphony", variant A. `brand/GUIDELINES.md` is the deci
 `brand/polyphony/index.html` is the reference; where they disagree on a value, the page
 wins. This was a restyle rather than a redesign. Every class a screen used before is the
 class it uses now, and no layout, section or interaction moved, except where the list below
-says otherwise.
+says otherwise. One section has moved *since*, and it is the door's landing hero — see
+below, and "The app's door is a sign-in, not a second landing page".
 
 - **Self-hosted fonts, not Google Fonts.** Fraunces and Instrument Sans are served as latin
   subsets of the variable woff2 files, OFL, with their licences alongside them. Vite
@@ -1989,11 +1990,14 @@ says otherwise.
   decorative captions.
 - **The old variable names are aliases.** `--fg`, `--muted`, `--line` and `--bad` point at
   the brand tokens, so a screen written against them did not need touching.
-- **The landing is the reference hero.** It has the headline, the positioning, the motif
-  and **Start listening**, which starts the Google sign-in the door always offered. The
-  motif's path data is lifted verbatim into `web/src/brand/scoreData.ts`, not redrawn. The
-  landing's transport under the score is a picture (`aria-hidden`), as it is on the
-  reference page.
+- **The landing was the reference hero, and it has since moved out of the SPA.** It had
+  the headline, the positioning, the motif and **Start listening**, which started the
+  Google sign-in the door always offered — and once `site/` shipped that same hero to
+  `getmotet.com`, `app.getmotet.com` was serving the pitch a second time in front of the
+  one thing somebody who typed the app's address came for. So the door is a sign-in and
+  nothing else, and the section below is the record. The motif's path data is still lifted
+  verbatim into `web/src/brand/scoreData.ts`, not redrawn; the transport picture under the
+  score (`aria-hidden`, as on the reference page) lives only in `site/` now.
 - **New episodes are titled "Episode — <date>"**, no longer "Briefing — …". The title is
   stored and appears in the RSS feed, so older episodes keep the old word.
 - **Dark mode is not designed**, so nothing here derives one.
@@ -2015,8 +2019,80 @@ reads "hold to ask". The web player has no push-to-talk: Play Live starts on a p
 press while narrating interrupts (`barge_in`), and the voice service ends the turn. So
 `Live` renders into the transport's pill slot through a portal, and the pill says
 *Play Live* or *just ask*. Hold-and-release semantics would be new capability, and it is
-not built. The landing's picture says "hold to ask" because it copies the reference, and
-the reference is a picture too.
+not built. `site/`'s hero picture says "hold to ask" because it copies the reference, and
+the reference is a picture too — the SPA no longer draws that picture anywhere.
+
+### The app's door is a sign-in, not a second landing page
+
+`web/src/screens/SignIn.tsx`, `web/src/styles.css`. Motet has two public surfaces —
+`getmotet.com`, the landing built from `site/`, and `app.getmotet.com`, the SPA — and for
+as long as both existed they showed the same page. `SignIn.tsx` rendered the reference
+hero out of `brand/polyphony/index.html`, which is the page `site/` is built from: the
+eyebrow, the headline, the subhead, the motif with its drawn transport, a **Start
+listening** CTA and the three-fact strip, with the actual sign-in panel below all of it.
+**The duplication was by construction rather than by accident** — one reference page, two
+renderings of it — and the screen's own comment said so.
+
+**The section above is the sign-off this reverses, and the reversal is stated rather than
+assumed** (the preamble's bar: not "I have a better idea", but "the reason this was
+decided no longer holds"). Tadas chose the hero in motet#110, when the SPA's door was the
+only surface Motet had and a landing there was the only place the brand could live. `site/`
+is that place now, so the reason is spent. Tadas, 2026-09-20: *"right now it's very
+duplicative"* — `app.getmotet.com` should take you straight to signing in, or straight to
+the dashboard if the browser already holds a token.
+
+**So the door is the sign-in and its footnotes**: the wordmark in the bar, the brand
+eyebrow, `Sign in`, one primary **Sign in with Google**, and three hints — who is accepted,
+the registered redirect URI, and the API token. What is kept is deliberate and each piece
+earns it: the 503 from `api.startLogin` still reads verbatim because it names the missing
+variable, `redirectUri()` is still printed because a Google mismatch is invisible from
+inside the app, and the `<TokenField>` disclosure stays because the shared token is still
+the answer when there is no Google account to hand. Brand identity stays too — dropping the
+*duplicated marketing* is not the same as making the page anonymous.
+
+**One button, because the error had nowhere to go from the second one.** "Start listening"
+and "Sign in with Google" called the same function, and only the hero rendered `status` —
+so a refusal pressed on the lower button printed a screenful above it, on a screen whose
+whole job is to report refusals clearly. There is one button now and the error is directly
+under it.
+
+**A browser that holds a token never sees any of this**, which is the other half of what
+the owner asked for: `inShell` is true as soon as there is a token (or the deployment is
+open) and no callback is in the address, and it renders the shell.
+
+**`getmotet.com` is a literal in the SPA, and that is the repo-split reading.** The door
+links out for anyone who arrived wanting the pitch. The Repo split rule forbids a secret, a
+project id, a bucket, a service-account address, an internal hostname or a topology detail;
+this is none of them — it is the product, named in this file's first line. It needs no
+variable because it is a fact about Motet rather than about an environment, and a variable
+would be a private-repo change per environment for one identical value. **The consequence,
+stated: a staging door links to the production landing.** That is intended — there is one
+landing page — and it is the only cross-environment link in the SPA.
+
+**Two things the deletion exposed, both now fixed.** `.door-main` had a full-width variant
+that existed only for the hero, so the door and every OAuth callback share one reading
+column. That left `.door-panel` with exactly one consumer, `ConnectorCallback` — and it was
+a two-column grid sized for the full-width strip below the hero, which inside the reading
+column laid that linear message out in two overlapping columns. It had been rendering that
+way since the callback shipped, on a screen nobody screenshots. It is a block now.
+
+**What went with the hero**, because nothing else used it: `.hero*`, `.headline`,
+`.now-playing`, `.motif .transport`, `.play-glyph`, `.btn-text`, `.pill-static`,
+`.door-panel .kicker`/`.token`, and `Motif`'s `children` prop, whose one caller was the
+transport picture. `Motif` itself stays — `Backlog`'s empty state is its remaining home, and
+its full-size variant is kept for a surface that may want it rather than because one does.
+
+**Three lines of `brand/GUIDELINES.md` are now departed from**, and they are named here
+rather than edited there, because that file is the owner's record of the decision: the
+motif "belongs on the landing/sign-in screen" (in-app it is the empty backlog only), "the
+web SPA and its sign-in and landing" (there is no SPA landing), and the primary button's
+"22px play glyph in a parchment circle" (no `.btn-primary` in the SPA draws one).
+
+**The invariant-12 reading, recorded as invariant 12 asks.** No deployable, datastore,
+queue mechanism, vendor, seam, cross-service protocol, inference stage, model call or
+private-repo resource — one screen's markup, the CSS it owned, and a prop with no caller.
+This is "work inside an existing shape", and the SPA tripwire is not firing either: the
+change *removes* SPA surface and is about a screen's job rather than about the shell.
 
 ### The episode screen reflects server state, not this page's lifetime
 
