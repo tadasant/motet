@@ -145,12 +145,68 @@ final class StalledPlaybackTests: XCTestCase {
         let harness = try await makeHarness()
         await harness.engine.waiting(.noItemToPlay)
 
+        // The double sends `.waiting(nil)` *and* `.paused`, as the real engine does, because
+        // the fix is about which of them wins: the answer to "why did nothing happen" must
+        // survive the listener's next tap whichever order they arrive in.
         await harness.controller.perform(.pause)
 
-        // Giving up is not the audio arriving, and the answer to "why did nothing happen"
-        // must survive the listener's next tap.
         let snapshot = await harness.controller.snapshot()
         XCTAssertEqual(snapshot.errorMessage, PlaybackWaitReason.noItemToPlay.failureSentence)
+    }
+
+    func testAWaitThatEndsOnItsOwnDoesNotWipeAFailureThePauseAlreadyRaised() async throws {
+        let harness = try await makeHarness()
+        await harness.engine.waiting(.noItemToPlay)
+
+        // `waiting(nil)` alone — the half of a pause that used to arrive first and clear it.
+        await harness.engine.waiting(nil)
+
+        let snapshot = await harness.controller.snapshot()
+        XCTAssertEqual(snapshot.errorMessage, PlaybackWaitReason.noItemToPlay.failureSentence)
+    }
+
+    func testAWaitThatEndsBecauseAudioStartedDoesClearTheFailure() async throws {
+        let harness = try await makeHarness()
+        await harness.engine.waiting(.noItemToPlay)
+
+        // The other side of the bargain: `waiting(nil)` keeps the error, so something else
+        // has to take it away when the audio genuinely arrives. Both of these do.
+        await harness.engine.waiting(nil)
+        await harness.engine.advance(toMs: 1_000)
+        let snapshot = await harness.controller.snapshot()
+        XCTAssertNil(snapshot.errorMessage)
+    }
+
+    func testTheGraceIsMeasuredFromTheStartOfTheWaitNotOfTheCurrentReason() async throws {
+        let harness = try await makeHarness()
+
+        // `AVPlayer` walks between reasons inside one wait as a matter of routine. Restarting
+        // the clock on each turned a promised 15 s into 45, and into never for one that flaps.
+        await harness.engine.waiting(.evaluatingBufferingRate)
+        harness.clock.advance(by: 8)
+        await harness.engine.waiting(.toMinimizeStalls)
+        harness.clock.advance(by: 8)
+        await harness.engine.waiting(.toMinimizeStalls)
+
+        let snapshot = await harness.controller.snapshot()
+        XCTAssertEqual(snapshot.errorMessage, PlaybackWaitReason.toMinimizeStalls.failureSentence)
+    }
+
+    func testAPlayerThatNeverLeavesPausedIsReportedRatherThanLookingLikePlayback() async throws {
+        let harness = try await makeHarness()
+
+        // The reported bug's own shape: `playImmediately` left the player `.paused`, so
+        // `timeControlStatus` never changed and no AVFoundation reason exists to read. The
+        // engine's watchdog reports `.notStarted`; the controller treats it like any other
+        // wait that can clear, so it is a sentence first and an error after the grace.
+        await harness.engine.waiting(.notStarted)
+        let waiting = await harness.controller.snapshot()
+        XCTAssertEqual(waiting.stallMessage, PlaybackWaitReason.notStarted.sentence)
+
+        harness.clock.advance(by: PlaybackController.stallGraceSeconds + 1)
+        await harness.engine.waiting(.notStarted)
+        let failed = await harness.controller.snapshot()
+        XCTAssertEqual(failed.errorMessage, PlaybackWaitReason.notStarted.failureSentence)
     }
 
     // MARK: - The session, which is why *any* episode would be silent
@@ -181,23 +237,65 @@ final class StalledPlaybackTests: XCTestCase {
 
 /// The ladder of audio-session shapes, which is the other half of "I can't hear anything".
 ///
-/// A refused `setCategory` used to be swallowed by `try?` in three places, leaving the app
-/// on `.soloAmbient` — muted by the ringer switch, stopped on lock — with nothing said.
+/// A refused `setCategory` used to be swallowed by `try?` at both call sites, leaving the
+/// app on `.soloAmbient` — muted by the ringer switch, stopped on lock — with nothing said.
 final class AudioSessionPlanTests: XCTestCase {
     func testEveryRungKeepsPlaybackAndTheFirstGivesUpNothing() {
         let ladder = AudioSessionPlan.listening
         XCTAssertFalse(ladder.isEmpty)
         XCTAssertEqual(ladder.first?.mode, .spokenAudio)
         XCTAssertEqual(ladder.first?.policy, .longFormAudio)
-        XCTAssertNil(AudioSessionPlan.concessionNote(for: ladder[0]))
+        XCTAssertTrue(ladder[0].concession.isEmpty, "the best rung gives up nothing")
     }
 
     func testEveryLaterRungSaysWhatItGivesUp() {
         for shape in AudioSessionPlan.listening.dropFirst() {
             XCTAssertFalse(shape.concession.isEmpty, "\(shape.label) must say what it costs")
-            XCTAssertNotNil(AudioSessionPlan.concessionNote(for: shape))
+            XCTAssertTrue(AudioSessionPlan.Outcome.configured(shape).logLine.contains(shape.concession))
         }
     }
+
+    // MARK: - Walking it
+
+    func testTheFirstRungThatIsAcceptedWins() {
+        var asked: [AudioSessionShape] = []
+        let outcome = AudioSessionPlan.walk { asked.append($0) }
+        XCTAssertEqual(outcome, .configured(AudioSessionPlan.listening[0]))
+        XCTAssertEqual(asked, [AudioSessionPlan.listening[0]], "a rung that took must end the walk")
+    }
+
+    func testARefusedRungFallsThroughToTheNextOne() {
+        var asked: [AudioSessionShape] = []
+        let outcome = AudioSessionPlan.walk { shape in
+            asked.append(shape)
+            if shape.policy == .longFormAudio { throw Refusal() }
+        }
+        XCTAssertEqual(outcome, .configured(AudioSessionPlan.listening[1]))
+        XCTAssertEqual(asked.count, 2)
+    }
+
+    func testRunningOutOfRungsKeepsEveryRefusalAndTellsTheListener() {
+        let outcome = AudioSessionPlan.walk { _ in throw Refusal() }
+        guard case .refused(let errors) = outcome else { return XCTFail("expected a refusal") }
+        XCTAssertEqual(errors.count, AudioSessionPlan.listening.count, "every rung's error is kept")
+        for shape in AudioSessionPlan.listening {
+            XCTAssertTrue(errors.contains { $0.hasPrefix(shape.label) }, "\(shape.label) is named")
+        }
+        XCTAssertEqual(outcome.listenerMessage, AudioSessionPlan.noShapeAccepted)
+        XCTAssertTrue(outcome.isRefusal)
+    }
+
+    func testAWorkingFallbackIsNotShownToTheListener() {
+        // A lower rung that took is a player that works. Putting "no AirPlay 2 grouping" on
+        // the player screen in error red would train the listener to ignore the one line
+        // that means the audio will be silent, so the concession goes to the log alone.
+        for shape in AudioSessionPlan.listening {
+            XCTAssertNil(AudioSessionPlan.Outcome.configured(shape).listenerMessage)
+            XCTAssertFalse(AudioSessionPlan.Outcome.configured(shape).isRefusal)
+        }
+    }
+
+    private struct Refusal: Error {}
 
     func testTheLadderEndsSomewhereEveryPhoneShouldAccept() {
         // The last rung is the plainest `.playback` there is. If iOS refuses even that, the
@@ -207,7 +305,11 @@ final class AudioSessionPlanTests: XCTestCase {
         XCTAssertTrue(AudioSessionPlan.noShapeAccepted.contains("ringer switch"))
     }
 
-    func testTheRungsAreDistinct() {
-        XCTAssertEqual(Set(AudioSessionPlan.listening).count, AudioSessionPlan.listening.count)
+    func testNoTwoRungsAskIOSForTheSameThing() {
+        // On `(mode, policy)` and not on the shape, whose synthesised `Hashable` includes
+        // the prose: two rungs asking for an identical session would otherwise pass as
+        // "distinct" merely because they describe themselves differently.
+        let asked = AudioSessionPlan.listening.map { "\($0.mode)/\($0.policy)" }
+        XCTAssertEqual(Set(asked).count, asked.count)
     }
 }

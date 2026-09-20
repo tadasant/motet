@@ -214,6 +214,11 @@ actor ScriptedEngine: PlaybackEngine {
 
     func pause() async {
         isPlaying = false
+        // Both, and in this order, because the real engine sends both: `pause()` emits
+        // `.paused`, and the `timeControlStatus` KVO ends any wait, which emits
+        // `.waiting(nil)`. A double that sent only the first hid a race in which the
+        // second wiped the stall message — see `StalledPlaybackTests`.
+        await emit(.waiting(nil))
         await emit(.paused)
     }
 
@@ -255,15 +260,20 @@ actor ScriptedEngine: PlaybackEngine {
     }
 
     func finish() async {
+        // The real engine stops wanting audio first, which ends any wait — see
+        // `AVPlayerPlaybackEngine.stopWanting`.
+        await emit(.waiting(nil))
         await emit(.ended)
     }
 
     func interrupt(resumable: Bool) async {
         isPlaying = false
+        await emit(.waiting(nil))
         await emit(.interrupted(resumable: resumable))
     }
 
     func fail(_ message: String) async {
+        await emit(.waiting(nil))
         await emit(.failed(message))
     }
 

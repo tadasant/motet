@@ -102,14 +102,21 @@ public struct LiveSnapshot: Equatable, Sendable {
     /// question — and the only thing that says which vendor is missing is this text.
     public var liveUnavailableDetail: String?
 
-    /// Whether this session can produce a reply of any kind.
+    /// Whether this session can produce a reply of any kind — the service's own answer.
     ///
     /// False is the state production has been in since the voice service was deployed: the
     /// composed arm with no speech-to-text vendor provisioned. Barge-in works, every mic
     /// frame is forwarded, and no answer is possible — "the VAD seems to work but I'm not
     /// getting any audio". A session that cannot answer must say so where the mic is,
     /// rather than looking like one that is merely quiet.
-    public var canAnswer: Bool { liveUnavailable != "arm_dormant" }
+    ///
+    /// **Read from the frame, never inferred from `liveUnavailable`.** `arm_dormant` is
+    /// emitted for two opposite situations — a live channel that would not open on an arm
+    /// whose typed questions still work, and an arm that can reply to nothing — so a client
+    /// branching on the code tells half of them the wrong thing. True by default, which is
+    /// what a service too old to send the field means and the safer way to be wrong: it
+    /// offers a control that might not work rather than hiding one that does.
+    public var canAnswer = true
     public var lines: [Line] = []
     /// What was playing at the last barge-in.
     public var lastInterrupt: String?
@@ -435,7 +442,7 @@ public actor LiveSession {
 
     private func handle(_ event: LiveEvent, generation mine: Int) async {
         switch event {
-        case .sessionState(let phase, let detail, let reason, let live):
+        case .sessionState(let phase, let detail, let reason, let live, let canAnswer):
             switch phase {
             case "ready":
                 if !readySeen {
@@ -443,6 +450,7 @@ public actor LiveSession {
                     readySeen = true
                     let opened = live ?? (detail?.hasPrefix("live conversation open") ?? false)
                     state.isLive = opened
+                    if let canAnswer { state.canAnswer = canAnswer }
                     if !opened, let reason {
                         state.liveUnavailable = reason
                         state.liveUnavailableDetail = detail

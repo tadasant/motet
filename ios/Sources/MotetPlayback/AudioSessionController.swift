@@ -18,83 +18,57 @@ import os
 ///    does not interrupt whatever the phone was already playing just by being opened.
 ///
 /// **The category is asked for as a ladder, and a refusal is reported rather than
-/// swallowed.** This used to be one hard-coded combination behind `try?`, in three call
+/// swallowed.** This used to be one hard-coded combination behind `try?`, at both call
 /// sites. iOS validates category, mode, route-sharing policy and options *together*, and
 /// that validation has tightened between releases; when it refuses, the session stays on
 /// the process default `.soloAmbient`, which is muted by the ringer switch and stops on
 /// lock. So the failure mode of a swallowed `setCategory` is *exactly* the bug report
 /// "I can't hear anything" — with nothing in the app or the logs saying so.
-/// ``AudioSessionPlan/listening`` holds the rungs and what each gives up;
-/// ``Outcome`` is what took.
+///
+/// ``AudioSessionPlan`` holds the rungs, what each gives up, and the walk down them; this
+/// class supplies the one closure that calls `AVAudioSession` and logs what came back. The
+/// split is so that the half which can be wrong is testable where AVFoundation does not
+/// exist, which is every machine in CI but one.
 ///
 /// **Unverified here.** The simulator has an audio session API that accepts all of this and
 /// a host OS that does not enforce it: background audio, the mute switch, and ducking are
-/// device behaviours. What CI *can* check is the ladder itself, which is why it is data in
-/// `MotetKit` rather than four literals in this file. See `ios/README.md`.
+/// device behaviours. See `ios/README.md`.
 public final class AudioSessionController: @unchecked Sendable {
     private static let logger = Logger(subsystem: "com.getmotet.app", category: "audio-session")
 
-    /// What configuring the session achieved.
-    public enum Outcome: Equatable, Sendable {
-        /// A rung took. `shape` says which; anything but the first gave something up.
-        case configured(AudioSessionShape)
-        /// Every rung was refused. `errors` is one line per rung, for the log.
-        case refused(errors: [String])
-
-        /// What to tell the listener, or nil when there is nothing they need to know.
-        public var message: String? {
-            switch self {
-            case .configured(let shape): return AudioSessionPlan.concessionNote(for: shape)
-            case .refused: return AudioSessionPlan.noShapeAccepted
-            }
-        }
-    }
-
-    private let lock = NSLock()
-    private var lastOutcome: Outcome?
-
     public init() {}
-
-    /// The outcome of the last `configure()`, for the app layer to put on screen.
-    public var outcome: Outcome? { lock.withLock { lastOutcome } }
 
     /// Put the session into the best listening shape this phone will accept.
     ///
-    /// Never throws: running out of rungs is an answer — ``Outcome/refused`` — not an
-    /// exception, because every caller's only sane response is to say so and carry on
-    /// trying to play. A caller that threw here would have to choose between refusing to
+    /// Never throws: running out of rungs is an answer — ``AudioSessionPlan/Outcome/refused``
+    /// — not an exception, because every caller's only sane response is to say so and carry
+    /// on trying to play. A caller that threw here would have to choose between refusing to
     /// play at all and swallowing it again.
     @discardableResult
-    public func configure() -> Outcome {
+    public func configure() -> AudioSessionPlan.Outcome {
         let session = AVAudioSession.sharedInstance()
-        var errors: [String] = []
-        for shape in AudioSessionPlan.listening {
-            do {
-                try session.setCategory(
-                    .playback,
-                    mode: Self.mode(shape.mode),
-                    policy: Self.policy(shape.policy),
-                    options: []
-                )
-                let outcome = Outcome.configured(shape)
-                lock.withLock { lastOutcome = outcome }
-                if shape.concession.isEmpty {
-                    Self.logger.notice("audio session: \(shape.label, privacy: .public)")
-                } else {
-                    Self.logger.warning(
-                        "audio session fell back to \(shape.label, privacy: .public) — \(shape.concession, privacy: .public); refused: \(errors.joined(separator: "; "), privacy: .public)"
-                    )
-                }
-                return outcome
-            } catch {
-                errors.append("\(shape.label): \(error.localizedDescription)")
-            }
+        let outcome = AudioSessionPlan.walk { shape in
+            try session.setCategory(
+                .playback,
+                mode: Self.mode(shape.mode),
+                policy: Self.policy(shape.policy),
+                options: []
+            )
         }
-        let outcome = Outcome.refused(errors: errors)
-        lock.withLock { lastOutcome = outcome }
-        Self.logger.error(
-            "audio session: every shape refused — \(errors.joined(separator: "; "), privacy: .public). Playback will be silent under the ringer switch and will stop on lock."
-        )
+        // Logged on every path, the ordinary one included: "which shape did this phone
+        // accept" is the first question to ask of a silent device, and a log line is the
+        // artefact that travels off somebody else's phone when the screen does not.
+        let line = outcome.logLine
+        switch outcome {
+        case .configured(let shape) where shape.concession.isEmpty:
+            Self.logger.notice("\(line, privacy: .public)")
+        case .configured:
+            Self.logger.warning("\(line, privacy: .public)")
+        case .refused:
+            Self.logger.error(
+                "\(line, privacy: .public). Playback will be silent under the ringer switch and will stop on lock."
+            )
+        }
         return outcome
     }
 

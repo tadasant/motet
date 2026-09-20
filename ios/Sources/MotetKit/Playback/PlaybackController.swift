@@ -46,6 +46,9 @@ public actor PlaybackController {
     /// that actually moves, by a `playing`/`paused`, and by `waiting(nil)`.
     private var waitReason: PlaybackWaitReason?
     private var waitingSince: Date?
+    /// Whether the spinner on screen is this wait's, so clearing the wait does not cancel
+    /// a spinner `load` put up for its own reasons.
+    private var waitSetLoading = false
     /// Set when iOS refused every shape in ``AudioSessionPlan/listening``. Not per episode.
     private var audioSessionMessage: String?
     private var markedHeard: Set<String> = []
@@ -215,6 +218,7 @@ public actor PlaybackController {
         errorMessage = nil
         waitReason = nil
         waitingSince = nil
+        waitSetLoading = false
         isLoading = true
         publish()
 
@@ -286,6 +290,7 @@ public actor PlaybackController {
             errorMessage = nil
             waitReason = nil
             waitingSince = nil
+            waitSetLoading = false
             await engine.play()
             isPlaying = true
         case .pause:
@@ -400,8 +405,12 @@ public actor PlaybackController {
         }
         // A clock that moved forward is the only unarguable proof that audio is coming out,
         // and it outranks anything `timeControlStatus` said: a wait that has been overtaken
-        // by real progress is over, whatever order the two events arrived in.
-        if step > 0 { clearWait() }
+        // by real progress is over, whatever order the two events arrived in — and so is a
+        // failure a wait already raised, which the moving clock has just disproved.
+        if step > 0 {
+            clearWait()
+            if isPlaying { errorMessage = nil }
+        }
 
         await markNewlyHeard()
         await persistPosition(force: false)
@@ -425,14 +434,23 @@ public actor PlaybackController {
     /// decision. `nil` is the engine saying the wait ended.
     private func observed(waiting reason: PlaybackWaitReason?) async {
         guard let reason else {
-            clearWait()
+            // `keepingError: true`, because `waiting(nil)` and `paused` are two events from
+            // one pause, handed over by two unordered `Task`s. Clearing the error here
+            // would delete the sentence this whole mechanism exists to produce, about half
+            // the time, the moment the listener tapped pause to ask why nothing happened.
+            // Nothing is lost: a wait that ended because audio *started* produces `playing`
+            // or a forward position, and both clear the error on their own.
+            clearWait(keepingError: true)
             return
         }
         let now = clock.now
-        if waitReason != reason {
-            waitReason = reason
-            waitingSince = now
-        }
+        // The reason may change without the wait ending — `AVPlayer` walks from
+        // `evaluatingBufferingRate` to `toMinimizeStalls` routinely — and the grace is
+        // measured from the start of the *wait*, not of the current explanation. Resetting
+        // the mark here turned a promised fifteen seconds into forty-five, and into never
+        // for a reason that flaps.
+        if waitingSince == nil { waitingSince = now }
+        waitReason = reason
         // A wait only means something while somebody is waiting for it. `AVPlayer` reports
         // `waitingToPlayAtSpecifiedRate` on a paused player that is pre-rolling too, and
         // narrating a stall nobody asked for would be its own kind of lying.
@@ -440,13 +458,15 @@ public actor PlaybackController {
 
         if !reason.clearsItself {
             errorMessage = reason.failureSentence
-            isLoading = false
+            if waitSetLoading { waitSetLoading = false; isLoading = false }
             return
         }
         isLoading = true
+        waitSetLoading = true
         let waited = now.timeIntervalSince(waitingSince ?? now)
         if waited >= Self.stallGraceSeconds {
             errorMessage = reason.failureSentence
+            waitSetLoading = false
             isLoading = false
         }
     }
@@ -454,12 +474,16 @@ public actor PlaybackController {
     /// Forget the wait. `keepingError` leaves a failure it already raised on screen — a
     /// pause after a stall is the listener giving up, not the audio arriving.
     private func clearWait(keepingError: Bool = false) {
-        if waitReason != nil {
-            waitReason = nil
-            waitingSince = nil
+        guard waitReason != nil else { return }
+        waitReason = nil
+        waitingSince = nil
+        // Only unset the spinner this wait put up. A wait that arrived and cleared while
+        // `load` was genuinely still loading must not cancel `load`'s own spinner.
+        if waitSetLoading {
+            waitSetLoading = false
             isLoading = false
-            if !keepingError, errorMessage != nil { errorMessage = nil }
         }
+        if !keepingError, errorMessage != nil { errorMessage = nil }
     }
 
     /// The sentence the screen shows while a wait is still plausibly temporary. Nil once it

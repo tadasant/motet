@@ -33,7 +33,7 @@ final class AppEnvironment {
             // Play Live switched the session to `.playAndRecord`; this is the only thing
             // that puts listening back, so a refusal here is a briefing that goes silent
             // *after* a conversation and must not be swallowed either.
-            report(audioSession.configure().message)
+            report(audioSession.configure().listenerMessage)
             try? audioSession.activate()
         })
     }()
@@ -93,9 +93,13 @@ final class AppEnvironment {
     /// the startup call still holds is how a briefing ends up playing under
     /// `.playAndRecord` with no `.defaultToSpeaker`, into the earpiece.
     @discardableResult
-    func applyAudioSessionShape() async -> AudioSessionController.Outcome {
+    func applyAudioSessionShape() async -> AudioSessionPlan.Outcome {
         let outcome = audioSession.configure()
-        await controller.report(audioSessionMessage: outcome.message)
+        // Only a refusal reaches the listener. A lower rung that took is a working player,
+        // and putting "no AirPlay 2 grouping" on the player screen in error red would train
+        // them to ignore the one line that means the audio will be silent — the concession
+        // goes to the `audio-session` log instead.
+        await controller.report(audioSessionMessage: outcome.listenerMessage)
         return outcome
     }
 

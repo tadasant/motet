@@ -2179,17 +2179,26 @@ who calls it anyway. Turning it on is configuration, listed in the PR.
   (`MOTET_VOICE_ALLOWED_ORIGINS`). `StartSession` has no CORS policy on purpose: only the
   API calls it.
 
-**An arm that cannot answer says so in a code, on the first `ready`.** `reason` already
-carried one for a *live channel that did not open* (`insufficient_quota`, `arm_dormant`, …);
-an arm with no live channel to open sent its dormancy as prose in `detail`, so the only
-place either client surfaced it was a line in the transcript log. That is the state
-production has been in since the service was deployed — `arm=composed` with no
-speech-to-text vendor provisioned — and on a phone it reads as "the VAD works but I get no
-audio", because barge-in detection is genuinely unaffected and nothing else is possible.
-`ready` now sets `reason: "arm_dormant"` for it too, so both clients can say the *right*
-sentence: a live channel that did not open still answers a typed question, and this answers
-nothing. **The silence itself is the private repo's to fix** — a vendor has to be
-provisioned — and saying so is this repo's.
+**Whether a session can answer at all is its own field on the first `ready`, because no
+code could carry it.** An arm with no live channel to open sent its dormancy as prose in
+`detail`, so the only place either client surfaced it was a line in the transcript log —
+which is the state production has been in since the service was deployed (`arm=composed`
+with no speech-to-text vendor provisioned). On a phone that reads as "the VAD works but I
+get no audio", because barge-in detection is genuinely unaffected and nothing else is
+possible.
+
+Putting `arm_dormant` in `reason` and letting the clients branch on it does **not** work,
+and is the trap to avoid: `failure_reason` already emits that same code for a `LiveArm`
+whose channel would not open, and there a typed question *is* answered by `text_arm`. One
+code, two opposite consequences for the listener. So `SessionStateEvent.can_answer` says the
+thing directly — `live is not None`, or a `text_arm` whose `capabilities().conversational`
+is true, which is the flag a dormant composed arm sets false **while remaining its own
+`text_arm`**, so `text_arm is not None` is not the test. It also covers the case neither
+code could: a `LiveArm` with no `text_arm`, which has always been told it could type a
+question it cannot. Optional on the wire, and a client that reads it treats absent as true,
+so an older service offers a control that might not work rather than hiding one that does.
+**The silence itself is the private repo's to fix** — a vendor has to be provisioned — and
+saying so is this repo's.
 
 Deliberately not built, each for a stated reason: a **startup probe that the realtime key
 is billable** is a vendor connection per instance start and belongs with the decision to

@@ -284,6 +284,16 @@ class SessionStateEvent(SessionEvent):
     #: learns that a channel reopened mid-session). ``None`` where it says nothing, so a
     #: client need not match prose in ``detail`` to know whether its speech is heard.
     live: bool | None = None
+    #: Whether this session can produce a reply *at all* — by voice or to a typed question.
+    #:
+    #: ``reason`` cannot answer this and must not be made to: ``arm_dormant`` means "the
+    #: live channel could not open" on a :class:`~motet_voice.realtime.live.LiveArm`, where
+    #: a typed question still goes to ``text_arm``, and "nothing in this process can reply"
+    #: on an arm that offers no live channel at all. One code, two opposite consequences for
+    #: the listener, and a client guessing from it tells half of them the wrong thing. The
+    #: service knows which it is, so it says so. ``None`` where it says nothing — an older
+    #: client reads it as before, and a client that reads it should treat absent as true.
+    can_answer: bool | None = None
 
 
 class ErrorEvent(SessionEvent):

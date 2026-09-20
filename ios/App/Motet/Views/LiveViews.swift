@@ -85,19 +85,23 @@ struct LivePanel: View {
                         .font(Theme.body(13, relativeTo: .footnote))
                         .foregroundStyle(Theme.errorText)
                 }
-                if live.isRunning, let reason = live.liveUnavailable {
-                    // Two different sentences, because they are two different situations and
-                    // the wrong one is worse than none: a live channel that did not open
-                    // still answers a typed question, and a dormant arm answers nothing at
-                    // all — which is what production has been doing while looking fine.
+                // Two different situations, and the wrong sentence is worse than none: a
+                // live channel that did not open still answers a typed question, while an
+                // arm that cannot converse answers nothing at all — which is what production
+                // has been doing while looking fine. The service says which
+                // (`can_answer`); the code alone cannot, because `arm_dormant` is emitted
+                // for both.
+                if live.isRunning, !live.canAnswer {
                     Text(
-                        live.canAnswer
-                            ? "Live conversation unavailable (\(reason)); typed questions are answered instead."
-                            : "Play Live can't answer in this deployment, so you will hear nothing back. "
-                                + (live.liveUnavailableDetail ?? "No conversational vendor is provisioned.")
+                        "Play Live can't answer in this deployment, so you will hear nothing back. "
+                            + (live.liveUnavailableDetail ?? "No conversational vendor is provisioned.")
                     )
                     .font(Theme.body(12, relativeTo: .caption))
-                    .foregroundStyle(live.canAnswer ? Theme.inkSoft : Theme.errorText)
+                    .foregroundStyle(Theme.errorText)
+                } else if live.isRunning, let reason = live.liveUnavailable {
+                    Text("Live conversation unavailable (\(reason)); typed questions are answered instead.")
+                        .font(Theme.body(12, relativeTo: .caption))
+                        .foregroundStyle(Theme.inkSoft)
                 }
                 if live.phase == .listening {
                     HStack(spacing: 8) {

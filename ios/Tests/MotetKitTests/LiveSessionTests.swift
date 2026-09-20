@@ -273,7 +273,7 @@ final class LiveSessionTests: XCTestCase {
         // forwarded, which is why it reads as "the VAD works but I get no audio".
         try await started(
             h,
-            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"no speech-to-text vendor is provisioned for the composed arm","reason":"arm_dormant","live":false}"#
+            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"no speech-to-text vendor is provisioned for the composed arm","reason":"arm_dormant","live":false,"can_answer":false}"#
         )
 
         let snapshot = await h.session.snapshot()
@@ -289,13 +289,40 @@ final class LiveSessionTests: XCTestCase {
         let h = makeHarness()
         try await started(
             h,
-            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"composed","reason":"insufficient_quota","live":false}"#
+            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"composed","reason":"insufficient_quota","live":false,"can_answer":true}"#
         )
 
         // The distinction the screen's two sentences rest on: out of credits is not the
         // same as nothing in the process being able to reply.
         let snapshot = await h.session.snapshot()
         XCTAssertEqual(snapshot.liveUnavailable, "insufficient_quota")
+        XCTAssertTrue(snapshot.canAnswer)
+    }
+
+    func testACodeAloneIsNotEnoughBecauseArmDormantMeansTwoOppositeThings() async throws {
+        let h = makeHarness()
+        // The same `arm_dormant` code, from a LiveArm whose channel would not open — where
+        // `text_arm` does answer a typed question. A client branching on the code alone
+        // would tell this listener their working question box is dead.
+        try await started(
+            h,
+            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"live conversation unavailable (arm_dormant); answering typed questions with the composed arm","reason":"arm_dormant","live":false,"can_answer":true}"#
+        )
+
+        let snapshot = await h.session.snapshot()
+        XCTAssertEqual(snapshot.liveUnavailable, "arm_dormant")
+        XCTAssertTrue(snapshot.canAnswer)
+    }
+
+    func testAServiceTooOldToSendCanAnswerIsAssumedAbleTo() async throws {
+        let h = makeHarness()
+        try await started(
+            h,
+            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"composed","reason":"insufficient_quota","live":false}"#
+        )
+
+        // Offering a control that might not work beats hiding one that does.
+        let snapshot = await h.session.snapshot()
         XCTAssertTrue(snapshot.canAnswer)
     }
 

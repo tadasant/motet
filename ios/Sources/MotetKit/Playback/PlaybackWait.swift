@@ -22,6 +22,15 @@ public enum PlaybackWaitReason: String, Hashable, Sendable, CaseIterable {
     /// than swallowed: "waiting for a reason nobody here recognises" is still an answer,
     /// and an unrecognised one is exactly the kind that never gets looked at otherwise.
     case unknown
+    /// **Not one of `AVPlayer`'s** — ours, for the shape that has no reason because the
+    /// player never entered a waiting state at all.
+    ///
+    /// `playImmediately(atRate:)` can leave `timeControlStatus` at `.paused`, which is what
+    /// a refused or inactive audio session looks like from here. Nothing then changes, so
+    /// no KVO fires, no reason exists to read, and the controller sits at "playing" over a
+    /// frozen clock — the reported bug exactly. The engine's own watchdog reports this
+    /// after one probe interval, which is why the enum has a case AVFoundation does not.
+    case notStarted
 
     /// What the listener is told while it is still plausibly temporary.
     public var sentence: String {
@@ -38,6 +47,8 @@ public enum PlaybackWaitReason: String, Hashable, Sendable, CaseIterable {
             return "Waiting for the other devices in this shared session."
         case .unknown:
             return "The player is waiting to start, and did not say why."
+        case .notStarted:
+            return "The player was told to play and has not started."
         }
     }
 

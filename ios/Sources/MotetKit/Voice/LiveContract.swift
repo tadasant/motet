@@ -12,7 +12,13 @@ public enum LiveEvent: Equatable, Sendable {
     /// `ready` / `listening` / `speaking` / `closed`. `reason` rides on the first `ready`
     /// of a session whose live channel did not open (`insufficient_quota`, `arm_dormant`, …);
     /// `live` says whether a speech-to-speech channel is open behind this state.
-    case sessionState(state: String, detail: String?, reason: String?, live: Bool?)
+    ///
+    /// `canAnswer` says whether *anything* can reply — by voice or to a typed question —
+    /// and it is deliberately not derivable from `reason`: `arm_dormant` means "the live
+    /// channel could not open" on an arm that still answers typed questions, and "nothing
+    /// here can reply" on one that does not. Absent means the service did not say, which an
+    /// older service will not, so read it as true.
+    case sessionState(state: String, detail: String?, reason: String?, live: Bool?, canAnswer: Bool?)
     case transcript(speaker: String, text: String, final: Bool)
     /// Reply audio. `format` is `pcm16` (raw little-endian mono at `sampleRate`) or a
     /// container for a decoder — the composed arm sends Cartesia's MP3, the fake a WAV.
@@ -30,6 +36,7 @@ public enum LiveEvent: Equatable, Sendable {
         let state: String?
         let detail: String?
         let reason: String?
+        let can_answer: Bool?
         let live: Bool?
         let speaker: String?
         let text: String?
@@ -61,7 +68,8 @@ public enum LiveEvent: Equatable, Sendable {
         switch wire.type {
         case "session_state":
             return .sessionState(
-                state: wire.state ?? "", detail: wire.detail, reason: wire.reason, live: wire.live
+                state: wire.state ?? "", detail: wire.detail, reason: wire.reason,
+                live: wire.live, canAnswer: wire.can_answer
             )
         case "transcript":
             return .transcript(speaker: wire.speaker ?? "", text: wire.text ?? "", final: wire.final ?? true)
