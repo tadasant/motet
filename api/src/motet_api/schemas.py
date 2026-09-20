@@ -18,6 +18,8 @@ from motet_db.api_tokens import MAX_LABEL_CHARS as MAX_TOKEN_LABEL_CHARS
 from motet_sources import MAX_FIRST_SYNC_DAYS
 from pydantic import BaseModel, ConfigDict, Field
 
+from .fixtures import DEFAULT_FIXTURE_SOURCE_NAME
+
 #: The longest lifetime the mint route accepts, in days. A bound rather than a policy:
 #: nothing here expires a token by default, and a value a client can set to a century is
 #: a field that is not really validating anything.
@@ -1888,3 +1890,124 @@ class McpAuthorizationResponse(BaseModel):
     email: str = Field(description="The allowlisted account the client will act as.")
     redirect_url: str = Field(description="Approve: the client's redirect URI with the code.")
     deny_url: str = Field(description="Refuse: the client's redirect URI with access_denied.")
+
+
+# --- the staging test harness (motet_api.fixtures) -------------------------------------
+#
+# Present in `openapi.yaml` whether or not a deployment switches the harness on, and that
+# is deliberate: the routes are registered unconditionally and answer 503 when the flag is
+# off, so the generated contract, the reserved-path walk and the MCP parity table all
+# describe one app rather than one per environment. Hiding them would buy nothing — this
+# repo is public and the code is right here — and would cost every route-walking test its
+# determinism.
+
+
+class TestingJobResponse(BaseModel):
+    """One job row, plus whether anything is draining the queue it is on.
+
+    The second half is the point. A job in ``ready`` looks identical whether a worker is
+    working through a backlog or whether none has run for a week, so a caller given only
+    the state cannot tell slow from broken — which is the trap motet#38 is about, and the
+    reason ``worker_last_seen_at`` and ``worker_fresh`` travel with every answer.
+    """
+
+    job_id: int
+    queue: str
+    state: str
+    attempts: int
+    max_attempts: int = Field(description="Reported from the queue's own constant, never restated.")
+    subject_id: str | None = Field(description="The source, item or episode the job is about.")
+    last_error: str | None
+    run_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    locked_at: datetime | None
+    now: datetime = Field(description="The database's clock, for ageing the timestamps above.")
+    worker_last_seen_at: datetime | None = Field(
+        description="When a worker last drained this job's queue. Null means never."
+    )
+    worker_fresh: bool = Field(
+        description="Whether that was recent enough to expect this job to move."
+    )
+
+
+class SeedGmailSourceRequest(BaseModel):
+    """Re-establish the connected state a human's one-time consent produced."""
+
+    name: str = Field(
+        default=DEFAULT_FIXTURE_SOURCE_NAME,
+        min_length=1,
+        max_length=200,
+        description=(
+            "What the source is called, and what a re-seed matches on so that running the "
+            "loop twice replaces one mailbox rather than adding a second."
+        ),
+    )
+    query: str | None = Field(
+        default=None,
+        max_length=500,
+        description="The Gmail search this source polls. Unset means the default filter.",
+    )
+    mailbox: str | None = Field(
+        default=None,
+        max_length=320,
+        description=(
+            "Which mailbox the refresh token is for. Recorded so that a token for some "
+            "other account disconnects the source on the next poll instead of quietly "
+            "ingesting the wrong inbox. Unset falls back to the address this deployment "
+            "was configured with, and then to recording whatever the first poll sees."
+        ),
+    )
+    scopes: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Granted scopes. Empty means Gmail read-only, which is what a connect grants.",
+    )
+
+
+class SeedGmailSourceResponse(BaseModel):
+    source_id: str
+    name: str
+    created: bool = Field(description="False when this replaced the grant on an existing source.")
+    scopes: list[str]
+    mailbox: str | None
+    poll_job: TestingJobResponse = Field(
+        description="The poll this seed enqueued, exactly as completing a consent does."
+    )
+
+
+class TestingResetResponse(BaseModel):
+    """What a reset removed, per table, and what it deliberately did not."""
+
+    user_id: str
+    deleted: dict[str, int] = Field(
+        description=(
+            "Rows removed per table, including the join tables under episodes and news "
+            "items, so a caller can assert a baseline rather than trust one."
+        )
+    )
+    kept: list[str] = Field(
+        description="Tables a reset never touches — the account, its session, its feed token."
+    )
+
+
+class TriggerJobRequest(BaseModel):
+    """Run one pipeline stage now, and say which job that was."""
+
+    kind: Literal["gmail_poll", "episode"]
+    source_id: str | None = Field(
+        default=None,
+        description=(
+            "gmail_poll: which mailbox. Omit it when the account has exactly one connected "
+            "Gmail source, which is the case a staging loop is in."
+        ),
+    )
+    title: str | None = Field(
+        default=None, max_length=200, description="episode: its title. Unset means a dated one."
+    )
+    max_duration_ms: int | None = Field(
+        default=None, gt=0, description="episode: the duration cap. Unset means the default."
+    )
+    keep_in_backlog: bool = Field(
+        default=False, description="episode: listening to it marks nothing read."
+    )

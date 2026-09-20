@@ -46,6 +46,7 @@ from motet_db import api_tokens as token_repo
 from motet_db import auth as auth_repo
 from motet_db import connectors as connector_repo
 from motet_db import enrichment as enrichment_repo
+from motet_db import fixtures as fixtures_repo
 from motet_db import settings as settings_repo
 from motet_db import waitlist as waitlist_repo
 from motet_inference.llm import LlmConfigError, LlmStage
@@ -87,6 +88,7 @@ from motet_vault import DekWrapper, VaultError, vault_status
 from motet_workers import (
     DEFAULT_MAX_ATTEMPTS,
     RESYNC_REQUESTED_CONFIG_KEY,
+    Queue,
     enqueue_episode,
     enqueue_integration,
     enqueue_paste,
@@ -148,6 +150,15 @@ from .feed import (
     feed_url,
     render_feed,
 )
+from .fixtures import (
+    GMAIL_REFRESH_TOKEN_ENV,
+    TEST_FIXTURES_ENV,
+    FixturesRefused,
+    fixtures_enabled,
+    staging_mailbox,
+    staging_refresh_token,
+)
+from .fixtures import check_startup as check_fixtures_startup
 from .mcp import registry as mcp_registry
 from .mcp.oauth import complete_authorization as complete_mcp_oauth
 from .mcp.oauth import oauth_setup as mcp_oauth_setup
@@ -213,6 +224,8 @@ from .schemas import (
     ResyncRequest,
     RevokedResponse,
     SaveHighlightRequest,
+    SeedGmailSourceRequest,
+    SeedGmailSourceResponse,
     SegmentResponse,
     SessionResponse,
     SourceItemDetailResponse,
@@ -230,12 +243,15 @@ from .schemas import (
     StartNativeLoginRequest,
     StartNativeLoginResponse,
     StartVoiceSessionRequest,
+    TestingJobResponse,
+    TestingResetResponse,
+    TriggerJobRequest,
     VoiceSessionResponse,
     VoiceStatusResponse,
     WaitlistJoinResponse,
 )
 from .shownotes import SourceExcerpt, chapters_json, transcript_vtt
-from .sync_progress import run_started_at, sync_progress
+from .sync_progress import WORKER_FRESH, run_started_at, sync_progress
 from .voice import (
     VoiceConfig,
     VoiceStarter,
@@ -282,6 +298,33 @@ Trigger = Annotated[DrainTrigger, Depends(drain_trigger)]
 Nudge = Annotated[DrainNudge, Depends(drain_nudge)]
 
 
+def require_fixtures() -> None:
+    """Refuse unless this deployment switched the staging test harness on.
+
+    A 503 rather than a 404, which is the answer every other unconfigured capability in
+    this API gives — the voice session route, the vault, a missing ``DATABASE_URL``.
+    Nothing is wrong with the request; the capability is off. Hiding the route behind a
+    404 would buy no secrecy either: it is in ``openapi.yaml``, and this repo is public.
+
+    **This is the ordinary gate, not the control.** The control is
+    :func:`motet_api.fixtures.check_startup`, which stops the process from booting at all
+    where the harness must never run. A production deployment does not reach this function
+    with the flag on, because it does not reach a request.
+    """
+    if not fixtures_enabled():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"The staging test harness is off in this deployment. Set {TEST_FIXTURES_ENV}=1 "
+            "to enable it; it is refused at startup in production.",
+        )
+
+
+#: Marks a route as part of the staging test harness. Every one of them takes it, and
+#: ``api/tests/test_fixtures_api.py`` walks ``app.routes`` to prove none escaped — the same
+#: shape, and the same reason, as the walk that holds every ``/v1/admin`` route to ``Admin``.
+Fixtures = Annotated[None, Depends(require_fixtures)]
+
+
 @asynccontextmanager
 async def lifespan(target: FastAPI) -> AsyncIterator[None]:
     """Refuse to serve at all rather than serve a request we cannot fulfil.
@@ -309,6 +352,21 @@ async def lifespan(target: FastAPI) -> AsyncIterator[None]:
             "refused because that route is unauthenticated and this repo is public.",
             HEALTH_PATH,
         )
+    # Before anything else this process could do with the flag on. A deployment that
+    # must not serve the test harness has to fail its revision rather than start and
+    # then refuse per request: `check_startup` raises, uvicorn reports the startup as
+    # failed, and Cloud Run never shifts traffic to it.
+    #
+    # **Flushed on the way out, which is the difference between a refusal an agent can
+    # read and one only Cloud Logging saw.** The `finally` below covers everything from
+    # the `yield` onward; a raise up here skips it, and the batch processors would go
+    # down still holding the ERROR line that says why — on a revision that is failing to
+    # start, which its own comment names as the worst case to lose (invariant 11).
+    try:
+        check_fixtures_startup()
+    except FixturesRefused:
+        obs.shutdown()
+        raise
     config = load_llm_config()
     obs.logger.info("llm: %s", config.describe())
     current = Settings.from_env()
@@ -3533,3 +3591,340 @@ def sync_facts(source: StoredSource) -> dict[str, Any]:
 def repo_sources(conn: psycopg.Connection[Any], user_id: str) -> list[StoredSource]:
     """Named separately so the route's own name can be `list_sources`."""
     return phase2.list_sources(conn, user_id)
+
+
+# --- the staging test harness ---------------------------------------------------------
+#
+# Four routes that let an agent drive this deployment end to end with nobody in the loop:
+# seed the test mailbox's credential, reset the account, run a stage now, and watch the
+# job it produced. `motet_api.fixtures` is the module docstring for all of it — what the
+# flag turns on, why sealing here widens no decrypt, and what the boot refusal is.
+#
+# **Every one takes `Fixtures`, and `User` before it.** The order is the signature's, which
+# is the order FastAPI resolves in, so an unauthenticated caller is refused by the bearer
+# check rather than told whether the harness is on. Two tests hold both halves.
+#
+# Not MCP tools: they are a test harness rather than a product capability, and they are in
+# `mcp/registry.py`'s EXCLUDED with that reason.
+
+#: The duration cap a triggered episode gets when the caller names none — the SPA's own
+#: twenty minutes, so a harness episode is the shape a person would have asked for.
+FIXTURE_EPISODE_MAX_DURATION_MS: Final = 20 * 60_000
+
+
+def _job_response(status_: fixtures_repo.JobStatus) -> TestingJobResponse:
+    """A job row as the harness reports it, with the queue's liveness beside it."""
+    fresh = (
+        status_.queue_last_seen_at is not None
+        and status_.now - status_.queue_last_seen_at <= WORKER_FRESH
+    )
+    return TestingJobResponse(
+        job_id=status_.id,
+        queue=status_.queue,
+        state=status_.state,
+        attempts=status_.attempts,
+        # Reported from the queue's own constant rather than restated: a second copy is
+        # wrong the moment one of them moves, which is the rule `/v1/ingestion` already
+        # follows for "attempt 3 of 5".
+        max_attempts=DEFAULT_MAX_ATTEMPTS,
+        subject_id=status_.subject,
+        last_error=status_.last_error,
+        run_at=status_.run_at,
+        created_at=status_.created_at,
+        updated_at=status_.updated_at,
+        locked_at=status_.locked_at,
+        now=status_.now,
+        worker_last_seen_at=status_.queue_last_seen_at,
+        worker_fresh=fresh,
+    )
+
+
+@app.post(
+    "/v1/testing/gmail-source",
+    response_model=SeedGmailSourceResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["testing"],
+)
+def seed_gmail_source(
+    body: SeedGmailSourceRequest,
+    conn: Conn,
+    user_id: User,
+    _fixtures: Fixtures,
+    wrapper: Wrapper,
+    nudge: Nudge,
+) -> SeedGmailSourceResponse:
+    """Connect the staging test mailbox from a refresh token, as a consent would have.
+
+    **There is no machine-to-machine OAuth for a consumer ``@gmail.com`` account.** Google's
+    only mechanism for a service account to act as a mailbox is domain-wide delegation,
+    which requires Workspace — so the consent is performed once, by a human, and is exactly
+    the one-time boundary invariant 9 reserves for one. What is *not* a human step is
+    re-establishing the connected state afterwards, and this is that: the refresh token
+    that consent produced lives in Secret Manager, arrives as an environment variable, and
+    is sealed here.
+
+    **It seals through the same call the OAuth callback makes**, over the same encrypt-only
+    :class:`~motet_vault.DekWrapper`, so the row is envelope-encrypted under the same KEK
+    with the same ``user_id:source_id:provider`` AAD. No decrypt is widened — the API could
+    not open this credential a moment before this route existed and cannot now.
+
+    **Re-seeding replaces rather than accumulates.** A loop that ran daily and created a
+    mailbox each time would poll the same inbox N ways and dedup it against itself, so a
+    source of this user's with this name is reused and its grant overwritten — which is the
+    upsert ``store_source_credential`` already does for a re-consent.
+
+    ``mailbox`` is recorded rather than checked here: the worker is what asks Gmail which
+    account a grant reaches, before it reads with it (motet#96), and a token for some other
+    inbox therefore disconnects the source on the next poll instead of ingesting it.
+    """
+    secret = staging_refresh_token()
+    if secret is None:
+        # Not a seeding failure — the fixture has not been provisioned. Cloud Run will not
+        # create a revision whose secret has no enabled version, so the mount stays off
+        # until a human places the token once. Saying that rather than "could not seed"
+        # is the difference between a setup step and a bug hunt.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"The staging test mailbox is not provisioned yet: {GMAIL_REFRESH_TOKEN_ENV} is "
+            "unset in this deployment. A human places that refresh token once, and the "
+            "private infrastructure repo then mounts it here; nothing is wrong with this "
+            "request.",
+        )
+
+    # The same per-user transaction lock `POST /v1/source-items/integrate` takes, and for
+    # the same reason one layer along: what follows is a check-then-insert, `sources` has no
+    # unique index on (user_id, kind, name), and the realistic double-submit is not a second
+    # tab but a retry — a client that timed out on a cold start plus a KMS round trip, or two
+    # loop steps overlapping. Two sources named the same is not a cosmetic duplicate: the
+    # trigger route below then refuses with "this account has 2 connected Gmail sources" and
+    # the unattended loop stops, or both poll one inbox on independent cursors.
+    fixtures_repo.lock_seed(conn, user_id)
+
+    name = body.name.strip()
+    scopes = _seeded_scopes(body.scopes)
+    query = (body.query or "").strip()
+    # The request wins, then the deployment's own answer. Reading it from configuration
+    # is what lets the seed record the account with no vendor call: the API speaks to no
+    # vendor, and the worker is what asks Gmail which mailbox a grant actually reaches.
+    mailbox = (body.mailbox or "").strip() or staging_mailbox()
+
+    source_id = fixtures_repo.find_gmail_source(conn, user_id=user_id, name=name)
+    created = source_id is None
+    if source_id is None:
+        source = phase2.create_source(
+            conn,
+            user_id=user_id,
+            kind=SourceKind.GMAIL.value,
+            name=name,
+            config={"query": query} if query else {},
+        )
+        source_id = source.id
+    elif query:
+        phase2.set_source_config_key(conn, source_id, "query", query)
+
+    if mailbox:
+        # Merged rather than written over the whole document, for the reason the label
+        # write-back merges: a poll of this source owns the cursor and can commit between
+        # this read and this write.
+        phase2.merge_source_sync_state(conn, source_id, MAILBOX_ADDRESS_KEY, mailbox)
+
+    try:
+        phase2.store_source_credential(
+            conn,
+            wrapper,
+            user_id=user_id,
+            source_id_=source_id,
+            provider=PROVIDER,
+            purpose=CredentialPurpose.REFRESH.value,
+            secret=secret,
+            scopes=scopes,
+        )
+    except VaultError as exc:
+        # The callback's own answer, for the callback's own reason: invariant 8 has no
+        # degraded mode, so a credential that cannot be sealed is not stored at all.
+        logger.exception("could not seal the seeded credential for source %s: %s", source_id, exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "This credential could not be stored securely, so it was not stored at all.",
+        ) from exc
+
+    phase2.set_source_active(conn, source_id, active=True)
+    phase2.set_source_error(conn, source_id, None)
+    enqueue_source_poll(conn, source_id)
+    nudge.arm(DrainReason.SOURCE_POLL)
+
+    job = fixtures_repo.newest_job_for(conn, queue=Queue.POLL.value, subject_id=source_id)
+    assert job is not None, "the poll job was enqueued in this transaction"
+    return SeedGmailSourceResponse(
+        source_id=source_id,
+        name=name,
+        created=created,
+        scopes=list(scopes),
+        mailbox=mailbox,
+        poll_job=_job_response(job),
+    )
+
+
+@app.post("/v1/testing/reset", response_model=TestingResetResponse, tags=["testing"])
+def reset_testing_state(conn: Conn, user_id: User, _fixtures: Fixtures) -> TestingResetResponse:
+    """Delete this account's ingested and produced state, and the jobs about them.
+
+    Without it a run starts from whatever the last one left behind, which makes every
+    assertion downstream of it a statement about two runs rather than one.
+
+    **The whole of what goes**, because "sources, items and episodes" undersells it: the
+    Gmail sources and their sealed credentials, source items, news items, episodes and
+    their segments and claims, the user's **highlights**, the enrichment run log, and the
+    sealed **browser states** a site login produced. Every one is in the `deleted` counts.
+
+    What it never touches — the account, the session the caller is holding, the feed token
+    a podcast client is subscribed to, the connectors a human added — is
+    :data:`motet_db.fixtures.RESET_KEEPS`, which says why for each. The seeded paste source
+    survives too: deleting it would take paste-in down in a way that reads as an application
+    bug.
+
+    **Audio objects are not removed**, and that is a stated gap rather than an oversight:
+    the object store has no delete on its interface, so a rendered episode's bytes outlive
+    its row. In staging that is one unreferenced object per rendered episode; nothing reads
+    it, because the key is only reachable through the episode row this deletes.
+    """
+    deleted = fixtures_repo.reset_user(conn, user_id=user_id)
+    logger.warning(
+        "test harness: reset %s — %s",
+        user_id,
+        ", ".join(f"{table}={count}" for table, count in deleted.items() if count),
+    )
+    return TestingResetResponse(
+        user_id=user_id, deleted=deleted, kept=list(fixtures_repo.RESET_KEEPS)
+    )
+
+
+@app.post(
+    "/v1/testing/jobs",
+    response_model=TestingJobResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["testing"],
+)
+def trigger_testing_job(
+    body: TriggerJobRequest, conn: Conn, user_id: User, _fixtures: Fixtures, nudge: Nudge
+) -> TestingJobResponse:
+    """Run the Gmail poll or build an episode now, and say which job that is.
+
+    **The triggering is not the new part** — ``POST /v1/sources/{id}/poll`` and
+    ``POST /v1/episodes`` already enqueue exactly these jobs, and this route calls the same
+    two helpers rather than a second definition of either. What the product routes cannot
+    answer is *which job* they produced, which is what a caller needs in order to watch one
+    rather than to poll a list and guess. That is the whole of what this adds.
+
+    ``source_id`` may be omitted when the account has exactly one connected Gmail source,
+    which is the state a seeded staging loop is in — so a script does not have to thread an
+    id it did not choose. Zero or several is refused rather than guessed at.
+    """
+    if body.kind == "gmail_poll":
+        source_id = _fixture_poll_source(conn, user_id=user_id, requested=body.source_id)
+        enqueue_source_poll(conn, source_id)
+        nudge.arm(DrainReason.SOURCE_POLL)
+        queue, subject = Queue.POLL, source_id
+    else:
+        title = (body.title or "").strip() or f"Episode — {datetime.now(UTC):%Y-%m-%d}"
+        subject = enqueue_episode(
+            conn,
+            user_id=user_id,
+            title=title,
+            max_duration_ms=body.max_duration_ms or FIXTURE_EPISODE_MAX_DURATION_MS,
+            keep_in_backlog=body.keep_in_backlog,
+        )
+        nudge.arm(DrainReason.EPISODE)
+        queue = Queue.ASSEMBLE
+
+    job = fixtures_repo.newest_job_for(conn, queue=queue.value, subject_id=subject)
+    assert job is not None, "the job was enqueued in this transaction"
+    return _job_response(job)
+
+
+def _seeded_scopes(requested: Sequence[str]) -> tuple[str, ...]:
+    """What to record as granted. Empty means read-only, which is what a connect grants.
+
+    **Validated rather than taken**, because the recorded scopes are what the worker decides
+    from (motet#96): `labels.schedule` reads them to answer "may this grant write", and the
+    callback is careful to record only `asked ∩ granted` so that a source which asked for
+    read-only can never *look* writable. A seed that wrote whatever a caller sent would give
+    that gate a wrong answer — a `gmail.modify` recorded against a read-only token turns the
+    clean `needs_reauthorization` outcome into a Gmail 403 counted as `failed`. Google is
+    still the real control, so nothing unauthorized happens; what is lost is the one gate
+    meant to answer this question without asking Google.
+    """
+    scopes = tuple(dict.fromkeys(scope for scope in (s.strip() for s in requested) if scope))
+    if not scopes:
+        return (GMAIL_READONLY_SCOPE,)
+    known = {GMAIL_READONLY_SCOPE, *LABEL_SYNC_SCOPES}
+    unknown = [scope for scope in scopes if scope not in known]
+    if unknown:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"{len(unknown)} of the scopes are not ones Motet asks Google for. This seed "
+            "records what a consent would have granted, so it takes only those.",
+        )
+    return scopes
+
+
+def _fixture_poll_source(
+    conn: psycopg.Connection[Any], *, user_id: str, requested: str | None
+) -> str:
+    """Which mailbox a ``gmail_poll`` trigger means.
+
+    A named source has to be the caller's, connected, and Gmail — every other answer is a
+    poll job that fails minutes later on a missing token, which is exactly the "slow or
+    broken" confusion this surface exists to remove.
+    """
+    pollable = fixtures_repo.pollable_gmail_sources(conn, user_id=user_id)
+    ready = [source for source in pollable if source.active]
+    if requested is None:
+        if len(ready) == 1:
+            return ready[0].id
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"This account has {len(ready)} Gmail sources that would poll, so source_id is "
+            f"required ({len(pollable) - len(ready)} more hold a credential but are paused). "
+            "Seed one with POST /v1/testing/gmail-source.",
+        )
+    match = next((source for source in pollable if source.id == requested), None)
+    if match is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No Gmail source of yours with a stored credential has that id.",
+        )
+    if not match.active:
+        # **A paused source would accept the job and report `done` with no error**, because
+        # `handle_poll` short-circuits on `not source.active` and returns normally — so the
+        # caller reads a successful sync of a mailbox nothing opened. That is the false
+        # *green* this surface exists to prevent, and it is the state a refused refresh
+        # leaves behind: `ingest` pauses the source and keeps the credential, which is
+        # exactly what an OAuth client in "Testing" publishing status produces every week.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "That Gmail source is paused, so a poll would be recorded as done without "
+            f"reading the mailbox. Its last error was: {match.last_error or '(none recorded)'}. "
+            "Re-seed it with POST /v1/testing/gmail-source.",
+        )
+    return requested
+
+
+@app.get("/v1/testing/jobs/{job_id}", response_model=TestingJobResponse, tags=["testing"])
+def get_testing_job(
+    conn: Conn, user_id: User, _fixtures: Fixtures, job_id: Annotated[int, Path()]
+) -> TestingJobResponse:
+    """One job of this caller's, with whether anything is draining its queue.
+
+    **The two numbers together are the deliverable.** ``state`` alone cannot tell a job a
+    worker is about to pick up from one on a queue nothing has touched in a week — they are
+    the same row — so a caller given only the state has to infer liveness from elapsed time,
+    which is the mistake motet#38 records and `/v1/processing` exists to stop.
+
+    A job whose subject has been deleted resolves to no user and is a 404, which is also
+    what a reset makes of every job it removes.
+    """
+    found = fixtures_repo.job_status(conn, job_id)
+    if found is None or found.user_id != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No job of yours has that id.")
+    return _job_response(found)

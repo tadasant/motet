@@ -285,6 +285,23 @@ def _install_errors(service_name: str, dsn: str, env: Mapping[str, str]) -> list
         # A briefing is built out of the user's own mail. Never let the error reporter be
         # the thing that copies it somewhere else.
         send_default_pii=False,
+        # **The one that carries credentials, and it is a separate switch from the line
+        # above.** `send_default_pii` governs request bodies, headers and user identity;
+        # local variables are attached regardless, and this SDK defaults them on. The
+        # frames that matter are the two that hold a mailbox refresh token in a local
+        # while inside a `try` — `main.oauth_callback`, where `grant.refresh_token` is a
+        # real user's Gmail grant, and `main.seed_gmail_source`, where `secret` is the
+        # staging fixture's. Both log with `exception()` on a vault failure *by design*,
+        # because a traceback is the only thing that tells a genuine bug apart from a KMS
+        # refusal — so with locals on, one unreachable keyring puts a live credential into
+        # GlitchTip, searchable, where invariant 8 spent a whole subsystem keeping it out
+        # of the database.
+        #
+        # The cost is real and is accepted: every GlitchTip event loses its per-frame
+        # variables, which is the first thing a person looks at. The trade is that a
+        # traceback plus a log message is usually enough to place a fault, and a leaked
+        # refresh token is not recoverable by anything.
+        include_local_variables=False,
     )
     sentry_sdk.set_tag("service", service_name)
     _shutdown_hooks.append(lambda: sentry_sdk.flush(timeout=5.0))

@@ -3437,6 +3437,196 @@ deploy job. What is pinned offline is the whole decision procedure against a rea
 mint, authenticate, refuse a wrong one, refuse a revoked one, refuse an expired one, and
 read the row back to prove it holds a hash and not the token.
 
+### The staging test harness is four routes behind a flag that refuses to boot in production
+
+`api/src/motet_api/fixtures.py`, `db/src/motet_db/fixtures.py`, `/v1/testing/*`.
+**Asked for by Tadas through the 2026-09-20 staging-e2e workstream** (Zimmer sessions
+#19242 and #19254), which names the three capabilities, the flag, and the requirement that
+the application refuse to boot in production with the flag on. That request is the sign-off
+this section records; the choices below are the ones it left open.
+
+The goal is an agent driving Motet end to end on staging with nobody in the loop —
+authenticate, connect the test inbox, sync it, build an episode, check the result, reset,
+repeat. Three things stood between that and the API as shipped.
+
+**Seeding a Gmail credential, because there is no machine-to-machine OAuth for a consumer
+`@gmail.com` account.** Google's only mechanism for a service account to act as a mailbox
+is domain-wide delegation, which needs Workspace. So the consent is performed once by a
+human — invariant 9's human half, exactly as written — and its refresh token goes into
+Secret Manager as `MOTET_STAGING_GMAIL_REFRESH_TOKEN`, injected into the staging service
+like every other secret. `POST /v1/testing/gmail-source` re-establishes the connected state
+from it on demand, which is invariant 9's *other* half: re-connecting after the one-time
+consent is a routine operation, and a routine operation that needs a human is a defect.
+
+**Unset means "not provisioned yet", and the 503 says so in those words.** Cloud Run refuses
+to create a revision whose secret has no enabled version, so the mount is off until a human
+places the value once — which makes *unset* the expected state of a freshly deployed staging
+rather than a fault. A generic "could not seed" there would send somebody to read this code
+instead of to place the token. `MOTET_STAGING_GMAIL_ADDRESS` is the non-secret half, set
+beside it: an address is configuration rather than a credential, and having it lets the seed
+record the expected account **without a profile call** — which the API has no business
+making, since it speaks to no vendor.
+
+**Sealing widens no decrypt, which is why this lives in the API rather than the worker.**
+The route calls `phase2.store_source_credential` over `deps.dek_wrapper` — the same call,
+over the same encrypt-only `DekWrapper`, that the OAuth callback makes — so the row is
+envelope-encrypted with a per-record DEK under the same KEK and the same
+`user_id:source_id:provider` AAD, and the API's service account still holds `useToEncrypt`
+and not `useToDecrypt`. Invariant 8 is untouched in both directions. Routing the write
+through the worker was the fallback if sealing had needed decrypt; it does not, and a
+second process in the path would have bought coupling rather than safety.
+`api/tests/test_fixtures_api.py` opens the sealed row with a real `KeyManager` rather than
+checking the columns are non-null, which is also what pins the AAD.
+
+**The refresh token in plaintext in a service's environment is the one real trade, and it
+is bounded rather than assumed.** That is not how a *user's* mailbox token reaches these
+processes and must not become one: what makes it acceptable here is that it is one
+throwaway test inbox (invariant 13 — staging's secrets are the non-sensitive kind by
+construction), it exists in staging alone, and the flag is what stops the variable being
+read anywhere else.
+
+**A refused *refresh* names the publishing status, which is the one cause nothing here
+can see.** Google's `invalid_grant` is returned for three different facts and distinguishes
+none of them: access was revoked, the token went six months unused, or **the OAuth client is
+still in "Testing" publishing status, which expires every refresh token it issued after about
+seven days.** The third is the one that breaks an unattended loop on a weekly cadence with
+nothing pointing at it, because the publishing status is a console setting on a client defined
+in the private repo — and the carve-out people reach for does not apply, since Google exempts
+only clients asking for name, email and profile and Motet asks for `gmail.readonly`. So
+`motet_sources.gmail.REFRESH_REJECTED` names all three, on a *refresh* alone: `invalid_grant`
+on the first code exchange is a spent authorization code and has nothing to do with it. The
+message lands on `sources.last_error`, which is what `GET /v1/testing/jobs/{id}` reports — so
+the harness caller sees it without reading a log.
+
+**`mailbox` is recorded on the seeded source, and the account check is what makes it
+worth recording.** A refresh token in Secret Manager cannot be read back, so "is this for
+the inbox we think" is precisely the question the seed cannot answer for itself. It does
+not have to: `ingest.check_mailbox` asks Gmail which account a grant reaches before reading
+with it (motet#96), so a token for some other inbox **disconnects** the source with both
+addresses in `last_error` rather than quietly ingesting it. A test asserts that, and it is
+the reason the round-trip test records the fake mailbox's own address.
+
+**Reset is `motet_db.fixtures.reset_user`, and what it keeps is as much the design as what
+it removes.** Jobs go first — a job is resolved to a user by joining its payload to the row
+it is about, so one whose source item or episode is already gone resolves to nobody, is
+left behind, and fails on the next drain against a row that does not exist. The join tables
+are deleted explicitly rather than left to `ON DELETE CASCADE`, so the per-table counts in
+the response are a baseline a caller can assert rather than trust. `RESET_KEEPS` is the
+other list, with a reason each: the account, **the session the caller is holding** (a reset
+that revoked it would log the agent out halfway through its own run), the feed token a
+podcast client is subscribed to, the connectors a human added behind a one-time step, the
+spend ledger, and the seeded `src_paste` row — deleting which would take paste-in down in a
+way that reads as an application bug.
+
+**The trigger routes add a job id, not a trigger.** `POST /v1/sources/{id}/poll` and
+`POST /v1/episodes` already enqueue exactly these jobs, and `POST /v1/testing/jobs` calls
+the same two helpers rather than a second definition of either. What the product routes
+cannot answer is *which* job they produced. `GET /v1/testing/jobs/{id}` then reports the row
+**and the queue's heartbeat**, and the pair is the deliverable: a job in `ready` looks
+identical whether a worker is working through a backlog or whether none has run for a week,
+so a caller given only the state has to infer liveness from elapsed time — which is
+motet#38's trap, and why sessions #19159 and #19202 had to exist in the first place.
+
+**A seed takes a per-user transaction lock, because it is a check-then-insert.**
+`sources` has no unique index on `(user_id, kind, name)`, and the realistic double-submit is
+not a second tab but a *retry* — a client that timed out on a cold start plus a KMS round
+trip. Two mailboxes of one name is not a cosmetic duplicate: the trigger route then has no
+single source to poll and the unattended loop stops. Its own lock namespace, beside the
+held-claim lock's, because it serializes seeds against seeds and has no business making an
+"Ingest now" wait.
+
+**"Holds a credential" and "would read the mailbox" are different questions, and the poll
+trigger asks both.** `ingest` pauses a source on a permanently refused refresh and **keeps**
+the credential — which is exactly what an OAuth client in "Testing" status produces every
+week — and `handle_poll` then short-circuits on a paused source and returns *normally*. A
+trigger that offered it would enqueue a job that finishes `done` with no error, so a caller
+reads a successful sync of a mailbox nothing opened: a false **green**, on the surface built
+to remove that ambiguity. So a paused source is a 409 naming its `last_error`, and re-seeding
+is the repair.
+
+**The recorded scopes are validated rather than taken.** They are what the worker decides
+"may this grant write" from (motet#96), and the callback is careful to record only
+`asked ∩ granted` so a read-only source can never *look* writable; a seed that wrote whatever
+a caller sent would give that gate a wrong answer. Only the scopes Motet asks Google for are
+accepted.
+
+**The production safety property is a boot refusal, not a permission check.**
+`MOTET_TEST_FIXTURES` must be exactly `1` — `mint_session`'s rule, not `config._truthy`'s,
+because the symmetric mistake here switches a destructive surface *on* — and
+`fixtures.check_startup` runs in the API's lifespan before anything else, raising where the
+resolved deployment environment is production. Cloud Run reports a failed revision and
+never shifts traffic to it. The environment comes from the `deployment.environment`
+attribute the deploy already stamps on every telemetry record
+(`motet_obs.resolve_deployment_environment`) rather than from a variable invented for this:
+a second name for the environment is a second thing that can disagree about which one this
+is. **An unknown environment is allowed and logged at WARNING**, because a laptop and CI set
+no resource attributes and the harness has to work in both — so reaching production through
+that gap needs *two* independent private-repo diffs a reviewer sees, which is
+`mint_session`'s three-interlocks argument with the in-repo one deliberately the smallest.
+The match is the two exact spellings **plus any name containing `prod`**, so `prod-eu` and
+`motet-production` refuse too — a denylist over a string written in a repo this one cannot
+read is the wrong shape, and that substring is as far as it can be pushed from here. The
+residue is stated rather than closed: a production environment named `prd` or `live` would
+boot. **The refusal flushes telemetry before it propagates**, because the lifespan's own
+`finally` starts at the `yield` — a refusal that skipped it would go down still holding the
+line that says why, on a revision that is failing to start.
+
+**`RESET_KEEPS` is complete against the schema, and a test holds it so.** It is reported on
+the wire as "tables a reset never touches", which a caller asserting a baseline reads as
+exhaustive; the first draft was silently short by four. `db/tests/test_fixtures_reset.py`
+requires every table the migrations create to be either deleted or kept, so a new table is a
+red run and a decision — `test_mcp_parity`'s rule, one layer down.
+
+**The routes are registered unconditionally and answer 503 when the flag is off**, rather
+than being registered only when it is on. A conditional route table would make
+`openapi.yaml`, the reserved-path walk and the MCP parity table describe one app per
+environment, and every route-walking test in this repo would pass or fail on the importing
+process's environment. Hiding them would buy no secrecy either — the code is in a public
+repo. They are in `mcp/registry.py`'s `EXCLUDED` for the same reason they are not a product
+capability, and `test_fixtures_api.py` walks `app.routes` to prove no route under
+`/v1/testing` escaped the guard, which is the `/v1/admin` walk one surface along.
+
+**What is reachable with the flag on, stated so the change can be reviewed on that basis:**
+an authenticated `/v1` caller can seed a Gmail source from the staging refresh token, delete
+their own sources, items and episodes, enqueue a poll or an episode and get the job id, and
+read any job of theirs. Two of those destroy data. With the flag unset every one is a 503
+that reads nothing.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** This adds four routes on the
+existing API, two modules, a flag, and a variable in the private infrastructure repo — the
+last of which is the seventh bullet's territory, and "when in doubt, it counts". The
+sign-off is the owner's request above rather than the size of the diff. What it does *not*
+add: no deployable, no datastore, no migration, no queue mechanism, no new role for an
+existing table, no vendor, no seam, no inference stage and no model call. The vault gains no
+third kind of record and no wider grant — the credential it writes is
+`source_credentials`' own, written by `source_credentials`' own function.
+
+**The error reporter had to stop attaching frame locals for this to be safe, and that is
+a change to `obs/` rather than to this surface.** `sentry_sdk` attaches per-frame variables
+on a switch of its own that defaults to *on*, and `send_default_pii=False` does not cover it
+— that governs request bodies, headers and identity. Two places hold a mailbox refresh token
+in a local inside a `try` and log with `exception()` there **by design**, because a traceback
+is the only thing that tells a genuine bug apart from a KMS refusal: `oauth_callback`, whose
+`grant` is a *real user's* Gmail token, and the seed, whose `secret` is the fixture's. With
+locals on, one unreachable keyring posts a live credential to GlitchTip — searchable, in the
+store invariant 8 spent a subsystem keeping it out of. So `include_local_variables=False`,
+and the cost is stated rather than hidden: every event loses the per-frame variables that are
+the first thing a person reads. `obs/tests/test_alert_scoping.py` asserts it off the wire
+against a local named **`grant`** rather than `secret`, because `sentry_sdk`'s own scrubber
+filters the second *by name* and a test using it is green against a leak it never prevented.
+
+**What no test here can tell you** is whether the refresh token in staging's Secret Manager
+is live: invariant 9 keeps vendors out of CI, so what runs offline is the decision procedure
+over the fake mailbox — which serves complete RFC 822 messages, so the pipeline meets the
+shapes it will meet in staging. The first real seed is against staging, once the private
+repo has created the secret and injected it.
+
+**Deliberately not done, with the reason.** The reset removes no **audio objects**: the
+object store's interface has no delete, so a rendered episode's bytes outlive its row. In
+staging that is one unreferenced object per rendered episode, reachable only through the row
+the reset removes; adding deletion means a method on the storage seam, which is a larger
+change than this one.
+
 ### The operator view is the one read across users, and only a listed person gets it
 
 `GET /v1/admin/overview`, `deps.require_admin`, `web/src/screens/Admin.tsx` (motet#87).
