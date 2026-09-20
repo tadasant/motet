@@ -13,6 +13,7 @@ import struct
 import pytest
 from motet_inference.audio import (
     MPEG_MEDIA_TYPE,
+    MPEG_SYNC_WINDOW,
     WAV_MEDIA_TYPE,
     AudioError,
     duration_ms,
@@ -117,8 +118,33 @@ class TestSniff:
     def test_an_mpeg_frame_header_is_mpeg(self) -> None:
         assert sniff_media_type(mpeg(1)) == MPEG_MEDIA_TYPE
 
-    def test_an_id3_tag_is_mpeg(self) -> None:
-        assert sniff_media_type(b"ID3\x04\x00\x00\x00\x00\x00\x0a") == MPEG_MEDIA_TYPE
+    def test_an_id3_tag_ahead_of_the_frames_is_mpeg(self) -> None:
+        tag = b"ID3\x04\x00\x00\x00\x00\x00\x0a" + b"\x00" * 10
+        assert sniff_media_type(tag + mpeg(2)) == MPEG_MEDIA_TYPE
+
+    def test_an_id3_tag_with_nothing_behind_it_is_not(self) -> None:
+        """A tag is metadata about audio, and here there is no audio for it to be about."""
+        assert sniff_media_type(b"ID3\x04\x00\x00\x00\x00\x00\x0a" + b"\x00" * 10) is None
+
+    def test_leading_bytes_the_parser_steps_past_are_stepped_past_here_too(self) -> None:
+        """The guard must be no stricter than the check that admitted the segment.
+
+        `mpeg_duration_ms` resynchronises past bytes that are not a frame, so a vendor
+        response opening with padding, or a tag it does not parse, passes synthesis — and a
+        player resynchronises the same way. Refusing it at publish would be a permanent
+        failure, after the whole episode was billed, of an object that would have played.
+        """
+        for junk in (b"\x00" * 7, b"APETAGEX" + b"\x00" * 24, b"\xff" * 3 + b"\x00"):
+            assert sniff_media_type(junk + mpeg(3)) == MPEG_MEDIA_TYPE, junk
+
+    def test_the_window_is_bounded(self) -> None:
+        assert sniff_media_type(b"\x00" * (MPEG_SYNC_WINDOW + 1) + mpeg(3)) is None
+
+    def test_a_sync_shaped_pair_not_followed_by_a_frame_is_chance(self) -> None:
+        """One header is a byte pair; a header whose *length* lands on another is audio."""
+        stray = _FRAME_HEADER + b"\x00" * 100  # says 417 bytes long, and is 104
+        assert sniff_media_type(stray + b"\x00" * 400) is None
+        assert sniff_media_type(_FRAME_HEADER + b"\x00" * 50) == MPEG_MEDIA_TYPE, "ends inside"
 
     def test_a_riff_wave_header_is_wav(self) -> None:
         wav = FakeSpeechSynthesizer().synthesize("one two").data

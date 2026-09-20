@@ -84,6 +84,13 @@ def duration_ms(audio_bytes: bytes, media_type: str) -> int:
     raise AudioError(f"do not know how to measure {media_type!r} audio")
 
 
+#: How far into an object the first MPEG frame may sit and still count as MPEG audio. An
+#: encoder may put a tag or padding ahead of the first frame, and a player resynchronises
+#: past it — so must this, or a publishable object is refused. Wider than the largest frame
+#: (1,441 bytes: 320 kbps at 32 kHz) with room for a tag `_skip_id3v2` does not parse.
+MPEG_SYNC_WINDOW = 4096
+
+
 def sniff_media_type(data: bytes) -> str | None:
     """The media type ``data`` *begins as*, or ``None`` if it does not begin as audio.
 
@@ -91,24 +98,44 @@ def sniff_media_type(data: bytes) -> str | None:
     the extension its key ends in is what an offline copy is identified by — so both are
     claims about the bytes, made by code that has never looked at them. This is the look.
 
-    A **prefix** check rather than a parse: the parse already happened, per segment, in the
-    synthesizer. What this catches is the joined object not starting the way the media type
-    it is about to be labelled with says it does, which is the one failure that survives
-    every check upstream and surfaces as a player refusing to open the episode.
+    **The MPEG arm is the parser's own rule, deliberately no stricter.** The synthesizer
+    admitted each segment through :func:`mpeg_duration_ms`, which skips an ID3v2 tag and
+    steps past bytes that are not a frame; a check here that demanded a sync word at byte
+    zero would refuse, permanently and after the whole episode was billed, an object every
+    player would have resynchronised into and played. So this skips the tag, then looks for
+    a frame header :func:`_parse_frame` accepts inside :data:`MPEG_SYNC_WINDOW` — and asks
+    that the frame after it parse too, when the data reaches that far, because a sync-shaped
+    byte pair followed by a valid frame *length* is identification and one alone is chance.
     """
     if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
         return WAV_MEDIA_TYPE
-    if data[:3] == b"ID3":
+    if _mpeg_frames_begin_within(data, MPEG_SYNC_WINDOW):
         return MPEG_MEDIA_TYPE
-    # An MPEG frame sync: eleven set bits, then a version that is not the reserved `01` and
-    # a layer that is not the reserved `00`. Checking the two reserved values is what makes
-    # this identification rather than a guess about any byte pair starting 0xFF.
-    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
-        version = (data[1] >> 3) & 0b11
-        layer = (data[1] >> 1) & 0b11
-        if version != 1 and layer != 0:
-            return MPEG_MEDIA_TYPE
     return None
+
+
+def _mpeg_frames_begin_within(data: bytes, window: int) -> bool:
+    """Whether a valid MPEG frame — followed by another, where there is room — starts within
+    ``window`` bytes of the end of any leading ID3v2 tag."""
+    start = _skip_id3v2(data)
+    end = _strip_id3v1(data)
+    for offset in range(start, min(start + window, end - 3)):
+        frame = _frame_at(data, offset)
+        if frame is None:
+            continue
+        following = offset + frame[0]
+        if following + 4 > end:
+            return True  # the data ends inside or right after this frame: nothing to contradict it
+        return _frame_at(data, following) is not None
+    return False
+
+
+def _frame_at(data: bytes, offset: int) -> tuple[int, int, int] | None:
+    """:func:`_parse_frame` behind the sync-word check its caller in the parser makes."""
+    header = data[offset : offset + 4]
+    if len(header) < 4 or header[0] != 0xFF or (header[1] & 0xE0) != 0xE0:
+        return None
+    return _parse_frame(header)
 
 
 # --- MPEG ---------------------------------------------------------------------------

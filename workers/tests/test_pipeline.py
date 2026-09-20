@@ -666,6 +666,31 @@ class TestAnObjectIsNotPublishedUnderAContentTypeItsBytesContradict:
         assert row["attempts"] == 1
         assert row["state"] == "failed"
 
+    def test_an_mpeg_object_with_bytes_ahead_of_its_first_frame_is_published(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """The guard is the parser's rule, no stricter — see `sniff_media_type`.
+
+        A vendor response that opens with padding or a tag passes the synthesizer, which
+        resynchronises past it, and plays everywhere. A guard demanding a sync word at
+        byte zero would fail every such episode permanently, after it was billed.
+        """
+        episode_id = self._episode_ready_for_tts(db, _migrated)
+        header = bytes([0xFF, 0xFB, 0x90, 0x00])
+        frames = (header + b"\x00" * 413) * 4
+        stages = replace(
+            fake_stages(),
+            speech_synthesizer=MislabellingSynthesizer(b"\x00" * 9 + frames, "audio/mpeg"),
+        )
+
+        drain(Queue.TTS, _migrated, stages=stages, store=object_store)
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert episode.state is EpisodeState.READY
+        assert episode.audio_key is not None
+        assert episode.audio_key.endswith(".mp3")
+
     def test_the_ordinary_path_still_publishes(
         self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
     ) -> None:

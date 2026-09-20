@@ -174,6 +174,44 @@ final class OfflineLibraryTests: XCTestCase {
         XCTAssertEqual(again?.lastPathComponent, "ep-1.mp3")
     }
 
+    /// A crash between the download landing at `ep-1.mp3` and the manifest recording it,
+    /// on a build before this one, leaves a `.mp3` the manifest does not know about beside
+    /// the `.audio` it does. The repair has to replace it, not fail on it.
+    func testARepairReplacesAFileAlreadyAtTheTargetName() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        let store = InMemoryKeyValueStore()
+        try Audio.mp3.write(to: directory.appendingPathComponent("ep-1.audio"))
+        try Audio.wav.write(to: directory.appendingPathComponent("ep-1.mp3"))
+        try store.setValue(
+            [DownloadedEpisode(
+                episodeId: "ep-1",
+                fileName: "ep-1.audio",
+                byteCount: Audio.mp3.count,
+                downloadedAt: Date(timeIntervalSince1970: 1_800_000_000)
+            )],
+            forKey: "offline.manifest"
+        )
+
+        let library = try makeLibrary(store: store, directory: directory)
+        let local = try await library.localURL(forEpisode: "ep-1")
+
+        XCTAssertEqual(local?.lastPathComponent, "ep-1.mp3")
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(local)), Audio.mp3, "the manifest's bytes win")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["ep-1.mp3"])
+    }
+
+    /// A transfer that died between landing its bytes and naming them leaves a `.download`
+    /// nothing references; the next load sweeps it rather than leaving it to sit forever.
+    func testAStagingFileOrphanedByACrashIsSweptOnLoad() async throws {
+        let directory = Fixture.temporaryDirectory(self)
+        try Audio.mp3.write(to: directory.appendingPathComponent("ep-9.download"))
+        let library = try makeLibrary(directory: directory)
+
+        _ = try await library.downloadedEpisodeIds()
+
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+    }
+
     func testAnOlderBuildsFileThatIsNotAudioIsDroppedSoTheNextSyncRefetchesIt() async throws {
         let directory = Fixture.temporaryDirectory(self)
         let store = InMemoryKeyValueStore()

@@ -8,10 +8,45 @@ final class AudioFileFormatTests: XCTestCase {
         XCTAssertEqual(AudioFileFormat.sniff(Audio.mp3), .mp3)
     }
 
-    func testAnId3TagIsMp3() {
+    func testAnId3TagAheadOfTheFramesIsMp3() {
         var data = Data("ID3".utf8)
         data.append(contentsOf: [0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A])
+        data.append(Data(repeating: 0, count: 10))
+        data.append(Audio.mp3Frames(3))
         XCTAssertEqual(AudioFileFormat.sniff(data), .mp3)
+    }
+
+    func testAnId3TagWithNothingBehindItIsNotAudio() {
+        var data = Data("ID3".utf8)
+        data.append(contentsOf: [0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A])
+        data.append(Data(repeating: 0, count: 10))
+        XCTAssertNil(AudioFileFormat.sniff(data))
+    }
+
+    /// The worker admits a segment by resynchronising past bytes that are not a frame, and
+    /// a player does the same; a phone that demanded a sync word at byte zero would refuse a
+    /// download the server was right to publish, on every sync, with nothing saying why.
+    func testLeadingBytesThatAreNotAFrameAreSteppedPast() {
+        for junk in [
+            Data(repeating: 0, count: 7),
+            Data("APETAGEX".utf8) + Data(repeating: 0, count: 24),
+            Data([0xFF, 0xFF, 0xFF, 0x00]),
+            Data(repeating: 0x41, count: 3000),
+        ] {
+            XCTAssertEqual(AudioFileFormat.sniff(junk + Audio.mp3Frames(3)), .mp3, "\(junk.count) bytes of junk")
+        }
+    }
+
+    func testTheWindowIsBounded() {
+        let junk = Data(repeating: 0, count: AudioFileFormat.headLength + 1)
+        XCTAssertNil(AudioFileFormat.sniff(junk + Audio.mp3Frames(3)))
+    }
+
+    /// One header is a byte pair; a header whose *length* lands on another header is audio.
+    func testASyncShapedPairNotFollowedByAFrameIsChance() {
+        let stray = Audio.mp3FrameHeader + Data(repeating: 0, count: 100)  // claims 417 bytes
+        XCTAssertNil(AudioFileFormat.sniff(stray + Data(repeating: 0, count: 400)))
+        XCTAssertEqual(AudioFileFormat.sniff(stray), .mp3, "ends inside the frame: nothing to contradict it")
     }
 
     func testARiffWaveHeaderIsWav() {
@@ -27,8 +62,20 @@ final class AudioFileFormatTests: XCTestCase {
     /// ADTS AAC shares MPEG audio's sync word and is told apart by the reserved layer bits.
     /// Getting this backwards would name an AAC file `.mp3`, which is the same bug again.
     func testAdtsAacIsNotMistakenForMp3() {
-        XCTAssertEqual(AudioFileFormat.sniff(Data([0xFF, 0xF1, 0x50, 0x80, 0x00])), .aac)
-        XCTAssertEqual(AudioFileFormat.sniff(Data([0xFF, 0xF9, 0x50, 0x80, 0x00])), .aac)
+        // Two ADTS frames: 7-byte headers, each declaring a 20-byte frame.
+        let frame = Data([0xFF, 0xF1, 0x50, 0x80, 0x02, 0x80, 0x00]) + Data(repeating: 0, count: 13)
+        XCTAssertEqual(AudioFileFormat.sniff(frame + frame), .aac)
+        let frameV2 = Data([0xFF, 0xF9, 0x50, 0x80, 0x02, 0x80, 0x00]) + Data(repeating: 0, count: 13)
+        XCTAssertEqual(AudioFileFormat.sniff(frameV2 + frameV2), .aac)
+    }
+
+    /// Bytes 4–7 of an MP3 that happen to spell "ftyp" must not make it an M4A.
+    func testTheFtypBoxCannotClaimAnMp3() {
+        var data = Audio.mp3FrameHeader
+        data.append(contentsOf: Array("ftyp".utf8))
+        data.append(Data(repeating: 0, count: 417 - 8))
+        data.append(Audio.mp3Frames(1))
+        XCTAssertEqual(AudioFileFormat.sniff(data), .mp3)
     }
 
     func testAnHtmlPageIsNotAudio() {

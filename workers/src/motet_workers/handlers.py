@@ -616,9 +616,7 @@ def handle_tts(context: Context, payload: Mapping[str, Any]) -> None:
     if sniffed != audio.media_type:
         raise PermanentFailure(
             f"refusing to publish {len(audio.data)} bytes as {audio.media_type!r}: they begin "
-            f"as {sniffed or 'nothing playable'} ({audio.data[:12]!r}). Every client picks its "
-            "decoder from that label and from the extension on the key, so an object whose "
-            "bytes disagree with them is one no client can open."
+            f"as {sniffed or 'nothing playable'} ({audio.data[:12]!r})"
         )
 
     key = episode_audio_key(episode.user_id, episode_id, extension)

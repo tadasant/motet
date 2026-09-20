@@ -315,8 +315,19 @@ final class FakeDownloader: EpisodeDownloader, @unchecked Sendable {
 /// Byte patterns a player identifies a file by — the real openings, not stand-ins, because
 /// what is under test is whether they are recognised.
 enum Audio {
-    /// An MPEG-1 Layer III frame header (`FF FB`) and a little payload behind it.
-    static let mp3 = Data([0xFF, 0xFB, 0x90, 0x44] + [UInt8](repeating: 0, count: 60))
+    /// A 128 kbps, 44.1 kHz MPEG-1 Layer III frame header: 417 bytes per frame, no padding.
+    static let mp3FrameHeader = Data([0xFF, 0xFB, 0x90, 0x00])
+    /// `count` whole frames, each the header and 413 bytes of silence.
+    static func mp3Frames(_ count: Int) -> Data {
+        var data = Data()
+        for _ in 0..<count {
+            data.append(mp3FrameHeader)
+            data.append(Data(repeating: 0, count: 413))
+        }
+        return data
+    }
+    /// Two frames — the smallest thing that is identifiably MP3 rather than a sync pair.
+    static let mp3 = mp3Frames(2)
     /// A 44-byte canonical RIFF/WAVE header with no samples.
     static let wav: Data = {
         var data = Data("RIFF".utf8)

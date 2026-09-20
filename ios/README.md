@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     255 tests (258 on a Mac), incl. an end-to-end offline-walk journey
+  Tests/MotetKitTests/     262 tests (265 on a Mac), incl. an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/MotetUITests/        XCUITest: the one flow that RUNS the app, on a simulator
   App/Motet.xcodeproj/     two targets, three configurations (Debug, Release, Staging)
@@ -107,7 +107,7 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 255 tests pass — 258 on a Mac, where three more put the
+strict concurrency checking, and 262 tests pass — 265 on a Mac, where three more put the
 local-file format rule to AVFoundation itself rather than to our own account of it.
 Segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
@@ -134,7 +134,7 @@ recognise means no reader at all, and `AVURLAsset` fails with `AVFoundationError
 Every download used to be named `<episode-id>.audio`, which is a media extension nowhere,
 so **no downloaded episode had ever been playable** — and because the download policy keeps
 the newest episodes on the phone, the newest episode is the one that is always local and
-therefore was always refused. `AudioFileFormat` sniffs the first twelve bytes and
+therefore was always refused. `AudioFileFormat` sniffs the first few kilobytes and
 `OfflineLibrary` names the file after the answer. Sniffing rather than trusting the
 server's `audio_media_type`, for two reasons: it is the only thing that can repair a file
 already on a phone, where no media type was ever recorded beside it, and it is the one
