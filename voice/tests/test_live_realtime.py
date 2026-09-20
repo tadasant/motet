@@ -223,6 +223,9 @@ def test_spoken_question_streams_back_a_spoken_reply(settings: VoiceSettings) ->
         "state": "listening",
         "detail": "live — speak your question",
         "reason": None,
+        # Only the first `ready` answers this; every other frame says nothing, as it does
+        # for `reason`. Asserted rather than omitted because this is the whole wire shape.
+        "can_answer": None,
         "live": True,
     }
 
@@ -243,6 +246,9 @@ def test_spoken_question_streams_back_a_spoken_reply(settings: VoiceSettings) ->
         "state": "ready",
         "detail": "reply complete",
         "reason": None,
+        # A later `ready` is "the reply finished streaming", not a fresh session, so it
+        # re-answers nothing: the client keeps what the first one told it.
+        "can_answer": None,
         "live": None,
     }
     assert {e["type"] for e in events} <= CONTRACT_EVENT_TYPES, (

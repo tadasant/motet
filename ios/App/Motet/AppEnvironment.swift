@@ -23,8 +23,17 @@ final class AppEnvironment {
     /// holds the audio session while a Live session runs and hands it back afterwards.
     private(set) lazy var liveAudio: AVLiveAudio = {
         let audioSession = self.audioSession
+        let report: @Sendable (String?) -> Void = { [weak self] message in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.controller.report(audioSessionMessage: message)
+            }
+        }
         return AVLiveAudio(restoreListening: {
-            try? audioSession.configure()
+            // Play Live switched the session to `.playAndRecord`; this is the only thing
+            // that puts listening back, so a refusal here is a briefing that goes silent
+            // *after* a conversation and must not be swallowed either.
+            report(audioSession.configure().listenerMessage)
             try? audioSession.activate()
         })
     }()
@@ -73,7 +82,25 @@ final class AppEnvironment {
         let settings = (try? await library.playbackSettings()) ?? PlaybackSettings()
         await controller.update(settings: settings)
         nowPlaying.attach(to: controller, settings: settings)
-        try? audioSession.configure()
+        await applyAudioSessionShape()
+    }
+
+    /// Put the session into the best shape this phone accepts, and tell the player screen
+    /// what that cost — nothing, in the ordinary case.
+    ///
+    /// Called at startup and again before every `play`, because the shape is process-wide
+    /// state that Play Live deliberately changes and a route change can disturb: assuming
+    /// the startup call still holds is how a briefing ends up playing under
+    /// `.playAndRecord` with no `.defaultToSpeaker`, into the earpiece.
+    @discardableResult
+    func applyAudioSessionShape() async -> AudioSessionPlan.Outcome {
+        let outcome = audioSession.configure()
+        // Only a refusal reaches the listener. A lower rung that took is a working player,
+        // and putting "no AirPlay 2 grouping" on the player screen in error red would train
+        // them to ignore the one line that means the audio will be silent — the concession
+        // goes to the `audio-session` log instead.
+        await controller.report(audioSessionMessage: outcome.listenerMessage)
+        return outcome
     }
 
     /// Rebuild the API-facing half after the server or the session changes.

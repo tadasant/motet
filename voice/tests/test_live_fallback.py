@@ -326,6 +326,43 @@ def test_the_composed_arm_is_its_own_text_arm(settings: VoiceSettings) -> None:
     assert [e.type for e in events][:2] == ["transcript", "transcript"]
 
 
+def test_a_dormant_composed_arm_reports_a_code_a_client_can_branch_on(
+    settings: VoiceSettings,
+) -> None:
+    """Production's state since the voice service was deployed, and it looked fine.
+
+    ``arm=composed`` with no speech-to-text vendor provisioned: barge-in detection works,
+    every mic frame is forwarded, and no reply is possible. Tadas saw exactly that on
+    TestFlight on 2026-09-20 — "the VAD seems to work but not getting any audio".
+
+    The reason was already in ``detail``, as prose, which meant the only place it surfaced
+    on either client was a line in the transcript log. It is a code now, so the screen can
+    say it where the mic button is — and, crucially, can say the *right* sentence: a live
+    channel that did not open still answers a typed question, and this answers nothing.
+    """
+    from motet_voice.realtime import build_composed_arm  # noqa: PLC0415
+    from motet_voice.realtime.composed import ComposedArm, DormantSpeechRecognizer  # noqa: PLC0415
+    from motet_voice.vad import EnergyVad  # noqa: PLC0415
+
+    # Built from the working arm so the only difference is the leg production is missing.
+    arm = build_composed_arm(settings)
+    dormant = ComposedArm(
+        vad_factory=EnergyVad,
+        recognizer=DormantSpeechRecognizer(),
+        model=arm.model,
+        synthesizer=arm.synthesizer,
+        conversational=False,
+        dormant_reason=DormantSpeechRecognizer().reason,
+    )
+    session = VoiceSession.create(
+        session_id="vs_dormant", config=CONFIG, arm=dormant, tools=ToolRegistry({})
+    )
+
+    ready = session.ready()
+    assert ready.reason == "arm_dormant"
+    assert DormantSpeechRecognizer().reason in (ready.detail or "")
+
+
 def test_the_app_builds_the_composed_arm_behind_a_live_arm(settings: VoiceSettings) -> None:
     arm = build_openai_arm(settings, transport=RefusingTransport())
     app = create_app(settings, arm=arm)

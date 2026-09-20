@@ -32,7 +32,11 @@ type SessionEvent =
   // key" are two different sentences. Absent or null everywhere else.
   // `live` says whether a speech-to-speech channel is open behind this state (on the first
   // `ready`, and on the `listening` a reopened channel engages with); absent means it says nothing.
-  | { type: 'session_state'; at_ms: number; state: 'ready' | 'listening' | 'speaking' | 'closed'; detail: string | null; reason?: string | null; live?: boolean | null }
+  // `can_answer` says whether anything can reply at all — by voice or to a typed question.
+  // Not derivable from `reason`: `arm_dormant` is emitted both for a live channel that did
+  // not open on an arm whose typed questions still work, and for an arm that answers
+  // nothing. Absent (an older service) reads as true.
+  | { type: 'session_state'; at_ms: number; state: 'ready' | 'listening' | 'speaking' | 'closed'; detail: string | null; reason?: string | null; live?: boolean | null; can_answer?: boolean | null }
   | { type: 'transcript'; at_ms: number; speaker: 'user' | 'assistant'; text: string; final: boolean }
   | { type: 'audio_chunk'; at_ms: number; pcm_base64: string; sample_rate: number; duration_ms: number; format?: string }
   | { type: 'tool_call'; at_ms: number; call_id: string; name: string; arguments: Record<string, unknown> }
@@ -195,6 +199,8 @@ export function Live({
   // Why the live channel is not there, when the arm offered one: the server's `reason` code
   // plus its prose. Rendered as one line so the owner can tell "no credits" from "no key".
   const [liveUnavailable, setLiveUnavailable] = useState<{ reason: string; detail: string } | null>(null)
+  // Whether the session can produce a reply of any kind, as the service reported it.
+  const [canAnswer, setCanAnswer] = useState(true)
   // The last turn's failure, shown inline under the question box — a vendor refusing one
   // reply is not a closed socket, and the box stays usable for the next question.
   const [turnError, setTurnError] = useState('')
@@ -388,6 +394,7 @@ export function Live({
             readySeen.current = true
             const opened = event.live ?? Boolean(event.detail?.startsWith('live conversation open'))
             setLiveMode(opened)
+            if (event.can_answer != null) setCanAnswer(event.can_answer)
             // A live arm whose channel did not open says why in `reason`; a plain composed
             // arm sends neither the prefix nor a reason and this stays null.
             if (!opened && event.reason) setLiveUnavailable({ reason: event.reason, detail: event.detail ?? '' })
@@ -584,6 +591,8 @@ export function Live({
     setError('')
     setTurnError('')
     setLiveUnavailable(null)
+    // Optimistic per session, like `liveUnavailable`: the next `ready` says what this one is.
+    setCanAnswer(true)
     setLines([])
     setLastInterrupt(null)
     readySeen.current = false
@@ -733,7 +742,13 @@ export function Live({
           {error}
         </p>
       )}
-      {running && liveUnavailable && (
+      {running && !canAnswer && (
+        <p className="error" data-live-cannot-answer="true">
+          Play Live can’t answer in this deployment, so you will hear nothing back.{' '}
+          {liveUnavailable?.detail || 'No conversational vendor is provisioned.'}
+        </p>
+      )}
+      {running && canAnswer && liveUnavailable && (
         <p className="hint" data-live-unavailable={liveUnavailable.reason}>
           live conversation unavailable — <code>{liveUnavailable.reason}</code>; typed questions are answered by the
           fallback arm

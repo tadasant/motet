@@ -188,8 +188,17 @@ actor ScriptedEngine: PlaybackEngine {
     private var handler: (@Sendable (PlaybackEngineEvent) async -> Void)?
     private var positionMs = 0
     var loadError: Error?
+    /// Whether `play()` is followed by `.playing`.
+    ///
+    /// The real engine no longer emits it from `play()` at all — `timeControlStatus` does,
+    /// once audio is actually flowing — so a stall is exactly the case where the ask
+    /// succeeds and `.playing` never comes. Off is how a test says "the player took the
+    /// command and produced nothing", which is the bug this double has to be able to model.
+    var announcesPlaying = true
 
     func setLoadError(_ error: Error?) { loadError = error }
+
+    func setAnnouncesPlaying(_ value: Bool) { announcesPlaying = value }
 
     func load(url: URL, startingAtMs: Int) async throws {
         if let loadError { throw loadError }
@@ -200,11 +209,16 @@ actor ScriptedEngine: PlaybackEngine {
 
     func play() async {
         isPlaying = true
-        await emit(.playing)
+        if announcesPlaying { await emit(.playing) }
     }
 
     func pause() async {
         isPlaying = false
+        // Both, and in this order, because the real engine sends both: `pause()` emits
+        // `.paused`, and the `timeControlStatus` KVO ends any wait, which emits
+        // `.waiting(nil)`. A double that sent only the first hid a race in which the
+        // second wiped the stall message — see `StalledPlaybackTests`.
+        await emit(.waiting(nil))
         await emit(.paused)
     }
 
@@ -246,16 +260,26 @@ actor ScriptedEngine: PlaybackEngine {
     }
 
     func finish() async {
+        // The real engine stops wanting audio first, which ends any wait — see
+        // `AVPlayerPlaybackEngine.stopWanting`.
+        await emit(.waiting(nil))
         await emit(.ended)
     }
 
     func interrupt(resumable: Bool) async {
         isPlaying = false
+        await emit(.waiting(nil))
         await emit(.interrupted(resumable: resumable))
     }
 
     func fail(_ message: String) async {
+        await emit(.waiting(nil))
         await emit(.failed(message))
+    }
+
+    /// One heartbeat of `AVPlayer`'s `waitingToPlayAtSpecifiedRate`. `nil` ends the wait.
+    func waiting(_ reason: PlaybackWaitReason?) async {
+        await emit(.waiting(reason))
     }
 
     private func emit(_ event: PlaybackEngineEvent) async {

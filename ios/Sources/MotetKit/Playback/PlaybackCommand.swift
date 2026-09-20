@@ -44,6 +44,18 @@ public struct PlaybackSnapshot: Hashable, Sendable {
     /// Whether this episode is playing from the device rather than the network.
     public var isOffline: Bool
     public var errorMessage: String?
+    /// Why nothing is coming out of the speaker although the player was told to play, while
+    /// it is still plausibly temporary. Becomes `errorMessage` once it has outlasted
+    /// ``PlaybackController/stallGraceSeconds``.
+    ///
+    /// Separate from `isLoading` because they are different promises: loading is "this is
+    /// on its way", and this is "it was on its way and is not arriving". Drawn as the same
+    /// spinner with a sentence under it, which is the difference a listener can act on.
+    public var stallMessage: String?
+    /// What the audio *session* could not be set to, when iOS refused every shape
+    /// ``AudioSessionPlan/listening`` offers. Not about this episode: it is why any episode
+    /// would be silent on a phone with the ringer switch on.
+    public var audioSessionMessage: String?
 
     public init(
         episodeId: String? = nil,
@@ -55,7 +67,9 @@ public struct PlaybackSnapshot: Hashable, Sendable {
         currentSegmentTitle: String? = nil,
         isLoading: Bool = false,
         isOffline: Bool = false,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        stallMessage: String? = nil,
+        audioSessionMessage: String? = nil
     ) {
         self.episodeId = episodeId
         self.episodeTitle = episodeTitle
@@ -67,6 +81,8 @@ public struct PlaybackSnapshot: Hashable, Sendable {
         self.isLoading = isLoading
         self.isOffline = isOffline
         self.errorMessage = errorMessage
+        self.stallMessage = stallMessage
+        self.audioSessionMessage = audioSessionMessage
     }
 
     public var hasEpisode: Bool { episodeId != nil }

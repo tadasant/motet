@@ -710,13 +710,30 @@ class VoiceSession:
         Three shapes on a :class:`LiveArm`: the live channel is open; it did not open and a
         typed question is answered by ``text_arm`` (``reason`` names why, in a code a client
         can branch on — ``insufficient_quota`` is not ``arm_dormant``); or it did not open
-        and nothing can answer. The composed arm reports its own capabilities as before.
+        and nothing can answer.
+
+        **Whether anything can reply at all is its own field, and that is the fix for a
+        session that looks alive and can never answer.** Production runs ``arm=composed``
+        with no speech-to-text vendor provisioned: barge-in detection works, every frame is
+        forwarded, and no reply is possible — which on a phone reads as "the VAD works but
+        I get no audio". That was only ever in ``detail``, as prose, so the one place either
+        client surfaced it was a line in the transcript log.
+
+        It is **not** enough to put ``arm_dormant`` in ``reason`` and let the clients branch
+        on that, which is what the first draft of this did: ``failure_reason`` already emits
+        that same code for a :class:`LiveArm` whose channel would not open, and there a
+        typed question *is* answered by ``text_arm``. One code, two opposite consequences.
+        So ``can_answer`` says the thing directly — and it covers the third case neither
+        code could, a ``LiveArm`` with no ``text_arm``, which has always been told it could
+        type a question it cannot.
         """
         capabilities = self.arm.capabilities()
         detail = capabilities.dormant_reason or capabilities.notes
         reason: str | None = None
         if self.live is not None:
             detail = f"live conversation open · {detail}"
+        elif not isinstance(self.arm, LiveArm) and capabilities.dormant_reason:
+            reason = "arm_dormant"
         elif isinstance(self.arm, LiveArm):
             reason = self.live_failure_reason or "not_opened"
             if self.text_arm is not None:
@@ -734,6 +751,14 @@ class VoiceSession:
             detail=detail,
             reason=reason,
             live=self.live is not None,
+            # An open live channel answers by voice; otherwise it comes down to whether
+            # the arm behind a typed question can hold a conversation. `text_arm is not
+            # None` is **not** that test — a composed arm is its own `text_arm` whether or
+            # not it has a speech-to-text vendor, which is exactly production's case.
+            can_answer=(
+                self.live is not None
+                or (self.text_arm is not None and self.text_arm.capabilities().conversational)
+            ),
         )
 
     def summary(self) -> dict[str, Any]:

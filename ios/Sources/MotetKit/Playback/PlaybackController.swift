@@ -42,6 +42,15 @@ public actor PlaybackController {
     private var isLoading = false
     private var isLocal = false
     private var errorMessage: String?
+    /// The wait the engine last reported, and when it started. Cleared by any position
+    /// that actually moves, by a `playing`/`paused`, and by `waiting(nil)`.
+    private var waitReason: PlaybackWaitReason?
+    private var waitingSince: Date?
+    /// Whether the spinner on screen is this wait's, so clearing the wait does not cancel
+    /// a spinner `load` put up for its own reasons.
+    private var waitSetLoading = false
+    /// Set when iOS refused every shape in ``AudioSessionPlan/listening``. Not per episode.
+    private var audioSessionMessage: String?
     private var markedHeard: Set<String> = []
     private var didMarkListened = false
     private var lastPersistAt: Date?
@@ -88,6 +97,21 @@ public actor PlaybackController {
     /// frontier, so nothing is lost by waiting.
     static let reportRetrySeconds: TimeInterval = 10
 
+    /// How long a wait that *can* clear is allowed to last before it is called a failure.
+    ///
+    /// Long enough for a slow first buffer on a bad connection — the episode is fetched
+    /// from a signed URL on an object store, and a cold one takes seconds — and short
+    /// enough that a listener is not left staring at a spinner wondering whether they
+    /// pressed the button. A wait that cannot clear (``PlaybackWaitReason/clearsItself``)
+    /// does not get the grace at all.
+    public static let stallGraceSeconds: TimeInterval = 15
+
+    /// How often the engine is expected to re-report a continuing wait.
+    ///
+    /// The controller needs a heartbeat because the thing that has gone wrong is precisely
+    /// that the clock is not ticking, so no `position` arrives to hang the decision on.
+    public static let stallProbeSeconds: TimeInterval = 2
+
     public init(
         engine: any PlaybackEngine,
         positions: ListeningPositionStore,
@@ -124,7 +148,9 @@ public actor PlaybackController {
             currentSegmentTitle: timeline.entry(at: positionMs)?.newsItemTitle,
             isLoading: isLoading,
             isOffline: isLocal,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            stallMessage: stallSentence,
+            audioSessionMessage: audioSessionMessage
         )
     }
 
@@ -190,6 +216,9 @@ public actor PlaybackController {
         timeline = newEpisode.timeline
         isLocal = source.isLocal
         errorMessage = nil
+        waitReason = nil
+        waitingSince = nil
+        waitSetLoading = false
         isLoading = true
         publish()
 
@@ -256,6 +285,12 @@ public actor PlaybackController {
         guard episode != nil else { return }
         switch command {
         case .play:
+            // Asking again is what "Try again" is: the last failure and the last wait come
+            // off the screen here, so that what is shown next is about this attempt.
+            errorMessage = nil
+            waitReason = nil
+            waitingSince = nil
+            waitSetLoading = false
             await engine.play()
             isPlaying = true
         case .pause:
@@ -318,8 +353,13 @@ public actor PlaybackController {
         case .playing:
             isPlaying = true
             errorMessage = nil
+            // `playing` is `timeControlStatus == .playing`, which is the engine saying the
+            // wait is over — so it clears one, and clears the error a previous wait raised.
+            clearWait()
         case .paused:
             isPlaying = false
+            // Nothing is waiting to start once nobody asked it to.
+            clearWait(keepingError: true)
             await persistPosition(force: true)
             reportFrontier(force: true)
         case .ended:
@@ -332,10 +372,13 @@ public actor PlaybackController {
             await persistPosition(force: true)
         case .stalled:
             isLoading = true
+        case .waiting(let reason):
+            await observed(waiting: reason)
         case .failed(let message):
             errorMessage = message
             isPlaying = false
             isLoading = false
+            clearWait(keepingError: true)
             await persistPosition(force: true)
         }
         publish()
@@ -360,10 +403,106 @@ public actor PlaybackController {
             coverage.add(from: previous, to: positionMs)
             furthestMs = max(furthestMs, positionMs)
         }
+        // A clock that moved forward is the only unarguable proof that audio is coming out,
+        // and it outranks anything `timeControlStatus` said: a wait that has been overtaken
+        // by real progress is over, whatever order the two events arrived in — and so is a
+        // failure a wait already raised, which the moving clock has just disproved.
+        if step > 0 {
+            clearWait()
+            if isPlaying { errorMessage = nil }
+        }
 
         await markNewlyHeard()
         await persistPosition(force: false)
         reportFrontier(force: false)
+    }
+
+    // MARK: - Waiting
+
+    /// The engine says the player was told to play and no audio is coming out.
+    ///
+    /// **Two different things are called "not playing" and only one of them is a fault.**
+    /// A wait that can clear — buffering, measuring the connection — is reported as a
+    /// sentence under a spinner and nothing more, because on a slow connection it is the
+    /// normal way an episode starts. A wait that cannot clear is a failure the moment it is
+    /// seen. Between them sits the case this exists for: a wait that *could* clear and does
+    /// not, which used to be indistinguishable from a working player and is now an error
+    /// after ``stallGraceSeconds``.
+    ///
+    /// The engine re-sends the same reason every ``stallProbeSeconds`` precisely because a
+    /// stalled player emits nothing else; each repeat is what moves the clock on this
+    /// decision. `nil` is the engine saying the wait ended.
+    private func observed(waiting reason: PlaybackWaitReason?) async {
+        guard let reason else {
+            // `keepingError: true`, because `waiting(nil)` and `paused` are two events from
+            // one pause, handed over by two unordered `Task`s. Clearing the error here
+            // would delete the sentence this whole mechanism exists to produce, about half
+            // the time, the moment the listener tapped pause to ask why nothing happened.
+            // Nothing is lost: a wait that ended because audio *started* produces `playing`
+            // or a forward position, and both clear the error on their own.
+            clearWait(keepingError: true)
+            return
+        }
+        let now = clock.now
+        // The reason may change without the wait ending — `AVPlayer` walks from
+        // `evaluatingBufferingRate` to `toMinimizeStalls` routinely — and the grace is
+        // measured from the start of the *wait*, not of the current explanation. Resetting
+        // the mark here turned a promised fifteen seconds into forty-five, and into never
+        // for a reason that flaps.
+        if waitingSince == nil { waitingSince = now }
+        waitReason = reason
+        // A wait only means something while somebody is waiting for it. `AVPlayer` reports
+        // `waitingToPlayAtSpecifiedRate` on a paused player that is pre-rolling too, and
+        // narrating a stall nobody asked for would be its own kind of lying.
+        guard isPlaying else { return }
+
+        if !reason.clearsItself {
+            errorMessage = reason.failureSentence
+            if waitSetLoading { waitSetLoading = false; isLoading = false }
+            return
+        }
+        isLoading = true
+        waitSetLoading = true
+        let waited = now.timeIntervalSince(waitingSince ?? now)
+        if waited >= Self.stallGraceSeconds {
+            errorMessage = reason.failureSentence
+            waitSetLoading = false
+            isLoading = false
+        }
+    }
+
+    /// Forget the wait. `keepingError` leaves a failure it already raised on screen — a
+    /// pause after a stall is the listener giving up, not the audio arriving.
+    private func clearWait(keepingError: Bool = false) {
+        guard waitReason != nil else { return }
+        waitReason = nil
+        waitingSince = nil
+        // Only unset the spinner this wait put up. A wait that arrived and cleared while
+        // `load` was genuinely still loading must not cancel `load`'s own spinner.
+        if waitSetLoading {
+            waitSetLoading = false
+            isLoading = false
+        }
+        if !keepingError, errorMessage != nil { errorMessage = nil }
+    }
+
+    /// The sentence the screen shows while a wait is still plausibly temporary. Nil once it
+    /// has become `errorMessage`, so the two are never both on screen saying the same thing.
+    private var stallSentence: String? {
+        guard let waitReason, isPlaying, errorMessage == nil else { return nil }
+        return waitReason.sentence
+    }
+
+    /// What the audio session could not be set to, from the app layer that owns
+    /// `AVAudioSession`.
+    ///
+    /// It lives on this snapshot rather than beside it because it is the *answer* to the
+    /// question the player screen asks — "why is there no sound" — and a listener reading
+    /// that screen should not have to find it somewhere else. Nil clears it.
+    public func report(audioSessionMessage message: String?) {
+        guard audioSessionMessage != message else { return }
+        audioSessionMessage = message
+        publish()
     }
 
     /// Every story whose segments were actually played is read (invariant 5) — unless the
