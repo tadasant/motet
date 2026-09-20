@@ -31,8 +31,9 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.requests import Request
 
 from ..config import Settings
-from ..deps import Caller, connection, drain_trigger
+from ..deps import Caller, connection, drain_trigger, slack_alerter
 from ..drain import DrainNudge
+from ..slack import WaitlistAlert
 
 __all__ = [
     "ActionResult",
@@ -153,8 +154,12 @@ def run[T](tool: str, call: Callable[[RouteCall], T]) -> T:
     caller = current_caller()
     config = Settings.from_env()
     nudge = DrainNudge(drain_trigger())
+    # No MCP tool reaches the waitlist route — it is public and unauthenticated, and
+    # `EXCLUDED` in the registry says so — so this alert is never armed and never fires.
+    # It is passed because `connection` takes it, not because anything here uses it.
+    alert = WaitlistAlert(slack_alerter())
     try:
-        with contextlib.contextmanager(connection)(config, nudge) as conn:
+        with contextlib.contextmanager(connection)(config, nudge, alert) as conn:
             result = call(RouteCall(conn=conn, nudge=nudge, config=config, caller=caller))
     except HTTPException as exc:
         outcome = "refused" if exc.status_code < 500 else "error"

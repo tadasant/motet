@@ -1023,6 +1023,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
     public var vaultBackend: String
     public var vaultReady: Bool
     public var voiceConfigured: Bool?
+    public var waitlistAlerts: Bool?
 
     public init(
         authenticated: Bool,
@@ -1044,7 +1045,8 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         testFixtures: Bool? = nil,
         vaultBackend: String,
         vaultReady: Bool,
-        voiceConfigured: Bool? = nil
+        voiceConfigured: Bool? = nil,
+        waitlistAlerts: Bool? = nil
     ) {
         self.authenticated = authenticated
         self.drainTrigger = drainTrigger
@@ -1066,6 +1068,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         self.vaultBackend = vaultBackend
         self.vaultReady = vaultReady
         self.voiceConfigured = voiceConfigured
+        self.waitlistAlerts = waitlistAlerts
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1089,6 +1092,7 @@ public struct HealthResponse: Codable, Hashable, Sendable {
         case vaultBackend = "vault_backend"
         case vaultReady = "vault_ready"
         case voiceConfigured = "voice_configured"
+        case waitlistAlerts = "waitlist_alerts"
     }
 }
 

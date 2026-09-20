@@ -1623,6 +1623,9 @@ describe('the generated contract', () => {
       // Off everywhere but staging: the test harness's routes, which a production process
       // refuses to boot with.
       test_fixtures: false,
+      // Off until SLACK_WEBHOOK_URL is wired, which is the shipped state of both
+      // environments; a laptop always reports false.
+      waitlist_alerts: false,
       mcp_oauth_configured: false,
       mcp_tools: 0,
       inference_mode: 'fake',
