@@ -1620,6 +1620,9 @@ describe('the generated contract', () => {
       voice_configured: false,
       // Off unless this deployment has an enrichment service wired (motet#102).
       enrich_enabled: false,
+      // Off everywhere but staging: the test harness's routes, which a production process
+      // refuses to boot with.
+      test_fixtures: false,
       mcp_oauth_configured: false,
       mcp_tools: 0,
       inference_mode: 'fake',
