@@ -183,6 +183,20 @@ class StoredEpisode:
     created_at: datetime
     published_at: datetime | None
     segments: tuple[StoredSegment, ...]
+    #: How many of this render's segments TTS has synthesized so far (migration 0025).
+    #: Written by ``handle_tts`` on a side connection as each one comes back, and reset to
+    #: zero when a render starts, so it counts *this* attempt. Nothing downstream reads it:
+    #: the audio, the durations and the claim timings all come from what TTS returned. It
+    #: exists so that the longest, most expensive stage is a count rather than a spinner.
+    rendered_segments: int = 0
+    #: When this row last changed. Every write to the episode touches it, so for a
+    #: ``failed`` episode it is *when it gave up* — which ``published_at`` is for a ready
+    #: one and which nothing else records. ``motet_api.episode_progress`` needs it: the
+    #: window in which a settled build still reports how it went has to be measured from
+    #: the moment it settled, and a retry ladder that exhausts itself takes a quarter of an
+    #: hour to get there. Defaulted rather than required so that a fixture built by hand
+    #: still constructs; ``None`` reads as "never changed since creation".
+    updated_at: datetime | None = None
 
     @property
     def has_audio(self) -> bool:

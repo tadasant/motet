@@ -2363,12 +2363,133 @@ export interface components {
             entries: components["schemas"]["EnrichTranscriptEntryResponse"][];
             run: components["schemas"]["EnrichRunResponse"];
         };
+        /**
+         * EpisodeBuildProgress
+         * @description Where an episode is between "make it" and a file to play.
+         *
+         *     An episode is created in ``pending`` and built on three queues — ``assemble``,
+         *     ``script``, ``tts`` — so it is a minute or several of work a client can otherwise only
+         *     show as the bare word in ``state``. This is that work joined to the job queue, so a
+         *     screen can say which step it is on, whether anything has picked it up, how far through
+         *     the render it is, and roughly how much longer, instead of "queued".
+         *
+         *     **Two fields, not one.** ``step`` is which work; ``stage`` is what is happening to it.
+         *     ``SourceSyncProgress`` folds both into one enum because a sync has a single kind of
+         *     work; an episode has three, and a nine-member enum of half-verbs would be worse than
+         *     two small vocabularies. Branch on ``stage`` for the tone and read ``step`` for the noun.
+         *
+         *     ``step``:
+         *
+         *     - ``assemble`` — choosing which unread stories fit inside the duration cap.
+         *     - ``script`` — writing the briefing, one model call over every chosen story.
+         *     - ``tts`` — synthesizing each segment's audio, joining and uploading it.
+         *     - ``null`` — no step is outstanding, which is ``stage: ready``.
+         *
+         *     ``stage``:
+         *
+         *     - ``queued`` — the step's job is waiting for a worker to claim it.
+         *     - ``running`` — a worker has it right now.
+         *     - ``retrying`` — the step failed and is waiting to try again; ``error`` says why and
+         *       ``next_attempt_at`` says when. Not the same as ``failed``: the episode carries no
+         *       error of its own until the attempts run out.
+         *     - ``ready`` — the audio exists and the episode is playable.
+         *     - ``failed`` — a step gave up; ``error`` says why.
+         *
+         *     Reported for ten minutes after an episode settles, then null — an episode that has been
+         *     ready since yesterday is described by its own state and duration.
+         */
+        EpisodeBuildProgress: {
+            /**
+             * Attempt
+             * @description Which attempt the outstanding job is on. Zero before it has been claimed once, and zero for an episode that is not building.
+             */
+            attempt: number;
+            /**
+             * Claims
+             * @description Claims the script wrote. Zero until scripting has finished.
+             */
+            claims: number;
+            /**
+             * Elapsed Ms
+             * @description How long this episode has been building, computed on the server so no client has to reconcile its clock with ours. Stops at publication for a ready one.
+             */
+            elapsed_ms: number;
+            /**
+             * Error
+             * @description Why the build failed (``failed``), or what the last attempt said (``retrying``). Null otherwise.
+             */
+            error: string | null;
+            /**
+             * Estimate Ms
+             * @description A rough total, the median of the last few finished episodes on this deployment. **An estimate, and clients must label it as one.** Null when fewer than three have finished, because there is then no sound basis for a number — show the elapsed time and the step instead of inventing one. Null for an episode that is no longer building.
+             */
+            estimate_ms: number | null;
+            /**
+             * Estimate Samples
+             * @description How many finished episodes ``estimate_ms`` is the median of, so a client can say what it is made of rather than presenting it as a promise.
+             */
+            estimate_samples: number;
+            /**
+             * Max Attempts
+             * @description How many attempts a step gets before it gives up. Reported rather than restated: it is the queue's own ``DEFAULT_MAX_ATTEMPTS``.
+             */
+            max_attempts: number;
+            /**
+             * News Items
+             * @description Stories in the episode. Zero until assembly has chosen them, so it is real from the script step onward.
+             */
+            news_items: number;
+            /**
+             * Next Attempt At
+             * @description When a retrying step tries again. Null unless ``stage`` is ``retrying``.
+             */
+            next_attempt_at: string | null;
+            /**
+             * Segments Rendered
+             * @description Segments whose audio has been synthesized, out of ``news_items``. Only counted while ``step`` is ``tts``; zero otherwise, because outside the render it would be a count of work that is not happening.
+             */
+            segments_rendered: number;
+            /**
+             * Stage
+             * @description What is happening to that step. The one field to branch on.
+             * @enum {string}
+             */
+            stage: "queued" | "running" | "retrying" | "ready" | "failed";
+            /**
+             * Step
+             * @description Which pipeline step is outstanding. Null once the episode is ready.
+             */
+            step: ("assemble" | "script" | "tts") | null;
+            /**
+             * Steps Done
+             * @description How many of the three steps are behind it — 0 while assembling, 3 once ready. A coarse bar that is always available, unlike the counts below.
+             */
+            steps_done: number;
+            /**
+             * Steps Total
+             * @description How many steps a build has. Three today.
+             */
+            steps_total: number;
+            /**
+             * Waiting On Worker
+             * @description True when a step is waiting, no worker has run its queue in the last five minutes, and none is being started — so nothing will move until one runs. False for a step a worker is running, however long it has been running for: a large render outlives the freshness window, and accusing the worker paying Cartesia is worse than saying nothing. Also false while a worker is still booting: that is ``worker_starting``.
+             */
+            waiting_on_worker: boolean;
+            /**
+             * Worker Starting
+             * @description True when a worker was asked for and may still be starting: this deployment runs the worker on demand, and the container takes a minute or two to appear. Only ever true on the assemble step, which is the one job the API itself enqueues and nudges for. Mutually exclusive with ``waiting_on_worker`` — say 'a worker is starting' rather than 'nothing will run this'. Optional so an older client decodes.
+             * @default false
+             */
+            worker_starting: boolean;
+        };
         /** EpisodeResponse */
         EpisodeResponse: {
             /** Audio Bytes */
             audio_bytes: number | null;
             /** Audio Media Type */
             audio_media_type: string | null;
+            /** @description Where this episode is between creation and playable, for the ten minutes after it settles as well as while it builds. Null for an episode that finished longer ago than that, and absent on an API older than this field. */
+            build_progress?: components["schemas"]["EpisodeBuildProgress"] | null;
             /**
              * Created At
              * Format: date-time

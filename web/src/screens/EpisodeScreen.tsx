@@ -23,10 +23,11 @@
 
 import { type RefObject, useEffect, useRef, useState } from 'react'
 
-import { ApiError, type Episode, type FeedInfo, type ProcessingStatus, api } from '../api/client'
+import { ApiError, type Episode, type FeedInfo, api } from '../api/client'
 import { Live } from './Live'
+import { EpisodeProgressPanel } from './EpisodeProgressPanel'
+import { describeBuildProgress } from './episodeProgress'
 import { formatClock, listenState, markEpisodeListened } from './listening'
-import { ago, serverNow, workerState } from './Processing'
 
 /** States a client should keep polling through. Exported: the app polls on it. */
 export const IN_PROGRESS = new Set(['pending', 'scripting', 'rendering'])
@@ -47,20 +48,17 @@ export const MAX_LISTENING_STEP_MS = 5_000
 
 export function EpisodeScreen({
   episode,
-  processing,
   autoPlay = false,
   onPositionReported,
   onBacklogChanged,
 }: {
   episode: Episode
-  processing: ProcessingStatus | null
   /** Start playing as soon as the audio can — the shelf's Play pill, not a row click. */
   autoPlay?: boolean
   /** The server's answer to a position report: where it now says the listener is. */
   onPositionReported: (episodeId: string, listenedThroughMs: number) => void
   onBacklogChanged: () => void
 }) {
-  const worker = workerState(processing)
   const [feed, setFeed] = useState<FeedInfo | null>(null)
   const [error, setError] = useState('')
   const [listened, setListened] = useState<number | null>(null)
@@ -110,32 +108,26 @@ export function EpisodeScreen({
         </span>
       </p>
 
-      {IN_PROGRESS.has(episode.state) &&
-        (worker === 'running' || worker === 'unknown' || episode.state !== 'pending' ? (
-          <p className="hint" role="status">
-            Working… assembly, script, then audio. This page polls.
+      {/* Where the build is, from the server: which step, how far into the render, how
+          long it has taken against how long one usually takes, and — when nothing is
+          draining the queues — that nothing will move it. It replaced a "Working…
+          assembly, script, then audio. This page polls." line that said the same thing
+          for all three steps and all four minutes, plus a hand-rolled stall banner that
+          re-derived from `processing` what the API now answers directly. `waiting_on_worker`
+          keeps that banner's one piece of care: a long render outlives the heartbeat's
+          freshness window, and the API does not accuse a worker that is at that moment
+          paying Cartesia. */}
+      {episode.build_progress ? (
+        <EpisodeProgressPanel description={describeBuildProgress(episode.build_progress)} />
+      ) : (
+        // No build report: an episode that finished long enough ago that its own state is
+        // the whole answer — or an API older than `build_progress`, where the failure
+        // still has to be readable.
+        episode.state === 'failed' && (
+          <p className="error" role="alert">
+            {episode.last_error ?? 'This episode failed.'}
           </p>
-        ) : (
-          // The same lie the Processing panel used to tell, one stage later and more
-          // expensive: an episode that reached `pending` and has no worker behind it is
-          // not working, and "this page polls" invites somebody to sit and watch it.
-          //
-          // Only in `pending`, which is the state nothing has touched yet. Past it a
-          // worker demonstrably reached this episode, and a long TTS render is exactly
-          // the job that can outlast the heartbeat's freshness window — so the banner
-          // would be accusing a worker that is at that moment paying Cartesia.
-          <p className="stalled" role="status">
-            Not moving: nothing is draining the queues
-            {processing?.worker_last_seen_at
-              ? ` — a worker last ran ${ago(processing.worker_last_seen_at, serverNow(processing))}`
-              : ' — no worker has ever run here'}
-            . Assembly, script and audio all wait on one.
-          </p>
-        ))}
-      {episode.state === 'failed' && (
-        <p className="error" role="alert">
-          {episode.last_error ?? 'This episode failed.'}
-        </p>
+        )
       )}
       {error && (
         <p className="error" role="alert">

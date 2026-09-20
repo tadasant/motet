@@ -119,7 +119,6 @@ function renderEpisodes({
         openId={open}
         loaded={loaded}
         unavailable={unavailable}
-        processing={null}
         onOpen={(episode) => {
           onOpen(episode)
           setOpen(episode.id)

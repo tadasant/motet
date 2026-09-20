@@ -639,7 +639,7 @@ def get_episode(
         """
         SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
                audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
-               keep_in_backlog, created_at, published_at
+               keep_in_backlog, rendered_segments, created_at, updated_at, published_at
         FROM episodes
         WHERE id = %s AND (%s::text IS NULL OR user_id = %s)
         """,
@@ -656,7 +656,7 @@ def list_episodes(conn: psycopg.Connection[Any], user_id: str) -> list[StoredEpi
         """
         SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
                audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
-               keep_in_backlog, created_at, published_at
+               keep_in_backlog, rendered_segments, created_at, updated_at, published_at
         FROM episodes
         WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
@@ -674,7 +674,7 @@ def list_published_episodes(conn: psycopg.Connection[Any], user_id: str) -> list
         """
         SELECT id, user_id, title, state, kind, rule, max_duration_ms, duration_ms,
                audio_key, audio_bytes, audio_media_type, last_error, listened_through_ms,
-               keep_in_backlog, created_at, published_at
+               keep_in_backlog, rendered_segments, created_at, updated_at, published_at
         FROM episodes
         WHERE user_id = %s AND state = 'ready' AND audio_key IS NOT NULL
         ORDER BY published_at DESC, id DESC
@@ -815,6 +815,218 @@ def publish_episode(
         """,
         (audio_key, audio_bytes, audio_media_type, duration_ms, episode_id_),
     )
+
+
+# --- how an episode is getting on -----------------------------------------------------
+
+
+#: The queues an episode's build travels through, in order. The same three
+#: :mod:`motet_workers.queues` names, spelled here because this module cannot import the
+#: worker package — the arrow goes the other way — and named rather than inlined so the
+#: index predicate in migration 0025, the query below and the API's step mapping are one
+#: list. A queue added to the pipeline and forgotten here is a stage the screen calls
+#: "queued" forever.
+EPISODE_QUEUES: Final = ("assemble", "script", "tts")
+
+#: ``'assemble', 'script', 'tts'`` as SQL literals, for :data:`_EPISODE_JOB_SQL`.
+#:
+#: **Spelled into the statement rather than bound as a parameter, and that is the difference
+#: between using migration 0025's index and sequentially scanning the job table.** Postgres
+#: uses a partial index only when it can prove the query's own restriction implies the
+#: index's predicate, and the predicate here is a constant ``IN`` list. With the queues
+#: bound as ``queue = ANY($2)`` it can still prove it while it is building a *custom* plan,
+#: because then it has the values — so the first few executions look fine. psycopg prepares
+#: a statement after five executions, and on a route the SPA polls every three seconds that
+#: is the first quarter-minute; from the *generic* plan on, the parameter has no value to
+#: reason about and the proof fails. Measured over 20,000 job rows: the literal form plans
+#: at cost 82 with ``Index Scan using jobs_episode_idx``, the parameterized one at 8,909
+#: with ``Seq Scan on jobs``. That the index is the one used is asserted in
+#: ``api/tests/test_episode_progress.py``.
+#:
+#: Safe to interpolate because the values are this module's own literals and never reach
+#: here from a caller — checked below, so that a future queue name carrying a quote is an
+#: import error rather than an injection. A ``raise`` rather than an ``assert``, because
+#: ``python -O`` strips the latter: the same argument ``jobs.prune`` makes for its
+#: autocommit check, and the reason that one is a ``ValueError`` too.
+if not all(name.isalpha() for name in EPISODE_QUEUES):
+    raise ValueError(f"episode queue names must be bare identifiers: {EPISODE_QUEUES!r}")
+_EPISODE_QUEUE_LITERALS: Final = ", ".join(f"'{name}'" for name in EPISODE_QUEUES)
+
+
+@dataclass(frozen=True)
+class EpisodeJob:
+    """The pipeline job an episode is at, read beside the episode row.
+
+    The episode row says which *stage* it is at; this says what is happening to that stage
+    — whether a worker holds it, which attempt it is on, when the next one is due, and what
+    the last one said. An episode still climbing the retry ladder carries no ``last_error``
+    of its own, because :func:`motet_workers.handlers.episode_failed` writes that only once
+    the attempts run out, so without this a screen cannot tell "a worker is on it" from
+    "it has failed four times and is waiting to try again" (migration 0005's argument, one
+    half of the pipeline along).
+    """
+
+    queue: str
+    state: str
+    attempts: int
+    run_at: datetime
+    last_error: str | None
+    #: When the row was enqueued. For the ``assemble`` job that is the moment the API asked
+    #: for a worker (motet#71), which is what tells a worker that is *booting* apart from
+    #: one that is never coming — see ``motet_api.episode_progress``.
+    created_at: datetime
+
+
+_EPISODE_BUILD_SQL: Final = f"""
+    SELECT e.id AS episode_id,
+           ep.state AS episode_state, ep.published_at, ep.updated_at,
+           j.queue, j.state AS job_state, j.attempts, j.run_at, j.last_error,
+           j.created_at AS job_created_at
+    FROM unnest(%s::text[]) AS e(id)
+    JOIN episodes ep ON ep.id = e.id
+    LEFT JOIN LATERAL (
+        SELECT queue, state, attempts, run_at, last_error, created_at
+        FROM jobs
+        WHERE queue IN ({_EPISODE_QUEUE_LITERALS}) AND state <> 'done'
+          AND payload ->> 'episode_id' = e.id
+        ORDER BY (queue = CASE ep.state
+                              WHEN 'pending'   THEN 'assemble'
+                              WHEN 'scripting' THEN 'script'
+                              WHEN 'rendering' THEN 'tts'
+                          END) DESC,
+                 (state = 'running') DESC,
+                 (state <> 'failed') DESC,
+                 id DESC
+        LIMIT 1
+    ) j ON true
+"""
+
+
+@dataclass(frozen=True)
+class EpisodeBuild:
+    """One statement's reading of where an episode's build is.
+
+    **The episode's state is re-read here rather than taken from the row a list route
+    already has, and that is the point of this type.** The API's connection is READ
+    COMMITTED, so every statement takes a fresh snapshot, and ``_execute`` commits a
+    handler's work and ``jobs.complete`` in two transactions by design. Between the two
+    lies a window in which a list route's episode read says ``rendering`` and a later job
+    read — correctly — finds no open job, because the render finished in between. Reading
+    the state beside the job makes that pair consistent: "no job" then means a lost row
+    rather than a race, which is what lets the absence be reported as *stopped*.
+
+    ``updated_at`` is when the row last changed, which for a ``failed`` episode is when it
+    gave up. Nothing else records that: ``published_at`` is the ready episode's equivalent
+    and a retry ladder takes a quarter of an hour to exhaust, so a window measured from
+    ``created_at`` would close before the failure it is meant to report ever happened.
+    """
+
+    state: str
+    published_at: datetime | None
+    updated_at: datetime
+    job: EpisodeJob | None
+
+
+def episode_builds(
+    conn: psycopg.Connection[Any], episode_ids: Sequence[str]
+) -> dict[str, EpisodeBuild]:
+    """Per episode, its state now and the pipeline job that describes where it is.
+
+    One statement for every episode a list route reports, answered off migration 0025's
+    partial index: ``queue IN (...) AND state <> 'done'`` is repeated verbatim so the
+    planner can use it, and a ``done`` row is never wanted — an episode whose stage
+    finished is described by the *next* stage's row, or by being ready.
+
+    Which job, when there is more than one, in order. **First, one on the queue the
+    episode's own state says it is at.** Two open rows for one episode is not the ordinary
+    case — each stage enqueues the next in the transaction that finishes its own — but a
+    worker that dies between committing its work and completing its job leaves a stale
+    ``running`` row on the stage it *finished*, beside the ``ready`` row of the stage it
+    handed on to. The step is named from the state, so taking the stale row's *stage*
+    would report "a worker is running this" over a job nothing has claimed — which is
+    motet#38's lie in exactly the case ``waiting_on_worker`` exists to catch. Then a
+    ``running`` row, then the newest; a ``failed`` row loses to both and wins only when it
+    is all there is, which is what lets a failed episode name the step that stopped it.
+
+    An id with no ``episodes`` row is absent from the result rather than carrying a null
+    reading: it was deleted between this statement and the one that listed it.
+    """
+    if not episode_ids:
+        return {}
+    rows = _all(conn, _EPISODE_BUILD_SQL, (list(episode_ids),))
+    return {
+        row["episode_id"]: EpisodeBuild(
+            state=row["episode_state"],
+            published_at=row["published_at"],
+            updated_at=row["updated_at"],
+            job=None
+            if row["queue"] is None
+            else EpisodeJob(
+                queue=row["queue"],
+                state=row["job_state"],
+                attempts=row["attempts"] or 0,
+                run_at=row["run_at"],
+                last_error=row["last_error"],
+                created_at=row["job_created_at"],
+            ),
+        )
+        for row in rows
+    }
+
+
+def recent_build_times_ms(conn: psycopg.Connection[Any], user_id: str, *, limit: int) -> list[int]:
+    """How long this user's last few episodes took, creation to publication.
+
+    The only honest basis for "how much longer" there is. A constant would be a guess about
+    a duration whose two largest terms — how long Cloud Run takes to start a worker, and how
+    many stories the script and the render have to get through — are facts about the
+    deployment and about the backlog on the day. Measured here instead, from episodes that
+    actually finished, and reported to the client with the sample count so it can say what
+    the number is made of rather than presenting it as a promise.
+
+    **Per user, not per deployment**, which is indistinguishable today — Phase 1 is one
+    account — and is the right half of the ambiguity to pick: the two largest terms are a
+    property of the estate, but how many stories a build has to get through is a property
+    of *your* backlog, and that is the one that moves between two people on one deployment.
+
+    Only ``ready`` episodes, because a failed one stopped rather than finished, and only
+    ones whose ``published_at`` is after their ``created_at``: an episode published in the
+    same transaction it was created in would contribute a zero that drags the median toward
+    a number no build can hit.
+
+    Ordered by ``published_at`` rather than ``created_at`` so that ``episodes_feed_idx``
+    (``user_id, published_at DESC`` where ``state = 'ready'``) answers it. The two differ
+    only for episodes created out of order, and this is a route the SPA polls every three
+    seconds while anything is building — sorting every ready episode a user has, to pick
+    ten, is the cost ``jobs_episode_idx`` exists to avoid one table over.
+    """
+    rows = _all(
+        conn,
+        """
+        SELECT extract(epoch FROM (published_at - created_at)) * 1000 AS ms
+        FROM episodes
+        WHERE user_id = %s AND state = 'ready' AND published_at > created_at
+        ORDER BY published_at DESC
+        LIMIT %s
+        """,
+        (user_id, limit),
+    )
+    return [int(row["ms"]) for row in rows]
+
+
+def record_rendered_segments(conn: psycopg.Connection[Any], episode_id_: str, count: int) -> None:
+    """Say how many of this render's segments TTS has produced (migration 0025).
+
+    Called on a **side connection** by :func:`motet_workers.handlers.handle_tts`, once
+    before the first segment and once after each one. It has to be a side connection: the
+    handler's own transaction stays open for the whole render — minutes, and the longest
+    single thing the pipeline does — so a write on it would become visible at exactly the
+    moment nobody needs it any more.
+
+    Nothing downstream reads this. It is a progress counter, which is why the caller
+    swallows what it raises rather than failing a render over a number on a screen.
+    """
+    conn.execute("UPDATE episodes SET rendered_segments = %s WHERE id = %s", (count, episode_id_))
 
 
 # --- feed tokens -------------------------------------------------------------------
@@ -1748,6 +1960,8 @@ def _episode(row: dict[str, Any], segments: tuple[StoredSegment, ...]) -> Stored
         listened_through_ms=row["listened_through_ms"],
         keep_in_backlog=row["keep_in_backlog"],
         created_at=row["created_at"],
+        updated_at=row["updated_at"],
         published_at=row["published_at"],
         segments=segments,
+        rendered_segments=row["rendered_segments"],
     )

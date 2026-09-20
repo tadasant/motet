@@ -916,9 +916,116 @@ public struct EnrichTranscriptResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// Where an episode is between "make it" and a file to play.
+///
+/// An episode is created in ``pending`` and built on three queues — ``assemble``,
+/// ``script``, ``tts`` — so it is a minute or several of work a client can otherwise only
+/// show as the bare word in ``state``. This is that work joined to the job queue, so a
+/// screen can say which step it is on, whether anything has picked it up, how far through
+/// the render it is, and roughly how much longer, instead of "queued".
+///
+/// **Two fields, not one.** ``step`` is which work; ``stage`` is what is happening to it.
+/// ``SourceSyncProgress`` folds both into one enum because a sync has a single kind of
+/// work; an episode has three, and a nine-member enum of half-verbs would be worse than
+/// two small vocabularies. Branch on ``stage`` for the tone and read ``step`` for the noun.
+///
+/// ``step``:
+///
+/// - ``assemble`` — choosing which unread stories fit inside the duration cap.
+/// - ``script`` — writing the briefing, one model call over every chosen story.
+/// - ``tts`` — synthesizing each segment's audio, joining and uploading it.
+/// - ``null`` — no step is outstanding, which is ``stage: ready``.
+///
+/// ``stage``:
+///
+/// - ``queued`` — the step's job is waiting for a worker to claim it.
+/// - ``running`` — a worker has it right now.
+/// - ``retrying`` — the step failed and is waiting to try again; ``error`` says why and
+///   ``next_attempt_at`` says when. Not the same as ``failed``: the episode carries no
+///   error of its own until the attempts run out.
+/// - ``ready`` — the audio exists and the episode is playable.
+/// - ``failed`` — a step gave up; ``error`` says why.
+///
+/// Reported for ten minutes after an episode settles, then null — an episode that has been
+/// ready since yesterday is described by its own state and duration.
+public struct EpisodeBuildProgress: Codable, Hashable, Sendable {
+    public var attempt: Int
+    public var claims: Int
+    public var elapsedMs: Int
+    public var error: String?
+    public var estimateMs: Int?
+    public var estimateSamples: Int
+    public var maxAttempts: Int
+    public var newsItems: Int
+    public var nextAttemptAt: Date?
+    public var segmentsRendered: Int
+    public var stage: String
+    public var step: String?
+    public var stepsDone: Int
+    public var stepsTotal: Int
+    public var waitingOnWorker: Bool
+    public var workerStarting: Bool?
+
+    public init(
+        attempt: Int,
+        claims: Int,
+        elapsedMs: Int,
+        error: String? = nil,
+        estimateMs: Int? = nil,
+        estimateSamples: Int,
+        maxAttempts: Int,
+        newsItems: Int,
+        nextAttemptAt: Date? = nil,
+        segmentsRendered: Int,
+        stage: String,
+        step: String? = nil,
+        stepsDone: Int,
+        stepsTotal: Int,
+        waitingOnWorker: Bool,
+        workerStarting: Bool? = nil
+    ) {
+        self.attempt = attempt
+        self.claims = claims
+        self.elapsedMs = elapsedMs
+        self.error = error
+        self.estimateMs = estimateMs
+        self.estimateSamples = estimateSamples
+        self.maxAttempts = maxAttempts
+        self.newsItems = newsItems
+        self.nextAttemptAt = nextAttemptAt
+        self.segmentsRendered = segmentsRendered
+        self.stage = stage
+        self.step = step
+        self.stepsDone = stepsDone
+        self.stepsTotal = stepsTotal
+        self.waitingOnWorker = waitingOnWorker
+        self.workerStarting = workerStarting
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempt
+        case claims
+        case elapsedMs = "elapsed_ms"
+        case error
+        case estimateMs = "estimate_ms"
+        case estimateSamples = "estimate_samples"
+        case maxAttempts = "max_attempts"
+        case newsItems = "news_items"
+        case nextAttemptAt = "next_attempt_at"
+        case segmentsRendered = "segments_rendered"
+        case stage
+        case step
+        case stepsDone = "steps_done"
+        case stepsTotal = "steps_total"
+        case waitingOnWorker = "waiting_on_worker"
+        case workerStarting = "worker_starting"
+    }
+}
+
 public struct EpisodeResponse: Codable, Hashable, Sendable {
     public var audioBytes: Int?
     public var audioMediaType: String?
+    public var buildProgress: EpisodeBuildProgress?
     public var createdAt: Date
     public var durationMs: Int
     public var id: String
@@ -934,6 +1041,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
     public init(
         audioBytes: Int? = nil,
         audioMediaType: String? = nil,
+        buildProgress: EpisodeBuildProgress? = nil,
         createdAt: Date,
         durationMs: Int,
         id: String,
@@ -948,6 +1056,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
     ) {
         self.audioBytes = audioBytes
         self.audioMediaType = audioMediaType
+        self.buildProgress = buildProgress
         self.createdAt = createdAt
         self.durationMs = durationMs
         self.id = id
@@ -964,6 +1073,7 @@ public struct EpisodeResponse: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case audioBytes = "audio_bytes"
         case audioMediaType = "audio_media_type"
+        case buildProgress = "build_progress"
         case createdAt = "created_at"
         case durationMs = "duration_ms"
         case id

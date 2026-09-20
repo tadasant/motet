@@ -698,6 +698,133 @@ class SegmentResponse(BaseModel):
     claims: list[ClaimModel]
 
 
+class EpisodeBuildProgress(BaseModel):
+    """Where an episode is between "make it" and a file to play.
+
+    An episode is created in ``pending`` and built on three queues — ``assemble``,
+    ``script``, ``tts`` — so it is a minute or several of work a client can otherwise only
+    show as the bare word in ``state``. This is that work joined to the job queue, so a
+    screen can say which step it is on, whether anything has picked it up, how far through
+    the render it is, and roughly how much longer, instead of "queued".
+
+    **Two fields, not one.** ``step`` is which work; ``stage`` is what is happening to it.
+    ``SourceSyncProgress`` folds both into one enum because a sync has a single kind of
+    work; an episode has three, and a nine-member enum of half-verbs would be worse than
+    two small vocabularies. Branch on ``stage`` for the tone and read ``step`` for the noun.
+
+    ``step``:
+
+    - ``assemble`` — choosing which unread stories fit inside the duration cap.
+    - ``script`` — writing the briefing, one model call over every chosen story.
+    - ``tts`` — synthesizing each segment's audio, joining and uploading it.
+    - ``null`` — no step is outstanding, which is ``stage: ready``.
+
+    ``stage``:
+
+    - ``queued`` — the step's job is waiting for a worker to claim it.
+    - ``running`` — a worker has it right now.
+    - ``retrying`` — the step failed and is waiting to try again; ``error`` says why and
+      ``next_attempt_at`` says when. Not the same as ``failed``: the episode carries no
+      error of its own until the attempts run out.
+    - ``ready`` — the audio exists and the episode is playable.
+    - ``failed`` — a step gave up; ``error`` says why.
+
+    Reported for ten minutes after an episode settles, then null — an episode that has been
+    ready since yesterday is described by its own state and duration.
+    """
+
+    step: Literal["assemble", "script", "tts"] | None = Field(
+        description="Which pipeline step is outstanding. Null once the episode is ready."
+    )
+    stage: Literal["queued", "running", "retrying", "ready", "failed"] = Field(
+        description="What is happening to that step. The one field to branch on."
+    )
+    steps_done: int = Field(
+        description=(
+            "How many of the three steps are behind it — 0 while assembling, 3 once "
+            "ready. A coarse bar that is always available, unlike the counts below."
+        )
+    )
+    steps_total: int = Field(description="How many steps a build has. Three today.")
+    news_items: int = Field(
+        description=(
+            "Stories in the episode. Zero until assembly has chosen them, so it is real "
+            "from the script step onward."
+        )
+    )
+    claims: int = Field(description="Claims the script wrote. Zero until scripting has finished.")
+    segments_rendered: int = Field(
+        description=(
+            "Segments whose audio has been synthesized, out of ``news_items``. Only "
+            "counted while ``step`` is ``tts``; zero otherwise, because outside the render "
+            "it would be a count of work that is not happening."
+        )
+    )
+    elapsed_ms: int = Field(
+        description=(
+            "How long this episode has been building, computed on the server so no client "
+            "has to reconcile its clock with ours. Stops at publication for a ready one."
+        )
+    )
+    estimate_ms: int | None = Field(
+        description=(
+            "A rough total, the median of the last few finished episodes on this "
+            "deployment. **An estimate, and clients must label it as one.** Null when "
+            "fewer than three have finished, because there is then no sound basis for a "
+            "number — show the elapsed time and the step instead of inventing one. Null "
+            "for an episode that is no longer building."
+        )
+    )
+    estimate_samples: int = Field(
+        description=(
+            "How many finished episodes ``estimate_ms`` is the median of, so a client can "
+            "say what it is made of rather than presenting it as a promise."
+        )
+    )
+    attempt: int = Field(
+        description=(
+            "Which attempt the outstanding job is on. Zero before it has been claimed "
+            "once, and zero for an episode that is not building."
+        )
+    )
+    max_attempts: int = Field(
+        description=(
+            "How many attempts a step gets before it gives up. Reported rather than "
+            "restated: it is the queue's own ``DEFAULT_MAX_ATTEMPTS``."
+        )
+    )
+    next_attempt_at: datetime | None = Field(
+        description="When a retrying step tries again. Null unless ``stage`` is ``retrying``."
+    )
+    error: str | None = Field(
+        description=(
+            "Why the build failed (``failed``), or what the last attempt said (``retrying``). "
+            "Null otherwise."
+        )
+    )
+    waiting_on_worker: bool = Field(
+        description=(
+            "True when a step is waiting, no worker has run its queue in the last five "
+            "minutes, and none is being started — so nothing will move until one runs. "
+            "False for a step a worker is running, however long it has been running for: "
+            "a large render outlives the freshness window, and accusing the worker paying "
+            "Cartesia is worse than saying nothing. Also false while a worker is still "
+            "booting: that is ``worker_starting``."
+        )
+    )
+    worker_starting: bool = Field(
+        default=False,
+        description=(
+            "True when a worker was asked for and may still be starting: this deployment "
+            "runs the worker on demand, and the container takes a minute or two to appear. "
+            "Only ever true on the assemble step, which is the one job the API itself "
+            "enqueues and nudges for. Mutually exclusive with ``waiting_on_worker`` — say "
+            "'a worker is starting' rather than 'nothing will run this'. Optional so an "
+            "older client decodes."
+        ),
+    )
+
+
 class EpisodeResponse(BaseModel):
     id: str
     title: str
@@ -726,6 +853,14 @@ class EpisodeResponse(BaseModel):
             "server's own position and listened routes already do. Optional in the "
             "contract, absent meaning false, so a client decoding a response from an API "
             "older than this field — or its own offline cache of one — still decodes."
+        ),
+    )
+    build_progress: EpisodeBuildProgress | None = Field(
+        default=None,
+        description=(
+            "Where this episode is between creation and playable, for the ten minutes "
+            "after it settles as well as while it builds. Null for an episode that "
+            "finished longer ago than that, and absent on an API older than this field."
         ),
     )
     segments: list[SegmentResponse]
