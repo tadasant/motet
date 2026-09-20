@@ -3931,6 +3931,17 @@ second variable naming the channel, and a second variable naming the environment
   logged, because `invalid_token` is what tells a revoked webhook from a broken one, and it
   is **redacted first**: Slack does not echo the URL today, and that is a promise about a
   vendor rather than a property of this code. A test asserts it against a body that does.
+  **The third place is httpx's own logger, and the first draft missed it**: `httpx` logs
+  every request's full URL at INFO, upstream of everything the module writes, and the obs
+  handler sits on the root logger — so the credential would have shipped on every alert
+  while every test scoped to `motet.api` stayed green. A filter on the `httpx` logger now
+  rewrites the URL out of the record before any handler, the error reporter's included,
+  sees it; the test for it captures at the root, which is the only place the leak was
+  visible.
+- **The list count cannot cost the signup.** It exists only to decorate the message, so it
+  runs in a savepoint with a failure boundary of its own and answers `None` — inside the
+  write's `try`, a count that failed rolled the successful insert back and told the
+  visitor their signup was lost, which is the one thing the alert is not allowed to cost.
 - **No channel is sent.** An incoming webhook binds its own destination when it is created,
   so the payload is `{"text": …}` and nothing else, and this repo names no channel.
 - **The address is the payload, and the promise one section up is intact.** "No address
