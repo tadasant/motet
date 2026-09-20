@@ -420,11 +420,12 @@ export interface paths {
         };
         /**
          * List Api Tokens
-         * @description Every personal access token this account holds, newest first.
+         * @description Every personal access token this account holds: live ones first, then revoked.
          *
          *     Revoked ones are included and marked, because with no database shell (invariant 10)
          *     this list is the only place "which tokens existed, and when did each stop" can be
-         *     asked. No row carries a secret.
+         *     asked — and they sort last so that nothing which can still authenticate falls off the
+         *     bound, since this list is also the only way to revoke. No row carries a secret.
          */
         get: operations["list_api_tokens_v1_auth_tokens_get"];
         put?: never;
@@ -3362,7 +3363,7 @@ export interface components {
         SessionResponse: {
             /**
              * Admin
-             * @description Whether this caller may read /v1/admin/*: a signed-in session whose address is on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open deployment, and for everybody when MOTET_ADMIN_EMAILS is unset.
+             * @description Whether this caller may read /v1/admin/*: a signed-in browser session whose address is on MOTET_ADMIN_EMAILS. Always false for a personal access token, for an MCP client's grant, for the shared API token and for an open deployment, and for everybody when MOTET_ADMIN_EMAILS is unset.
              */
             admin: boolean;
             /** Email */

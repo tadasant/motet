@@ -59,5 +59,8 @@ CREATE TABLE api_tokens (
     revoked_at    timestamptz
 );
 
--- The list route reads every token for a user, newest first.
+-- The list route reads every token for a user. It orders live rows before revoked ones
+-- and newest first within each group, so this index serves the `user_id =` filter rather
+-- than the sort — which is the right trade at a bounded hundred rows, and the reason the
+-- ordering is not spelled here: a second copy of it would be the thing that goes stale.
 CREATE INDEX api_tokens_user_idx ON api_tokens (user_id, created_at DESC);

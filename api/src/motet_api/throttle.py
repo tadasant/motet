@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from typing import Final
 
 from opentelemetry import metrics
@@ -64,6 +65,11 @@ auth_failures = _meter.create_counter(
 MAX_FAILURES: Final = 60
 
 #: The window the budget is spent over, and the ``Retry-After`` a throttled caller is told.
+#:
+#: A **fixed** window, not a sliding one, so the honest ceiling is twice
+#: :data:`MAX_FAILURES` in a span straddling a boundary — 120 refusals inside ~1.5s is
+#: reachable. That is accepted rather than overlooked: a sliding window costs a deque per
+#: bucket to shave a factor of two off a number whose only job is to be finite.
 WINDOW_SECONDS: Final = 60
 
 
@@ -75,13 +81,19 @@ class FailureThrottle:
         *,
         max_failures: int = MAX_FAILURES,
         window_seconds: float = WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._max_failures = max_failures
         self._window = window_seconds
+        # Injectable only so a test can pin the arithmetic. The property worth pinning is
+        # that a failure every `window + ε` never accumulates, and the only way to assert
+        # it without a seam is `window_seconds=0` — which makes the reset branch fire
+        # unconditionally and would pass whether the reset worked or not.
+        self._clock = clock
         # Locked because FastAPI runs sync routes in a threadpool: two refusals arriving
         # together would otherwise race on the counter.
         self._lock = threading.Lock()
-        self._started = time.monotonic()
+        self._started = clock()
         self._failures = 0
 
     def record_failure(self) -> bool:
@@ -91,7 +103,7 @@ class FailureThrottle:
         bearer, so a caller holding a valid credential is never counted and never refused
         by this.
         """
-        now = time.monotonic()
+        now = self._clock()
         with self._lock:
             if now - self._started >= self._window:
                 self._started = now
@@ -106,7 +118,7 @@ class FailureThrottle:
     def reset(self) -> None:
         """Forget the window. For tests, and for nothing else."""
         with self._lock:
-            self._started = time.monotonic()
+            self._started = self._clock()
             self._failures = 0
 
 

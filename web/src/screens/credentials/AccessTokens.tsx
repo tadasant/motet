@@ -177,7 +177,13 @@ export function AccessTokens() {
         </button>
       </form>
 
-      {load.kind === 'loaded' && tokens.length === 0 ? (
+      {load.kind === 'loading' ? (
+        // Said out loud, because the alternative is an empty `<ul>`: "you have tokens,
+        // here are none of them" for as long as the request takes, then a list.
+        <p className="hint empty" role="status">
+          Loading…
+        </p>
+      ) : load.kind === 'loaded' && tokens.length === 0 ? (
         <p className="hint empty" role="status">
           No tokens yet.
         </p>

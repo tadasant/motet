@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -84,9 +84,17 @@ CALLBACK_PATH: Final = "/oauth/callback"
 
 @dataclass(frozen=True)
 class Settings:
-    database_url: str | None
+    #: Out of the repr, with ``api_token`` below, and that is a leak guard rather than
+    #: tidiness. An error reporter captures frame locals **by their repr**, and a
+    #: ``Settings`` is a local of `motet_api.deps.require_caller` — the one function every
+    #: authenticated request passes through, and the one an unhandled exception on the
+    #: auth path is raised inside (the `motet-vault[kms]` incident was exactly that).
+    #: Without this the bearer is redacted by name and the *shared owner-equivalent
+    #: secret* and the Cloud SQL URL, password and all, go to GlitchTip beside it.
+    #: `sentry_sdk`'s scrubber works on names, and `config` is not a name it knows.
+    database_url: str | None = field(repr=False)
     inference_mode: str
-    api_token: str | None
+    api_token: str | None = field(repr=False)
     public_base_url: str | None
     app_base_url: str | None
     feed_title: str

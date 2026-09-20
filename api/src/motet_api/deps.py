@@ -44,7 +44,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
-from fastapi import Depends, Header, HTTPException, Query, Request, status
+from fastapi import Depends, Header, HTTPException, Query, status
 from motet_db import api_tokens as token_repo
 from motet_db import auth as auth_repo
 from motet_db import repo
@@ -222,8 +222,9 @@ class Caller:
     #: token, which belongs to no person.
     email: str | None = None
     session_id: str | None = None
-    #: When this browser has to sign in again. ``None`` for the shared token, which does
-    #: not expire — rotating it is a deploy.
+    #: When this credential stops working: a browser session's expiry, or a personal
+    #: access token's if it was given one. ``None`` for a token minted without an expiry
+    #: and for the shared token, which does not expire — rotating it is a deploy.
     expires_at: datetime | None = None
     #: The MCP client this session was issued to, when it is an MCP client's OAuth access
     #: token rather than a browser's (motet#111). Such a grant acts as the person who approved
@@ -232,7 +233,6 @@ class Caller:
 
 
 def require_caller(
-    request: Request,
     config: Annotated[Settings, Depends(settings)],
     conn: Annotated[psycopg.Connection[Any], Depends(connection, scope="function")],
     authorization: Annotated[str | None, Header()] = None,
@@ -285,7 +285,7 @@ def require_caller(
     # session lookup, which costs a second probe only on a request that was being refused
     # anyway.
     if token and token_repo.looks_like_api_token(token):
-        caller = _caller_for_api_token(request, conn, config, token)
+        caller = _caller_for_api_token(conn, config, token)
         if caller is not None:
             return caller
 
@@ -309,7 +309,6 @@ def require_caller(
             # quietly contradicting everything this comment and the migration claim.
             conn.commit()
             raise _refused(
-                request,
                 "This session is no longer allowed. Sign in again.",
                 outcome="session_delisted",
                 counted=True,
@@ -328,13 +327,11 @@ def require_caller(
         # that "I pasted the wrong thing" and "that token has been revoked" are not the
         # same sentence — the detail still names no state of any particular row.
         raise _refused(
-            request,
             "This access token is not valid. It may have been revoked or have expired.",
             outcome="unknown_token",
             counted=True,
         )
     raise _refused(
-        request,
         "A valid bearer token is required. Sign in, or set the API token.",
         outcome="unknown_bearer",
         # A request with no bearer at all made no lookup, so there is nothing to bound
@@ -344,7 +341,6 @@ def require_caller(
 
 
 def _caller_for_api_token(
-    request: Request,
     conn: psycopg.Connection[Any],
     config: Settings,
     token: str,
@@ -380,7 +376,6 @@ def _caller_for_api_token(
         # warning logged on every request about a row that is still live.
         conn.commit()
         raise _refused(
-            request,
             "This access token is no longer allowed and has been revoked.",
             outcome="token_delisted",
             counted=True,
@@ -393,7 +388,7 @@ def _caller_for_api_token(
     )
 
 
-def _refused(request: Request, detail: str, *, outcome: str, counted: bool) -> HTTPException:
+def _refused(detail: str, *, outcome: str, counted: bool) -> HTTPException:
     """The 401 for a bearer that did not resolve, counted and rate-limited.
 
     **The throttle is consulted here and nowhere else**, which is the property that makes
@@ -404,11 +399,14 @@ def _refused(request: Request, detail: str, *, outcome: str, counted: bool) -> H
     browser before sign-in) answering 401 rather than 429. See :mod:`motet_api.throttle`.
 
     Returned rather than raised so that every call site reads ``raise _refused(...)`` and
-    a reviewer can see the control flow leaves at each one. ``request`` is unused today
-    and kept because the shape of this refusal is a property of the request, not of the
-    process; dropping it would be a signature change the day anything here needs it.
+    a reviewer can see the control flow leaves at each one.
+
+    It takes no ``Request``, and that is worth a line because the first draft did: the
+    throttle was keyed on the caller's address, and when that key turned out to be
+    attacker-supplied the key went and the parameter stayed. A ``Request`` threaded down
+    here is not free — ``/mcp`` would hand one across a thread boundary on every call for
+    a value nobody reads.
     """
-    del request  # see the docstring: kept for shape, deliberately unread.
     if counted and failed_auth.record_failure():
         auth_failures.add(1, {"outcome": "throttled"})
         return HTTPException(

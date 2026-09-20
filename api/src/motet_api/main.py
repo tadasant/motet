@@ -1158,11 +1158,12 @@ def create_api_token(
 
 @app.get("/v1/auth/tokens", response_model=list[ApiTokenResponse], tags=["auth"])
 def list_api_tokens(conn: Conn, caller: SignedIn) -> list[ApiTokenResponse]:
-    """Every personal access token this account holds, newest first.
+    """Every personal access token this account holds: live ones first, then revoked.
 
     Revoked ones are included and marked, because with no database shell (invariant 10)
     this list is the only place "which tokens existed, and when did each stop" can be
-    asked. No row carries a secret.
+    asked — and they sort last so that nothing which can still authenticate falls off the
+    bound, since this list is also the only way to revoke. No row carries a secret.
     """
     return [_api_token(token) for token in token_repo.list_tokens(conn, caller.user_id)]
 

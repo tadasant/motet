@@ -129,20 +129,19 @@ def www_authenticate(config: Settings, presented: bool) -> str:
     return "Bearer" + (" " + ", ".join(parts) if parts else "")
 
 
-def authenticate(request: Request, authorization: str | None) -> Caller | Response:
+def authenticate(authorization: str | None) -> Caller | Response:
     """``require_caller``, on a connection of its own, answered as an HTTP response on refusal.
 
-    The request is passed through only so that a refusal lands in the same failed-auth
-    throttle a ``/v1`` refusal does (``motet_api.throttle``): ``/mcp`` is reachable by
-    anyone who can reach the service, and a bearer guessed at here costs exactly what one
-    guessed at there does.
+    A refusal here lands in the same failed-auth throttle a ``/v1`` refusal does
+    (``motet_api.throttle``): ``/mcp`` is reachable by anyone who can reach the service,
+    and a bearer guessed at here costs exactly what one guessed at there does. That needs
+    nothing from the request — the throttle has no key — so nothing is threaded across
+    the thread boundary below for it.
     """
     config = Settings.from_env()
     try:
         with contextlib.contextmanager(connection)(config, DrainNudge(drain_trigger())) as conn:
-            return require_caller(
-                request=request, config=config, conn=conn, authorization=authorization
-            )
+            return require_caller(config=config, conn=conn, authorization=authorization)
     except HTTPException as exc:
         headers = dict(exc.headers or {})
         if exc.status_code == 401:
@@ -187,9 +186,7 @@ class McpEndpoint:
                 {"error": "invalid_request", "error_description": str(exc)}, status_code=400
             )(scope, receive, send)
             return
-        outcome = await anyio.to_thread.run_sync(
-            authenticate, request, request.headers.get("authorization")
-        )
+        outcome = await anyio.to_thread.run_sync(authenticate, request.headers.get("authorization"))
         if isinstance(outcome, Response):
             await outcome(scope, receive, send)
             return

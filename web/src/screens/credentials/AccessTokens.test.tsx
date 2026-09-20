@@ -148,6 +148,47 @@ describe('AccessTokens', () => {
     expect(screen.queryByRole('button', { name: 'Revoke' })).toBeNull()
   })
 
+  it('says it is loading rather than rendering an empty list', async () => {
+    let release: (value: unknown) => void = () => undefined
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await gate
+        return { ok: true, status: 200, statusText: 'OK', json: async () => [] } as Response
+      }),
+    )
+    render(<AccessTokens />)
+
+    expect(await screen.findByText('Loading…')).toBeTruthy()
+    expect(screen.queryByRole('list', { name: 'Access tokens' })).toBeNull()
+
+    release(undefined)
+    expect(await screen.findByText('No tokens yet.')).toBeTruthy()
+  })
+
+  it('keeps a token minted while a revoke was in flight', async () => {
+    // The revoke handler reads the list functionally rather than off its render closure:
+    // the refresh a mint kicks off can land mid-flight, and the closure would undo it.
+    const second: ApiToken = { ...LIVE, id: 'pat_2', label: 'second', prefix: 'mot_stg_ZZZZ1111' }
+    const revoked = { ...LIVE, revoked_at: '2026-09-21T00:00:00Z' }
+    mockApi({
+      '/v1/auth/tokens': [LIVE, second],
+      'DELETE /v1/auth/tokens/pat_1': revoked,
+    })
+    render(<AccessTokens />)
+    const rows = await screen.findByRole('list', { name: 'Access tokens' })
+    const [firstRevoke] = within(rows).getAllByRole('button', { name: 'Revoke' })
+    if (!firstRevoke) throw new Error('expected a Revoke button on the first row')
+    fireEvent.click(firstRevoke)
+
+    expect(await screen.findByText('Revoked')).toBeTruthy()
+    // The other row is still there — the update touched one entry, not the whole list.
+    expect(screen.getByText('second')).toBeTruthy()
+  })
+
   it('says so when the list cannot be loaded, rather than reading as empty', async () => {
     mockApi({ '/v1/auth/tokens': { status: 503, detail: 'the database is not configured' } })
     render(<AccessTokens />)

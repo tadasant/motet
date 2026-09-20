@@ -3213,10 +3213,12 @@ Three properties keep that from being a liability:
   reads both as "not signed in" on `/v1/auth/session` for exactly that reason: a 429 there
   means this credential was refused, since a valid one is never throttled, and reading it
   as an outage would leave a dead token in storage behind a sentence nobody can act on.
-- **It is in-process and per-instance, and it fails open.** The real budget is sixty a
-  minute times the instance count. A cross-instance limiter would be a row and a lock on
-  the one path whose job is to be cheap, which is the shape `motet_api.waitlist` already
-  declines — a new mechanism, and invariant 12's business.
+- **It is in-process and per-instance, and it fails open.** The window is *fixed* rather
+  than sliding, so the honest ceiling is **twice** sixty in a span straddling a boundary,
+  times the instance count — accepted, because a sliding window costs a deque per bucket
+  to halve a number whose only job is to be finite. A cross-instance limiter would be a
+  row and a lock on the one path whose job is to be cheap, which is the shape
+  `motet_api.waitlist` already declines — a new mechanism, and invariant 12's business.
 
 `motet.api.auth_failures{outcome}` is what makes it falsifiable, because a queue of 401s
 and a queue of 429s look identical in an access log. One object per process also means
@@ -3229,6 +3231,16 @@ that is load-bearing.** `sentry_sdk` captures frame locals into an error report 
 default scrubber redacts by *variable name*; both of those are on its denylist and
 `presented`, which `require_caller` used to call it, is not. So an unhandled exception on
 the auth path redacts the bearer instead of shipping it to GlitchTip.
+
+**A name is not enough for an object that prints its fields, which is the half the second
+review found.** `require_caller`'s other local is a `Settings`, and `config` is a name no
+denylist knows — so the bearer was redacted while the *shared owner-equivalent token* and
+the Cloud SQL URL, password and all, went to GlitchTip in the same frame, by that
+dataclass's default repr. `Settings.api_token` and `Settings.database_url` are
+`field(repr=False)` for that, and `test_settings_does_not_print_its_secrets` pins it —
+including that the harmless fields still print, or the assertion would pass on a repr
+that had been blanked wholesale. This one predates the feature; it is fixed here because
+this is the section that claims the property.
 `api/tests/test_api_tokens.py` asserts the names against the installed SDK's own list,
 because a rename on either side would otherwise be silent. `MintedToken.secret` is out of
 the dataclass's repr for the same reason `motet_api.waitlist.Submission.email` is, and

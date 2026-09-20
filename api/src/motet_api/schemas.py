@@ -1367,8 +1367,9 @@ class SessionResponse(BaseModel):
     )
     admin: bool = Field(
         description=(
-            "Whether this caller may read /v1/admin/*: a signed-in session whose address is "
-            "on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open "
+            "Whether this caller may read /v1/admin/*: a signed-in browser session whose "
+            "address is on MOTET_ADMIN_EMAILS. Always false for a personal access token, "
+            "for an MCP client's grant, for the shared API token and for an open "
             "deployment, and for everybody when MOTET_ADMIN_EMAILS is unset."
         )
     )

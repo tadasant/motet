@@ -394,6 +394,26 @@ class TestTheExistingPathsAreUnchanged:
             == 200
         )
 
+    def test_a_token_cannot_sign_the_owner_out(self, api: TestClient) -> None:
+        """A leaked PAT must not be able to out-race its own revocation.
+
+        `logout-all` deletes every session, and a session is the only credential that can
+        reach the revoke route — so a PAT able to call it could delete the owner's session
+        on a loop and never be revoked.
+        """
+        owner = signed_in(api)
+        headers = {"Authorization": f"Bearer {mint(api, owner)['token']}"}
+        refused = api.post("/v1/auth/logout-all", headers=headers)
+        assert refused.status_code == 403
+        assert "cannot sign other sessions out" in refused.json()["detail"]
+        # The owner's session is untouched, so the revoke lever still works.
+        assert api.get("/v1/auth/tokens", headers=owner).status_code == 200
+
+    def test_the_shared_token_can_still_sign_every_session_out(self, api: TestClient) -> None:
+        """The property `logout-all` exists for: reachable from a *different* device."""
+        signed_in(api)
+        assert api.post("/v1/auth/logout-all", headers=AUTH).json()["revoked"] >= 1
+
 
 class TestTheFailedAuthThrottle:
     def test_repeated_failures_become_a_429_with_retry_after(self, api: TestClient) -> None:
@@ -447,10 +467,29 @@ class TestTheFailedAuthThrottle:
         )
         assert throttled.status_code == 429
 
-    def test_the_window_lapses(self) -> None:
-        throttle = FailureThrottle(max_failures=2, window_seconds=0)
-        for _ in range(5):
+    def test_a_failure_every_window_never_accumulates(self) -> None:
+        """The arithmetic, on a clock this test owns.
+
+        `window_seconds=0` would make the reset branch fire unconditionally and would pass
+        whether the reset worked or not, which is why `FailureThrottle` takes a clock.
+        """
+        now = [1000.0]
+        throttle = FailureThrottle(max_failures=2, window_seconds=60, clock=lambda: now[0])
+        for _ in range(500):
+            now[0] += 61
             assert throttle.record_failure() is False
+
+    def test_failures_inside_one_window_do_accumulate(self) -> None:
+        now = [1000.0]
+        throttle = FailureThrottle(max_failures=2, window_seconds=60, clock=lambda: now[0])
+        for _ in range(2):
+            now[0] += 1
+            assert throttle.record_failure() is False
+        now[0] += 1
+        assert throttle.record_failure() is True
+        # And the next window starts clean.
+        now[0] += 60
+        assert throttle.record_failure() is False
 
     def test_the_budget_is_spent_then_refused_then_reset(self) -> None:
         throttle = FailureThrottle(max_failures=2, window_seconds=3600)
@@ -487,6 +526,56 @@ class TestTheCredentialNeverReachesAnErrorReport:
                 f"{credentials - set(DEFAULT_DENYLIST)}, which sentry_sdk's scrubber "
                 "would not redact out of a frame local"
             )
+
+    def test_the_response_model_is_not_in_its_own_repr_either(self) -> None:
+        """`MintedToken` is the dataclass; this is the shape that crosses the wire.
+
+        Pydantic's default repr prints every field, and this object is a frame local of
+        the route that returns it — so without `Field(repr=False)` an unhandled exception
+        during serialization ships a live credential to GlitchTip.
+        """
+        from motet_api.schemas import ApiTokenResponse, CreatedApiTokenResponse
+
+        row = ApiTokenResponse(
+            id="pat_1",
+            prefix="mot_stg_abcd1234",
+            label="x",
+            email=FAKE_EMAIL,
+            created_at=datetime.now(UTC),
+            last_used_at=None,
+            expires_at=None,
+            revoked_at=None,
+        )
+        response = CreatedApiTokenResponse(token="mot_stg_the-actual-secret", created=row)
+        assert "the-actual-secret" not in repr(response)
+        # …and it is still *sent*, which is the whole point of the route.
+        assert "the-actual-secret" in response.model_dump_json()
+
+    def test_settings_does_not_print_its_secrets(self) -> None:
+        """`Settings` is a frame local of `require_caller`, so its repr is an auth-path leak.
+
+        The bearer is redacted by name; the *shared* token and the Cloud SQL URL are not,
+        because `config` is not a name `sentry_sdk`'s scrubber knows. `field(repr=False)`
+        is what keeps an unhandled exception on this path from carrying them to GlitchTip.
+        """
+        from motet_api.config import Settings
+
+        printed = repr(
+            Settings(
+                database_url="postgresql://postgres:hunter2@db.invalid/motet",
+                inference_mode="fake",
+                api_token="the-shared-secret",
+                public_base_url=None,
+                app_base_url=None,
+                feed_title="",
+                feed_description="",
+                feed_author="",
+            )
+        )
+        assert "hunter2" not in printed
+        assert "the-shared-secret" not in printed
+        # Not blanket-hidden: the fields that are safe still print, or this proves nothing.
+        assert "inference_mode='fake'" in printed
 
     def test_the_minted_token_is_not_in_its_own_repr(self) -> None:
         """An error reporter captures a local by its repr, and the route holds this one."""
