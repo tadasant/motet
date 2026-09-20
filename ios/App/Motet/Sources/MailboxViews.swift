@@ -134,7 +134,7 @@ struct MailboxDetailView: View {
                     } header: {
                         Text("Sync further back").brandLabel()
                     } footer: {
-                        Text("Searches this mailbox again from the chosen point and keeps that as its window. Mail already pulled in is skipped before it is fetched, so nothing is duplicated and nothing already ingested is charged for twice.")
+                        Text("Searches again from the chosen point and keeps that as the window. Mail already pulled in is skipped, so nothing is duplicated or paid for twice.")
                             .font(Theme.aside(14))
                             .foregroundStyle(Theme.inkSoft)
                     }
@@ -190,7 +190,7 @@ struct MailboxDetailView: View {
     @ViewBuilder
     private func notices(_ source: SourceResponse, status: SourceStatus.Row) -> some View {
         if status == .awaitingConsent {
-            Text("This row was created when Connect was pressed and no credential ever arrived — you cancelled on Google’s page, or closed it before finishing. Nothing was connected and nothing was changed. Connect again, or remove it: it is not polled.")
+            Text("Connect was pressed and no credential arrived, so nothing was connected. Connect again, or remove it — it is not polled.")
                 .font(Theme.body(14, relativeTo: .footnote))
                 .listRowBackground(Theme.surface)
         }
@@ -341,7 +341,7 @@ private struct LabelSyncSection: View {
         } header: {
             Text("Label sync").brandLabel()
         } footer: {
-            Text("When you ingest an item from this mailbox, Motet can move its message — say from Newsletters to Completed. Connecting asked for read-only access; changing labels needs one more consent.")
+            Text("Ingesting an item can move its message — say Newsletters to Completed. Connecting asked for read-only access, so this needs one more consent.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }
@@ -541,9 +541,9 @@ struct ConnectMailboxView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("We’ll read newsletters matching your filter — read-only, and only the messages the search matches. What arrives is pulled in and held. **Nothing is processed until you choose to ingest it.**")
+                    Text("Read-only, and only the messages your filter matches. **Nothing is processed until you ingest it.**")
                         .font(Theme.body(15, relativeTo: .subheadline))
-                    Text("Motet stores only a refresh token, sealed: nothing in the API can read it back. Google asks for consent on its own page and hands you back here.")
+                    Text("Motet keeps only a refresh token, sealed: nothing in the API can read it back.")
                         .font(Theme.aside(14))
                         .foregroundStyle(Theme.inkSoft)
                 }
@@ -557,7 +557,7 @@ struct ConnectMailboxView: View {
                 } header: {
                     Text("Name and Gmail search").brandLabel()
                 } footer: {
-                    Text("Which messages count as newsletters, in Gmail’s own search syntax. Left blank it is the default above, which needs no setup.")
+                    Text("Gmail’s own search syntax. Blank is the default above.")
                         .font(Theme.aside(14))
                         .foregroundStyle(Theme.inkSoft)
                 }

@@ -664,7 +664,24 @@ class NewsItemResponse(BaseModel):
     """A deduped story. Read state lives here, per invariant 5 — not per episode."""
 
     id: str
-    title: str
+    title: str = Field(
+        description=(
+            "The title dedup wrote for this story. For a story with one source this is a "
+            "paraphrase of that source's own subject line; `display_title` is what a list "
+            "should show."
+        )
+    )
+    display_title: str = Field(
+        default="",
+        description=(
+            "What to put on a backlog row. One source: that source item's title, "
+            "verbatim. Several: the title dedup wrote for the merged story, which is the "
+            "only one that can name more than one write-up at once. Derived per request "
+            "rather than stored, so it is right for every story ever deduped and moves "
+            "when a later merge rewrites the story's title. Absent on an API older than "
+            "this field, where `title` is the whole answer."
+        ),
+    )
     summary: str
     source_item_ids: list[str]
     sources: list[NewsItemSourceRef] = Field(
@@ -674,6 +691,46 @@ class NewsItemResponse(BaseModel):
     )
     read: bool
     created_at: datetime
+
+
+class NewsItemSourceDetailResponse(BaseModel):
+    """One source item behind a story, with enough of it to recognise."""
+
+    id: str
+    title: str = Field(description="The source's own title — an email's subject line.")
+    source_kind: str
+    source_name: str
+    received_at: datetime
+    chars: int = Field(description="How long the source's text is, in characters.")
+    preview: str = Field(
+        description=(
+            "The opening of the source's own text. Truncated: the whole of it is on "
+            "GET /v1/source-items/{id}, which also carries the pipeline detail."
+        )
+    )
+    position: int = Field(
+        description=(
+            "Where dedup put this source in the story. 0 created it; anything higher was "
+            "merged into it afterwards."
+        )
+    )
+
+
+class NewsItemDetailResponse(BaseModel):
+    """A story and every source that went into it (provenance).
+
+    The pair a reader needs to trust a backlog row: the story as dedup tells it, and the
+    write-ups it was made from, each with its own untouched title. One request rather than
+    one per source, because a merged story has several and a screen shows them together.
+    """
+
+    id: str
+    title: str
+    display_title: str
+    summary: str
+    read: bool
+    created_at: datetime
+    sources: list[NewsItemSourceDetailResponse]
 
 
 class ReadStateRequest(BaseModel):
@@ -855,6 +912,23 @@ class EpisodeBuildProgress(BaseModel):
     )
 
 
+#: Said once, because three request models and three clients would otherwise each say it.
+EPISODE_TITLE_FIELD = (
+    "What to call this episode. Omit it, or send blank, and the server names it after the "
+    "day it was made — which is what every client does unless somebody types something."
+)
+
+
+class RenameEpisodeRequest(BaseModel):
+    """A new title for an episode.
+
+    Renaming does not move ``updated_at``: that column is when the *build* last moved, and
+    a client reads it to decide whether a failed episode's report is still worth showing.
+    """
+
+    title: str = Field(min_length=1, max_length=500)
+
+
 class EpisodeResponse(BaseModel):
     id: str
     title: str
@@ -899,7 +973,7 @@ class EpisodeResponse(BaseModel):
 class CreateEpisodeRequest(BaseModel):
     """'All unread', capped by duration — or exactly the stories somebody picked."""
 
-    title: str = Field(min_length=1, max_length=500)
+    title: str | None = Field(default=None, max_length=500, description=EPISODE_TITLE_FIELD)
     max_duration_ms: int = Field(gt=0)
     news_item_ids: list[str] | None = Field(
         default=None,
@@ -1298,7 +1372,7 @@ class SmartRuleModel(BaseModel):
 class CreateSmartEpisodeRequest(BaseModel):
     """An episode whose stories are selected by a rule rather than by 'all unread'."""
 
-    title: str = Field(min_length=1, max_length=500)
+    title: str | None = Field(default=None, max_length=500, description=EPISODE_TITLE_FIELD)
     max_duration_ms: int = Field(gt=0)
     rule: SmartRuleModel = Field(default_factory=SmartRuleModel)
 

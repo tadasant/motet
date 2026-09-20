@@ -111,7 +111,7 @@ public actor MotetLibrary {
     }
 
     public func createEpisode(
-        title: String,
+        title: String?,
         maxDurationMs: Int,
         newsItemIds: [String]? = nil,
         keepInBacklog: Bool = false
@@ -122,6 +122,19 @@ public actor MotetLibrary {
             newsItemIds: newsItemIds,
             keepInBacklog: keepInBacklog
         )
+    }
+
+    /// Rename an episode — the one thing about it a person chooses after it is made.
+    ///
+    /// Not through the outbox: renaming is a deliberate act somebody is watching the result
+    /// of, and a rename replayed later from a queue would overwrite a newer one silently.
+    public func renameEpisode(id: String, title: String) async throws -> EpisodeResponse {
+        try await api.renameEpisode(id: id, title: title)
+    }
+
+    /// One story with every source behind it — the provenance the backlog row links to.
+    public func newsItem(id: String) async throws -> NewsItemDetailResponse {
+        try await api.newsItem(id: id)
     }
 
     /// "Mark listened", as the SPA's shelf has it: every story read, then the position at the

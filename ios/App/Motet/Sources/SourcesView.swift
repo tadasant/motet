@@ -193,7 +193,7 @@ private struct SourcesList: View {
         } header: {
             Text("Sites").brandLabel()
         } footer: {
-            Text("The sites Motet may fetch full articles from, when a newsletter is only a preview of one. Nothing is fetched until enrichment runs in this deployment.")
+            Text("Where Motet may fetch a full article when a newsletter is only a preview. Nothing is fetched until enrichment runs in this deployment.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }

@@ -18,6 +18,7 @@ import { useState } from 'react'
 
 import { ApiError, type Episode } from '../api/client'
 import { EpisodeScreen, IN_PROGRESS } from './EpisodeScreen'
+import { EpisodeTitle } from './EpisodeTitle'
 import { describeRowProgress } from './episodeProgress'
 import { formatClock, listenState, markEpisodeListened } from './listening'
 
@@ -152,7 +153,7 @@ export function Episodes({
               Up next <span className="hint">({upNext.length})</span>
             </h3>
             {upNext.length === 0 ? (
-              <p className="hint">All caught up — everything here has been heard.</p>
+              <p className="hint">All caught up.</p>
             ) : (
               <ul className="episode-list">
                 {upNext.map((entry) => (
@@ -164,6 +165,7 @@ export function Episodes({
                       setPlayId(entry.id)
                       onOpen(entry)
                     }}
+                    onRenamed={onChanged}
                     onMarkListened={() => markListened(entry)}
                     marking={marking === entry.id}
                   />
@@ -189,6 +191,7 @@ export function Episodes({
                       setPlayId(entry.id)
                       onOpen(entry)
                     }}
+                    onRenamed={onChanged}
                   />
                 ))}
               </ul>
@@ -203,9 +206,7 @@ export function Episodes({
 /** The list is what was last loaded, and a refresh just failed: say so rather than pose. */
 function StaleNote() {
   return (
-    <p className="hint" role="status">
-      Could not refresh your episodes just now — this is what was last loaded.
-    </p>
+    <p className="hint" role="status">Could not refresh — this is the last list loaded.</p>
   )
 }
 
@@ -213,12 +214,14 @@ function EpisodeRow({
   episode,
   onOpen,
   onPlay,
+  onRenamed,
   onMarkListened,
   marking = false,
 }: {
   episode: Episode
   onOpen: () => void
   onPlay: () => void
+  onRenamed: () => void
   onMarkListened?: () => void
   marking?: boolean
 }) {
@@ -245,17 +248,19 @@ function EpisodeRow({
     <li className={`episode-row ${listen} ${episode.state}`} onClick={onOpen} data-listen-state={listen}>
       <div className="episode-main">
         <div className="episode-head">
-          <button
-            type="button"
-            className="linkish episode-title"
-            onClick={(event) => {
-              // The row would open it too; once is the right number of times.
-              event.stopPropagation()
-              onOpen()
-            }}
-          >
-            {episode.title}
-          </button>
+          <EpisodeTitle episode={episode} onRenamed={onRenamed}>
+            <button
+              type="button"
+              className="linkish episode-title"
+              onClick={(event) => {
+                // The row would open it too; once is the right number of times.
+                event.stopPropagation()
+                onOpen()
+              }}
+            >
+              {episode.title}
+            </button>
+          </EpisodeTitle>
           {working && <span className="badge working">Working…</span>}
           {failed && <span className="badge failed">Failed</span>}
           {ready && listen === 'unlistened' && <span className="badge">Unlistened</span>}

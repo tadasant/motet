@@ -57,14 +57,11 @@ export function ConnectGmail({
         <>
           <h4>Connect a mailbox</h4>
           <p className="connect-explainer">
-            We&rsquo;ll read newsletters matching your filter — read-only, and only the
-            messages the search matches. What arrives is pulled in and held.{' '}
-            <strong>Nothing is processed until you choose to ingest it</strong> from the
-            Backlog.
+            Read-only, and only the messages your filter matches.{' '}
+            <strong>Nothing is processed until you ingest it</strong> from the Backlog.
           </p>
           <p className="hint">
-            Motet stores only a refresh token, sealed: nothing in the API can read it back.
-            Google asks for consent on its own page and returns you here.
+            Motet keeps only a refresh token, sealed: nothing in the API can read it back.
           </p>
         </>
       )}
@@ -87,8 +84,7 @@ export function ConnectGmail({
           onChange={(e) => setQuery(e.target.value)}
         />
         <p className="hint">
-          Which messages count as newsletters, in Gmail&rsquo;s own search syntax. Left blank
-          it is <code>{DEFAULT_QUERY}</code>, which needs no setup.
+          Gmail&rsquo;s own search syntax. Blank is <code>{DEFAULT_QUERY}</code>.
         </p>
         <label htmlFor="source-first-sync">First sync reaches back</label>
         <select
@@ -103,10 +99,8 @@ export function ConnectGmail({
           ))}
         </select>
         <p className="hint">
-          How far back the first sync looks. Only this once — after it, every new message is
-          picked up whatever this says. Nothing here costs inference: everything found waits
-          on the Backlog until you ingest it, so a wide window is safe and you can widen it
-          again later.
+          Only this once; new mail is picked up whatever it says. A wide window is safe —
+          what it finds waits on the Backlog, and costs nothing until you ingest it.
         </p>
         <button
           type="submit"

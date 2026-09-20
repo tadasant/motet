@@ -42,7 +42,7 @@ struct SignInView: View {
                             .foregroundStyle(Theme.ink)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    Text("Only accounts this Motet allows can sign in. The session is kept in the Keychain, on this device only.")
+                    Text("Only accounts this Motet allows can sign in.")
                         .font(Theme.aside(14))
                         .foregroundStyle(Theme.inkSoft)
                         .fixedSize(horizontal: false, vertical: true)

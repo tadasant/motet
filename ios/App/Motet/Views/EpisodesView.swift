@@ -89,6 +89,10 @@ struct EpisodeRow: View {
     let episode: EpisodeResponse
     let position: ListeningPosition?
     let isDownloaded: Bool
+    /// The rename sheet's field, and whether it is up. An episode is named after the day it
+    /// was made unless somebody typed something, so most of them want a better name later.
+    @State private var isRenaming = false
+    @State private var draftTitle = ""
 
     /// Heard to the end here, or within the sign-off's slack of it anywhere.
     private var isListened: Bool {
@@ -195,7 +199,31 @@ struct EpisodeRow: View {
         .listRowBackground(Theme.parchment)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+        .contextMenu {
+            Button {
+                draftTitle = episode.title
+                isRenaming = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+        }
+        .alert("Rename episode", isPresented: $isRenaming) {
+            TextField("Title", text: $draftTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let title = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !title.isEmpty, title != episode.title else { return }
+                Task { await model.rename(episode: episode, to: title) }
+            }
+        }
         .swipeActions(edge: .leading) {
+            Button {
+                draftTitle = episode.title
+                isRenaming = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            .tint(Theme.inkSoft)
             if episode.episodeState.isPlayable, !isListened {
                 Button {
                     Task { await model.markListened(episode: episode) }
@@ -229,14 +257,16 @@ struct EpisodeRow: View {
 struct NewEpisodeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var title = "Episode — \(Date.now.formatted(date: .abbreviated, time: .omitted))"
+    /// Empty, and sent as nothing: the server names an episode after the day it was made,
+    /// and it is the only place that string is composed. Renaming is a swipe on the row.
+    @State private var title = ""
     @State private var minutes = 20
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Title", text: $title)
+                    TextField("Title", text: $title, prompt: Text("Today's date"))
                         .font(Theme.body(16))
                     Stepper("Up to \(minutes) minutes", value: $minutes, in: 5...90, step: 5)
                         .font(Theme.body(16))
@@ -254,11 +284,13 @@ struct NewEpisodeView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Make it") {
                         Task {
-                            await model.createEpisode(title: title, maxDurationMinutes: minutes)
+                            await model.createEpisode(
+                                title: title.trimmingCharacters(in: .whitespaces).nilIfEmpty,
+                                maxDurationMinutes: minutes
+                            )
                             dismiss()
                         }
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
         }

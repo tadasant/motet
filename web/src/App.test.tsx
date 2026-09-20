@@ -20,6 +20,7 @@ import { SignIn } from './screens/SignIn'
 const NEWS_ITEM: NewsItem = {
   id: 'ni_1',
   title: 'Acme raises $20M Series A',
+  display_title: 'Acme raises $20M Series A',
   summary: 'Acme announced the round on Tuesday.',
   source_item_ids: ['si_1', 'si_2'],
   sources: [
@@ -250,7 +251,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Some newsletter.' } })
     fireEvent.click(screen.getByRole('button', { name: 'Ingest' }))
 
-    await screen.findByText(/Queued as si_9/)
+    await screen.findByText(/Queued\. Watch it under Backlog/)
     const paste = calls.find((call) => call.url.includes('/v1/sources/paste'))
     expect(paste?.method).toBe('POST')
     expect(paste?.body).toEqual({ title: 'A title', text: 'Some newsletter.' })
@@ -572,7 +573,7 @@ describe('App', () => {
     // ...and still there once the refresh has, with the server's older copy in it.
     await waitFor(() => expect(lists()).toBeGreaterThan(before))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Listened (1)' })).toBeDefined())
-    expect(screen.getByText('All caught up — everything here has been heard.')).toBeDefined()
+    expect(screen.getByText('All caught up.')).toBeDefined()
   })
 
   it('remembers which episode is open across a visit to another section', async () => {

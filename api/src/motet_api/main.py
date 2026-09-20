@@ -219,7 +219,9 @@ from .schemas import (
     LoginResponse,
     MarkListenedResponse,
     McpAuthorizationResponse,
+    NewsItemDetailResponse,
     NewsItemResponse,
+    NewsItemSourceDetailResponse,
     NewsItemSourceRef,
     OAuthCallbackRequest,
     PasteRequest,
@@ -230,6 +232,7 @@ from .schemas import (
     ReadStateRequest,
     ReauthorizeSourceRequest,
     RedeemNativeLoginRequest,
+    RenameEpisodeRequest,
     ResyncRequest,
     RevokedResponse,
     SaveHighlightRequest,
@@ -1996,6 +1999,62 @@ def set_news_item_read(
     return _news_item(updated, repo.source_item_titles(conn, updated.source_item_ids))
 
 
+@app.get("/v1/news-items/{news_item_id}", response_model=NewsItemDetailResponse, tags=["backlog"])
+def get_news_item(
+    conn: Conn, user_id: User, news_item_id: Annotated[str, Path()]
+) -> NewsItemDetailResponse:
+    """One story with every source that went into it — where a backlog row came from.
+
+    A merged story's title and summary are dedup's account of several write-ups, and this
+    is the answer to "says who": each contributing source item with its own untouched
+    title, when it arrived, and the opening of its text. The whole of a source, and the
+    pipeline detail behind it, stay on ``GET /v1/source-items/{id}``.
+    """
+    detail = repo.news_item_detail(conn, user_id=user_id, item_id=news_item_id)
+    if detail is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such news item.")
+    item = detail.item
+    return NewsItemDetailResponse(
+        id=item.id,
+        title=item.title,
+        display_title=display_title(item.title, [source.title for source in detail.sources]),
+        summary=item.summary,
+        read=item.read,
+        created_at=item.created_at,
+        sources=[
+            NewsItemSourceDetailResponse(
+                id=source.id,
+                title=source.title,
+                source_kind=source.source_kind,
+                source_name=source.source_name,
+                received_at=source.received_at,
+                chars=source.chars,
+                preview=source.preview,
+                position=source.position,
+            )
+            for source in detail.sources
+        ],
+    )
+
+
+def episode_title(requested: str | None, *, now: datetime | None = None) -> str:
+    """The title an episode is created with: what was asked for, else the day's date.
+
+    **The default is composed here and in no client.** Three clients each used to build
+    their own — two of them spelling it differently from the API's own fallback — which is
+    three definitions of one string and no way to change it in one place. A client now
+    sends what somebody typed, or nothing.
+
+    The date is the server's, in UTC and ISO order: a title is stored and goes out in the
+    RSS feed, where it is read on devices in other timezones and sorted as text, so a
+    locale-formatted date would make one episode wear different names in different places.
+    The cost, stated: an episode made late in the evening west of UTC is named after
+    tomorrow. Renaming it is one call, which is the other half of this change.
+    """
+    asked = (requested or "").strip()
+    return asked or f"{now or datetime.now(UTC):%Y-%m-%d}"
+
+
 @app.post(
     "/v1/episodes",
     response_model=EpisodeResponse,
@@ -2017,7 +2076,7 @@ def create_episode(
     caller's would otherwise surface minutes later as an episode that failed on a queue,
     or as one quietly shorter than what was picked.
     """
-    title = body.title.strip()
+    title = episode_title(body.title)
     if body.news_item_ids is None:
         episode_id = enqueue_episode(
             conn,
@@ -2063,6 +2122,31 @@ def list_episodes(conn: Conn, user_id: User) -> list[EpisodeResponse]:
 def get_episode(conn: Conn, user_id: User, episode_id: Annotated[str, Path()]) -> EpisodeResponse:
     """An episode with its transcript — each claim beside the span it came from."""
     episode = repo.get_episode(conn, episode_id, user_id=user_id)
+    if episode is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.")
+    return _episode(conn, episode, progress=_one_build_progress(conn, user_id, episode))
+
+
+@app.put(
+    "/v1/episodes/{episode_id}/title",
+    response_model=EpisodeResponse,
+    summary="Rename Episode",
+    tags=["episodes"],
+)
+def rename_episode(
+    body: RenameEpisodeRequest,
+    conn: Conn,
+    user_id: User,
+    episode_id: Annotated[str, Path()],
+) -> EpisodeResponse:
+    """Give an episode a different title.
+
+    The title is a label on a historical artifact, so this writes nothing else: not the
+    state, not ``updated_at`` — see ``repo.rename_episode`` for why that one matters — and
+    nothing about what the episode contains. An episode being built can be renamed while
+    it builds; the title is not something any stage reads.
+    """
+    episode = repo.rename_episode(conn, episode_id, user_id=user_id, title=body.title.strip())
     if episode is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such episode.")
     return _episode(conn, episode, progress=_one_build_progress(conn, user_id, episode))
@@ -2360,15 +2444,38 @@ def _ingestion_item(item: IngestionStatus) -> IngestionItemResponse:
     )
 
 
+def display_title(stored_title: str, source_titles: Sequence[str]) -> str:
+    """What a backlog row should say this story is called.
+
+    **One source: that source's own title, verbatim.** A newsletter's subject line is what
+    its reader recognises, and dedup's paraphrase of it is strictly less recognisable — it
+    was written to name a *merged* story and there is nothing here to merge. Several
+    sources: dedup's title, which is the only one that can name more than one write-up at
+    once.
+
+    Derived here rather than written at integrate time, and that is the choice worth
+    stating. Storing it would mean a migration, a backfill for every story already
+    deduped, and a second definition of the story's name that a later merge could leave
+    stale — where the stored ``news_items.title`` is already rewritten by every merge.
+    This reads whatever is true now, for every row ever written.
+
+    A source with a blank title falls back to the stored one: an extractor that found no
+    subject line has given us nothing to show, and an empty row is worse than a paraphrase.
+    """
+    if len(source_titles) == 1 and source_titles[0].strip():
+        return source_titles[0]
+    return stored_title
+
+
 def _news_item(item: StoredNewsItem, titles: Mapping[str, str]) -> NewsItemResponse:
+    sources = [NewsItemSourceRef(id=sid, title=titles.get(sid, "")) for sid in item.source_item_ids]
     return NewsItemResponse(
         id=item.id,
         title=item.title,
+        display_title=display_title(item.title, [source.title for source in sources]),
         summary=item.summary,
         source_item_ids=list(item.source_item_ids),
-        sources=[
-            NewsItemSourceRef(id=sid, title=titles.get(sid, "")) for sid in item.source_item_ids
-        ],
+        sources=sources,
         read=item.read,
         created_at=item.created_at,
     )
@@ -3451,7 +3558,7 @@ def create_smart_episode(
     episode_id = enqueue_smart_episode(
         conn,
         user_id=user_id,
-        title=body.title.strip(),
+        title=episode_title(body.title),
         max_duration_ms=body.max_duration_ms,
         rule=rule,
     )
@@ -3945,7 +4052,7 @@ def trigger_testing_job(
         job = fixtures_repo.job_status(conn, enqueue_source_poll(conn, source_id))
         nudge.arm(DrainReason.SOURCE_POLL)
     else:
-        title = (body.title or "").strip() or f"Episode — {datetime.now(UTC):%Y-%m-%d}"
+        title = episode_title(body.title)
         episode_id = enqueue_episode(
             conn,
             user_id=user_id,

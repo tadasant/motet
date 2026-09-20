@@ -823,12 +823,14 @@ components:
             is left out.'
           title: News Item Ids
         title:
-          maxLength: 500
-          minLength: 1
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          description: "What to call this episode. Omit it, or send blank, and the server names it after\
+            \ the day it was made \u2014 which is what every client does unless somebody types something."
           title: Title
-          type: string
       required:
-      - title
       - max_duration_ms
       title: CreateEpisodeRequest
       type: object
@@ -842,12 +844,14 @@ components:
         rule:
           $ref: '#/components/schemas/SmartRuleModel'
         title:
-          maxLength: 500
-          minLength: 1
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          description: "What to call this episode. Omit it, or send blank, and the server names it after\
+            \ the day it was made \u2014 which is what every client does unless somebody types something."
           title: Title
-          type: string
       required:
-      - title
       - max_duration_ms
       title: CreateSmartEpisodeRequest
       type: object
@@ -2298,12 +2302,65 @@ components:
       - deny_url
       title: McpAuthorizationResponse
       type: object
+    NewsItemDetailResponse:
+      description: 'A story and every source that went into it (provenance).
+
+
+        The pair a reader needs to trust a backlog row: the story as dedup tells it, and the
+
+        write-ups it was made from, each with its own untouched title. One request rather than
+
+        one per source, because a merged story has several and a screen shows them together.'
+      properties:
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        display_title:
+          title: Display Title
+          type: string
+        id:
+          title: Id
+          type: string
+        read:
+          title: Read
+          type: boolean
+        sources:
+          items:
+            $ref: '#/components/schemas/NewsItemSourceDetailResponse'
+          title: Sources
+          type: array
+        summary:
+          title: Summary
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - display_title
+      - summary
+      - read
+      - created_at
+      - sources
+      title: NewsItemDetailResponse
+      type: object
     NewsItemResponse:
       description: "A deduped story. Read state lives here, per invariant 5 \u2014 not per episode."
       properties:
         created_at:
           format: date-time
           title: Created At
+          type: string
+        display_title:
+          default: ''
+          description: 'What to put on a backlog row. One source: that source item''s title, verbatim.
+            Several: the title dedup wrote for the merged story, which is the only one that can name more
+            than one write-up at once. Derived per request rather than stored, so it is right for every
+            story ever deduped and moves when a later merge rewrites the story''s title. Absent on an
+            API older than this field, where `title` is the whole answer.'
+          title: Display Title
           type: string
         id:
           title: Id
@@ -2326,6 +2383,8 @@ components:
           title: Summary
           type: string
         title:
+          description: The title dedup wrote for this story. For a story with one source this is a paraphrase
+            of that source's own subject line; `display_title` is what a list should show.
           title: Title
           type: string
       required:
@@ -2337,6 +2396,51 @@ components:
       - read
       - created_at
       title: NewsItemResponse
+      type: object
+    NewsItemSourceDetailResponse:
+      description: One source item behind a story, with enough of it to recognise.
+      properties:
+        chars:
+          description: How long the source's text is, in characters.
+          title: Chars
+          type: integer
+        id:
+          title: Id
+          type: string
+        position:
+          description: Where dedup put this source in the story. 0 created it; anything higher was merged
+            into it afterwards.
+          title: Position
+          type: integer
+        preview:
+          description: 'The opening of the source''s own text. Truncated: the whole of it is on GET /v1/source-items/{id},
+            which also carries the pipeline detail.'
+          title: Preview
+          type: string
+        received_at:
+          format: date-time
+          title: Received At
+          type: string
+        source_kind:
+          title: Source Kind
+          type: string
+        source_name:
+          title: Source Name
+          type: string
+        title:
+          description: "The source's own title \u2014 an email's subject line."
+          title: Title
+          type: string
+      required:
+      - id
+      - title
+      - source_kind
+      - source_name
+      - received_at
+      - chars
+      - preview
+      - position
+      title: NewsItemSourceDetailResponse
       type: object
     NewsItemSourceRef:
       description: A source item a news item is backed by, named so a list can show it.
@@ -2606,6 +2710,23 @@ components:
       - code
       - code_verifier
       title: RedeemNativeLoginRequest
+      type: object
+    RenameEpisodeRequest:
+      description: 'A new title for an episode.
+
+
+        Renaming does not move ``updated_at``: that column is when the *build* last moved, and
+
+        a client reads it to decide whether a failed episode''s report is still worth showing.'
+      properties:
+        title:
+          maxLength: 500
+          minLength: 1
+          title: Title
+          type: string
+      required:
+      - title
+      title: RenameEpisodeRequest
       type: object
     ResyncRequest:
       description: 'Ask a connected mailbox to search its whole window again, from a chosen start.
@@ -5053,6 +5174,50 @@ paths:
       summary: Report Listen Progress
       tags:
       - episodes
+  /v1/episodes/{episode_id}/title:
+    put:
+      description: "Give an episode a different title.\n\nThe title is a label on a historical artifact,\
+        \ so this writes nothing else: not the\nstate, not ``updated_at`` \u2014 see ``repo.rename_episode``\
+        \ for why that one matters \u2014 and\nnothing about what the episode contains. An episode being\
+        \ built can be renamed while\nit builds; the title is not something any stage reads."
+      operationId: rename_episode_v1_episodes__episode_id__title_put
+      parameters:
+      - in: path
+        name: episode_id
+        required: true
+        schema:
+          title: Episode Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameEpisodeRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Rename Episode
+      tags:
+      - episodes
   /v1/episodes/{episode_id}/transcript.vtt:
     get:
       description: "WebVTT captions, one cue per spoken claim.\n\nAuthenticated by the **feed** token\
@@ -5397,6 +5562,45 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: List News Items
+      tags:
+      - backlog
+  /v1/news-items/{news_item_id}:
+    get:
+      description: "One story with every source that went into it \u2014 where a backlog row came from.\n\
+        \nA merged story's title and summary are dedup's account of several write-ups, and this\nis the\
+        \ answer to \"says who\": each contributing source item with its own untouched\ntitle, when it\
+        \ arrived, and the opening of its text. The whole of a source, and the\npipeline detail behind\
+        \ it, stay on ``GET /v1/source-items/{id}``."
+      operationId: get_news_item_v1_news_items__news_item_id__get
+      parameters:
+      - in: path
+        name: news_item_id
+        required: true
+        schema:
+          title: News Item Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewsItemDetailResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Get News Item
       tags:
       - backlog
   /v1/news-items/{news_item_id}/read:

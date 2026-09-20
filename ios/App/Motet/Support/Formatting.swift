@@ -21,6 +21,11 @@ enum Format {
         return minutes < 1 ? "under a minute" : "\(minutes) min"
     }
 
+    /// "Sep 12, 5:04 PM" — when a newsletter arrived, on a provenance line.
+    static func arrived(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
+    }
+
     static func bytes(_ count: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
     }
@@ -28,4 +33,12 @@ enum Format {
     static func rate(_ rate: Double) -> String {
         rate == rate.rounded() ? String(format: "%.0f×", rate) : String(format: "%.2g×", rate)
     }
+}
+
+extension String {
+    /// Nil for a string with nothing in it — what an omitted field is on the wire.
+    ///
+    /// A blank episode title is not "call it the empty string": it is "you name it", and
+    /// the server is the one place that name is composed.
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

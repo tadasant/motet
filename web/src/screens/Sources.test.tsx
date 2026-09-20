@@ -718,8 +718,8 @@ describe('connecting a mailbox', () => {
     render(<Sources navigate={vi.fn()} now={NOW} />)
     await screen.findByRole('form', { name: 'Connect Gmail' })
 
-    expect(screen.getByText(/read-only/)).toBeDefined()
-    expect(screen.getByText('Nothing is processed until you choose to ingest it')).toBeDefined()
+    expect(screen.getByText(/Read-only/)).toBeDefined()
+    expect(screen.getByText('Nothing is processed until you ingest it')).toBeDefined()
   })
 
   it('says a 503 is the deployment and shows the API own message', async () => {
@@ -758,8 +758,8 @@ describe('connecting a mailbox', () => {
     expect(card('Gmail').getAttribute('aria-label')).toBe('Gmail: Awaiting consent')
     const detail = screen.getByRole('region', { name: 'Gmail details' })
     const notice = within(detail).getByRole('status')
-    expect(notice.textContent).toMatch(/you cancelled on Google’s page/i)
-    expect(notice.textContent).toMatch(/Nothing was connected/)
+    expect(notice.textContent).toMatch(/no credential arrived/i)
+    expect(notice.textContent).toMatch(/nothing was connected/i)
     expect(within(detail).queryByRole('alert')).toBeNull()
     // And the form is right there to try again.
     expect(within(detail).getByRole('form', { name: 'Connect Gmail' })).toBeDefined()

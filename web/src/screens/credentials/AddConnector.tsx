@@ -79,8 +79,7 @@ export function AddConnector({ onAdded }: { onAdded: (connector: Connector) => v
         <div>
           <h3 id="add-connector-heading">Add</h3>
           <p className="hint">
-            A password or a token is stored sealed. Only the ingestion worker can open it; this
-            screen never sees it again.
+            A password or a token is sealed: only the ingestion worker can open it.
           </p>
         </div>
       </div>
@@ -109,8 +108,8 @@ export function AddConnector({ onAdded }: { onAdded: (connector: Connector) => v
               onBlur={() => setDomain(normalizeDomain(domain))}
             />
             <p className="hint">
-              Newsletter links to this site, and its subdomains, get the full article fetched.
-              Nothing is fetched from a site that is not on this list.
+              Newsletter links to this site and its subdomains get the full article fetched.
+              Nothing else is.
             </p>
             <label htmlFor="cn-username">Username or email (optional)</label>
             <input
@@ -143,8 +142,8 @@ export function AddConnector({ onAdded }: { onAdded: (connector: Connector) => v
               onChange={(e) => setUrl(e.target.value)}
             />
             <p className="hint">
-              OAuth only. After adding, press Authorize to sign in with the server. A server that
-              does not support dynamic client registration will say so.
+              OAuth only. Press Authorize after adding; a server without dynamic client
+              registration will say so.
             </p>
             <label htmlFor="cn-domains">Only for these sites (optional)</label>
             <input
@@ -164,11 +163,10 @@ export function AddConnector({ onAdded }: { onAdded: (connector: Connector) => v
                 account — to read what the server can see and carry it somewhere else.
               </p>
               <p>
-                Enrichment is built to narrow that: its browser is locked to the article&rsquo;s
-                site, it runs with no access to Motet&rsquo;s database or keys, and its
-                transcript keeps no tool result from a server like this one. That narrows the
-                risk; it does not close it. Connect only a server whose worst case you would
-                accept — a read-only mailbox, not one that can send.
+                Enrichment narrows that — its browser is locked to the article&rsquo;s site,
+                it holds no database or keys, and its transcript keeps no result from a
+                server like this one — but it does not close it. Connect only a server whose
+                worst case you would accept: a read-only mailbox, not one that can send.
               </p>
               <label className="check">
                 <input

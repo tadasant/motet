@@ -74,9 +74,7 @@ export function SignIn({
       <h1 id="signin-heading" className="signin-heading">
         Sign in
       </h1>
-      <p className="subhead">
-        Motet has one account, and signing in is how this browser proves it may use it.
-      </p>
+      <p className="subhead">Motet has one account. This is how this browser proves it may use it.</p>
       <button type="button" className="btn-primary" onClick={signIn} disabled={status.kind === 'busy'}>
         {status.kind === 'busy' ? 'Redirecting…' : 'Sign in with Google'}
       </button>
@@ -90,12 +88,11 @@ export function SignIn({
         {/* Printed because a mismatch is invisible from in here: Google matches this
             string exactly and rejects anything unregistered on its own error page. In dev
             that means reaching the app at localhost, not 127.0.0.1. */}
-        Google will return you to <code className="feed-url">{redirectUri()}</code>, which has to be
+        Google returns you to <code className="feed-url">{redirectUri()}</code>, which has to be
         registered on the OAuth client.
       </p>
       <p className="hint">
-        No Google account handy? The API token still works — open <strong>API token</strong> and paste
-        it.
+        No Google account handy? Open <strong>API token</strong> and paste one.
       </p>
       {tokenField}
       <p className="signin-away">

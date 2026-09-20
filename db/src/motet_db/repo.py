@@ -590,6 +590,92 @@ def mark_news_items_read(
     return result.rowcount
 
 
+@dataclass(frozen=True)
+class NewsItemSourceDetail:
+    """One source item behind a story, as the provenance view needs it.
+
+    ``preview`` is the opening of the source's own text rather than all of it: this is a
+    "which newsletter was this" surface, and a whole mailbox body per source turns one
+    screen into several hundred kilobytes. The full text stays one click further in, on
+    ``GET /v1/source-items/{id}``, which already serves it.
+    """
+
+    id: str
+    title: str
+    source_kind: str
+    source_name: str
+    received_at: datetime
+    chars: int
+    preview: str
+    position: int
+
+
+@dataclass(frozen=True)
+class NewsItemDetail:
+    """A story with every source that went into it, newest merge last."""
+
+    item: StoredNewsItem
+    sources: tuple[NewsItemSourceDetail, ...]
+
+
+#: How much of a source item's own text the provenance view carries per source.
+PREVIEW_CHARS: Final = 600
+
+
+def news_item_detail(
+    conn: psycopg.Connection[Any], *, user_id: str, item_id: str, preview_chars: int = PREVIEW_CHARS
+) -> NewsItemDetail | None:
+    """One story and the sources it was deduped from, or ``None`` if it is not this user's.
+
+    **Scoped by user in the statement itself**, for ``source_item_lifecycle``'s reason: the
+    answer carries mailbox content, so "not yours" and "does not exist" are one answer.
+
+    The sources come back in ``position`` order, which is the order dedup wrote them — 0
+    is the write-up that created the story and anything higher merged into it — so a reader
+    sees the provenance in the order it accumulated.
+    """
+    row = _maybe_one(
+        conn,
+        """
+        SELECT id, user_id, title, summary, read_at, created_at
+        FROM news_items WHERE id = %s AND user_id = %s
+        """,
+        (item_id, user_id),
+    )
+    if row is None:
+        return None
+    sources = _all(
+        conn,
+        """
+        SELECT si.id, si.title, si.received_at, link.position,
+               length(si.text) AS chars, left(si.text, %s) AS preview,
+               src.kind AS source_kind, src.name AS source_name
+        FROM news_item_sources link
+        JOIN source_items si ON si.id = link.source_item_id
+        JOIN sources src ON src.id = si.source_id
+        WHERE link.news_item_id = %s
+        ORDER BY link.position, si.id
+        """,
+        (preview_chars, item_id),
+    )
+    return NewsItemDetail(
+        item=_attach_sources(conn, [row])[0],
+        sources=tuple(
+            NewsItemSourceDetail(
+                id=source["id"],
+                title=source["title"],
+                source_kind=source["source_kind"],
+                source_name=source["source_name"],
+                received_at=source["received_at"],
+                chars=source["chars"],
+                preview=source["preview"],
+                position=source["position"],
+            )
+            for source in sources
+        ),
+    )
+
+
 # --- episodes ----------------------------------------------------------------------
 
 
@@ -696,6 +782,26 @@ def set_episode_state(
         "UPDATE episodes SET state = %s, last_error = %s, updated_at = now() WHERE id = %s",
         (state.value, error, episode_id_),
     )
+
+
+def rename_episode(
+    conn: psycopg.Connection[Any], episode_id_: str, *, user_id: str, title: str
+) -> StoredEpisode | None:
+    """Give an episode a new title, or ``None`` if it is not this caller's.
+
+    **``updated_at`` is deliberately left alone.** Every other write to this row moves it,
+    and `motet_api.episode_progress.settled_at` reads it as *when the build stopped* for a
+    failed episode — so a rename that touched it would reopen the failure panel, on both
+    clients, for an episode that gave up days ago. The title is a label a person put on a
+    historical artifact; it is not the pipeline moving.
+    """
+    updated = conn.execute(
+        "UPDATE episodes SET title = %s WHERE id = %s AND user_id = %s",
+        (title, episode_id_, user_id),
+    ).rowcount
+    if not updated:
+        return None
+    return get_episode(conn, episode_id_, user_id=user_id)
 
 
 @dataclass(frozen=True)

@@ -654,13 +654,13 @@ public struct CreateEpisodeRequest: Codable, Hashable, Sendable {
     public var keepInBacklog: Bool?
     public var maxDurationMs: Int
     public var newsItemIds: [String]?
-    public var title: String
+    public var title: String?
 
     public init(
         keepInBacklog: Bool? = nil,
         maxDurationMs: Int,
         newsItemIds: [String]? = nil,
-        title: String
+        title: String? = nil
     ) {
         self.keepInBacklog = keepInBacklog
         self.maxDurationMs = maxDurationMs
@@ -680,9 +680,9 @@ public struct CreateEpisodeRequest: Codable, Hashable, Sendable {
 public struct CreateSmartEpisodeRequest: Codable, Hashable, Sendable {
     public var maxDurationMs: Int
     public var rule: SmartRuleModel?
-    public var title: String
+    public var title: String?
 
-    public init(maxDurationMs: Int, rule: SmartRuleModel? = nil, title: String) {
+    public init(maxDurationMs: Int, rule: SmartRuleModel? = nil, title: String? = nil) {
         self.maxDurationMs = maxDurationMs
         self.rule = rule
         self.title = title
@@ -1823,9 +1823,53 @@ public struct McpAuthorizationResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// A story and every source that went into it (provenance).
+///
+/// The pair a reader needs to trust a backlog row: the story as dedup tells it, and the
+/// write-ups it was made from, each with its own untouched title. One request rather than
+/// one per source, because a merged story has several and a screen shows them together.
+public struct NewsItemDetailResponse: Codable, Hashable, Sendable {
+    public var createdAt: Date
+    public var displayTitle: String
+    public var id: String
+    public var read: Bool
+    public var sources: [NewsItemSourceDetailResponse]
+    public var summary: String
+    public var title: String
+
+    public init(
+        createdAt: Date,
+        displayTitle: String,
+        id: String,
+        read: Bool,
+        sources: [NewsItemSourceDetailResponse],
+        summary: String,
+        title: String
+    ) {
+        self.createdAt = createdAt
+        self.displayTitle = displayTitle
+        self.id = id
+        self.read = read
+        self.sources = sources
+        self.summary = summary
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case createdAt = "created_at"
+        case displayTitle = "display_title"
+        case id
+        case read
+        case sources
+        case summary
+        case title
+    }
+}
+
 /// A deduped story. Read state lives here, per invariant 5 — not per episode.
 public struct NewsItemResponse: Codable, Hashable, Sendable {
     public var createdAt: Date
+    public var displayTitle: String?
     public var id: String
     public var read: Bool
     public var sourceItemIds: [String]
@@ -1835,6 +1879,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
 
     public init(
         createdAt: Date,
+        displayTitle: String? = nil,
         id: String,
         read: Bool,
         sourceItemIds: [String],
@@ -1843,6 +1888,7 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
         title: String
     ) {
         self.createdAt = createdAt
+        self.displayTitle = displayTitle
         self.id = id
         self.read = read
         self.sourceItemIds = sourceItemIds
@@ -1853,11 +1899,55 @@ public struct NewsItemResponse: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case createdAt = "created_at"
+        case displayTitle = "display_title"
         case id
         case read
         case sourceItemIds = "source_item_ids"
         case sources
         case summary
+        case title
+    }
+}
+
+/// One source item behind a story, with enough of it to recognise.
+public struct NewsItemSourceDetailResponse: Codable, Hashable, Sendable {
+    public var chars: Int
+    public var id: String
+    public var position: Int
+    public var preview: String
+    public var receivedAt: Date
+    public var sourceKind: String
+    public var sourceName: String
+    public var title: String
+
+    public init(
+        chars: Int,
+        id: String,
+        position: Int,
+        preview: String,
+        receivedAt: Date,
+        sourceKind: String,
+        sourceName: String,
+        title: String
+    ) {
+        self.chars = chars
+        self.id = id
+        self.position = position
+        self.preview = preview
+        self.receivedAt = receivedAt
+        self.sourceKind = sourceKind
+        self.sourceName = sourceName
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chars
+        case id
+        case position
+        case preview
+        case receivedAt = "received_at"
+        case sourceKind = "source_kind"
+        case sourceName = "source_name"
         case title
     }
 }
@@ -2075,6 +2165,18 @@ public struct RedeemNativeLoginRequest: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case code
         case codeVerifier = "code_verifier"
+    }
+}
+
+/// A new title for an episode.
+///
+/// Renaming does not move ``updated_at``: that column is when the *build* last moved, and
+/// a client reads it to decide whether a failed episode's report is still worth showing.
+public struct RenameEpisodeRequest: Codable, Hashable, Sendable {
+    public var title: String
+
+    public init(title: String) {
+        self.title = title
     }
 }
 
@@ -3187,6 +3289,11 @@ public enum MotetEndpoints {
         return HTTPEndpoint(method: "POST", path: "/v1/episodes/\(MotetPathComponent(episodeId))/progress")
     }
 
+    /// `PUT /v1/episodes/{episode_id}/title` — Rename Episode
+    public static func renameEpisode(episodeId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "PUT", path: "/v1/episodes/\(MotetPathComponent(episodeId))/title")
+    }
+
     /// `GET /v1/episodes/{episode_id}/transcript.vtt` — Episode Transcript
     public static func episodeTranscript(episodeId: String, token: String? = nil) -> HTTPEndpoint {
         var query: [String: String] = [:]
@@ -3237,6 +3344,11 @@ public enum MotetEndpoints {
     /// `GET /v1/news-items` — List News Items
     public static var listNewsItems: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/news-items")
+    }
+
+    /// `GET /v1/news-items/{news_item_id}` — Get News Item
+    public static func getNewsItem(newsItemId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/news-items/\(MotetPathComponent(newsItemId))")
     }
 
     /// `POST /v1/news-items/{news_item_id}/read` — Set News Item Read

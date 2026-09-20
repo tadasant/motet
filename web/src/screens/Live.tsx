@@ -735,7 +735,7 @@ export function Live({
         )}
       </div>
       {!running && (
-        <p className="hint">Headphones recommended: the mic stays open for the whole session.</p>
+        <p className="hint">Headphones recommended — the mic stays open throughout.</p>
       )}
       {error && (
         <p className="error" role="alert">

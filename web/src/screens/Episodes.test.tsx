@@ -264,7 +264,7 @@ describe('the shelf', () => {
     mockApi()
     renderEpisodes({ unavailable: true })
     expect(screen.getByText('Wednesday briefing')).toBeTruthy()
-    expect(screen.getByText(/Could not refresh your episodes just now/)).toBeTruthy()
+    expect(screen.getByText(/Could not refresh/)).toBeTruthy()
   })
 })
 

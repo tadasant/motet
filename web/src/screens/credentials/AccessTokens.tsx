@@ -107,9 +107,8 @@ export function AccessTokens() {
     <div className="access-tokens">
       <h3>Access tokens</h3>
       <p className="hint">
-        A token signs in for a script or an agent, without a browser. It can do everything
-        you can except manage tokens and open Admin. It is shown once, stored only as a
-        hash, and works until you revoke it.
+        For a script or an agent, with no browser. It can do everything you can except
+        manage tokens and open Admin, and it is shown once.
       </p>
 
       {error && (

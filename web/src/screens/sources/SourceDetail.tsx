@@ -128,17 +128,15 @@ export function SourceDetail({
 
       {status === 'awaiting_consent' && (
         <p className="notice" role="status">
-          This row was created when Connect was pressed and no credential ever arrived — you
-          cancelled on Google&rsquo;s page, or closed it before finishing. Nothing was
-          connected and nothing was changed. Connect again, or remove it: it is not polled.
+          Connect was pressed and no credential arrived, so nothing was connected. Connect
+          again, or remove it — it is not polled.
         </p>
       )}
       {status === 'disconnected' && (
         <p className="notice" role="status">
           Disconnected
-          {source.disconnected_at ? ` ${relativeTime(source.disconnected_at, now)}` : ''}. The
-          credential is forgotten and the mailbox is no longer polled; everything it pulled in
-          stays, because episodes already cite it.
+          {source.disconnected_at ? ` ${relativeTime(source.disconnected_at, now)}` : ''}. No
+          longer polled; everything it pulled in stays, because episodes cite it.
         </p>
       )}
       {source.last_error && (
@@ -285,9 +283,8 @@ export function SourceDetail({
             Search again
           </button>
           <p className="hint">
-            Searches this mailbox again from the chosen point and keeps that as its window.
-            Mail already pulled in is skipped before it is fetched, so nothing is duplicated
-            and nothing already ingested is charged for twice.
+            Searches again from the chosen point and keeps that as the window. Mail already
+            pulled in is skipped, so nothing is duplicated or paid for twice.
           </p>
         </div>
       )}

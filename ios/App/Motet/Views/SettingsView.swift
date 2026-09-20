@@ -44,7 +44,7 @@ struct SettingsView: View {
         } header: {
             Text("Account").brandLabel()
         } footer: {
-            Text("The session is kept in the Keychain, on this device only. Signing out revokes it on the server too.")
+            Text("Kept in the Keychain, on this device. Signing out revokes it on the server too.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }
@@ -73,7 +73,7 @@ struct SettingsView: View {
             }
             .listRowBackground(Theme.surface)
         } footer: {
-            Text("The server this app talks to. Changing it signs you out, because a session belongs to the server that issued it.")
+            Text("The server this app talks to. Changing it signs you out.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }
@@ -116,7 +116,7 @@ struct SettingsView: View {
         } header: {
             Text("Offline").brandLabel()
         } footer: {
-            Text("Downloaded before you leave, so a walk with no signal still plays.")
+            Text("Downloaded in advance, so a walk with no signal still plays.")
                 .font(Theme.aside(14))
                 .foregroundStyle(Theme.inkSoft)
         }
