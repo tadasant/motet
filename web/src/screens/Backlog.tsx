@@ -3,6 +3,12 @@
 // Read state is per news item (invariant 5) and this toggle writes the same column that
 // "I listened to this episode" does — so marking something read here and having heard it
 // on a walk are one fact, not two that drift.
+//
+// **A row is named after its source, not after dedup.** One source: that newsletter's own
+// subject line, verbatim, because it is what its reader recognises. Several: dedup's
+// title, which is the only one that can name more than one write-up at once, with a badge
+// saying how many. The server decides which (`display_title`); this screen renders it.
+// Clicking a row opens its provenance rather than expanding a summary in place.
 
 import { useEffect, useState } from 'react'
 
@@ -16,10 +22,21 @@ import {
 } from '../api/client'
 import { Motif } from '../brand/Brand'
 import { Held } from './Held'
+import { NewsItemDetail } from './NewsItemDetail'
 import { Processing } from './Processing'
-import { SourceItemDetail } from './SourceItemDetail'
 
 const DEFAULT_MAX_MINUTES = 20
+
+/** The shelf's rule, one screen over: the year only when it is not this one. */
+function when(iso: string): string {
+  const date = new Date(iso)
+  const sameYear = date.getFullYear() === new Date().getFullYear()
+  return date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  })
+}
 
 export function Backlog({
   items,
@@ -39,9 +56,9 @@ export function Backlog({
   const [minutes, setMinutes] = useState(DEFAULT_MAX_MINUTES)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  // Which source item's three-stage detail is open under a news item, and which news
-  // item is being pointed at (scrolled to and briefly highlighted) from one.
-  const [openSource, setOpenSource] = useState<string | null>(null)
+  // Which story's provenance is open, and which row is being pointed at (scrolled to and
+  // briefly highlighted) from the held list or a lifecycle drawer.
+  const [openItem, setOpenItem] = useState<string | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
 
   useEffect(() => {
@@ -67,16 +84,20 @@ export function Backlog({
     setBusy(true)
     setError('')
     try {
-      const episode = await api.createEpisode(
-        `Episode — ${new Date().toLocaleDateString()}`,
-        minutes * 60_000,
-      )
-      onOpenEpisode(episode)
+      onOpenEpisode(await api.createEpisode(minutes * 60_000))
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err))
     } finally {
       setBusy(false)
     }
+  }
+
+  // The provenance view replaces the list, the way an episode's detail replaces the
+  // shelf: one section, one thing on screen, and Back is a link rather than a URL.
+  if (openItem !== null) {
+    return (
+      <NewsItemDetail id={openItem} onBack={() => setOpenItem(null)} onChanged={onChanged} />
+    )
   }
 
   return (
@@ -92,8 +113,7 @@ export function Backlog({
 
       <h3>Processed</h3>
       <p className="hint">
-        {unread.length} unread of {items.length}. An episode takes everything unread, oldest
-        first, until it hits the cap.
+        {unread.length} unread of {items.length}.
       </p>
 
       <div className="row">
@@ -124,10 +144,7 @@ export function Backlog({
           // The one empty state that gets the motif (brand/GUIDELINES.md): what this list
           // becomes once there is something in it.
           <div className="empty">
-            <p className="hint">
-              Nothing here yet. Paste in a newsletter you trust, or connect a mailbox under
-              Sources and pick what to ingest.
-            </p>
+            <p className="hint">Nothing here yet. Paste in a newsletter, or connect a mailbox.</p>
             <Motif quiet caption="Many voices, one podcast." />
           </div>
         )
@@ -142,38 +159,25 @@ export function Backlog({
                 .join(' ')}
             >
               <div className="item-head">
-                <strong>{item.title}</strong>
+                {/* The title is the link in: a keyboard and a screen reader reach the same
+                    action a pointer does, so the row itself needs no role of its own. */}
+                <button
+                  type="button"
+                  className="linkish news-title"
+                  onClick={() => setOpenItem(item.id)}
+                >
+                  {item.display_title || item.title}
+                </button>
+                {item.sources.length > 1 && (
+                  // The affordance for a merge: how many write-ups are behind this one
+                  // line. One source needs no badge — the line *is* that source's title.
+                  <span className="badge">{item.sources.length} sources</span>
+                )}
                 <button type="button" onClick={() => toggle(item)}>
                   {item.read ? 'Mark unread' : 'Mark read'}
                 </button>
               </div>
-              <p>{item.summary}</p>
-              {/* The source items behind this story, by title; each opens its
-                  three-stage lifecycle. */}
-              <p className="hint">
-                {item.sources.length} source{item.sources.length === 1 ? '' : 's'}:{' '}
-                {item.sources.map((source, index) => (
-                  <span key={source.id}>
-                    {index > 0 && ', '}
-                    <button
-                      type="button"
-                      className="linkish hint"
-                      aria-expanded={openSource === source.id}
-                      onClick={() => setOpenSource(openSource === source.id ? null : source.id)}
-                    >
-                      {source.title || source.id}
-                    </button>
-                  </span>
-                ))}{' '}
-                · {item.id}
-              </p>
-              {openSource !== null && item.source_item_ids.includes(openSource) && (
-                <SourceItemDetail
-                  id={openSource}
-                  onClose={() => setOpenSource(null)}
-                  onJumpToNewsItem={setFlash}
-                />
-              )}
+              <p className="hint">{when(item.created_at)}</p>
             </li>
           ))}
         </ul>

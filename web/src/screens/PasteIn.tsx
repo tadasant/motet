@@ -35,8 +35,7 @@ export function PasteIn({ onIngested }: { onIngested: () => void }) {
   return (
     <section aria-label="Paste in">
       <p className="hint">
-        Paste in a newsletter, a thread, anything you trust. A worker folds it into your
-        backlog as a story for your next episode — it will not appear there instantly.
+        A worker folds this into your backlog as a story. It will not appear there instantly.
       </p>
       <form onSubmit={submit}>
         <label htmlFor="paste-title">Title</label>
@@ -63,8 +62,7 @@ export function PasteIn({ onIngested }: { onIngested: () => void }) {
       </form>
       {status.kind === 'done' && (
         <p className="ok" role="status">
-          Queued as {status.id}. Watch it under Backlog &rarr; Processing: it shows up
-          there while it is being worked on, and stays there with a reason if it fails.
+          Queued. Watch it under Backlog &rarr; Processing.
         </p>
       )}
       {status.kind === 'error' && (

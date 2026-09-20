@@ -26,7 +26,7 @@ actor FakeAPI: MotetAPI {
     var baseURL = URL(string: "https://api.example.invalid")!
 
     struct CreatedEpisode: Hashable {
-        let title: String
+        let title: String?
         let newsItemIds: [String]?
         let keepInBacklog: Bool
     }
@@ -62,9 +62,9 @@ actor FakeAPI: MotetAPI {
     }
 
     func createEpisode(
-        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+        title: String?, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
     ) async throws -> EpisodeResponse {
-        try check("createEpisode", title)
+        try check("createEpisode", title ?? "")
         createdEpisodes.append(
             CreatedEpisode(title: title, newsItemIds: newsItemIds, keepInBacklog: keepInBacklog)
         )
@@ -73,8 +73,22 @@ actor FakeAPI: MotetAPI {
             id: "new", keepInBacklog: keepInBacklog, lastError: nil, listenedThroughMs: 0,
             maxDurationMs: maxDurationMs,
             publishedAt: nil,
-            segments: [], state: "pending", title: title
+            segments: [], state: "pending", title: title ?? "2026-09-20"
         )
+    }
+
+    /// What each `renameEpisode` asked for, newest last.
+    private(set) var renames: [(id: String, title: String)] = []
+    func recordedRenames() -> [(id: String, title: String)] { renames }
+
+    func renameEpisode(id: String, title: String) async throws -> EpisodeResponse {
+        try check("renameEpisode", "\(id):\(title)")
+        renames.append((id: id, title: title))
+        guard let index = episodes.firstIndex(where: { $0.id == id }) else {
+            throw MotetError.http(status: 404, detail: nil)
+        }
+        episodes[index].title = title
+        return episodes[index]
     }
 
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse {
@@ -98,6 +112,25 @@ actor FakeAPI: MotetAPI {
     func listNewsItems() async throws -> [NewsItemResponse] {
         try check("listNewsItems")
         return newsItems
+    }
+
+    func newsItem(id: String) async throws -> NewsItemDetailResponse {
+        try check("newsItem", id)
+        guard let match = newsItems.first(where: { $0.id == id }) else {
+            throw MotetError.http(status: 404, detail: nil)
+        }
+        return NewsItemDetailResponse(
+            createdAt: match.createdAt, displayTitle: match.listTitle, id: match.id,
+            read: match.read,
+            sources: match.sources.enumerated().map { index, source in
+                NewsItemSourceDetailResponse(
+                    chars: 0, id: source.id, position: index, preview: "",
+                    receivedAt: match.createdAt, sourceKind: "paste", sourceName: "Pasted text",
+                    title: source.title
+                )
+            },
+            summary: match.summary, title: match.title
+        )
     }
 
     func setNewsItemRead(id: String, read: Bool) async throws -> NewsItemResponse {

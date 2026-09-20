@@ -59,8 +59,7 @@ export function ConnectorRow({
         </p>
         {connector.kind === 'mcp' && connector.status !== 'ready' && (
           <p className="hint">
-            Authorizing lets the enrichment agent use this server with your account, on the
-            terms you accepted when you added it.
+            Authorizing lets the enrichment agent use this server with your account.
           </p>
         )}
         {connector.last_error && (

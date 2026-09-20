@@ -214,7 +214,7 @@ struct PlayerView: View {
                     .foregroundStyle(Theme.inkSoft)
                     .multilineTextAlignment(.center)
             } else if !model.live.isRunning, model.live.availability == .available {
-                Text("Headphones recommended: the mic stays open for the whole session.")
+                Text("Headphones recommended — the mic stays open throughout.")
                     .font(Theme.body(12, relativeTo: .caption))
                     .foregroundStyle(Theme.inkSoft)
             }

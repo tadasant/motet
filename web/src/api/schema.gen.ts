@@ -837,6 +837,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/episodes/{episode_id}/title": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rename Episode
+         * @description Give an episode a different title.
+         *
+         *     The title is a label on a historical artifact, so this writes nothing else: not the
+         *     state, not ``updated_at`` — see ``repo.rename_episode`` for why that one matters — and
+         *     nothing about what the episode contains. An episode being built can be renamed while
+         *     it builds; the title is not something any stage reads.
+         */
+        put: operations["rename_episode_v1_episodes__episode_id__title_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/episodes/{episode_id}/transcript.vtt": {
         parameters: {
             query?: never;
@@ -1061,6 +1086,31 @@ export interface paths {
          * @description The backlog: deduped news items with their read state (invariant 5).
          */
         get: operations["list_news_items_v1_news_items_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/news-items/{news_item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get News Item
+         * @description One story with every source that went into it — where a backlog row came from.
+         *
+         *     A merged story's title and summary are dedup's account of several write-ups, and this
+         *     is the answer to "says who": each contributing source item with its own untouched
+         *     title, when it arrived, and the opening of its text. The whole of a source, and the
+         *     pipeline detail behind it, stay on ``GET /v1/source-items/{id}``.
+         */
+        get: operations["get_news_item_v1_news_items__news_item_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2305,8 +2355,11 @@ export interface components {
              * @description Only these news items, spoken oldest first, whether or not they are read. Omit for every unread item. Every id must be one of your news items, or the request is refused with a 422 and nothing is created. The duration cap still applies: a story that does not fit is left out.
              */
             news_item_ids?: string[] | null;
-            /** Title */
-            title: string;
+            /**
+             * Title
+             * @description What to call this episode. Omit it, or send blank, and the server names it after the day it was made — which is what every client does unless somebody types something.
+             */
+            title?: string | null;
         };
         /**
          * CreateSmartEpisodeRequest
@@ -2316,8 +2369,11 @@ export interface components {
             /** Max Duration Ms */
             max_duration_ms: number;
             rule?: components["schemas"]["SmartRuleModel"];
-            /** Title */
-            title: string;
+            /**
+             * Title
+             * @description What to call this episode. Omit it, or send blank, and the server names it after the day it was made — which is what every client does unless somebody types something.
+             */
+            title?: string | null;
         };
         /**
          * CreatedApiTokenResponse
@@ -3342,6 +3398,33 @@ export interface components {
             redirect_url: string;
         };
         /**
+         * NewsItemDetailResponse
+         * @description A story and every source that went into it (provenance).
+         *
+         *     The pair a reader needs to trust a backlog row: the story as dedup tells it, and the
+         *     write-ups it was made from, each with its own untouched title. One request rather than
+         *     one per source, because a merged story has several and a screen shows them together.
+         */
+        NewsItemDetailResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Display Title */
+            display_title: string;
+            /** Id */
+            id: string;
+            /** Read */
+            read: boolean;
+            /** Sources */
+            sources: components["schemas"]["NewsItemSourceDetailResponse"][];
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+        };
+        /**
          * NewsItemResponse
          * @description A deduped story. Read state lives here, per invariant 5 — not per episode.
          */
@@ -3351,6 +3434,12 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /**
+             * Display Title
+             * @description What to put on a backlog row. One source: that source item's title, verbatim. Several: the title dedup wrote for the merged story, which is the only one that can name more than one write-up at once. Derived per request rather than stored, so it is right for every story ever deduped and moves when a later merge rewrites the story's title. Absent on an API older than this field, where `title` is the whole answer.
+             * @default
+             */
+            display_title: string;
             /** Id */
             id: string;
             /** Read */
@@ -3364,7 +3453,47 @@ export interface components {
             sources: components["schemas"]["NewsItemSourceRef"][];
             /** Summary */
             summary: string;
-            /** Title */
+            /**
+             * Title
+             * @description The title dedup wrote for this story. For a story with one source this is a paraphrase of that source's own subject line; `display_title` is what a list should show.
+             */
+            title: string;
+        };
+        /**
+         * NewsItemSourceDetailResponse
+         * @description One source item behind a story, with enough of it to recognise.
+         */
+        NewsItemSourceDetailResponse: {
+            /**
+             * Chars
+             * @description How long the source's text is, in characters.
+             */
+            chars: number;
+            /** Id */
+            id: string;
+            /**
+             * Position
+             * @description Where dedup put this source in the story. 0 created it; anything higher was merged into it afterwards.
+             */
+            position: number;
+            /**
+             * Preview
+             * @description The opening of the source's own text. Truncated: the whole of it is on GET /v1/source-items/{id}, which also carries the pipeline detail.
+             */
+            preview: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Source Kind */
+            source_kind: string;
+            /** Source Name */
+            source_name: string;
+            /**
+             * Title
+             * @description The source's own title — an email's subject line.
+             */
             title: string;
         };
         /**
@@ -3562,6 +3691,20 @@ export interface components {
             code: string;
             /** Code Verifier */
             code_verifier: string;
+        };
+        /**
+         * RenameEpisodeRequest
+         * @description A new title for an episode.
+         *
+         *     Renaming does not move ``updated_at``: that column is when the *build* last moved, and
+         *     a client reads it to decide whether a failed episode's report is still worth showing.
+         */
+        RenameEpisodeRequest: {
+            /**
+             * Title
+             * @description Trimmed before it is stored, and refused when nothing is left: whitespace is characters and no title.
+             */
+            title: string;
         };
         /**
          * ResyncRequest
@@ -5515,6 +5658,43 @@ export interface operations {
             };
         };
     };
+    rename_episode_v1_episodes__episode_id__title_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameEpisodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpisodeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     episode_transcript_v1_episodes__episode_id__transcript_vtt_get: {
         parameters: {
             query?: {
@@ -5828,6 +6008,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NewsItemResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_news_item_v1_news_items__news_item_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                news_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewsItemDetailResponse"];
                 };
             };
             /** @description Validation Error */

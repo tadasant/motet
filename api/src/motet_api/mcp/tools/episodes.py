@@ -14,12 +14,18 @@ from ...schemas import (
     ListenProgressRequest,
     ListenProgressResponse,
     MarkListenedResponse,
+    RenameEpisodeRequest,
     SmartRuleModel,
 )
 from ..context import RouteCall, routes, run
 
 _EPISODE_ID = Field(description="The episode's id, from list_episodes.")
-_TITLE = Field(description="The episode's title, shown in podcast apps.")
+_TITLE = Field(
+    description=(
+        "The episode's title, shown in podcast apps. Omit it and the server names the "
+        "episode after the day it was made."
+    )
+)
 _MAX_DURATION = Field(
     description="The longest the episode may run, in milliseconds, e.g. 1200000 for 20 minutes."
 )
@@ -36,8 +42,8 @@ def list_episodes() -> list[EpisodeResponse]:
 
 
 def create_episode(
-    title: Annotated[str, _TITLE],
     max_duration_ms: Annotated[int, _MAX_DURATION],
+    title: Annotated[str | None, _TITLE] = None,
     news_item_ids: Annotated[
         list[str] | None,
         Field(
@@ -75,8 +81,8 @@ def create_episode(
 
 
 def create_smart_episode(
-    title: Annotated[str, _TITLE],
     max_duration_ms: Annotated[int, _MAX_DURATION],
+    title: Annotated[str | None, _TITLE] = None,
     rule: Annotated[
         SmartRuleModel | None,
         Field(description="Which stories, and in what order. Omit for everything unread."),
@@ -110,6 +116,27 @@ def get_episode(episode_id: Annotated[str, _EPISODE_ID]) -> EpisodeResponse:
     return run(
         "get_episode",
         lambda c: routes.get_episode(conn=c.conn, user_id=c.user_id, episode_id=episode_id),
+    )
+
+
+def rename_episode(
+    episode_id: Annotated[str, _EPISODE_ID],
+    title: Annotated[str, Field(description="The new title, 1 to 500 characters.")],
+) -> EpisodeResponse:
+    """Rename an episode. Changes nothing but the title, which podcast apps show.
+
+    An episode is named after the day it was made unless somebody said otherwise, so this
+    is how one gets a name worth finding again. Safe at any point, including while the
+    episode is still being made. Returns the episode. Unknown ids are a 404.
+    """
+    return run(
+        "rename_episode",
+        lambda c: routes.rename_episode(
+            body=RenameEpisodeRequest(title=title),
+            conn=c.conn,
+            user_id=c.user_id,
+            episode_id=episode_id,
+        ),
     )
 
 
@@ -181,6 +208,7 @@ TOOLS = (
     create_episode,
     create_smart_episode,
     get_episode,
+    rename_episode,
     set_playback_position,
     mark_episode_listened,
     get_episode_transcript,

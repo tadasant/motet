@@ -33,6 +33,49 @@ final class MotetLibraryTests: XCTestCase {
         return Harness(library: library, api: api, outbox: outbox, downloader: downloader)
     }
 
+    // MARK: - Renaming
+
+    func testARenameReachesTheServerAndTheCacheThatSurvivesNoSignal() async throws {
+        let harness = try makeHarness(self)
+        await harness.api.setEpisodes([Fixture.episode()])
+        _ = try await harness.library.episodes()
+
+        let renamed = try await harness.library.renameEpisode(id: "ep-1", title: "The Tuesday walk")
+
+        XCTAssertEqual(renamed.title, "The Tuesday walk")
+        let asked = await harness.api.recordedRenames()
+        XCTAssertEqual(asked.map(\.title), ["The Tuesday walk"])
+        // The cache is what a launch with no signal renders, so a rename that only moved
+        // the server would come back as the old title on a train.
+        await harness.api.setFailure(.offline)
+        let offlineEpisodes = try await harness.library.episodes()
+        XCTAssertEqual(offlineEpisodes.map(\.title), ["The Tuesday walk"])
+    }
+
+    func testTheAppNamesAnUnnamedEpisodeAfterTheDayForAnApiThatCannot() throws {
+        // The compatibility shim in `MotetHTTPClient.dayTitle` — an API older than the
+        // server-side default refuses a request with no title at all, and a TestFlight
+        // build reaches a phone before the API it talks to is bumped.
+        //
+        // **The device's zone is moved for the duration**, or this asserts nothing: CI
+        // runs in UTC, so deleting the formatter's `timeZone` line would leave both
+        // assertions green against a shim that had stopped agreeing with the server.
+        let original = NSTimeZone.default
+        NSTimeZone.default = TimeZone(identifier: "Pacific/Midway")!  // UTC-11
+        defer { NSTimeZone.default = original }
+
+        XCTAssertEqual(
+            MotetHTTPClient.dayTitle(now: Date(timeIntervalSince1970: 1_789_905_600)),
+            "2026-09-20"
+        )
+        // 00:20 UTC on the 21st is still the 20th in Midway — the server would say the
+        // 21st, and so does this.
+        XCTAssertEqual(
+            MotetHTTPClient.dayTitle(now: Date(timeIntervalSince1970: 1_789_950_000)),
+            "2026-09-21"
+        )
+    }
+
     func testTheLibraryOpensFromCacheWithNoSignal() async throws {
         let harness = try makeHarness(self)
         await harness.api.setEpisodes([Fixture.episode()])

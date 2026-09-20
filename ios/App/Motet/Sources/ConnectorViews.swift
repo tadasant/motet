@@ -177,7 +177,7 @@ struct AddConnectorView: View {
         } header: {
             Text("Domain").brandLabel()
         } footer: {
-            Text("Newsletter links to this site, and its subdomains, get the full article fetched. Nothing is fetched from a site that is not on this list.")
+            Text("Newsletter links to this site and its subdomains get the full article fetched. Nothing else is.")
                 .font(Theme.aside(14)).foregroundStyle(Theme.inkSoft)
         }
         .listRowBackground(Theme.surface)
@@ -191,7 +191,7 @@ struct AddConnectorView: View {
         } header: {
             Text("Login (optional)").brandLabel()
         } footer: {
-            Text("Leave both blank for a site the newsletter’s own link opens. Leave the password blank for a site that emails a code or a magic link. The password is sealed and never shown again.")
+            Text("Leave both blank for a site the newsletter’s own link opens; leave the password blank for one that emails a code. The password is sealed and never shown again.")
                 .font(Theme.aside(14)).foregroundStyle(Theme.inkSoft)
         }
         .listRowBackground(Theme.surface)
@@ -210,13 +210,13 @@ struct AddConnectorView: View {
         } header: {
             Text("Server").brandLabel()
         } footer: {
-            Text("OAuth only. After adding, press Authorize to sign in with the server. Leave the sites blank to hand this server to the agent for every site you added.")
+            Text("OAuth only. Press Authorize after adding. Leave the sites blank to hand this server to the agent for every site you added.")
                 .font(Theme.aside(14)).foregroundStyle(Theme.inkSoft)
         }
         .listRowBackground(Theme.surface)
         Section {
             Text("The enrichment agent that is handed this server also reads web pages nobody at Motet wrote. A hostile page can instruct it to use this server with your account — to read what the server can see and carry it somewhere else.")
-            Text("Enrichment narrows that: its browser is locked to the article’s site, it runs with no access to Motet’s database or keys, and its transcript keeps no tool result from a server like this one. That narrows the risk; it does not close it. Connect only a server whose worst case you would accept — a read-only mailbox, not one that can send.")
+            Text("Enrichment narrows that — its browser is locked to the article’s site, it holds no database or keys, and its transcript keeps no result from a server like this one — but it does not close it. Connect only a server whose worst case you would accept: a read-only mailbox, not one that can send.")
             Toggle("I understand that a web page the agent reads can steer it into using this server with my account.", isOn: $acknowledged)
         } header: {
             Text("Before you connect a server").brandLabel()

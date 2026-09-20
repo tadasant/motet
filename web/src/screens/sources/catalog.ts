@@ -43,8 +43,7 @@ export const CATALOG: Integration[] = [
     kind: 'gmail',
     availability: 'available',
     detail:
-      'Read-only. Motet polls the mailbox, pulls matching messages in and extracts the ' +
-      'article from each. Nothing is processed until you ingest it.',
+      'Read-only. Motet polls the mailbox and extracts the article from each matching message.',
   },
   {
     id: 'paste',
@@ -52,9 +51,7 @@ export const CATALOG: Integration[] = [
     description: 'Text you paste in yourself. Always on; nothing to connect.',
     kind: 'paste',
     availability: 'builtin',
-    detail:
-      'Pasting is asking: a paste is processed at once rather than held, because the act ' +
-      'of pasting it is the decision.',
+    detail: 'Pasting is asking, so a paste is processed at once rather than held.',
   },
   {
     id: 'x',

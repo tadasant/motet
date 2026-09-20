@@ -264,6 +264,7 @@ class TestTheSurfaceTheVoiceServiceAsksFor:
 
         assert run(settings, work) == [
             "delete_highlight",
+            "get_news_item",
             "list_highlights",
             "list_news_items",
             "save_highlight",

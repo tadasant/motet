@@ -152,7 +152,7 @@ describe('SourceItemDetail', () => {
     mockFetch({ 'GET /v1/source-items/si_a': held })
     render(<SourceItemDetail id="si_a" onClose={() => {}} />)
 
-    expect(await screen.findByText(/Not processed yet — held/)).toBeDefined()
+    expect(await screen.findByText(/Held\. Nothing has been spent on it/)).toBeDefined()
     expect(screen.getByText(/None yet/)).toBeDefined()
   })
 

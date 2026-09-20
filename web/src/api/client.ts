@@ -41,6 +41,8 @@ export type PutResponse<P extends keyof paths> = paths[P] extends {
 
 export type HealthResponse = GetResponse<'/internal/health'>
 export type NewsItem = GetResponse<'/v1/news-items'>[number]
+export type NewsItemDetail = GetResponse<'/v1/news-items/{news_item_id}'>
+export type NewsItemSource = NewsItemDetail['sources'][number]
 export type IngestionItem = GetResponse<'/v1/ingestion'>[number]
 export type ProcessingStatus = GetResponse<'/v1/processing'>
 export type Episode = GetResponse<'/v1/episodes'>[number]
@@ -344,6 +346,10 @@ export const api = {
   revokeApiToken: (id: string) =>
     apiDeletePathJson('/v1/auth/tokens/{token_id}', `/v1/auth/tokens/${encodeURIComponent(id)}`),
   newsItems: () => apiGet('/v1/news-items'),
+  // One story with every source behind it — titles, arrival dates and the opening of each
+  // one. The whole of a source stays on `sourceItem`, which also carries the pipeline.
+  newsItem: (id: string) =>
+    apiGetPath('/v1/news-items/{news_item_id}', `/v1/news-items/${encodeURIComponent(id)}`),
   // What has been pasted but is not a news item yet. The backlog cannot answer that:
   // an item that fails never becomes a news item, so it never appears there at all.
   ingestion: () => apiGet('/v1/ingestion'),
@@ -443,8 +449,15 @@ export const api = {
       `/v1/sources/${encodeURIComponent(id)}/reauthorize`,
       { redirect_uri: redirectUri },
     ),
-  createEpisode: (title: string, maxDurationMs: number) =>
-    apiPost('/v1/episodes', { title, max_duration_ms: maxDurationMs }),
+  // No title: the server names an episode after the day it was made, and it is the only
+  // place that string is composed. `renameEpisode` is how it gets a better one.
+  createEpisode: (maxDurationMs: number) => apiPost('/v1/episodes', { max_duration_ms: maxDurationMs }),
+  renameEpisode: (id: string, title: string) =>
+    apiPutPath(
+      '/v1/episodes/{episode_id}/title',
+      `/v1/episodes/${encodeURIComponent(id)}/title`,
+      { title },
+    ),
   rotateFeed: () => apiPost('/v1/feed/rotate'),
   setRead: (id: string, read: boolean) =>
     apiPostPath(

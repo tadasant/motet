@@ -143,9 +143,7 @@ export function Held({
           Dismiss
         </button>
         {someSelected && (
-          <span className="hint">
-            ~{(selectedChars / 1000).toFixed(1)}k chars → dedup at low effort, each
-          </span>
+          <span className="hint">~{(selectedChars / 1000).toFixed(1)}k chars selected</span>
         )}
         {notice && (
           <span className="ok" role="status">
@@ -159,8 +157,7 @@ export function Held({
         </p>
       )}
       <p className="hint">
-        Pulled from your sources but not yet deduped into the backlog. Nothing here has cost
-        inference. Pick what you want in your next episode; dismiss what you do not.
+        Nothing here has cost inference yet. Ingest what you want; dismiss what you do not.
       </p>
       {all.length > 0 && (
         <table className="grid held-table">

@@ -65,6 +65,7 @@ class ToolDef:
 ALL_TOOLS: tuple[ToolDef, ...] = (
     # backlog
     ToolDef("list_news_items", "backlog", False, (("GET", "/v1/news-items"),)),
+    ToolDef("get_news_item", "backlog", False, (("GET", "/v1/news-items/{news_item_id}"),)),
     ToolDef(
         "set_news_item_read",
         "backlog",
@@ -149,6 +150,13 @@ ALL_TOOLS: tuple[ToolDef, ...] = (
     ToolDef("create_episode", "episodes", True, (("POST", "/v1/episodes"),)),
     ToolDef("create_smart_episode", "episodes", True, (("POST", "/v1/episodes/smart"),)),
     ToolDef("get_episode", "episodes", False, (("GET", "/v1/episodes/{episode_id}"),)),
+    ToolDef(
+        "rename_episode",
+        "episodes",
+        True,
+        (("PUT", "/v1/episodes/{episode_id}/title"),),
+        idempotent=True,
+    ),
     ToolDef(
         "set_playback_position",
         "episodes",

@@ -2019,8 +2019,9 @@ below, and "The app's door is a sign-in, not a second landing page".
   nothing else, and the section below is the record. The motif's path data is still lifted
   verbatim into `web/src/brand/scoreData.ts`, not redrawn; the transport picture under the
   score (`aria-hidden`, as on the reference page) lives only in `site/` now.
-- **New episodes are titled "Episode — <date>"**, no longer "Briefing — …". The title is
-  stored and appears in the RSS feed, so older episodes keep the old word.
+- **New episodes are named after the day**, no longer "Briefing — …" and — since the
+  rename section below — no longer "Episode — <date>" either. The title is stored and
+  appears in the RSS feed, so older episodes keep whatever they were called.
 - **Dark mode is not designed**, so nothing here derives one.
 
 **The web player's transport replaced the browser's own controls.** The ink play circle,
@@ -2305,6 +2306,112 @@ more than a read is the render counter's side connection, and it is `handle_enri
 existing mechanism rather than a new one — the same `context.database_url`, for the same
 reason, in the handler next door.
 
+#### An episode is named after the day, and the name is the one thing about it a person picks
+
+`motet_api.main.episode_title`, `PUT /v1/episodes/{episode_id}/title`,
+`repo.rename_episode`, `web/src/screens/EpisodeTitle.tsx`, `EpisodeRow`'s rename alert on
+the phone. **Asked for by Tadas, 2026-09-20**: an episode should be renameable, and the
+default name should be just the date.
+
+**`episodes.title` has been a column since migration 0002**, so this is a write to an
+existing column and a route on the existing API — no migration, and nothing to backfill.
+
+**The default is composed in the API and in no client, which is the half worth keeping.**
+Three clients each built their own `Episode — <date>` string, in three spellings, over an
+API whose own fallback was a fourth; `CreateEpisodeRequest.title` is optional now, and a
+client sends what somebody typed or nothing at all. The date is the server's, UTC and ISO
+order (`2026-09-20`), because a title is stored, goes out in the RSS feed, and is read on
+devices in other timezones and sorted as text — a locale-formatted date would make one
+episode wear different names in different places. The cost, stated: an episode made late
+in the evening west of UTC is named after tomorrow, and renaming it is one call.
+
+**Episodes that already exist keep their titles**, which is the same call the brand pass
+made when "Briefing — …" became "Episode — …": a title is stored and has gone out in a
+feed, so rewriting one is rewriting something a podcast client has already shown. The
+default changes for new episodes and for nobody else.
+
+**The rename deliberately does not move `episodes.updated_at`.** Every other write to that
+row does, and `episode_progress.settled_at` reads it as *when the build stopped* for a
+failed episode — so a rename that touched it would reopen the failure panel, on both
+clients, for a build that gave up days ago. A title is a label somebody put on a historical
+artifact; it is not the pipeline moving. `repo.rename_episode`'s docstring says so and
+`test_backlog_and_titles.py` pins it.
+
+**The app keeps composing the date for one release, and that is Runner policy's ordering
+rule rather than a second definition of the default.** A TestFlight build reaches a phone
+minutes after its PR merges, while the API it talks to serves whatever the private repo
+pins — so an app that sent no title at all would meet an API whose `title` is still
+required and get a 422, breaking "Make it", which works today. `MotetHTTPClient.dayTitle`
+sends the string the server would have chosen, byte-identical, and its docstring names the
+condition for deleting it: the deployed API being at or past this change. The two genuinely
+*new* iOS calls — the provenance read and the rename — need no shim, because nothing
+regresses when they are refused; the provenance screen falls back to the titles the backlog
+row already carries and says the previews are missing.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** A route on the existing API,
+a write to a column that has always existed, an MCP tool beside the ones the episodes group
+already has, and a field made optional on an existing request: no deployable, datastore,
+queue mechanism, vendor, seam, inference stage, model call or resource in the private repo.
+This is "work inside an existing shape".
+
+### A backlog row is named after its source, and says who else told the story
+
+`motet_api.main.display_title`, `NewsItemResponse.display_title`,
+`GET /v1/news-items/{news_item_id}`, `repo.news_item_detail`,
+`web/src/screens/NewsItemDetail.tsx`, `ios/App/Motet/Views/NewsItemDetailView.swift`.
+**Asked for by Tadas, 2026-09-20**: the backlog should copy the source's title verbatim
+rather than showing a summary, a deduplication should get a custom title with an affordance
+saying how many sources it used, and clicking a row should show the provenance.
+
+**One source: that source item's title, verbatim.** A newsletter's subject line is what its
+reader recognises, and dedup's paraphrase of it is strictly less recognisable — it was
+written to name a *merged* story and there is nothing here to merge. **Several sources:
+dedup's title**, which is the only one that can name more than one write-up at once, with a
+count beside it. A source whose extractor found no subject line falls back to the stored
+title, because an empty row is worse than a paraphrase.
+
+**It is derived per request, not written at integrate time, and that is the choice.**
+Storing it would mean a migration, a backfill for every story already deduped, and a second
+definition of a story's name that a later merge could leave stale — where
+`news_items.title` is *already* rewritten by every merge (see "Dedup's decision is persisted
+on `news_item_sources`"). Deriving it reads whatever is true now, for every row ever
+written, and needed no dedup change at all. `title` is still reported beside it: it is what
+the episode speaks and what the show notes print, and those are not this screen's call.
+
+**The provenance is one request rather than one per source.** `GET /v1/news-items/{id}`
+answers with the story and every contributing source item — its own untouched title, which
+source it came from, when it arrived, how long it is, and the opening of its text — in
+`position` order, so a reader sees which write-up started the story and which merged in.
+The preview is bounded (`repo.PREVIEW_CHARS`): this is a "which newsletter was this"
+surface, and a whole mailbox body per source turns one screen into several hundred
+kilobytes. The whole of a source, and the pipeline behind it, stay on
+`GET /v1/source-items/{id}`, which both detail screens link to. Scoped by user in the
+statement itself, for `source_item_lifecycle`'s reason: the answer carries mailbox content,
+so "not yours" and "does not exist" are one answer.
+
+**The row's summary went to the detail, which is what "instead of a subtext summary"
+means.** A row is a glance — a title, a merge count when there is one, and a date; the
+summary is at the top of the provenance screen where it is dedup's account of several
+write-ups rather than a second line under every story. On the phone the summary survives in
+one place: the picking mode, where the title alone is not always enough to decide what goes
+in an episode.
+
+**The detail replaces the list rather than taking a path**, exactly as an episode's detail
+replaces the shelf: the shell has one path per section and no nested routes, and AGENTS.md
+already says a nested path is the moment to revisit forty lines of `pushState` — not
+before.
+
+**`get_news_item` is the MCP tool this adds**, and it is the single-news-item read motet#120
+named as missing when `get_item_detail` was dropped. It is a read-only tool in the `backlog`
+group, so the voice service's `backlog,highlights` selection now grants it too — one more
+entry on the residue list that section already keeps, and one that spends nothing.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** A computed field on an existing
+response, one route on the existing API reading two existing tables, an MCP tool beside the
+one the backlog group already has, and two screens: no deployable, datastore, migration,
+queue mechanism, vendor, seam, inference stage, model call or resource in the private repo.
+Dedup is untouched — what it writes and when is exactly what it was.
+
 ### The episode detail has a player, which reverses a Phase 1 decision
 
 `web/src/screens/EpisodeScreen.tsx`, motet#89. **The owner's go for shipping it came with
@@ -2543,8 +2650,8 @@ two write groups for the two tools that write, and **no read-only group at all**
 everything a session reads arrives in its `SessionContext` (invariant 2). `registry.py` says
 the honest limit of that — *"a caller that must not write needs a credential that cannot"* —
 and the residue is stated rather than hidden: the selection also grants `list_news_items`,
-`list_highlights` and `delete_highlight`, which no platform tool names and the voice service
-therefore never calls. That second bound is `PLATFORM_TOOLS`, not the credential.
+`get_news_item`, `list_highlights` and `delete_highlight`, which no platform tool names and
+the voice service therefore never calls. That second bound is `PLATFORM_TOOLS`, not the credential.
 
 **Metered spend is out of reach by construction**, which is a property of the selection
 rather than of the tools: every model call in the system is reached through `ingestion`,

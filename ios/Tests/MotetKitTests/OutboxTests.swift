@@ -121,9 +121,12 @@ actor GatedAPI: MotetAPI {
     func listEpisodes() async throws -> [EpisodeResponse] { [] }
     func episode(id: String) async throws -> EpisodeResponse { Fixture.episode(id: id) }
     func createEpisode(
-        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+        title: String?, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
     ) async throws -> EpisodeResponse {
         Fixture.episode()
+    }
+    func renameEpisode(id: String, title: String) async throws -> EpisodeResponse {
+        Fixture.episode(id: id)
     }
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse {
         MarkListenedResponse(episodeId: id, newsItemsMarkedRead: 0)
@@ -132,6 +135,12 @@ actor GatedAPI: MotetAPI {
         ListenProgressResponse(episodeId: episodeId, listenedThroughMs: listenedThroughMs, newsItemsMarkedRead: 0)
     }
     func listNewsItems() async throws -> [NewsItemResponse] { [] }
+    func newsItem(id: String) async throws -> NewsItemDetailResponse {
+        NewsItemDetailResponse(
+            createdAt: Date(), displayTitle: id, id: id, read: false, sources: [],
+            summary: "", title: id
+        )
+    }
     func pasteSource(title: String, text: String) async throws -> SourceItemResponse {
         SourceItemResponse(id: "source", state: "pending", title: title)
     }

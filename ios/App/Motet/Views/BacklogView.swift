@@ -64,7 +64,7 @@ struct BacklogView: View {
                                     .foregroundStyle(Theme.ink)
                             }
                         } description: {
-                            Text("Paste in a newsletter, bookmark or thread to start a backlog.")
+                            Text("Paste in a newsletter or a thread to start a backlog.")
                                 .font(Theme.body(15, relativeTo: .subheadline))
                                 .foregroundStyle(Theme.inkSoft)
                         }
@@ -72,7 +72,7 @@ struct BacklogView: View {
                         .listRowSeparator(.hidden)
                     }
                     ForEach(visibleItems, id: \.id) { item in
-                        row(item)
+                        rowLink(item)
                             .padding(.vertical, 6)
                             .listRowBackground(Theme.parchment)
                             .listRowSeparatorTint(Theme.rule)
@@ -150,7 +150,7 @@ struct BacklogView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("\(sources.held.count) pulled in, waiting for you")
                     .font(Theme.body(16, weight: 600))
-                Text("Synced from your sources and not yet processed. Nothing has cost inference — pick what you want in your next episode.")
+                Text("Nothing here has cost inference yet — pick what you want.")
                     .font(Theme.body(13, relativeTo: .footnote))
                     .foregroundStyle(Theme.inkSoft)
             }
@@ -159,6 +159,13 @@ struct BacklogView: View {
         .listRowBackground(Theme.surface)
     }
 
+    /// A row is named after its source, not after dedup.
+    ///
+    /// One source: that newsletter's own subject line, verbatim, because it is what its
+    /// reader recognises. Several: dedup's title, which is the only one that can name more
+    /// than one write-up at once, with a count saying how many. The server decides which
+    /// (`display_title`); this row renders it. Tapping opens the provenance — the summary
+    /// lives there now rather than under every row.
     @ViewBuilder
     private func row(_ item: NewsItemResponse) -> some View {
         let isPicked = selection.contains(item.id)
@@ -171,30 +178,47 @@ struct BacklogView: View {
                     .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.title)
+                Text(item.listTitle)
                     .font(Theme.display(18, relativeTo: .headline))
                     .foregroundStyle(item.read ? Theme.inkSoft : Theme.ink)
-                Text(item.summary)
-                    .font(Theme.body(15, relativeTo: .subheadline))
-                    .foregroundStyle(Theme.inkSoft)
-                    .lineLimit(isSelecting ? 2 : nil)
-                if isSelecting, let from = item.sources.first?.title {
-                    // Which newsletter it came from is how a person recognises what to pick.
-                    Text(from)
+                if isSelecting {
+                    // Picking is the one place the summary still earns its line: the title
+                    // alone is not always enough to decide what goes in an episode.
+                    Text(item.summary)
+                        .font(Theme.body(15, relativeTo: .subheadline))
+                        .foregroundStyle(Theme.inkSoft)
+                        .lineLimit(2)
+                }
+                if item.sourceCount > 1 {
+                    // The affordance for a merge: how many write-ups are behind this one
+                    // line. One source needs none — the line *is* that source's title.
+                    Text("\(item.sourceCount) sources")
                         .brandLabel(size: 11)
-                        .lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            guard isSelecting else { return }
-            if isPicked { selection.remove(item.id) } else { selection.insert(item.id) }
-        }
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isSelecting ? [.isButton] : [])
         .accessibilityAddTraits(isPicked ? .isSelected : [])
+    }
+
+    /// Selecting turns the whole row into a checkbox; otherwise it opens the provenance.
+    @ViewBuilder
+    private func rowLink(_ item: NewsItemResponse) -> some View {
+        if isSelecting {
+            row(item)
+                .accessibilityAddTraits(.isButton)
+                .onTapGesture {
+                    if selection.contains(item.id) {
+                        selection.remove(item.id)
+                    } else {
+                        selection.insert(item.id)
+                    }
+                }
+        } else {
+            NavigationLink { NewsItemDetailView(item: item) } label: { row(item) }
+        }
     }
 
     private var generateBar: some View {
@@ -277,7 +301,8 @@ struct PickedEpisodeView: View {
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var title = "Episode — \(Date.now.formatted(date: .abbreviated, time: .omitted))"
+    /// Empty, and sent as nothing: the server names an episode after the day it was made.
+    @State private var title = ""
     @State private var minutes = 30
     @State private var keepInBacklog: Bool
     @State private var isSending = false
@@ -287,13 +312,13 @@ struct PickedEpisodeView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Title", text: $title)
+                    TextField("Title", text: $title, prompt: Text("Today's date"))
                         .font(Theme.body(16))
                     Stepper("Up to \(minutes) minutes", value: $minutes, in: 5...90, step: 5)
                         .font(Theme.body(16))
                         .monospacedDigit()
                 } footer: {
-                    Text("Spoken oldest first. Stories that don't fit are left out from the end.")
+                    Text("Spoken oldest first; what doesn't fit is left out.")
                         .font(Theme.body(13, relativeTo: .footnote))
                         .foregroundStyle(Theme.inkSoft)
                 }
@@ -305,8 +330,8 @@ struct PickedEpisodeView: View {
                 } footer: {
                     Text(
                         keepInBacklog
-                            ? "Listening won't mark these stories read. They stay in your backlog."
-                            : "Each story is marked read once you've heard it, like any episode."
+                            ? "These stories stay in your backlog."
+                            : "Each story is marked read once you've heard it."
                     )
                     .font(Theme.body(13, relativeTo: .footnote))
                     .foregroundStyle(Theme.inkSoft)
@@ -342,10 +367,7 @@ struct PickedEpisodeView: View {
                     Button(isSending ? "Making…" : "Make it") {
                         Task { await make() }
                     }
-                    .disabled(
-                        isSending || items.isEmpty
-                            || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    )
+                    .disabled(isSending || items.isEmpty)
                 }
             }
         }
@@ -357,7 +379,7 @@ struct PickedEpisodeView: View {
         isSending = true
         failure = nil
         let queued = await model.createEpisode(
-            title: title,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             maxDurationMinutes: minutes,
             newsItemIds: items.map(\.id),
             keepInBacklog: keepInBacklog

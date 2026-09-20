@@ -24,6 +24,7 @@
 import { type RefObject, useEffect, useRef, useState } from 'react'
 
 import { ApiError, type Episode, type FeedInfo, api } from '../api/client'
+import { EpisodeTitle } from './EpisodeTitle'
 import { Live } from './Live'
 import { EpisodeProgressPanel } from './EpisodeProgressPanel'
 import { describeBuildProgress } from './episodeProgress'
@@ -100,13 +101,23 @@ export function EpisodeScreen({
 
   return (
     <section aria-label="Episode">
-      <p className="hint episode-heading">
+      {/* A div rather than a p: the rename control is a form, which a paragraph cannot
+          legally contain — the browser would close the paragraph around it. */}
+      <div className="hint episode-heading">
         <strong>{episode.title}</strong>
-        <span>
-          {episode.state}
-          {episode.state === 'ready' && ` · ${formatClock(episode.duration_ms)}`}
-        </span>
-      </p>
+        {/* Renaming sits beside the state rather than over the title, so the title stays
+            the display-face heading it is everywhere else. The row is a <div>, not a
+            <span>: the editor is a <form>, and phrasing content cannot contain one. */}
+        <div className="episode-heading-meta">
+          <span>
+            {episode.state}
+            {episode.state === 'ready' && ` · ${formatClock(episode.duration_ms)}`}
+          </span>
+          <EpisodeTitle episode={episode} onRenamed={onBacklogChanged}>
+            <span aria-hidden="true">·</span>
+          </EpisodeTitle>
+        </div>
+      </div>
 
       {/* Where the build is, from the server: which step, how far into the render, how
           long it has taken against how long one usually takes, and — when nothing is
@@ -172,14 +183,13 @@ export function EpisodeScreen({
       )}
       {/* Made from a pick with "keep in backlog": listening here marks nothing read. */}
       {episode.keep_in_backlog && (
-        <p className="hint">Listening to this episode leaves its stories in the backlog.</p>
+        <p className="hint">Its stories stay in your backlog however far you get.</p>
       )}
 
       {feed && episode.state === 'ready' && (
         <p className="hint">
-          For the walk, listen in a podcast app — background audio and offline are what a
-          browser tab cannot do. Paste this private feed URL into Overcast or Apple
-          Podcasts: <code className="feed-url">{feed.url}</code>
+          For the walk, paste this private feed into a podcast app — a browser tab has no
+          background audio and no offline: <code className="feed-url">{feed.url}</code>
         </p>
       )}
 
@@ -447,7 +457,7 @@ function Player({
         </p>
       )}
       {resumeAt > 0 && (
-        <p className="hint">Resumes at {formatClock(resumeAt)}, where you got to.</p>
+        <p className="hint">Resumes at {formatClock(resumeAt)}.</p>
       )}
     </div>
   )

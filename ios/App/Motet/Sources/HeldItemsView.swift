@@ -37,7 +37,7 @@ struct HeldItemsView: View {
     var body: some View {
         List {
             Section {
-                Text("Pulled in from your sources and not yet deduped into the backlog. Nothing here has cost inference. Pick what you want in your next episode; dismiss what you do not.")
+                Text("Nothing here has cost inference yet. Ingest what you want; dismiss what you do not.")
                     .font(Theme.body(14, relativeTo: .footnote))
                     .foregroundStyle(Theme.inkSoft)
                 if let notice {

@@ -22,14 +22,14 @@ function stamp(iso: string | null | undefined): string {
 
 /** What to say when stage 2 has no steps, by the item's overall status. */
 const EMPTY_STAGE_COPY: Record<string, string> = {
-  held: 'Not processed yet — held. Nothing has been spent on this item; pick it and press Ingest now.',
-  dismissed: 'Dismissed. Nothing was spent on this item and it will not be in an episode.',
+  held: 'Held. Nothing has been spent on it; pick it and press Ingest now.',
+  dismissed: 'Dismissed. Nothing was spent on it, and it will not be in an episode.',
 }
 
 const STEP_COPY: Record<string, string> = {
   queued: 'Queued. An integrate job is waiting for a worker.',
   running: 'Running. A worker holds the integrate job now.',
-  done: 'Done. Dedup read the extracted text against the window of news items.',
+  done: 'Done. Dedup read it against the backlog.',
   failed: 'Failed.',
 }
 
@@ -164,10 +164,7 @@ function Step({ step }: { step: ProcessingStep }) {
         )}
       </dl>
       {!step.cost_recorded && (
-        <p className="hint stage-gaps">
-          Not recorded on this item: the inference spend (logged beside the item and metered per
-          stage, never stored per item).
-        </p>
+        <p className="hint stage-gaps">Spend is metered per stage, not stored per item.</p>
       )}
     </div>
   )
@@ -233,7 +230,7 @@ export function SourceItemDetail({
       <Stage
         number={1}
         name="Pulled in"
-        what="The deterministic scrape: polled, fetched and extracted with no model involved. This is exactly what the source handed over."
+        what="Polled, fetched and extracted with no model involved — exactly what the source handed over."
       >
         <dl className="facts">
           <dt>source</dt>
@@ -267,7 +264,7 @@ export function SourceItemDetail({
       <Stage
         number={2}
         name="Processed"
-        what="Inference: dedup reads the extracted text against the news-item window and decides whether it is a new story or part of one. Enrichment steps will sit here too."
+        what="Dedup reads the extracted text against the backlog and decides whether it is a new story or part of one."
       >
         {processed.length === 0 ? (
           <p className={`stage-status status-${data.status}`}>
@@ -281,10 +278,10 @@ export function SourceItemDetail({
       <Stage
         number={3}
         name="News item"
-        what="The deduped story in the backlog that this source item backs, alongside any other sources that told the same story."
+        what="The backlog story this source backs, with any others that told it too."
       >
         {data.news_items.length === 0 ? (
-          <p className="hint">None yet. A news item appears here once stage 2 completes.</p>
+          <p className="hint">None yet — stage 2 has not finished.</p>
         ) : (
           <ul className="linked-news">
             {data.news_items.map((item) => (

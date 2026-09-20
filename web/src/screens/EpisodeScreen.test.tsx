@@ -143,7 +143,7 @@ describe('the in-page player', () => {
     const audio = await findAudio()
     fireEvent(audio, new Event('loadedmetadata'))
     expect(audio.currentTime).toBe(750)
-    expect(screen.getByText('Resumes at 12:30, where you got to.')).toBeTruthy()
+    expect(screen.getByText('Resumes at 12:30.')).toBeTruthy()
     expect(play).not.toHaveBeenCalled()
   })
 
@@ -342,7 +342,7 @@ describe('an episode made to keep its stories in the backlog', () => {
     mockApi()
     renderScreen({ ...EPISODE, keep_in_backlog: true })
     expect(
-      screen.getByText('Listening to this episode leaves its stories in the backlog.'),
+      screen.getByText('Its stories stay in your backlog however far you get.'),
     ).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Mark listened' }))
     expect(

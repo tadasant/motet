@@ -358,17 +358,21 @@ actor ProbeAPI: MotetAPI {
     func listEpisodes() async throws -> [EpisodeResponse] { try await fake.listEpisodes() }
     func episode(id: String) async throws -> EpisodeResponse { try await fake.episode(id: id) }
     func createEpisode(
-        title: String, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
+        title: String?, maxDurationMs: Int, newsItemIds: [String]?, keepInBacklog: Bool
     ) async throws -> EpisodeResponse {
         try await fake.createEpisode(
             title: title, maxDurationMs: maxDurationMs, newsItemIds: newsItemIds, keepInBacklog: keepInBacklog
         )
+    }
+    func renameEpisode(id: String, title: String) async throws -> EpisodeResponse {
+        try await fake.renameEpisode(id: id, title: title)
     }
     func markEpisodeListened(id: String) async throws -> MarkListenedResponse { try await fake.markEpisodeListened(id: id) }
     func setPlaybackPosition(episodeId: String, listenedThroughMs: Int) async throws -> ListenProgressResponse {
         try await fake.setPlaybackPosition(episodeId: episodeId, listenedThroughMs: listenedThroughMs)
     }
     func listNewsItems() async throws -> [NewsItemResponse] { try await fake.listNewsItems() }
+    func newsItem(id: String) async throws -> NewsItemDetailResponse { try await fake.newsItem(id: id) }
     func setNewsItemRead(id: String, read: Bool) async throws -> NewsItemResponse {
         try await fake.setNewsItemRead(id: id, read: read)
     }

@@ -259,6 +259,12 @@ final class AppModel: ObservableObject {
         try? await library.setRead(read, newsItemId: newsItem.id)
     }
 
+    /// One story with every source behind it. Not cached: it is read when a row is opened,
+    /// and the backlog list the row came from is the only thing kept.
+    func newsItem(id: String) async throws -> NewsItemDetailResponse {
+        try await library.newsItem(id: id)
+    }
+
     func download(episode: EpisodeResponse) async {
         do {
             try await library.download(episode: episode)
@@ -279,7 +285,7 @@ final class AppModel: ObservableObject {
     /// server took it, so a sheet can stay open with the picks intact when it did not.
     @discardableResult
     func createEpisode(
-        title: String,
+        title: String?,
         maxDurationMinutes: Int,
         newsItemIds: [String]? = nil,
         keepInBacklog: Bool = false
@@ -292,6 +298,24 @@ final class AppModel: ObservableObject {
                 keepInBacklog: keepInBacklog
             )
             await refresh()
+            return true
+        } catch let error as MotetError {
+            connectionMessage = error.description
+        } catch {
+            connectionMessage = String(describing: error)
+        }
+        return false
+    }
+
+    /// Rename an episode. The row moves as soon as the server has taken it, because a
+    /// rename is a deliberate act somebody is watching — and the list here is the only copy.
+    @discardableResult
+    func rename(episode: EpisodeResponse, to title: String) async -> Bool {
+        do {
+            let renamed = try await library.renameEpisode(id: episode.id, title: title)
+            if let index = episodes.firstIndex(where: { $0.id == renamed.id }) {
+                episodes[index] = renamed
+            }
             return true
         } catch let error as MotetError {
             connectionMessage = error.description
