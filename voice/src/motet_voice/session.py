@@ -710,13 +710,23 @@ class VoiceSession:
         Three shapes on a :class:`LiveArm`: the live channel is open; it did not open and a
         typed question is answered by ``text_arm`` (``reason`` names why, in a code a client
         can branch on — ``insufficient_quota`` is not ``arm_dormant``); or it did not open
-        and nothing can answer. The composed arm reports its own capabilities as before.
+        and nothing can answer.
+
+        **A dormant arm that is not a** :class:`LiveArm` **now sets** ``reason`` **too, and
+        that is the fix for a session that looks alive and can never answer.** Production
+        runs ``arm=composed`` with no speech-to-text vendor provisioned: barge-in detection
+        works, every frame is forwarded, and no reply is possible — which on a phone reads
+        as "the VAD works but I get no audio". The reason was in ``detail`` as prose, so the
+        only place it surfaced was a line in the transcript log. It is a code now, so a
+        client can say it where the mic button is.
         """
         capabilities = self.arm.capabilities()
         detail = capabilities.dormant_reason or capabilities.notes
         reason: str | None = None
         if self.live is not None:
             detail = f"live conversation open · {detail}"
+        elif not isinstance(self.arm, LiveArm) and capabilities.dormant_reason:
+            reason = "arm_dormant"
         elif isinstance(self.arm, LiveArm):
             reason = self.live_failure_reason or "not_opened"
             if self.text_arm is not None:

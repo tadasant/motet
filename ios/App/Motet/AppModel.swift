@@ -144,8 +144,22 @@ final class AppModel: ObservableObject {
     func play(episode: EpisodeResponse) async {
         guard episode.episodeState.isPlayable else { return }
         playbackProblem = nil
+        // Configure *then* activate, on every play rather than once at startup. The
+        // category is process-wide state: Play Live moves it to `.playAndRecord` on
+        // purpose, and a refusal at launch used to leave the app on `.soloAmbient` — muted
+        // by the ringer switch — for the rest of the process with nothing saying so.
+        await environment.applyAudioSessionShape()
         do {
             try environment.audioSession.activate()
+        } catch {
+            // Not a connection problem, and not a reason to refuse to try: the player
+            // screen is where "there is no sound" is asked, so the answer goes there.
+            await controller.report(
+                audioSessionMessage:
+                    "This phone would not give Motet the audio output: \(error.localizedDescription)"
+            )
+        }
+        do {
             let source = try await library.source(forEpisode: episode)
             try await controller.load(episode: episode, source: source, autoplay: true)
         } catch let error as MotetError {

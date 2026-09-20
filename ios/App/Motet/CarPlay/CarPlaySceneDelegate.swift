@@ -123,6 +123,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             // read, and the Now Playing screen pushed below would render an empty
             // `MPNowPlayingInfoCenter`.
             await environment.activate()
+            // The same configure-then-activate as the app's own play button: CarPlay can
+            // be the first thing that ever asks for audio in this process, and the session
+            // shape is not something to assume somebody else set.
+            await environment.applyAudioSessionShape()
             try environment.audioSession.activate()
             let source = try await environment.library.source(forEpisode: episode)
             try await environment.controller.load(

@@ -2179,6 +2179,18 @@ who calls it anyway. Turning it on is configuration, listed in the PR.
   (`MOTET_VOICE_ALLOWED_ORIGINS`). `StartSession` has no CORS policy on purpose: only the
   API calls it.
 
+**An arm that cannot answer says so in a code, on the first `ready`.** `reason` already
+carried one for a *live channel that did not open* (`insufficient_quota`, `arm_dormant`, …);
+an arm with no live channel to open sent its dormancy as prose in `detail`, so the only
+place either client surfaced it was a line in the transcript log. That is the state
+production has been in since the service was deployed — `arm=composed` with no
+speech-to-text vendor provisioned — and on a phone it reads as "the VAD works but I get no
+audio", because barge-in detection is genuinely unaffected and nothing else is possible.
+`ready` now sets `reason: "arm_dormant"` for it too, so both clients can say the *right*
+sentence: a live channel that did not open still answers a typed question, and this answers
+nothing. **The silence itself is the private repo's to fix** — a vendor has to be
+provisioned — and saying so is this repo's.
+
 Deliberately not built, each for a stated reason: a **startup probe that the realtime key
 is billable** is a vendor connection per instance start and belongs with the decision to
 deploy the service at all; **streaming the composed arm's reply** (2–5 s of silence today)

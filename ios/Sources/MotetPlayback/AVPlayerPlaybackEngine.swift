@@ -22,7 +22,12 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
     private var handler: (@Sendable (PlaybackEngineEvent) async -> Void)?
     private var timeObserver: Any?
     private var itemObservations: [NSKeyValueObservation] = []
+    private var playerObservations: [NSKeyValueObservation] = []
     private var notificationObservers: [NSObjectProtocol] = []
+    /// Re-sends the current wait while it lasts. A stalled player's clock does not tick, so
+    /// without a heartbeat the controller would see one `waiting` event and never hear
+    /// again — and "still waiting twelve seconds later" is the whole thing it has to decide.
+    private var waitHeartbeat: DispatchSourceTimer?
     /// The episode's own start offset. Always 0 today — one episode is one audio file —
     /// but it is the hook for a future queue where an item is not the whole episode.
     private var itemStartOffsetMs = 0
@@ -30,11 +35,13 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
     public init() {
         player.automaticallyWaitsToMinimizeStalling = true
         observeInterruptions()
+        observeTimeControlStatus()
     }
 
     deinit {
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         notificationObservers.forEach(NotificationCenter.default.removeObserver)
+        waitHeartbeat?.cancel()
     }
 
     // MARK: - PlaybackEngine
@@ -58,7 +65,12 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
         // `playImmediately(atRate:)` rather than `play()`: `play()` resumes at 1.0 and then
         // the rate observer would have to correct it, which is audible.
         player.playImmediately(atRate: Float(currentRate))
-        emit(.playing)
+        // Deliberately no `emit(.playing)` here. It used to be sent the instant play was
+        // *asked for*, which is the claim that was false: on a device the next thing that
+        // happens is often `.waitingToPlayAtSpecifiedRate`, and an optimistic `.playing`
+        // racing a truthful `.waiting` through two unordered `Task`s would clear the wait
+        // the wait had just reported. `timeControlStatus` is now the only source of both,
+        // so they cannot disagree.
     }
 
     public func pause() async {
@@ -113,6 +125,90 @@ public final class AVPlayerPlaybackEngine: PlaybackEngine, @unchecked Sendable {
             guard let self else { return }
             self.emit(.position(ms: Self.ms(fromTime: time) + self.itemStartOffsetMs))
         }
+    }
+
+    /// The observation whose absence was the bug.
+    ///
+    /// `AVPlayer` has three control states and this engine only ever reported two of them.
+    /// `.playing` and `.paused` were wired; `.waitingToPlayAtSpecifiedRate` was not — and
+    /// that is the one a real device sits in when a remote asset will not start. In it the
+    /// clock does not advance, no item error is ever set, `didPlayToEndTime` never fires,
+    /// and `AVPlayerItem.status` stays `.readyToPlay`, so every other observation in this
+    /// file reports that everything is fine. The listener sees a pause button over silence.
+    ///
+    /// `reasonForWaitingToPlay` is the player's own account of why, and it is only readable
+    /// while the wait is on, so it is read here rather than reconstructed later.
+    private func observeTimeControlStatus() {
+        playerObservations.append(
+            player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+                guard let self else { return }
+                switch player.timeControlStatus {
+                case .waitingToPlayAtSpecifiedRate:
+                    self.beginWaiting(Self.reason(player.reasonForWaitingToPlay))
+                case .playing:
+                    self.endWaiting()
+                    self.emit(.playing)
+                case .paused:
+                    self.endWaiting()
+                @unknown default:
+                    self.endWaiting()
+                }
+            }
+        )
+    }
+
+    /// `AVPlayer.WaitingReason` is a `String`-backed struct rather than an enum, so a
+    /// release can add a reason without this file changing — which is what `.unknown` is
+    /// for. A reason nobody here recognises is still reported: an unnamed wait is exactly
+    /// the kind that never gets looked at.
+    private static func reason(_ reason: AVPlayer.WaitingReason?) -> PlaybackWaitReason {
+        guard let reason else { return .unknown }
+        switch reason {
+        case .noItemToPlay: return .noItemToPlay
+        case .toMinimizeStalls: return .toMinimizeStalls
+        case .evaluatingBufferingRate: return .evaluatingBufferingRate
+        case .interstitialEvent: return .interstitialEvent
+        case .waitingForCoordinatedPlayback: return .waitingForCoordinatedPlayback
+        default: return .unknown
+        }
+    }
+
+    private func beginWaiting(_ reason: PlaybackWaitReason) {
+        emit(.waiting(reason))
+        // One heartbeat for the whole wait, replaced rather than stacked: `timeControlStatus`
+        // can report a *different* reason without leaving the waiting state, and two timers
+        // would both survive the one `endWaiting` that follows.
+        let existing = lock.withLock { () -> DispatchSourceTimer? in
+            defer { waitHeartbeat = nil }
+            return waitHeartbeat
+        }
+        existing?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        let interval = PlaybackController.stallProbeSeconds
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            // Read the live reason each tick rather than the captured one: a wait that
+            // started as "measuring the connection" and became "nothing to play" is a
+            // different answer, and the second is the one worth reporting.
+            guard self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate else {
+                self.endWaiting()
+                return
+            }
+            self.emit(.waiting(Self.reason(self.player.reasonForWaitingToPlay)))
+        }
+        lock.withLock { waitHeartbeat = timer }
+        timer.resume()
+    }
+
+    private func endWaiting() {
+        let timer = lock.withLock { () -> DispatchSourceTimer? in
+            defer { waitHeartbeat = nil }
+            return waitHeartbeat
+        }
+        guard timer != nil else { return }
+        timer?.cancel()
+        emit(.waiting(nil))
     }
 
     private func replaceObservations(for item: AVPlayerItem) {

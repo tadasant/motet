@@ -149,6 +149,8 @@ links. It says nothing about any of this.
 2. **Background audio.** `UIBackgroundModes: audio` plus the `.playback` category with
    `.spokenAudio` and `.longFormAudio` is written; a simulator's host OS does not enforce
    any of it. Prove it on a device: play, lock the screen, put the phone in a pocket, walk.
+   What is no longer unknown is **whether the category was set at all**: see "Silence has a
+   reason now" below. The `audio-session` log category names the shape that took.
 3. **The mute switch.** `.playback` is what keeps audio going when the ringer is silenced.
    Device-only.
 4. **Lockscreen and Control Centre.** `MPNowPlayingInfoCenter` publishes *our* elapsed time
@@ -206,6 +208,61 @@ links. It says nothing about any of this.
     page, loaded inside the sheet, handing the consent to `motet://consent` (see "Sources
     and connectors on the phone"). The first real mailbox connected from the phone is the
     evidence.
+
+## Silence has a reason now
+
+Reported against TestFlight on 2026-09-20: *"The Play button doesn't actually start the
+audio… can't hear anything. Same with Live. The VAD seems to work but not getting any audio
+and the timer line doesn't move."* Production telemetry settled where the fault is **not**:
+the phone fetched `GET /v1/episodes/{id}/audio` and the API answered `307` to a signed URL,
+one request, no error, no expiry, and no second request — so nothing was wrong with the
+server, the route, the feed token, or range support. The narration offsets the phone
+reported to the voice service never advance on their own; they are scrub positions. The
+clock was never running.
+
+**What no observation in this app could tell you is why**, and that was the defect worth
+fixing here, because it is the one that made a device bug undiagnosable from anywhere:
+
+* **`AVPlayer` has three control states and this app observed two.** `.playing` and
+  `.paused` were wired; `.waitingToPlayAtSpecifiedRate` — the one a device sits in when a
+  remote asset will not start — was not. In it `AVPlayerItem.status` stays `.readyToPlay`,
+  no error is ever set, `didPlayToEndTime` never fires and the clock does not tick, so every
+  other observation in `AVPlayerPlaybackEngine` reported that all was well while the screen
+  drew a pause button over silence. It is now `PlaybackEngineEvent.waiting`, carrying
+  `reasonForWaitingToPlay`; the engine re-sends it every two seconds, because a stalled
+  player emits nothing else and "still waiting" is the whole thing there is to decide.
+  `PlaybackController` shows it as a sentence under a spinner while it can still clear, and
+  turns it into an error after fifteen seconds — or at once for `noItemToPlay`, which never
+  clears. `play()` no longer emits an optimistic `.playing`: `timeControlStatus` is the only
+  source of both, so the truthful event cannot be raced away by the hopeful one.
+* **A refused `setCategory` was swallowed by `try?`, in three places.** That is the quietest
+  failure the app had: the session stays on the process default `.soloAmbient`, which is
+  *muted by the ringer switch* and *stops on lock* — the exact bug report, with nothing
+  anywhere saying so. iOS validates category, mode, policy and options together and has
+  tightened that validation between releases (18.5 refuses any explicit `CategoryOptions`
+  alongside `longFormAudio`), so one hard-coded combination is a bet on a table that moves.
+  `AudioSessionPlan.listening` is a ladder instead — `.playback` throughout, giving up
+  long-form route sharing and then spoken-audio ducking — and running out of rungs is a
+  sentence on the player screen, not a `try?`. The ladder lives in `MotetKit` so CI can test
+  it on a machine with no AVFoundation; `AudioSessionController` only walks it.
+* **The session shape is now applied before every play**, not once at launch. It is
+  process-wide state that Play Live deliberately moves to `.playAndRecord`, and assuming
+  the startup call still holds is how a briefing ends up in the earpiece.
+
+**Play Live's silence in production is a different thing and is not an app bug.** The voice
+service logs, at startup, `arm=composed … openai_key=absent` and *"arm composed is dormant:
+no speech-to-text vendor is provisioned for the composed arm"*. Barge-in detection is
+unaffected — which is precisely why the VAD looked healthy — and no reply is possible at
+all. Provisioning that vendor is the private repo's, not this one's. What **was** an app bug
+is that the session said so only as prose inside a transcript log line: `ready` now carries
+`reason: "arm_dormant"`, `LiveSnapshot.canAnswer` is false, and the panel says the session
+will not answer rather than offering typed questions it cannot answer either.
+
+**What none of this proves is that the audio now plays.** Nothing in CI boots a simulator,
+and the fault is a device one. The evidence that the fix worked is the first TestFlight
+build where Play produces sound; the evidence that this change is worth having either way is
+that a build where it *doesn't* now says what stopped it, on screen and in the
+`audio-session` and player logs, instead of showing a button that does nothing.
 
 ## Playback position is cross-device
 

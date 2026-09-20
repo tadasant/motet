@@ -128,11 +128,24 @@ struct PlayerView: View {
         }
     }
 
-    /// Loading and failing, said where they can be seen. The controller always knew both;
-    /// the screen showed neither, so audio that would not load was a play button that did
-    /// nothing.
+    /// Loading, waiting, failing, and a session this phone would not grant — said where
+    /// they can be seen. The controller always knew the first and the last two; the screen
+    /// showed none of them, so audio that would not load was a play button that did nothing.
+    ///
+    /// The middle one is new and is the one the TestFlight report was about: `AVPlayer`
+    /// waiting to start is neither loading nor failing, and it was the state nothing
+    /// anywhere had a name for.
     @ViewBuilder
     private var loadState: some View {
+        if let session = model.playback.audioSessionMessage {
+            // Above the rest deliberately: it is the reason *any* episode would be silent,
+            // so a listener chasing silence should meet it before an episode-specific line.
+            Text(session)
+                .font(Theme.body(12, relativeTo: .caption))
+                .foregroundStyle(Theme.errorText)
+                .multilineTextAlignment(.center)
+                .padding(.top, 4)
+        }
         if let error = model.playback.errorMessage {
             VStack(spacing: 6) {
                 Text("This episode’s audio could not be loaded.")
@@ -152,6 +165,19 @@ struct PlayerView: View {
                 }
             }
             .padding(.top, 4)
+        } else if let stall = model.playback.stallMessage {
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for audio…")
+                        .font(Theme.body(13, relativeTo: .footnote))
+                        .foregroundStyle(Theme.inkSoft)
+                }
+                Text(stall)
+                    .font(Theme.body(12, relativeTo: .caption))
+                    .foregroundStyle(Theme.inkSoft)
+                    .multilineTextAlignment(.center)
+            }
         } else if model.playback.isLoading {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -373,12 +399,30 @@ struct MiniPlayerView: View {
                         .font(Theme.body(15, weight: 500, relativeTo: .subheadline))
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
-                    Text(
-                        "\(Format.time(model.playback.positionMs)) · \(Format.rate(model.playback.rate))"
-                    )
-                    .font(Theme.body(12, weight: 500, relativeTo: .caption))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.inkSoft)
+                    // The bar is the surface most often on screen while somebody is
+                    // wondering why there is no sound, so it carries the answer rather than
+                    // a time that is not moving and a pause button that implies it is.
+                    if model.playback.errorMessage != nil {
+                        Text(
+                            model.playbackProblem?.sentence
+                                ?? "Audio could not be loaded. Tap to see why."
+                        )
+                        .font(Theme.body(12, weight: 500, relativeTo: .caption))
+                        .foregroundStyle(Theme.errorText)
+                        .lineLimit(1)
+                    } else if model.playback.stallMessage != nil {
+                        Text("Waiting for audio…")
+                            .font(Theme.body(12, weight: 500, relativeTo: .caption))
+                            .foregroundStyle(Theme.inkSoft)
+                            .lineLimit(1)
+                    } else {
+                        Text(
+                            "\(Format.time(model.playback.positionMs)) · \(Format.rate(model.playback.rate))"
+                        )
+                        .font(Theme.body(12, weight: 500, relativeTo: .caption))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkSoft)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

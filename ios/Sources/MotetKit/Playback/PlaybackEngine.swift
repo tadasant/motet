@@ -13,6 +13,14 @@ public enum PlaybackEngineEvent: Hashable, Sendable {
     /// polite to resume when it hands it back.
     case interrupted(resumable: Bool)
     case stalled
+    /// The player was told to play and is producing no audio — `AVPlayer`'s
+    /// `timeControlStatus == .waitingToPlayAtSpecifiedRate`. `nil` means the wait ended.
+    ///
+    /// Re-sent while the wait continues, roughly every
+    /// ``PlaybackController/stallProbeSeconds``, because a frozen clock emits nothing else
+    /// and the controller needs a heartbeat to decide the wait has gone on too long. The
+    /// engine reports; ``PlaybackController`` decides when it becomes a failure.
+    case waiting(PlaybackWaitReason?)
     case failed(String)
 }
 

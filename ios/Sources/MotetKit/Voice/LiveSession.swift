@@ -94,8 +94,22 @@ public struct LiveSnapshot: Equatable, Sendable {
     public var arm = ""
     /// Whether a speech-to-speech channel is open: the listener can just talk.
     public var isLive = false
-    /// Why the live channel is not there, when the arm offered one.
+    /// Why the live channel is not there, when the arm offered one — a short code the UI
+    /// branches on (`insufficient_quota`, `arm_dormant`, …).
     public var liveUnavailable: String?
+    /// The service's own sentence behind that code. Carried because `arm_dormant` on an arm
+    /// that offers no live channel at all means *nothing* can answer — not even a typed
+    /// question — and the only thing that says which vendor is missing is this text.
+    public var liveUnavailableDetail: String?
+
+    /// Whether this session can produce a reply of any kind.
+    ///
+    /// False is the state production has been in since the voice service was deployed: the
+    /// composed arm with no speech-to-text vendor provisioned. Barge-in works, every mic
+    /// frame is forwarded, and no answer is possible — "the VAD seems to work but I'm not
+    /// getting any audio". A session that cannot answer must say so where the mic is,
+    /// rather than looking like one that is merely quiet.
+    public var canAnswer: Bool { liveUnavailable != "arm_dormant" }
     public var lines: [Line] = []
     /// What was playing at the last barge-in.
     public var lastInterrupt: String?
@@ -429,7 +443,10 @@ public actor LiveSession {
                     readySeen = true
                     let opened = live ?? (detail?.hasPrefix("live conversation open") ?? false)
                     state.isLive = opened
-                    if !opened, let reason { state.liveUnavailable = reason }
+                    if !opened, let reason {
+                        state.liveUnavailable = reason
+                        state.liveUnavailableDetail = detail
+                    }
                     if let detail { push(.event, "Ready · \(detail)") }
                     await beginNarration(generation: mine)
                 } else {

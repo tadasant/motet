@@ -266,6 +266,39 @@ final class LiveSessionTests: XCTestCase {
         XCTAssertEqual(snapshot.liveUnavailable, "insufficient_quota")
     }
 
+    func testADormantArmSaysNothingCanAnswerRatherThanOfferingTypedQuestions() async throws {
+        let h = makeHarness()
+        // What production has sent since the voice service was deployed: `arm=composed`
+        // with no speech-to-text vendor provisioned. Barge-in works and every mic frame is
+        // forwarded, which is why it reads as "the VAD works but I get no audio".
+        try await started(
+            h,
+            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"no speech-to-text vendor is provisioned for the composed arm","reason":"arm_dormant","live":false}"#
+        )
+
+        let snapshot = await h.session.snapshot()
+        XCTAssertEqual(snapshot.liveUnavailable, "arm_dormant")
+        XCTAssertFalse(snapshot.canAnswer, "a dormant arm cannot answer a typed question either")
+        XCTAssertEqual(
+            snapshot.liveUnavailableDetail,
+            "no speech-to-text vendor is provisioned for the composed arm"
+        )
+    }
+
+    func testALiveChannelThatDidNotOpenStillAnswersTypedQuestions() async throws {
+        let h = makeHarness()
+        try await started(
+            h,
+            readyJSON: #"{"type":"session_state","at_ms":0,"state":"ready","detail":"composed","reason":"insufficient_quota","live":false}"#
+        )
+
+        // The distinction the screen's two sentences rest on: out of credits is not the
+        // same as nothing in the process being able to reply.
+        let snapshot = await h.session.snapshot()
+        XCTAssertEqual(snapshot.liveUnavailable, "insufficient_quota")
+        XCTAssertTrue(snapshot.canAnswer)
+    }
+
     func testAFailedTurnIsNotAClosedSocket() async throws {
         let h = makeHarness()
         try await started(h)
