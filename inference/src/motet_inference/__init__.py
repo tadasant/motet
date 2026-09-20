@@ -16,6 +16,7 @@ from .audio import (
     AudioError,
     estimate_duration_ms,
     join_audio,
+    sniff_media_type,
 )
 from .fakes import first_sentence
 from .interfaces import (
@@ -68,5 +69,6 @@ __all__ = [
     "first_sentence",
     "get_stages",
     "join_audio",
+    "sniff_media_type",
     "real_stages",
 ]

@@ -290,10 +290,14 @@ actor ScriptedEngine: PlaybackEngine {
 // MARK: - Downloader
 
 /// A downloader that writes a known payload, and can be told to fail.
+///
+/// The payload is real audio by default — the smallest thing that sniffs as MP3 — because
+/// the offline library refuses to file anything else, exactly as it refuses the HTML
+/// sign-in page or empty object a real download can come back with.
 final class FakeDownloader: EpisodeDownloader, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var downloaded: [URL] = []
-    var payload = Data("audio-bytes".utf8)
+    var payload = Audio.mp3
     var failingURLs: Set<URL> = []
 
     func download(from url: URL, to destination: URL) async throws {
@@ -306,6 +310,28 @@ final class FakeDownloader: EpisodeDownloader, @unchecked Sendable {
     }
 
     func recordedDownloads() -> [URL] { lock.withLock { downloaded } }
+}
+
+/// Byte patterns a player identifies a file by — the real openings, not stand-ins, because
+/// what is under test is whether they are recognised.
+enum Audio {
+    /// An MPEG-1 Layer III frame header (`FF FB`) and a little payload behind it.
+    static let mp3 = Data([0xFF, 0xFB, 0x90, 0x44] + [UInt8](repeating: 0, count: 60))
+    /// A 44-byte canonical RIFF/WAVE header with no samples.
+    static let wav: Data = {
+        var data = Data("RIFF".utf8)
+        data.append(contentsOf: [0x24, 0x00, 0x00, 0x00])
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        data.append(contentsOf: [0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00])
+        data.append(contentsOf: [0x40, 0x1F, 0x00, 0x00, 0x80, 0x3E, 0x00, 0x00])
+        data.append(contentsOf: [0x02, 0x00, 0x10, 0x00])
+        data.append(contentsOf: Array("data".utf8))
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
+        return data
+    }()
+    /// What the audio route answers with when the caller is not signed in — the shape that
+    /// reaches a phone as "this media format is not supported".
+    static let signInPage = Data("<!DOCTYPE html><html><body>Sign in</body></html>".utf8)
 }
 
 // MARK: - Fixtures

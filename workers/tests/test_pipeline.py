@@ -30,10 +30,11 @@ from motet_inference import (
     ScriptGenerator,
     SourceItem,
     Stages,
+    sniff_media_type,
 )
 from motet_inference.llm import FakeLlmClient
 from motet_inference.registry import fake_stages
-from motet_storage import LocalObjectStore
+from motet_storage import LocalObjectStore, episode_audio_key
 from motet_workers import Queue, drain, enqueue_episode, enqueue_paste, jobs, loop, runner
 from motet_workers.queues import PIPELINE
 
@@ -576,6 +577,111 @@ class TestFullPipeline:
         drain(Queue.SCRIPT, _migrated)
 
         assert len(repo.get_episode(db, episode_id).segments) == before
+
+
+class MislabellingSynthesizer:
+    """A synthesizer whose bytes are not the media type it declares them to be."""
+
+    def __init__(self, data: bytes, media_type: str) -> None:
+        self._data = data
+        self._media_type = media_type
+
+    def synthesize(self, text: str) -> Audio:
+        return Audio(media_type=self._media_type, data=self._data, duration_ms=1000)
+
+
+class TestAnObjectIsNotPublishedUnderAContentTypeItsBytesContradict:
+    """The upload is where the bytes and the label a player reads them by meet.
+
+    A phone gets *only* the label: AVFoundation picks a reader for a downloaded file from
+    its path extension and a streamed one from the response's content type, and both of
+    those come from ``Audio.media_type``. Nothing had ever compared that field to the
+    bytes, so an object labelled wrong here is an episode that fails with
+    ``AVFoundationErrorDomain -11828`` — "this media format is not supported" — on a
+    device, days later, with no error anywhere in the pipeline that produced it.
+    """
+
+    def _episode_ready_for_tts(self, db: psycopg.Connection[Any], url: str) -> str:
+        paste(db, MORNING)
+        drain(Queue.INTEGRATE, url)
+        episode_id = enqueue_episode(db, user_id=USER, title="E", max_duration_ms=600_000)
+        db.commit()
+        drain(Queue.ASSEMBLE, url)
+        drain(Queue.SCRIPT, url)
+        return episode_id
+
+    def test_bytes_that_are_not_audio_at_all_are_refused(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        episode_id = self._episode_ready_for_tts(db, _migrated)
+        stages = replace(
+            fake_stages(),
+            speech_synthesizer=MislabellingSynthesizer(
+                b'{"detail":"Not authenticated"}', "audio/mpeg"
+            ),
+        )
+
+        drain(Queue.TTS, _migrated, stages=stages, store=object_store)
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert episode.state is EpisodeState.FAILED
+        assert "refusing to publish" in (episode.last_error or "")
+        assert not object_store.exists(episode_audio_key(USER, episode_id, "mp3"))
+
+    def test_wav_bytes_labelled_as_mpeg_are_refused(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """The nastier half: real, playable audio, stored under the wrong name.
+
+        It is what an offline copy is named after, so the file lands on the phone as
+        ``.mp3`` holding a WAV — which is unopenable for exactly the reason a `.audio`
+        file was, and looks like perfectly good audio to everything server-side.
+        """
+        episode_id = self._episode_ready_for_tts(db, _migrated)
+        wav = fake_stages().speech_synthesizer.synthesize("one two three").data
+        stages = replace(
+            fake_stages(), speech_synthesizer=MislabellingSynthesizer(wav, "audio/mpeg")
+        )
+
+        drain(Queue.TTS, _migrated, stages=stages, store=object_store)
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert episode.state is EpisodeState.FAILED
+        assert "audio/wav" in (episode.last_error or "")
+
+    def test_a_failure_it_cannot_fix_is_not_retried_five_times(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """Mislabelled bytes are mislabelled next time too, and TTS is the billed stage."""
+        self._episode_ready_for_tts(db, _migrated)
+        stages = replace(
+            fake_stages(), speech_synthesizer=MislabellingSynthesizer(b"not audio", "audio/mpeg")
+        )
+        drain(Queue.TTS, _migrated, stages=stages, store=object_store)
+
+        row = db.execute("SELECT attempts, state FROM jobs WHERE queue = 'tts'").fetchone()
+        assert row is not None
+        assert row["attempts"] == 1
+        assert row["state"] == "failed"
+
+    def test_the_ordinary_path_still_publishes(
+        self, db: psycopg.Connection[Any], _migrated: str, object_store: LocalObjectStore
+    ) -> None:
+        """The guard has to be satisfied by what the pipeline actually produces."""
+        episode_id = self._episode_ready_for_tts(db, _migrated)
+
+        drain(Queue.TTS, _migrated, store=object_store)
+
+        episode = repo.get_episode(db, episode_id)
+        assert episode is not None
+        assert episode.state is EpisodeState.READY
+        assert episode.audio_key is not None
+        # And what is stored begins as the type it is stored under — the property the phone
+        # depends on, asserted against the object rather than against the handler's belief.
+        assert sniff_media_type(object_store.get(episode.audio_key)) == episode.audio_media_type
+        assert episode.audio_key.endswith(".wav")
 
 
 class CountingScriptGenerator:

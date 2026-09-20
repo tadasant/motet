@@ -18,7 +18,7 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     237 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     255 tests (258 on a Mac), incl. an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
   App/MotetUITests/        XCUITest: the one flow that RUNS the app, on a simulator
   App/Motet.xcodeproj/     two targets, three configurations (Debug, Release, Staging)
@@ -107,10 +107,12 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 237 tests
-pass — segment-boundary read state, the difference between listening and skipping, the
+strict concurrency checking, and 255 tests pass — 258 on a Mac, where three more put the
+local-file format rule to AVFoundation itself rather than to our own account of it.
+Segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
-in flight), the download policy, position resume across a simulated relaunch, interruption
+in flight), the download policy, what a downloaded file is named and what happens to one
+an older build misnamed, position resume across a simulated relaunch, interruption
 handling, error mapping, timestamp decoding against the exact shape FastAPI emits, and an
 end-to-end "dog walk with no signal" journey that drives the real library, controller,
 outbox, and offline store together against fakes for the audio engine, the downloader, and
@@ -123,6 +125,23 @@ read only once every segment it occupies is covered. That distinction is load-be
 three taps of *next story* as having heard three stories — and quietly empty the backlog,
 which is the product's memory. The coverage is persisted beside the position, so a story
 skipped on Monday is still unread on Tuesday.
+
+**A downloaded episode is named after what its bytes are, and that is not cosmetic.**
+AVFoundation picks a reader for a *local* file from the path extension and from nothing
+else — there is no HTTP response to carry a `Content-Type` — so an extension it does not
+recognise means no reader at all, and `AVURLAsset` fails with `AVFoundationErrorDomain
+-11828` ("Cannot Open", "This media format is not supported") before a byte is parsed.
+Every download used to be named `<episode-id>.audio`, which is a media extension nowhere,
+so **no downloaded episode had ever been playable** — and because the download policy keeps
+the newest episodes on the phone, the newest episode is the one that is always local and
+therefore was always refused. `AudioFileFormat` sniffs the first twelve bytes and
+`OfflineLibrary` names the file after the answer. Sniffing rather than trusting the
+server's `audio_media_type`, for two reasons: it is the only thing that can repair a file
+already on a phone, where no media type was ever recorded beside it, and it is the one
+check that an HTML sign-in page or an empty object saved under an audio filename cannot
+pass. Something that is not audio is refused rather than filed, because
+`MotetLibrary.source(forEpisode:)` prefers the device — a bad file held in the library
+would shadow the API for that episode on every future tap.
 
 ## What is **not** verified — and what no longer belongs on that list
 

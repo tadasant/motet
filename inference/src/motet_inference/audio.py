@@ -84,6 +84,33 @@ def duration_ms(audio_bytes: bytes, media_type: str) -> int:
     raise AudioError(f"do not know how to measure {media_type!r} audio")
 
 
+def sniff_media_type(data: bytes) -> str | None:
+    """The media type ``data`` *begins as*, or ``None`` if it does not begin as audio.
+
+    The content type an object is uploaded under is what a player is told the bytes are, and
+    the extension its key ends in is what an offline copy is identified by — so both are
+    claims about the bytes, made by code that has never looked at them. This is the look.
+
+    A **prefix** check rather than a parse: the parse already happened, per segment, in the
+    synthesizer. What this catches is the joined object not starting the way the media type
+    it is about to be labelled with says it does, which is the one failure that survives
+    every check upstream and surfaces as a player refusing to open the episode.
+    """
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return WAV_MEDIA_TYPE
+    if data[:3] == b"ID3":
+        return MPEG_MEDIA_TYPE
+    # An MPEG frame sync: eleven set bits, then a version that is not the reserved `01` and
+    # a layer that is not the reserved `00`. Checking the two reserved values is what makes
+    # this identification rather than a guess about any byte pair starting 0xFF.
+    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        version = (data[1] >> 3) & 0b11
+        layer = (data[1] >> 1) & 0b11
+        if version != 1 and layer != 0:
+            return MPEG_MEDIA_TYPE
+    return None
+
+
 # --- MPEG ---------------------------------------------------------------------------
 
 # Layer III bitrates in kbps, indexed by the header's 4-bit bitrate index. Index 0 is

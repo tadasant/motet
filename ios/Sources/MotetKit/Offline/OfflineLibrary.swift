@@ -97,13 +97,48 @@ public actor OfflineLibrary {
     private func loadIfNeeded() throws {
         guard !loaded else { return }
         let entries = (try? store.value([DownloadedEpisode].self, forKey: Self.manifestKey)) ?? []
-        manifest = Dictionary(uniqueKeysWithValues: (entries ?? []).map { ($0.episodeId, $0) })
+        manifest = Dictionary(uniqueKeysWithValues: entries.map { ($0.episodeId, $0) })
         // The manifest and the disk can disagree — iOS evicts files under storage pressure,
         // and a crash between the write and the manifest update leaves a phantom. Trust the
         // disk, which is what playback will actually open.
         manifest = manifest.filter { fileManager.fileExists(atPath: url(for: $0.value).path) }
+        repairFileNames()
         loaded = true
         try persist()
+    }
+
+    /// Give a file an extension AVFoundation recognises, where an older build did not.
+    ///
+    /// Every download used to be named `<episode-id>.audio`, which no player can open — see
+    /// `AudioFileFormat`. Renaming rather than evicting is the point: the bytes are good, and
+    /// making a phone re-fetch a walk's worth of episodes over cellular to correct a filename
+    /// would be a worse answer than reading twelve bytes off each of them. A file that is not
+    /// audio at all is dropped instead, and the next sync fetches the episode again.
+    private func repairFileNames() {
+        for (episodeId, entry) in Array(manifest) {
+            let current = url(for: entry)
+            guard AudioFileFormat(pathExtension: current.pathExtension) == nil else { continue }
+            guard let format = try? Self.audioFormat(ofFileAt: current, fileManager: fileManager)
+            else {
+                try? fileManager.removeItem(at: current)
+                manifest[episodeId] = nil
+                continue
+            }
+            let renamed = Self.fileName(for: episodeId, format: format)
+            do {
+                try replaceItem(at: directory.appendingPathComponent(renamed), movingFrom: current)
+            } catch {
+                try? fileManager.removeItem(at: current)
+                manifest[episodeId] = nil
+                continue
+            }
+            manifest[episodeId] = DownloadedEpisode(
+                episodeId: episodeId,
+                fileName: renamed,
+                byteCount: entry.byteCount,
+                downloadedAt: entry.downloadedAt
+            )
+        }
     }
 
     private func url(for entry: DownloadedEpisode) -> URL {
@@ -139,11 +174,31 @@ public actor OfflineLibrary {
         inFlight.insert(episodeId)
         defer { inFlight.remove(episodeId) }
 
-        let fileName = Self.fileName(for: episodeId)
-        let destination = directory.appendingPathComponent(fileName)
-        try await downloader.download(from: url, to: destination)
+        // Downloaded to a staging name first, because the name it has to end up with depends
+        // on what came back: AVFoundation reads a local file's format off its extension, so
+        // the extension has to be the one the bytes actually are.
+        let staging = directory.appendingPathComponent(Self.stagingFileName(for: episodeId))
+        try? fileManager.removeItem(at: staging)
+        try await downloader.download(from: url, to: staging)
 
-        let size = (try? fileManager.attributesOfItem(atPath: destination.path)[.size] as? Int) ?? 0
+        let format: AudioFileFormat
+        do {
+            format = try Self.audioFormat(ofFileAt: staging, fileManager: fileManager)
+        } catch {
+            // An unplayable file must not enter the library. Held, it would shadow the API
+            // for this episode forever — `source(forEpisode:)` prefers the device — and the
+            // listener would get -11828 on every tap with no way to clear it. Dropped, the
+            // next tap streams, and the next sync tries the download again.
+            try? fileManager.removeItem(at: staging)
+            throw error
+        }
+
+        let fileName = Self.fileName(for: episodeId, format: format)
+        let destination = directory.appendingPathComponent(fileName)
+        try replaceItem(at: destination, movingFrom: staging)
+
+        let attributes = try? fileManager.attributesOfItem(atPath: destination.path)
+        let size = attributes?[.size] as? Int
         let entry = DownloadedEpisode(
             episodeId: episodeId,
             fileName: fileName,
@@ -189,11 +244,53 @@ public actor OfflineLibrary {
         return failures
     }
 
+    /// Move `source` onto `target`, replacing whatever is there.
+    private func replaceItem(at target: URL, movingFrom source: URL) throws {
+        if fileManager.fileExists(atPath: target.path) {
+            try fileManager.removeItem(at: target)
+        }
+        try fileManager.moveItem(at: source, to: target)
+    }
+
+    /// What kind of audio the file holds, or `UnplayableAudioError` if it is not audio.
+    private static func audioFormat(
+        ofFileAt url: URL, fileManager: FileManager
+    ) throws -> AudioFileFormat {
+        let head = try head(ofFileAt: url, fileManager: fileManager)
+        guard let format = AudioFileFormat.sniff(head) else {
+            let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+            throw UnplayableAudioError(
+                byteCount: attributes?[.size] as? Int ?? head.count, head: head
+            )
+        }
+        return format
+    }
+
+    /// The first bytes of a file — enough to identify it, and never the whole episode.
+    private static func head(ofFileAt url: URL, fileManager: FileManager) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        return try handle.read(upToCount: 12) ?? Data()
+    }
+
     /// Episode ids are opaque server strings; keep them out of the filename.
-    private static func fileName(for episodeId: String) -> String {
+    ///
+    /// The extension is the format's own, because AVFoundation opens a local file by its
+    /// extension and by nothing else. It used to be a constant `.audio`, which is why no
+    /// downloaded episode played — see `AudioFileFormat`.
+    private static func fileName(for episodeId: String, format: AudioFileFormat) -> String {
+        "\(safeName(for: episodeId)).\(format.pathExtension)"
+    }
+
+    /// Where a download lands before its format is known. Deliberately not an audio
+    /// extension: a half-written transfer must never look like something playable.
+    private static func stagingFileName(for episodeId: String) -> String {
+        "\(safeName(for: episodeId)).download"
+    }
+
+    private static func safeName(for episodeId: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-_")
-        let safe = episodeId.addingPercentEncoding(withAllowedCharacters: allowed) ?? "episode"
-        return "\(safe).audio"
+        return episodeId.addingPercentEncoding(withAllowedCharacters: allowed) ?? "episode"
     }
 }
