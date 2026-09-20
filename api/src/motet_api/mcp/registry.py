@@ -248,6 +248,19 @@ EXCLUDED: dict[Operation, str] = {
         "The iOS app collecting its own sign-in with the PKCE verifier only it holds; same "
         "reason as /v1/auth/native/start, and a tool could not hold that verifier anyway."
     ),
+    ("POST", "/v1/auth/tokens"): (
+        "Mints a personal access token, which is a long-lived credential for the whole of "
+        "/v1. An MCP connection is a delegated grant the person can revoke by deleting the "
+        "client; a token minted from it would outlive that revocation, so deps.require_session "
+        "refuses one and a tool could only ever report the 403."
+    ),
+    ("GET", "/v1/auth/tokens"): (
+        "Lists this account's personal access tokens; same guard and same reason as "
+        "POST /v1/auth/tokens. Managing credentials is the owner's own surface."
+    ),
+    ("DELETE", "/v1/auth/tokens/{token_id}"): (
+        "Revokes a personal access token; same guard and same reason as POST /v1/auth/tokens."
+    ),
     ("POST", "/v1/auth/logout"): (
         "Revokes the credential the call arrived on, which would end the MCP connection that "
         "made it. logout_everywhere (admin) is the revocation an agent may need."

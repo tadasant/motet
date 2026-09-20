@@ -330,7 +330,13 @@ export default function App() {
       .catch((err: unknown) => {
         if (!current) return
         setWho(null)
-        const refused = err instanceof ApiError && err.status === 401
+        // A 429 counts as a refusal here, not as an outage. The API throttles only
+        // requests that *already failed to authenticate* (`motet_api.throttle`), so a 429
+        // on this call means this credential was refused and the process had spent its
+        // budget of saying so — a valid one is never throttled. Read as an error instead,
+        // it would leave a dead token in storage behind a sentence nobody can act on.
+        const refused =
+          err instanceof ApiError && (err.status === 401 || err.status === 429)
         setSessionError(refused ? '' : err instanceof Error ? err.message : String(err))
         if (refused && token) saveToken('')
       })
@@ -494,13 +500,21 @@ export default function App() {
   // says "Account" and the menu says which.
   const account = (
     <Popover label={who?.email ?? 'Account'}>
-      {who?.email ? (
+      {who?.how === 'session' ? (
         <>
           <p className="hint">Signed in with Google.</p>
           <button type="button" onClick={signOut}>
             Sign out
           </button>
         </>
+      ) : who?.how === 'pat' ? (
+        // A PAT carries the address of the session that minted it, so it has an email and
+        // is not a sign-in: `/v1/auth/logout` is a no-op for one, and offering Sign out
+        // would be a button that does nothing. Revoking is on the Credentials screen,
+        // which needs a session — so this says where, rather than offering a dead control.
+        <p className="hint">
+          Using an access token for {who.email}. Sign in to manage or revoke it.
+        </p>
       ) : who?.how === 'token' ? (
         <p className="hint">Using the shared API token.</p>
       ) : unlocked ? (
@@ -550,7 +564,7 @@ export default function App() {
         />
       )}
       {section.id === 'sources' && <Sources notice={consentNotice} />}
-      {section.id === 'credentials' && <Credentials />}
+      {section.id === 'credentials' && <Credentials signedIn={who?.how === 'session'} />}
       {section.id === 'admin' &&
         (isAdmin ? (
           <Admin />
@@ -569,7 +583,9 @@ export default function App() {
                     ? `${who.email ?? 'This account'} is not an admin on this deployment.`
                     : who.how === 'token'
                       ? 'The admin view needs a signed-in Google account; the shared API token is not one.'
-                      : 'The admin view needs a signed-in Google account, and this deployment has no sign-in lock at all.'}
+                      : who.how === 'pat'
+                        ? 'The admin view needs a signed-in Google account; an access token is not one.'
+                        : 'The admin view needs a signed-in Google account, and this deployment has no sign-in lock at all.'}
               </p>
             )}
           </section>

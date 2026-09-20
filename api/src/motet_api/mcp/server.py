@@ -130,7 +130,14 @@ def www_authenticate(config: Settings, presented: bool) -> str:
 
 
 def authenticate(authorization: str | None) -> Caller | Response:
-    """``require_caller``, on a connection of its own, answered as an HTTP response on refusal."""
+    """``require_caller``, on a connection of its own, answered as an HTTP response on refusal.
+
+    A refusal here lands in the same failed-auth throttle a ``/v1`` refusal does
+    (``motet_api.throttle``): ``/mcp`` is reachable by anyone who can reach the service,
+    and a bearer guessed at here costs exactly what one guessed at there does. That needs
+    nothing from the request — the throttle has no key — so nothing is threaded across
+    the thread boundary below for it.
+    """
     config = Settings.from_env()
     try:
         with contextlib.contextmanager(connection)(config, DrainNudge(drain_trigger())) as conn:

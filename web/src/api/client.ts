@@ -25,6 +25,13 @@ export type PostResponse<P extends keyof paths> = paths[P] extends {
       : never
   : never
 
+/** Response body of a DELETE that answers 200 with a body rather than 204. */
+export type DeleteResponse<P extends keyof paths> = paths[P] extends {
+  delete: { responses: { 200: { content: { 'application/json': infer R } } } }
+}
+  ? R
+  : never
+
 /** Response body of a PUT. */
 export type PutResponse<P extends keyof paths> = paths[P] extends {
   put: { responses: { 200: { content: { 'application/json': infer R } } } }
@@ -57,6 +64,8 @@ export type SignInStart = PostResponse<'/v1/auth/google/start'>
 export type SignedIn = PostResponse<'/v1/auth/google/callback'>
 export type McpAuthorization = PostResponse<'/v1/auth/mcp/callback'>
 export type SessionInfo = GetResponse<'/v1/auth/session'>
+export type ApiToken = GetResponse<'/v1/auth/tokens'>[number]
+export type MintedApiToken = PostResponse<'/v1/auth/tokens'>
 export type AdminOverview = GetResponse<'/v1/admin/overview'>
 export type AdminWaitlist = GetResponse<'/v1/admin/waitlist'>
 export type VoiceStatus = GetResponse<'/v1/voice'>
@@ -295,6 +304,19 @@ export async function apiDeletePath<P extends keyof paths>(_template: P, url: st
   if (!response.ok) throw await refuse(response, 'DELETE', url)
 }
 
+/**
+ * A DELETE that answers 200 with a body — `apiDeletePath`'s sibling, for the one route
+ * whose answer is worth having: revoking a token returns the row it stamped, so the list
+ * updates without a second round trip.
+ */
+export async function apiDeletePathJson<P extends keyof paths>(
+  _template: P,
+  url: string,
+): Promise<DeleteResponse<P>> {
+  const response = await send(`${apiBaseUrl()}${url}`, { method: 'DELETE', headers: headers() })
+  return parse<DeleteResponse<P>>(response, 'DELETE', url)
+}
+
 export const api = {
   health: () => apiGet('/internal/health'),
   // Signing in. `startLogin` and `completeLogin` are the only two calls in this file that
@@ -312,6 +334,15 @@ export const api = {
   // Every session, from any device. The answer to a lost phone: `logout` needs the token
   // you are trying to revoke, so it cannot be the one on the device you no longer hold.
   logoutEverywhere: () => apiPost('/v1/auth/logout-all'),
+  // Personal access tokens: the non-interactive way into /v1, for an agent that cannot
+  // sign in with Google. `mintApiToken` is the only call in this file whose response
+  // carries a credential, and it is the only time that value exists — nothing can return
+  // it again. All three need a signed-in session, so they are unreachable with a token.
+  apiTokens: () => apiGet('/v1/auth/tokens'),
+  mintApiToken: (label: string, expiresInDays: number | null) =>
+    apiPost('/v1/auth/tokens', { label, expires_in_days: expiresInDays }),
+  revokeApiToken: (id: string) =>
+    apiDeletePathJson('/v1/auth/tokens/{token_id}', `/v1/auth/tokens/${encodeURIComponent(id)}`),
   newsItems: () => apiGet('/v1/news-items'),
   // What has been pasted but is not a news item yet. The backlog cannot answer that:
   // an item that fails never becomes a news item, so it never appears there at all.

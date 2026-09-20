@@ -67,6 +67,9 @@ TABLES = (
     "oauth_states",
     "highlights",
     "auth_sessions",
+    # Personal access tokens (migration 0024). A leftover row is a live credential for a
+    # later test, and one whose email a later test's allowlist may not carry.
+    "api_tokens",
     "mcp_oauth_codes",
     "mcp_oauth_refresh_tokens",
     "mcp_oauth_clients",

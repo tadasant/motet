@@ -329,6 +329,52 @@ public struct AdminWaitlistSignupResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// One personal access token, as every route except the mint returns it.
+///
+/// **Never carries the token.** The plaintext exists in exactly one response body, ever,
+/// and this is not it.
+public struct ApiTokenResponse: Codable, Hashable, Sendable {
+    public var createdAt: Date
+    public var email: String
+    public var expiresAt: Date?
+    public var id: String
+    public var label: String
+    public var lastUsedAt: Date?
+    public var prefix: String
+    public var revokedAt: Date?
+
+    public init(
+        createdAt: Date,
+        email: String,
+        expiresAt: Date? = nil,
+        id: String,
+        label: String,
+        lastUsedAt: Date? = nil,
+        prefix: String,
+        revokedAt: Date? = nil
+    ) {
+        self.createdAt = createdAt
+        self.email = email
+        self.expiresAt = expiresAt
+        self.id = id
+        self.label = label
+        self.lastUsedAt = lastUsedAt
+        self.prefix = prefix
+        self.revokedAt = revokedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case createdAt = "created_at"
+        case email
+        case expiresAt = "expires_at"
+        case id
+        case label
+        case lastUsedAt = "last_used_at"
+        case prefix
+        case revokedAt = "revoked_at"
+    }
+}
+
 public struct AuthorizeConnectorRequest: Codable, Hashable, Sendable {
     public var redirectUri: String
 
@@ -545,6 +591,22 @@ public struct ConnectorResponse: Codable, Hashable, Sendable {
     }
 }
 
+/// Mint a personal access token. Only a signed-in session may ask.
+public struct CreateApiTokenRequest: Codable, Hashable, Sendable {
+    public var expiresInDays: Int?
+    public var label: String
+
+    public init(expiresInDays: Int? = nil, label: String) {
+        self.expiresInDays = expiresInDays
+        self.label = label
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expiresInDays = "expires_in_days"
+        case label
+    }
+}
+
 public struct CreateConnectorRequest: Codable, Hashable, Sendable {
     public var acknowledgeRisk: Bool?
     public var domain: String?
@@ -630,6 +692,17 @@ public struct CreateSmartEpisodeRequest: Codable, Hashable, Sendable {
         case maxDurationMs = "max_duration_ms"
         case rule
         case title
+    }
+}
+
+/// The one response that carries a token's plaintext, and the only time it exists.
+public struct CreatedApiTokenResponse: Codable, Hashable, Sendable {
+    public var created: ApiTokenResponse
+    public var token: String
+
+    public init(created: ApiTokenResponse, token: String) {
+        self.created = created
+        self.token = token
     }
 }
 
@@ -2729,6 +2802,21 @@ public enum MotetEndpoints {
     /// `GET /v1/auth/session` — Current Session
     public static var currentSession: HTTPEndpoint {
         return HTTPEndpoint(method: "GET", path: "/v1/auth/session")
+    }
+
+    /// `GET /v1/auth/tokens` — List Api Tokens
+    public static var listApiTokens: HTTPEndpoint {
+        return HTTPEndpoint(method: "GET", path: "/v1/auth/tokens")
+    }
+
+    /// `POST /v1/auth/tokens` — Create Api Token
+    public static var createApiToken: HTTPEndpoint {
+        return HTTPEndpoint(method: "POST", path: "/v1/auth/tokens")
+    }
+
+    /// `DELETE /v1/auth/tokens/{token_id}` — Revoke Api Token
+    public static func revokeApiToken(tokenId: String) -> HTTPEndpoint {
+        return HTTPEndpoint(method: "DELETE", path: "/v1/auth/tokens/\(MotetPathComponent(tokenId))")
     }
 
     /// `GET /v1/connectors` — List Connectors

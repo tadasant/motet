@@ -42,6 +42,7 @@ from motet_db import (
     phase2,
     repo,
 )
+from motet_db import api_tokens as token_repo
 from motet_db import auth as auth_repo
 from motet_db import connectors as connector_repo
 from motet_db import enrichment as enrichment_repo
@@ -133,6 +134,7 @@ from .deps import (
     require_api_token,
     require_caller,
     require_feed_token,
+    require_session,
     settings,
     store,
 )
@@ -161,6 +163,7 @@ from .schemas import (
     AdminUserResponse,
     AdminWaitlistResponse,
     AdminWaitlistSignupResponse,
+    ApiTokenResponse,
     AuthorizeConnectorRequest,
     AuthorizeConnectorResponse,
     ClaimModel,
@@ -169,7 +172,9 @@ from .schemas import (
     ConnectorResponse,
     ConnectSourceRequest,
     ConnectSourceResponse,
+    CreateApiTokenRequest,
     CreateConnectorRequest,
+    CreatedApiTokenResponse,
     CreateEpisodeRequest,
     CreateSmartEpisodeRequest,
     DedupDecisionResponse,
@@ -256,6 +261,10 @@ Who = Annotated[Caller, Depends(require_caller)]
 #: A caller who may read every user's data: a signed-in session on MOTET_ADMIN_EMAILS. Every
 #: route under ``/v1/admin`` takes it, and a test walks the app to hold that true.
 Admin = Annotated[Caller, Depends(require_admin)]
+#: A caller who is a signed-in person rather than a credential: the guard on the three
+#: routes that manage personal access tokens. A PAT may not mint or revoke a PAT, and
+#: neither may the shared API token — see ``deps.require_session`` for why each is refused.
+SignedIn = Annotated[Caller, Depends(require_session)]
 FeedUser = Annotated[str, Depends(require_feed_token)]
 Config = Annotated[Settings, Depends(settings)]
 Store = Annotated[ObjectStore, Depends(store)]
@@ -1066,10 +1075,132 @@ def logout_everywhere(conn: Conn, caller: Who) -> RevokedResponse:
 
     Reachable with the shared API token as well as with a session, which is what makes it
     usable from a *different* device than the compromised one.
+
+    **A personal access token may not call it**, and that is a recovery property rather
+    than tidiness. A PAT is not revoked by this (see `revoke_api_token`), so a leaked one
+    left able to call it could delete the owner's browser session on a loop — and the
+    owner's session is the only credential that can reach the revoke route. That would
+    make the leaked credential able to out-race its own revocation, which is the exact
+    thing "rotating the shared secret is a deploy" was the weakness of.
     """
+    if caller.how == "pat":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "An access token cannot sign other sessions out. Sign in, or use the API token.",
+        )
     revoked = auth_repo.delete_sessions_for_user(conn, caller.user_id)
     logger.info("revoked %d session(s) at the owner's request", revoked)
     return RevokedResponse(revoked=revoked)
+
+
+# --- personal access tokens (migration 0024) --------------------------------------------
+#
+# The non-interactive way into `/v1`, and the reason it exists is that until now there was
+# none: an agent driving staging end to end cannot sign in with Google, because Google
+# refuses an automated browser at the identifier step. Tadas asked for "app passwords that
+# bypass the human oauth flow" and, given the choice between a staging-only shared secret
+# and a real token system, said "Go straight to PATs" (2026-09-20).
+#
+# **All three routes take `SignedIn`, not `Who`.** A token may not mint or revoke a token,
+# and neither may the shared `MOTET_API_TOKEN` — `deps.require_session` says why each is
+# refused. That is what keeps a PAT a leaf: revoking the one you know about cannot leave
+# descendants you do not.
+
+
+@app.post(
+    "/v1/auth/tokens",
+    response_model=CreatedApiTokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["auth"],
+)
+def create_api_token(
+    body: CreateApiTokenRequest, conn: Conn, caller: SignedIn, config: Config
+) -> CreatedApiTokenResponse:
+    """Mint a personal access token and return it **once**.
+
+    The plaintext is in this response body and nowhere else: only its SHA-256 is stored,
+    nothing logs it, and no other route can return it. A lost token is revoked and
+    re-minted rather than recovered — which is the same trade `auth_sessions` already
+    makes, and the opposite of the feed token's, because that one has to be readable back
+    onto a new device and this one is pasted into an environment.
+
+    The address recorded on the row is the signed-in caller's, and it is what the
+    allowlist is re-checked against on every subsequent request. It is never None here —
+    `require_session` admits only a caller `deps.is_browser_session` accepts, and an
+    address is part of that question rather than a second check on top of it, which is
+    why this reads the value rather than asserting about it (`python -O` drops asserts).
+    """
+    if caller.email is None:  # pragma: no cover — require_session guarantees an address
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "This session carries no address, so no token can be bound to one.",
+        )
+    minted = token_repo.create_token(
+        conn,
+        user_id=caller.user_id,
+        email=caller.email,
+        label=body.label,
+        environment=config.token_label,
+        ttl_seconds=None if body.expires_in_days is None else body.expires_in_days * 86_400,
+    )
+    # The prefix and never the token. This line is the whole audit trail for "when was a
+    # credential created on this deployment", so it says which one without being the leak
+    # it is reporting.
+    logger.info(
+        "minted access token %s (%s…) for %s, expiring %s",
+        minted.token.id,
+        minted.token.prefix,
+        minted.token.email,
+        minted.token.expires_at.isoformat() if minted.token.expires_at else "never",
+    )
+    return CreatedApiTokenResponse(token=minted.secret, created=_api_token(minted.token))
+
+
+@app.get("/v1/auth/tokens", response_model=list[ApiTokenResponse], tags=["auth"])
+def list_api_tokens(conn: Conn, caller: SignedIn) -> list[ApiTokenResponse]:
+    """Every personal access token this account holds: live ones first, then revoked.
+
+    Revoked ones are included and marked, because with no database shell (invariant 10)
+    this list is the only place "which tokens existed, and when did each stop" can be
+    asked — and they sort last so that nothing which can still authenticate falls off the
+    bound, since this list is also the only way to revoke. No row carries a secret.
+    """
+    return [_api_token(token) for token in token_repo.list_tokens(conn, caller.user_id)]
+
+
+@app.delete("/v1/auth/tokens/{token_id}", response_model=ApiTokenResponse, tags=["auth"])
+def revoke_api_token(token_id: str, conn: Conn, caller: SignedIn) -> ApiTokenResponse:
+    """Revoke one token, immediately. Answers with the row it stamped.
+
+    Immediate because the lookup filters on `revoked_at` rather than waiting for a sweep,
+    so the next request on that token is refused. Revoking an already-revoked token is not
+    an error: a client that retries gets the same answer twice.
+
+    This is also the "lost laptop" lever for tokens, and it is deliberately **not** part of
+    `/v1/auth/logout-all`. That route revokes sessions, and folding tokens into it would
+    mean a person signing out everywhere silently killed the credential an agent is running
+    on. Reaching this route from another device needs only a sign-in, which is the property
+    `logout-all` exists for.
+    """
+    revoked = token_repo.revoke_token(conn, user_id=caller.user_id, token_id=token_id)
+    if revoked is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such access token.")
+    logger.info("revoked access token %s (%s…)", revoked.id, revoked.prefix)
+    return _api_token(revoked)
+
+
+def _api_token(token: token_repo.ApiToken) -> ApiTokenResponse:
+    """The wire shape of a token row. **Never carries the secret** — there is none to carry."""
+    return ApiTokenResponse(
+        id=token.id,
+        prefix=token.prefix,
+        label=token.label,
+        email=token.email,
+        created_at=token.created_at,
+        last_used_at=token.last_used_at,
+        expires_at=token.expires_at,
+        revoked_at=token.revoked_at,
+    )
 
 
 @app.post(

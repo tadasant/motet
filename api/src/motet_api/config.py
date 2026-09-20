@@ -10,11 +10,14 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Final
 from urllib.parse import urlsplit
 
+from motet_db.api_tokens import LABEL_RE
 from motet_inference.mode import current_mode
+from motet_obs import resolve_deployment_environment
 
 from .auth import CLIENT_ID_ENV, admin_emails, allowed_emails
 
@@ -38,6 +41,24 @@ APP_BASE_URL_ENV: Final = "MOTET_APP_BASE_URL"
 #: that never closes. It is switched on per environment, beside MOTET_IOS_APP_ID on the web
 #: service, once that file is served.
 IOS_APP_LINK_ENV: Final = "MOTET_IOS_APP_LINK"
+
+#: What a personal access token says it opens: the middle of ``mot_<label>_<secret>``.
+#:
+#: **Optional, and its fallback is a variable the deploy already sets.** A token's job is
+#: to be identifiable at a glance in a paste, a log or a repository scan, and what makes
+#: it identifiable is which *environment* it is a key to. ``deployment.environment.name``
+#: in ``OTEL_RESOURCE_ATTRIBUTES`` is already that fact — it is what GlitchTip labels an
+#: error with — so a deployment that sets nothing here still mints ``mot_staging_…`` and
+#: ``mot_production_…`` rather than an undifferentiated string. This variable exists only
+#: so a deployment can pick the shorter spelling (``stg``, ``live``) without renaming the
+#: environment every span and every error report wears. Same shape as ``OTEL_INGEST_TOKEN``
+#: beside ``OTEL_EXPORTER_OTLP_HEADERS``: one fact, and a second way to state it where the
+#: first cannot be bent to the purpose.
+TOKEN_LABEL_ENV: Final = "MOTET_TOKEN_LABEL"
+
+#: What a token says when nothing names the environment. A laptop, and a ``docker run``.
+DEFAULT_TOKEN_LABEL: Final = "dev"
+
 
 #: What a podcast client shows for the feed. Configurable so an environment can tell itself
 #: apart in a podcast app; not secret, and not infrastructure. The defaults are the brand's
@@ -63,9 +84,17 @@ CALLBACK_PATH: Final = "/oauth/callback"
 
 @dataclass(frozen=True)
 class Settings:
-    database_url: str | None
+    #: Out of the repr, with ``api_token`` below, and that is a leak guard rather than
+    #: tidiness. An error reporter captures frame locals **by their repr**, and a
+    #: ``Settings`` is a local of `motet_api.deps.require_caller` — the one function every
+    #: authenticated request passes through, and the one an unhandled exception on the
+    #: auth path is raised inside (the `motet-vault[kms]` incident was exactly that).
+    #: Without this the bearer is redacted by name and the *shared owner-equivalent
+    #: secret* and the Cloud SQL URL, password and all, go to GlitchTip beside it.
+    #: `sentry_sdk`'s scrubber works on names, and `config` is not a name it knows.
+    database_url: str | None = field(repr=False)
     inference_mode: str
-    api_token: str | None
+    api_token: str | None = field(repr=False)
     public_base_url: str | None
     app_base_url: str | None
     feed_title: str
@@ -90,6 +119,10 @@ class Settings:
     #: Present only so that "is sign-in actually wired" is answerable. The secret half is
     #: never read here: the API resolves it when it completes a sign-in, not at startup.
     google_client_id: str | None = None
+    #: The label a personal access token minted here carries — see :data:`TOKEN_LABEL_ENV`.
+    #: Defaulted, like the two allowlists, so a ``Settings`` built to test something else
+    #: lands on the laptop's answer rather than on nothing.
+    token_label: str = DEFAULT_TOKEN_LABEL
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -108,6 +141,7 @@ class Settings:
             allowed_emails=allowed_emails(os.environ),
             admin_emails=admin_emails(os.environ),
             google_client_id=_clean(os.environ.get(CLIENT_ID_ENV)),
+            token_label=token_label(os.environ),
         )
 
     @property
@@ -191,6 +225,31 @@ class Settings:
         if self.app_base_url is None:
             return []
         return [_origin(self.app_base_url)]
+
+
+def token_label(env: Mapping[str, str]) -> str:
+    """Which environment a token minted here should say it opens.
+
+    ``MOTET_TOKEN_LABEL`` first, then the deploy's own ``deployment.environment.name``,
+    then ``dev``. Slugified rather than validated, because the fallback is a value set for
+    somebody else's purpose — ``Staging (GCP)`` is a perfectly good GlitchTip environment
+    and a terrible thing to put in the middle of a credential — and a *refusal* here would
+    mean a deployment that could not mint a token at all because of how its telemetry was
+    labelled. Anything that slugifies to nothing lands on the default.
+    """
+    raw = _clean(env.get(TOKEN_LABEL_ENV)) or resolve_deployment_environment(env) or ""
+    slug = "".join(
+        character for character in raw.lower() if character.isascii() and character.isalnum()
+    )[:12]
+    if not LABEL_RE.match(slug):
+        if raw:
+            logger.warning(
+                "%r is not usable as a token label; minting %r tokens instead",
+                raw,
+                DEFAULT_TOKEN_LABEL,
+            )
+        return DEFAULT_TOKEN_LABEL
+    return slug
 
 
 class ConfigError(ValueError):

@@ -383,6 +383,67 @@ components:
       - submissions
       title: AdminWaitlistSignupResponse
       type: object
+    ApiTokenResponse:
+      description: 'One personal access token, as every route except the mint returns it.
+
+
+        **Never carries the token.** The plaintext exists in exactly one response body, ever,
+
+        and this is not it.'
+      properties:
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+        email:
+          description: The allowlisted address of the session that minted this token.
+          title: Email
+          type: string
+        expires_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          title: Expires At
+        id:
+          title: Id
+          type: string
+        label:
+          title: Label
+          type: string
+        last_used_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: 'When this token last authenticated a request, to within five minutes. Coarse on
+            purpose: writing it per request would serialize an agent''s concurrent calls behind each other.
+            Null means it has never been used.'
+          title: Last Used At
+        prefix:
+          description: "'mot_<environment>_<first 8 characters>' \u2014 what makes a leaked token identifiable\
+            \ at a glance and greppable in an incident. Display only: nothing authenticates against it."
+          title: Prefix
+          type: string
+        revoked_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: When this token stopped working. Revoked rows stay in the list rather than disappearing,
+            because 'that token was live until Tuesday' is the question an audit asks and there is no
+            database shell to ask it with.
+          title: Revoked At
+      required:
+      - id
+      - prefix
+      - label
+      - email
+      - created_at
+      - last_used_at
+      - revoked_at
+      title: ApiTokenResponse
+      type: object
     AuthorizeConnectorRequest:
       properties:
         redirect_uri:
@@ -653,6 +714,30 @@ components:
       - updated_at
       title: ConnectorResponse
       type: object
+    CreateApiTokenRequest:
+      description: Mint a personal access token. Only a signed-in session may ask.
+      properties:
+        expires_in_days:
+          anyOf:
+          - maximum: 3650.0
+            minimum: 1.0
+            type: integer
+          - type: 'null'
+          description: "Optional lifetime. Null means the token lasts until it is revoked, which is the\
+            \ right default for a credential an agent holds in a deployed environment \u2014 an expiry\
+            \ nobody is watching is an outage nobody predicted."
+          title: Expires In Days
+        label:
+          description: What this token is for, in the owner's own words. Shown in the list beside the
+            prefix, so that revoking the right one does not mean guessing.
+          maxLength: 80
+          minLength: 1
+          title: Label
+          type: string
+      required:
+      - label
+      title: CreateApiTokenRequest
+      type: object
     CreateConnectorRequest:
       properties:
         acknowledge_risk:
@@ -765,6 +850,21 @@ components:
       - title
       - max_duration_ms
       title: CreateSmartEpisodeRequest
+      type: object
+    CreatedApiTokenResponse:
+      description: The one response that carries a token's plaintext, and the only time it exists.
+      properties:
+        created:
+          $ref: '#/components/schemas/ApiTokenResponse'
+        token:
+          description: "The token. Shown once and hashed at rest \u2014 nothing can return it again, and\
+            \ a lost one is revoked and re-minted rather than recovered."
+          title: Token
+          type: string
+      required:
+      - token
+      - created
+      title: CreatedApiTokenResponse
       type: object
     DedupDecisionResponse:
       description: 'Why dedup put this source item where it did, as recorded at the time.
@@ -2449,9 +2549,10 @@ components:
         \ without guessing from what it has in storage."
       properties:
         admin:
-          description: 'Whether this caller may read /v1/admin/*: a signed-in session whose address is
-            on MOTET_ADMIN_EMAILS. Always false for the shared API token and for an open deployment, and
-            for everybody when MOTET_ADMIN_EMAILS is unset.'
+          description: 'Whether this caller may read /v1/admin/*: a signed-in browser session whose address
+            is on MOTET_ADMIN_EMAILS. Always false for a personal access token, for an MCP client''s grant,
+            for the shared API token and for an open deployment, and for everybody when MOTET_ADMIN_EMAILS
+            is unset.'
           title: Admin
           type: boolean
         email:
@@ -2466,8 +2567,9 @@ components:
           - type: 'null'
           title: Expires At
         how:
-          description: '''session'' for a signed-in browser, ''token'' for the shared API token, ''open''
-            when MOTET_API_TOKEN is unset and this deployment has no lock on it at all.'
+          description: '''session'' for a signed-in browser, ''pat'' for a personal access token, ''token''
+            for the shared API token, ''open'' when MOTET_API_TOKEN is unset and this deployment has no
+            lock on it at all.'
           title: How
           type: string
         login_configured:
@@ -3644,7 +3746,12 @@ paths:
         \ without this, \"I left my laptop on a train\" would mean waiting\nout a thirty-day expiry, or\
         \ taking your own address off `MOTET_ALLOWED_EMAILS` and\nredeploying twice.\n\nReachable with\
         \ the shared API token as well as with a session, which is what makes it\nusable from a *different*\
-        \ device than the compromised one."
+        \ device than the compromised one.\n\n**A personal access token may not call it**, and that is\
+        \ a recovery property rather\nthan tidiness. A PAT is not revoked by this (see `revoke_api_token`),\
+        \ so a leaked one\nleft able to call it could delete the owner's browser session on a loop \u2014\
+        \ and the\nowner's session is the only credential that can reach the revoke route. That would\n\
+        make the leaked credential able to out-race its own revocation, which is the exact\nthing \"rotating\
+        \ the shared secret is a deploy\" was the weakness of."
       operationId: logout_everywhere_v1_auth_logout_all_post
       parameters:
       - in: header
@@ -3817,6 +3924,138 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Current Session
+      tags:
+      - auth
+  /v1/auth/tokens:
+    get:
+      description: "Every personal access token this account holds: live ones first, then revoked.\n\n\
+        Revoked ones are included and marked, because with no database shell (invariant 10)\nthis list\
+        \ is the only place \"which tokens existed, and when did each stop\" can be\nasked \u2014 and\
+        \ they sort last so that nothing which can still authenticate falls off the\nbound, since this\
+        \ list is also the only way to revoke. No row carries a secret."
+      operationId: list_api_tokens_v1_auth_tokens_get
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/ApiTokenResponse'
+                title: Response List Api Tokens V1 Auth Tokens Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: List Api Tokens
+      tags:
+      - auth
+    post:
+      description: "Mint a personal access token and return it **once**.\n\nThe plaintext is in this response\
+        \ body and nowhere else: only its SHA-256 is stored,\nnothing logs it, and no other route can\
+        \ return it. A lost token is revoked and\nre-minted rather than recovered \u2014 which is the\
+        \ same trade `auth_sessions` already\nmakes, and the opposite of the feed token's, because that\
+        \ one has to be readable back\nonto a new device and this one is pasted into an environment.\n\
+        \nThe address recorded on the row is the signed-in caller's, and it is what the\nallowlist is\
+        \ re-checked against on every subsequent request. It is never None here \u2014\n`require_session`\
+        \ admits only a caller `deps.is_browser_session` accepts, and an\naddress is part of that question\
+        \ rather than a second check on top of it, which is\nwhy this reads the value rather than asserting\
+        \ about it (`python -O` drops asserts)."
+      operationId: create_api_token_v1_auth_tokens_post
+      parameters:
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiTokenRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedApiTokenResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Create Api Token
+      tags:
+      - auth
+  /v1/auth/tokens/{token_id}:
+    delete:
+      description: 'Revoke one token, immediately. Answers with the row it stamped.
+
+
+        Immediate because the lookup filters on `revoked_at` rather than waiting for a sweep,
+
+        so the next request on that token is refused. Revoking an already-revoked token is not
+
+        an error: a client that retries gets the same answer twice.
+
+
+        This is also the "lost laptop" lever for tokens, and it is deliberately **not** part of
+
+        `/v1/auth/logout-all`. That route revokes sessions, and folding tokens into it would
+
+        mean a person signing out everywhere silently killed the credential an agent is running
+
+        on. Reaching this route from another device needs only a sign-in, which is the property
+
+        `logout-all` exists for.'
+      operationId: revoke_api_token_v1_auth_tokens__token_id__delete
+      parameters:
+      - in: path
+        name: token_id
+        required: true
+        schema:
+          title: Token Id
+          type: string
+      - in: header
+        name: authorization
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiTokenResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Revoke Api Token
       tags:
       - auth
   /v1/connectors:
