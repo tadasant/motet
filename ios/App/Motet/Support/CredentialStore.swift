@@ -154,6 +154,30 @@ final class CredentialStore {
     /// entitlement was not signed in — which is every build but a TestFlight one.
     var appLinkDomain: String? { Self.buildAppLinkDomain }
 
+    /// Which deployment this build was made for, and which server it is on right now.
+    ///
+    /// Two facts, not one, because they can disagree: the label is compiled in
+    /// (`MOTET_BUILD_ENVIRONMENT`), and the server can be moved under Advanced. A staging
+    /// build pointed by hand at production would otherwise keep wearing a badge that says
+    /// the data in front of you is disposable.
+    ///
+    /// Neither half is a hostname this repository knows — the label carries no topology at
+    /// all, and the host is read off whatever the build or the device was given.
+    var buildTarget: BuildTarget {
+        let stored = storedBaseURL()
+        return BuildTarget(
+            environment: Self.buildEnvironment,
+            host: BuildTarget.host(of: stored ?? Self.buildDefaultBaseURL),
+            isBuildDefault: stored == nil
+        )
+    }
+
+    private static let buildEnvironment: BuildEnvironment = {
+        BuildEnvironment(
+            label: Bundle.main.object(forInfoDictionaryKey: "MotetBuildEnvironment") as? String
+        )
+    }()
+
     private static let buildAppLinkDomain: String? = {
         guard let raw = Bundle.main.object(forInfoDictionaryKey: "MotetAppLinkDomain") as? String
         else { return nil }

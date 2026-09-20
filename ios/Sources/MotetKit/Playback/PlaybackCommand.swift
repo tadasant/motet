@@ -28,6 +28,22 @@ public enum PlaybackCommand: Hashable, Sendable {
     case setRate(Double)
     /// Step up the speed ladder, wrapping.
     case cycleRate
+
+    /// Whether this command moves the position without any audio having been played.
+    ///
+    /// Read by the diagnostics window that decides whether the engine's clock is
+    /// advancing: a jump the listener asked for looks exactly like a second and a half of
+    /// listening to anything comparing two positions, and calling it listening would make
+    /// a skipped story read as audible. The same distinction `maxListeningStepMs` makes
+    /// for read state, asked one command earlier.
+    public var movesThePlayhead: Bool {
+        switch self {
+        case .skipForward, .skipBackward, .nextSegment, .previousSegment, .seek:
+            return true
+        case .play, .pause, .togglePlayPause, .setRate, .cycleRate:
+            return false
+        }
+    }
 }
 
 /// What the UI, the lockscreen, and CarPlay all render.

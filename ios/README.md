@@ -18,10 +18,11 @@ ios/
   Package.swift            SwiftPM: MotetKit + MotetPlayback + tests
   Sources/MotetKit/        Foundation only. The whole brain. Tested in bin/ci.
   Sources/MotetPlayback/   AVFoundation / MediaPlayer. Needs Apple platforms.
-  Tests/MotetKitTests/     174 tests, including an end-to-end offline-walk journey
+  Tests/MotetKitTests/     237 tests, including an end-to-end offline-walk journey
   App/Motet/               SwiftUI screens, the CarPlay scene, Info.plist, entitlements
-  App/Motet.xcodeproj/     the app target
-  bin/                     toolchain install + the two CI entry points
+  App/MotetUITests/        XCUITest: the one flow that RUNS the app, on a simulator
+  App/Motet.xcodeproj/     two targets, three configurations (Debug, Release, Staging)
+  bin/                     toolchain install + the three CI entry points
   tools/                   the openapi.yaml -> Swift generator
 ```
 
@@ -85,6 +86,7 @@ afterwards); on a Mac it uses Xcode's. Locally:
 ```bash
 ios/bin/ci-swift          # swift build && swift test
 ios/bin/build-app         # xcodebuild, for the simulator — needs a Mac
+ios/bin/ui-test           # RUNS the app on a booted simulator — needs a Mac
 bin/generate-ios-client   # regenerate the client from openapi.yaml
 ```
 
@@ -105,7 +107,7 @@ one.
 
 **Verified:** the whole app compiles — `App/`, `Sources/MotetPlayback/` and
 `Motet.xcodeproj` included — for the iOS Simulator, under Swift 6 language mode with
-strict concurrency checking, and 174 tests
+strict concurrency checking, and 237 tests
 pass — segment-boundary read state, the difference between listening and skipping, the
 outbox's ordering/coalescing/backoff/durability (including a write made *while* another is
 in flight), the download policy, position resume across a simulated relaunch, interruption
@@ -143,9 +145,12 @@ Everything below is still unproven, and the reason is the same for all of it: **
 not a run, and a simulator is not a phone.** A green `ios` job says the code compiles and
 links. It says nothing about any of this.
 
-1. **Nothing has been run or screenshotted.** The job builds for
-   `generic/platform=iOS Simulator`, which never boots a simulator. No screen in this app
-   has been looked at by anyone.
+1. **Most of the app has still never been run.** `ios/bin/build-app` builds for
+   `generic/platform=iOS Simulator`, which never boots one. What *is* now run is one flow:
+   `ios/bin/ui-test` boots a simulator and drives the playback probe (below), which is the
+   only screen an automated run can reach — because **an agent cannot sign in**, so no test
+   here gets past the front door. Every other screen is still unlooked-at except through
+   the `-MotetScreenshot` fixtures.
 2. **Background audio.** `UIBackgroundModes: audio` plus the `.playback` category with
    `.spokenAudio` and `.longFormAudio` is written; a simulator's host OS does not enforce
    any of it. Prove it on a device: play, lock the screen, put the phone in a pocket, walk.
@@ -285,6 +290,175 @@ that a build where it *doesn't* now says what stopped it, on screen and in the
 `audio-session` and `playback` log categories, instead of showing a button that does
 nothing.
 
+## "Is sound coming out" is a number now, and a machine can read it
+
+`Sources/MotetKit/Diagnostics/`, `Sources/MotetPlayback/AudioLevelMeter.swift`,
+`App/Motet/Support/PlaybackProbe*.swift`, `App/MotetUITests/`.
+
+The section above fixed a silent player and left the *reporting* where it was: the only
+witness to "there was no sound" was a person listening. That is not a gap automation can
+close from outside, and it is worth saying why rather than discovering it again —
+**no cloud device service captures iOS audio.** AWS Device Farm's session artifacts are
+video, logs and screenshots, with no audio track documented anywhere; Appetize supported
+iOS audio output in the past, has deprecated it with no plans to restore it, and has never
+supported microphone input on any platform. So the question has to be answered by the app
+about itself, or it cannot be answered at all.
+
+`PlaybackProbe` is that answer, in three layers of increasing proof and decreasing
+availability:
+
+| Layer | What it is | What it catches |
+|---|---|---|
+| 1 | `AVPlayer.timeControlStatus`, the rate, `reasonForWaitingToPlay`, the last error | told to play vs actually playing |
+| 2 | whether the clock **moved**, over `PlaybackClockWatch.window` | the failure above: `.waitingToPlayAtSpecifiedRate` sets no error, emits no event and never ticks |
+| 3 | RMS/peak off an `MTAudioProcessingTap` on the player item's audio mix | a running clock and a silent speaker — the only layer that is not the player's own opinion |
+
+Beside them sits the audio **route** as iOS actually has it, because the other half of a
+silent phone is a `setCategory` the system refused, which leaves the session on
+`.soloAmbient` while every other signal says playback is fine.
+
+Four things about it are decisions rather than implementation:
+
+- **A missing layer abstains; it does not vote no.** `AudioLevelMeter.level()` answers nil
+  until a buffer has *ever* arrived and whenever the sample format is one it cannot read,
+  and `PlaybackProbe.isAudible` treats nil as "nothing measured" rather than "silence".
+  Conflating the two would make any build where the tap did not install report a fault it
+  has no evidence for — on every perfectly good episode.
+- **The clock question is a window, not a comparison.** `AVPlayer` reports its position
+  about once a second, so two samples 80 ms apart are equal on a healthy player;
+  `PlaybackClockWatch` keeps a 2.5-second window and answers how far the position moved
+  across it, forward only. A seek, a skip and a resume all call `discontinuity()`, because a
+  jump the listener asked for is not audio — the same distinction `maxListeningStepMs`
+  already makes for read state, asked one command earlier.
+- **The diagnostic never makes playback worse.** The tap is attached off the critical path
+  (loading an asset's tracks is a network round trip for a remote episode), a tap that
+  cannot be created is logged and dropped, and nothing in this path can throw into a `play`.
+- **It runs in Release, and that is the point.** The on-screen strip is `#if DEBUG`
+  furniture; the `playback-probe` log category is what makes a TestFlight build answer the
+  question. One line, `key=value`, at WARNING when a player that was told to play is
+  producing nothing:
+
+  ```
+  playback silent: episode=ep_1f2c8dc8486c audible=false transport=playing position_ms=9408
+    advanced_ms=0 rate=1.0000 silence=clockNotMoving wait=none rms=unmeasured
+    category=Playback mode=SpokenAudio policy=longFormAudio output=Speaker error=none
+  ```
+
+  That is what the 2026-09-20 report would have looked like, from the phone, without
+  anybody having to listen.
+
+**What is tested where.** The rules — the window, the abstention, the verdict, the
+locale-proof formatting — are `MotetKit` and run on Linux in `bin/ci`, which is the same
+split `AudioSessionPlan` makes. Whether the tap actually fires is a claim about a running
+`AVPlayer`, and `ios/bin/ui-test` is what makes it.
+
+## The one flow that actually runs the app
+
+`ios/bin/ui-test`, `App/MotetUITests/PlaybackProbeUITests.swift`,
+`.github/workflows/ios-ui-tests.yml`.
+
+```bash
+ios/bin/ui-test                                              # Debug, no default server
+ios/bin/ui-test --configuration Staging --api-base-url https://example.test
+gh workflow run ios-ui-tests.yml --ref main \
+  -f configuration=Staging -f api_base_url_variable=MOTET_IOS_STAGING_API_BASE_URL
+```
+
+It boots a simulator, builds, records video, runs two XCUITests, and keeps the result
+bundle, the video and **three** screenshots. Three because the obvious one is worthless
+alone: XCUITest terminates the app when the run ends, so a `simctl` screenshot taken then
+catches the springboard. The other two relaunch the app and photograph the probe idle and
+then — with `-MotetPlaybackProbeAutoplay` — playing, because `simctl` can screenshot and
+cannot tap, which is the whole reason that launch argument exists. **A pair, because
+either alone proves nothing**: a probe hard-wired to AUDIBLE would take the second and one
+hard-wired to SILENT would take the first. The UI test does not use autoplay — its
+assertion is the same transition, which needs a press. **XCUITest rather than Maestro**: the project
+already has Swift, an Xcode project and a macOS runner, and Maestro would add a JVM, a YAML
+dialect and a second thing to keep in step with the app's accessibility identifiers for no
+capability this needs.
+
+**What it drives, and why it is not the real player screen.** An agent cannot sign in —
+Google refuses an automated browser at the identifier step, which AGENTS.md records as
+settled — so no automated run reaches a screen that needs a session or an episode that came
+from a server. `-MotetPlaybackProbe` is a Debug-only fixture instead: it generates a 20-second
+tone (a WAV is a header and a sine; a binary fixture in a public repo is a thing nobody can
+review), and plays it through the **real** `AVPlayerPlaybackEngine`, the **real**
+`AudioSessionController`, the **real** `PlaybackController` and the **real**
+`PlaybackProbeRecorder`. Everything between the play button and the audio tap is the code
+that ships. The network half — the feed token, the 307, the signed URL — is deliberately not
+in it, and has its own tests.
+
+**The assertion is the transition, not either end of it.** "It says audible while playing"
+would pass against a probe hard-wired to true, and "silent while paused" against one
+hard-wired to false; the test asserts both and that they differ. Layer 3 is asserted only
+when something measured it, and an abstention is recorded as an activity rather than failed —
+a runner with no audio device installs the tap and is handed nothing, and layers 1 and 2
+still answer the question.
+
+**One flow on purpose.** A broad suite that is flaky on day one reddens every iOS pull
+request for reasons that have nothing to do with the change.
+
+**Where it runs, and what that costs.** The `ios` job in `ci.yml` runs it on every change
+under `ios/**`, on the macOS runner that job was already paying for — a simulator boot plus
+one build-and-run, roughly 5 to 10 minutes on top of a job that was already taking about
+that. GitHub bills macOS at roughly ten times the Linux multiplier, which is free on a
+public repository and would not be on a private one; a second macOS job would have doubled
+the iOS cost for the same coverage, so this rides the existing one.
+`.github/workflows/ios-ui-tests.yml` is the `workflow_dispatch` entry point on top, for
+pointing a build at a server CI does not know about — expected to be run by hand and rarely.
+It carries no credential (a simulator build needs no identity) and names no host: the server
+arrives as the **name** of a repository variable, and its value is masked out of the log.
+
+## A build says which deployment it is for
+
+`MOTET_BUILD_ENVIRONMENT` → `Info.plist`'s `MotetBuildEnvironment` →
+`MotetKit.BuildEnvironment` → the badge and the `build-target` line.
+
+The server a build defaults to has been switchable since TestFlight shipped
+(`MOTET_DEFAULT_API_BASE_URL`, passed on the command line so no host is written here). What
+did not exist was any way to **tell which one you were on**: a build pointed at staging and
+a build pointed at production were byte-identical on screen, so a tester, a screenshot, a
+bug report and an automated run could none of them say which API the app in front of them
+was talking to. The two problems look like one and are not.
+
+So there is a third build configuration, `Staging` — `Debug` plus
+`MOTET_BUILD_ENVIRONMENT = staging` — and a shared `Motet (Staging)` scheme:
+
+```bash
+ios/bin/build-app --configuration Staging --api-base-url https://…
+```
+
+- **The label is not a hostname**, which is the whole reason it can live in a public
+  repository when the URL cannot. It carries no topology at all; the host beside it is
+  whatever the build or the device was given.
+- **Unlabelled reads as production**, and that direction is the safe one: a staging build
+  mistaken for production wears a badge it should not, and a production build mistaken for
+  staging would put "this is disposable" over somebody's real backlog.
+- **Two facts, not one.** `BuildTarget` reports the compiled-in label *and* the server in
+  force, with `source=build` or `source=settings` — because saving a server under Advanced
+  makes them disagree, and a badge that kept claiming the build's answer would be lying.
+- **`Staging` keeps `DEBUG` defined**, deliberately: the fixtures a UI test drives are
+  `#if DEBUG`, and a staging build without them could not be exercised by anything
+  automated. It is a build to *test* with, not a second thing to ship.
+- **`MotetUITests` is not in the `Motet` scheme**, and that is load-bearing:
+  `ios/bin/testflight` reads `xcodebuild -showBuildSettings -scheme Motet` to decide which
+  entitlements file is signed in, and that guard reasons about the blocks it gets back — one
+  per target in the scheme.
+
+**What is proven, and what is configuration.** `ios/bin/ui-test` builds `Staging` with a
+base URL and then checks the built `.app`'s own `Info.plist` for both keys — so the
+substitution is proven from the artifact — while the UI test asserts what the *running* app
+made of them. What no run here can prove is that the app reaches the real staging API: the
+host lives in the private infrastructure repo, and **turning this on is one variable**, a
+repository or environment variable (`MOTET_IOS_STAGING_API_BASE_URL` is the name the
+dispatch input expects) holding staging's https base URL.
+
+**A staging build on a phone beside production is deliberately not built.** That needs a
+second bundle identifier, and with it a second App ID, its own Associated Domains tick and
+its own App Store Connect record — all of which are invariant 9's human half. The simulator
+is where an automated run lives, and there is nothing for a staging bundle id to collide
+with.
+
 ## Playback position is cross-device
 
 Read state has always synced: position becomes *completed news items* via the segment map,
@@ -414,7 +588,9 @@ The server URL is under **Advanced**, on the sign-in screen and in Settings, and
 touched: a TestFlight build arrives with it prefilled, and other builds ask for it there.
 Changing it signs the phone out, because a session belongs to the server that issued it.
 `MotetDefaultBaseURL` in `Info.plist` comes from the `MOTET_DEFAULT_API_BASE_URL` build
-setting, which is empty in this repo and in CI. The TestFlight workflow fills it from the
+setting, which is empty in this repo and in CI. Beside it, `MotetBuildEnvironment` says
+*which deployment* that server is — a label, never a hostname, which is what lets it have a
+value here when the URL cannot (see "A build says which deployment it is for"). The TestFlight workflow fills it from the
 `testflight` environment's `MOTET_IOS_API_BASE_URL` variable, so no host is written in this
 repo's files. The variable holds the product's public API name, which the public SPA already
 serves in its `config.js`. It is not masked, and it shows in the workflow's logs. Never set

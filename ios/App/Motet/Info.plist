@@ -27,6 +27,12 @@
     `MOTET_DEFAULT_API_BASE_URL` build setting. It is empty in this repo and in every CI
     build; the TestFlight workflow passes it from a GitHub environment variable, so no
     hostname is written here. Settings still overrides it.
+  * `MotetBuildEnvironment` — which deployment this build was made for (`production`,
+    `staging`, `development`), from the `MOTET_BUILD_ENVIRONMENT` build setting. It is a
+    LABEL and never a hostname, so it is safe in a public repo where `MotetDefaultBaseURL`
+    is not: the `Staging` configuration sets it, and an empty or unrecognised value reads
+    as production, which is the direction that never puts a "this is disposable" badge
+    over real data.
   * `MotetAppLinkDomain` — the host this build's associated-domains entitlement names, from
     the `MOTET_APP_LINK_DOMAIN` build setting and empty everywhere the entitlement is not
     signed in. It is read at sign-in: asking the system sheet for an https callback on a
@@ -61,6 +67,8 @@
 	<string>$(MOTET_DEFAULT_API_BASE_URL)</string>
 	<key>MotetAppLinkDomain</key>
 	<string>$(MOTET_APP_LINK_DOMAIN)</string>
+	<key>MotetBuildEnvironment</key>
+	<string>$(MOTET_BUILD_ENVIRONMENT)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Play Live listens while an episode plays, so you can interrupt it and ask a question out loud.</string>
 	<key>UIBackgroundModes</key>

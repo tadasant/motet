@@ -204,7 +204,7 @@ jobs:
           fi
 
           printf '%s\n' "$files" | sed 's/^/  /'
-          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/(ci|testflight)\.yml$)'; then
+          if printf '%s\n' "$files" | grep -qE '^(ios/|\.github/workflows/(ci|testflight|ios-ui-tests)\.yml$)'; then
             echo "ios=true" >> "$GITHUB_OUTPUT"
           else
             echo "ios=false" >> "$GITHUB_OUTPUT"
@@ -230,7 +230,9 @@ jobs:
     if: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && needs.ios-changes.outputs.ios == 'true' }}
     needs: ios-changes
     runs-on: macos-latest
-    timeout-minutes: 45
+    # Raised from 45 when the simulator run joined the job: it is a second full app build
+    # plus a boot and a two-test run on top of the three steps that were already here.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -263,6 +265,41 @@ jobs:
         # also builds `MotetPlayback` for macOS, the only place outside the app target that
         # a compiler is pointed at the AVFoundation half.
         run: ios/bin/ci-swift
+
+      - name: Run the app on a simulator and check it produces audio
+        # THE ONLY STEP IN THIS REPOSITORY THAT RUNS THE APP. Everything above it compiles,
+        # archives or tests logic; none of that can answer "is sound actually coming out",
+        # and neither can anything outside the process — no cloud device service captures
+        # iOS audio. So the app measures itself (`PlaybackProbe`) and this reads it.
+        #
+        # It rides THIS job rather than living in a macOS job of its own, and that is the
+        # cost decision: the runner is already up and Xcode is already warm, so what this
+        # adds is a simulator boot plus one build-and-run — roughly 5 to 10 minutes on a
+        # job that was already taking about that, rather than a second ~10-minute macOS
+        # runner at its higher billing multiplier. It runs only when `ios/**` moved, like
+        # everything else in this job.
+        #
+        # `Staging` with a base URL is deliberate: one run then proves both the staging
+        # build variant resolves the server it was given AND that the playback signal
+        # changes between playing and paused. The host is a reserved-by-RFC-2606 name that
+        # can never resolve — the probe screen makes no request — because this repository
+        # names no deployment of ours, not even in a workflow file.
+        run: >
+          ios/bin/ui-test
+          --configuration Staging
+          --api-base-url https://ui-test.invalid
+          --artifacts "$RUNNER_TEMP/ui-test"
+
+      - name: Keep what the run produced
+        # `always()`: a red run is the one whose video, screenshot and result bundle
+        # somebody needs, and nobody here has a Mac to reproduce it on.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ui-test
+          path: ${{ runner.temp }}/ui-test
+          retention-days: 14
+          if-no-files-found: warn
 
   # Single aggregate gate. Set THIS job — `all-checks-pass` — as the one required status
   # check, rather than enumerating every job above.

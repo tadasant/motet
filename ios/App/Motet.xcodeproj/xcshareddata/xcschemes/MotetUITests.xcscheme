@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The app driven on a booted simulator.
+
+  Its own scheme rather than a testable added to `Motet`, and that is load-bearing:
+  `ios/bin/testflight` runs `xcodebuild -showBuildSettings -scheme Motet` to decide which
+  entitlements file is signed into a distribution build, and that guard reasons about the
+  blocks it gets back — one per target in the scheme. Putting a second target into `Motet`
+  would change what it reads for a reason that has nothing to do with signing.
+
+  It defaults to `Debug`; `ios/bin/ui-test` passes `-configuration Staging` to prove the
+  staging variant resolves the server it was built with.
+-->
+<Scheme LastUpgradeVersion = "1600" version = "1.7">
+   <BuildAction parallelizeBuildables = "YES" buildImplicitDependencies = "YES">
+      <BuildActionEntries>
+         <BuildActionEntry buildForTesting = "YES" buildForRunning = "YES" buildForProfiling = "NO" buildForArchiving = "NO" buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA0000000000000000000020"
+               BuildableName = "Motet.app"
+               BlueprintName = "Motet"
+               ReferencedContainer = "container:Motet.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry buildForTesting = "YES" buildForRunning = "NO" buildForProfiling = "NO" buildForArchiving = "NO" buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA0000000000000000000060"
+               BuildableName = "MotetUITests.xctest"
+               BlueprintName = "MotetUITests"
+               ReferencedContainer = "container:Motet.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction buildConfiguration = "Debug" selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv = "YES">
+      <Testables>
+         <TestableReference skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA0000000000000000000060"
+               BuildableName = "MotetUITests.xctest"
+               BlueprintName = "MotetUITests"
+               ReferencedContainer = "container:Motet.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+   </TestAction>
+   <LaunchAction buildConfiguration = "Debug" selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle = "0" useCustomWorkingDirectory = "NO" ignoresPersistentStateOnLaunch = "NO" debugDocumentVersioning = "YES" debugServiceExtension = "internal" allowLocationSimulation = "YES">
+      <BuildableProductRunnable runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "AA0000000000000000000020"
+            BuildableName = "Motet.app"
+            BlueprintName = "Motet"
+            ReferencedContainer = "container:Motet.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </LaunchAction>
+   <AnalyzeAction buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction buildConfiguration = "Debug" revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
+</Scheme>

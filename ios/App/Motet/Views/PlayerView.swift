@@ -40,6 +40,12 @@ struct PlayerView: View {
                 transportControls
                 pills
                 LivePanel()
+                #if DEBUG
+                // The measured answer to "is there sound", where a developer on a
+                // simulator can see it. A TestFlight build is Release and has the
+                // `playback-probe` log category instead — see `PlaybackProbeReporter`.
+                PlaybackProbeStrip(probe: model.playbackProbe)
+                #endif
 
                 if let episode {
                     TranscriptList(episode: episode, positionMs: model.playback.positionMs)

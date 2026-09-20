@@ -32,7 +32,10 @@ struct MotetApp: App {
                 .tint(Theme.ink)
                 .task {
                     #if DEBUG
+                    // Both fixtures render without a server and without a session, so
+                    // neither may take the path that needs one.
                     if ScreenshotFixture.current != nil { return }
+                    if PlaybackProbeFixture.isRequested { return }
                     #endif
                     await model.start()
                 }
@@ -47,6 +50,8 @@ extension MotetApp {
         if let fixture = ScreenshotFixture.current {
             BacklogView(fixture: fixture)
                 .task { model.showScreenshotFixture() }
+        } else if PlaybackProbeFixture.isRequested {
+            PlaybackProbeView()
         } else {
             RootView()
         }
