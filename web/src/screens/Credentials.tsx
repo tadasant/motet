@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { ApiError, api, type Connector } from '../api/client'
 import { beginConsent, redirectUri, rememberState } from '../oauth'
+import { AccessTokens } from './credentials/AccessTokens'
 import { AddConnector } from './credentials/AddConnector'
 import { ConnectorRow } from './credentials/ConnectorRow'
 
@@ -25,9 +26,18 @@ type Load =
 
 export function Credentials({
   navigate = beginConsent,
+  signedIn = false,
 }: {
   /** Overridden only by tests: jsdom cannot navigate. */
   navigate?: (url: string) => void
+  /**
+   * Whether this caller is a signed-in person, from `/v1/auth/session`. The access-token
+   * panel is offered only to one, because only one may use it — a token cannot manage
+   * tokens and neither can the shared API token, and the API answers both a 403. Same
+   * split the Admin section keeps: this decides what is *offered*, the API decides what
+   * is allowed.
+   */
+  signedIn?: boolean
 }) {
   const [load, setLoad] = useState<Load>({ kind: 'loading' })
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -90,7 +100,8 @@ export function Credentials({
       <p className="lead">
         The sites Motet may fetch full articles from, when a newsletter is only a preview of
         one — and the logins and tools the fetching agent may use there. Nothing is fetched
-        until enrichment runs in this deployment.
+        until enrichment runs in this deployment. Your own access tokens, for scripts and
+        agents that call the API without a browser, are at the bottom.
       </p>
 
       {error && (
@@ -141,6 +152,8 @@ export function Credentials({
       )}
 
       <AddConnector onAdded={added} />
+
+      {signedIn && <AccessTokens />}
     </section>
   )
 }

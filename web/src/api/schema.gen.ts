@@ -283,6 +283,13 @@ export interface paths {
          *
          *     Reachable with the shared API token as well as with a session, which is what makes it
          *     usable from a *different* device than the compromised one.
+         *
+         *     **A personal access token may not call it**, and that is a recovery property rather
+         *     than tidiness. A PAT is not revoked by this (see `revoke_api_token`), so a leaked one
+         *     left able to call it could delete the owner's browser session on a loop — and the
+         *     owner's session is the only credential that can reach the revoke route. That would
+         *     make the leaked credential able to out-race its own revocation, which is the exact
+         *     thing "rotating the shared secret is a deploy" was the weakness of.
          */
         post: operations["logout_everywhere_v1_auth_logout_all_post"];
         delete?: never;
@@ -399,6 +406,76 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Api Tokens
+         * @description Every personal access token this account holds, newest first.
+         *
+         *     Revoked ones are included and marked, because with no database shell (invariant 10)
+         *     this list is the only place "which tokens existed, and when did each stop" can be
+         *     asked. No row carries a secret.
+         */
+        get: operations["list_api_tokens_v1_auth_tokens_get"];
+        put?: never;
+        /**
+         * Create Api Token
+         * @description Mint a personal access token and return it **once**.
+         *
+         *     The plaintext is in this response body and nowhere else: only its SHA-256 is stored,
+         *     nothing logs it, and no other route can return it. A lost token is revoked and
+         *     re-minted rather than recovered — which is the same trade `auth_sessions` already
+         *     makes, and the opposite of the feed token's, because that one has to be readable back
+         *     onto a new device and this one is pasted into an environment.
+         *
+         *     The address recorded on the row is the signed-in caller's, and it is what the
+         *     allowlist is re-checked against on every subsequent request. It is never None here —
+         *     `require_session` admits only a caller `deps.is_browser_session` accepts, and an
+         *     address is part of that question rather than a second check on top of it, which is
+         *     why this reads the value rather than asserting about it (`python -O` drops asserts).
+         */
+        post: operations["create_api_token_v1_auth_tokens_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/tokens/{token_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Api Token
+         * @description Revoke one token, immediately. Answers with the row it stamped.
+         *
+         *     Immediate because the lookup filters on `revoked_at` rather than waiting for a sweep,
+         *     so the next request on that token is refused. Revoking an already-revoked token is not
+         *     an error: a client that retries gets the same answer twice.
+         *
+         *     This is also the "lost laptop" lever for tokens, and it is deliberately **not** part of
+         *     `/v1/auth/logout-all`. That route revokes sessions, and folding tokens into it would
+         *     mean a person signing out everywhere silently killed the credential an agent is running
+         *     on. Reaching this route from another device needs only a sign-in, which is the property
+         *     `logout-all` exists for.
+         */
+        delete: operations["revoke_api_token_v1_auth_tokens__token_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1776,6 +1853,46 @@ export interface components {
              */
             submissions: number;
         };
+        /**
+         * ApiTokenResponse
+         * @description One personal access token, as every route except the mint returns it.
+         *
+         *     **Never carries the token.** The plaintext exists in exactly one response body, ever,
+         *     and this is not it.
+         */
+        ApiTokenResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Email
+             * @description The allowlisted address of the session that minted this token.
+             */
+            email: string;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+            /**
+             * Last Used At
+             * @description When this token last authenticated a request, to within five minutes. Coarse on purpose: writing it per request would serialize an agent's concurrent calls behind each other. Null means it has never been used.
+             */
+            last_used_at: string | null;
+            /**
+             * Prefix
+             * @description 'mot_<environment>_<first 8 characters>' — what makes a leaked token identifiable at a glance and greppable in an incident. Display only: nothing authenticates against it.
+             */
+            prefix: string;
+            /**
+             * Revoked At
+             * @description When this token stopped working. Revoked rows stay in the list rather than disappearing, because 'that token was live until Tuesday' is the question an audit asks and there is no database shell to ask it with.
+             */
+            revoked_at: string | null;
+        };
         /** AuthorizeConnectorRequest */
         AuthorizeConnectorRequest: {
             /**
@@ -1969,6 +2086,22 @@ export interface components {
              */
             username: string | null;
         };
+        /**
+         * CreateApiTokenRequest
+         * @description Mint a personal access token. Only a signed-in session may ask.
+         */
+        CreateApiTokenRequest: {
+            /**
+             * Expires In Days
+             * @description Optional lifetime. Null means the token lasts until it is revoked, which is the right default for a credential an agent holds in a deployed environment — an expiry nobody is watching is an outage nobody predicted.
+             */
+            expires_in_days?: number | null;
+            /**
+             * Label
+             * @description What this token is for, in the owner's own words. Shown in the list beside the prefix, so that revoking the right one does not mean guessing.
+             */
+            label: string;
+        };
         /** CreateConnectorRequest */
         CreateConnectorRequest: {
             /**
@@ -2039,6 +2172,18 @@ export interface components {
             rule?: components["schemas"]["SmartRuleModel"];
             /** Title */
             title: string;
+        };
+        /**
+         * CreatedApiTokenResponse
+         * @description The one response that carries a token's plaintext, and the only time it exists.
+         */
+        CreatedApiTokenResponse: {
+            created: components["schemas"]["ApiTokenResponse"];
+            /**
+             * Token
+             * @description The token. Shown once and hashed at rest — nothing can return it again, and a lost one is revoked and re-minted rather than recovered.
+             */
+            token: string;
         };
         /**
          * DedupDecisionResponse
@@ -3226,7 +3371,7 @@ export interface components {
             expires_at?: string | null;
             /**
              * How
-             * @description 'session' for a signed-in browser, 'token' for the shared API token, 'open' when MOTET_API_TOKEN is unset and this deployment has no lock on it at all.
+             * @description 'session' for a signed-in browser, 'pat' for a personal access token, 'token' for the shared API token, 'open' when MOTET_API_TOKEN is unset and this deployment has no lock on it at all.
              */
             how: string;
             /**
@@ -4310,6 +4455,105 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_api_tokens_v1_auth_tokens_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_api_token_v1_auth_tokens_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateApiTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedApiTokenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_api_token_v1_auth_tokens__token_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                token_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenResponse"];
                 };
             };
             /** @description Validation Error */

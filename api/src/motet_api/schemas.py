@@ -14,8 +14,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
+from motet_db.api_tokens import MAX_LABEL_CHARS as MAX_TOKEN_LABEL_CHARS
 from motet_sources import MAX_FIRST_SYNC_DAYS
 from pydantic import BaseModel, ConfigDict, Field
+
+#: The longest lifetime the mint route accepts, in days. A bound rather than a policy:
+#: nothing here expires a token by default, and a value a client can set to a century is
+#: a field that is not really validating anything.
+MAX_TOKEN_TTL_DAYS = 3650
 
 
 class HealthResponse(BaseModel):
@@ -1349,8 +1355,9 @@ class SessionResponse(BaseModel):
 
     how: str = Field(
         description=(
-            "'session' for a signed-in browser, 'token' for the shared API token, 'open' "
-            "when MOTET_API_TOKEN is unset and this deployment has no lock on it at all."
+            "'session' for a signed-in browser, 'pat' for a personal access token, "
+            "'token' for the shared API token, 'open' when MOTET_API_TOKEN is unset and "
+            "this deployment has no lock on it at all."
         )
     )
     email: str | None = None
@@ -1365,6 +1372,85 @@ class SessionResponse(BaseModel):
             "deployment, and for everybody when MOTET_ADMIN_EMAILS is unset."
         )
     )
+
+
+class CreateApiTokenRequest(BaseModel):
+    """Mint a personal access token. Only a signed-in session may ask."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    label: str = Field(
+        min_length=1,
+        max_length=MAX_TOKEN_LABEL_CHARS,
+        description=(
+            "What this token is for, in the owner's own words. Shown in the list beside "
+            "the prefix, so that revoking the right one does not mean guessing."
+        ),
+    )
+    expires_in_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_TOKEN_TTL_DAYS,
+        description=(
+            "Optional lifetime. Null means the token lasts until it is revoked, which is "
+            "the right default for a credential an agent holds in a deployed environment "
+            "— an expiry nobody is watching is an outage nobody predicted."
+        ),
+    )
+
+
+class ApiTokenResponse(BaseModel):
+    """One personal access token, as every route except the mint returns it.
+
+    **Never carries the token.** The plaintext exists in exactly one response body, ever,
+    and this is not it.
+    """
+
+    id: str
+    prefix: str = Field(
+        description=(
+            "'mot_<environment>_<first 8 characters>' — what makes a leaked token "
+            "identifiable at a glance and greppable in an incident. Display only: "
+            "nothing authenticates against it."
+        )
+    )
+    label: str
+    email: str = Field(description="The allowlisted address of the session that minted this token.")
+    created_at: datetime
+    last_used_at: datetime | None = Field(
+        description=(
+            "When this token last authenticated a request, to within five minutes. "
+            "Coarse on purpose: writing it per request would serialize an agent's "
+            "concurrent calls behind each other. Null means it has never been used."
+        )
+    )
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = Field(
+        description=(
+            "When this token stopped working. Revoked rows stay in the list rather than "
+            "disappearing, because 'that token was live until Tuesday' is the question "
+            "an audit asks and there is no database shell to ask it with."
+        )
+    )
+
+
+class CreatedApiTokenResponse(BaseModel):
+    """The one response that carries a token's plaintext, and the only time it exists."""
+
+    token: str = Field(
+        # **`repr=False` is a leak guard, not presentation.** An error reporter captures
+        # frame locals by their repr, and Pydantic's default repr prints every field — so
+        # a response model holding a live credential is one unhandled exception away from
+        # GlitchTip, which is `MintedToken.secret`'s argument at the wire boundary. The
+        # residue is stated rather than hidden: the encoder and the response body still
+        # hold the bytes under names (`obj`, `content`) that no scrubber denylist covers.
+        repr=False,
+        description=(
+            "The token. Shown once and hashed at rest — nothing can return it again, and "
+            "a lost one is revoked and re-minted rather than recovered."
+        ),
+    )
+    created: ApiTokenResponse
 
 
 class RevokedResponse(BaseModel):

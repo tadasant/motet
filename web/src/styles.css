@@ -722,6 +722,23 @@ details > summary:hover { color: var(--ink); }
 .risk .check { display: flex; gap: .5rem; align-items: flex-start; font-weight: 500; margin-top: .6rem; }
 .risk .check input { width: auto; margin: .2rem 0 0; flex: none; }
 
+/* Access tokens (PATs): the same list and pills as a connector row, plus the one shape
+   that is genuinely new — the panel holding a secret that will never be shown again. */
+.access-tokens { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+.access-tokens h3 { margin-top: 0; }
+.pill-live .pill-dot { background: var(--ink); }
+.pill-revoked { color: var(--ink-soft); border-style: dashed; }
+.pill-revoked .pill-dot { background: transparent; border: 1px dashed var(--ink-mute); }
+.pill-expired .pill-dot { background: transparent; border: 1px solid var(--ink-mute); }
+.token-prefix { font-size: 13px; color: var(--ink-soft); overflow-wrap: anywhere; }
+.minted-token { border: 1px solid var(--ink); border-left-width: 3px; border-radius: 0 10px 10px 0; padding: .75rem 1rem; margin: .75rem 0 1rem; background: var(--surface); }
+.minted-token p { margin: 0 0 .5rem; font-size: 14px; }
+.minted-token .row { display: flex; gap: .5rem; margin-top: .75rem; }
+.token-value { display: block; padding: .6rem .75rem; border: 1px solid var(--rule); border-radius: 8px; background: var(--parchment); font-size: 13px; overflow-wrap: anywhere; user-select: all; }
+.mint-token { display: flex; gap: .75rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 1rem; }
+.mint-token label { display: flex; flex-direction: column; gap: .25rem; font-size: 14px; font-weight: 500; }
+.mint-token button { flex: none; }
+
 /* The panel: one integration in full, in the grid directly under its card. */
 .integration-panel { grid-column: 1 / -1; scroll-margin-top: 5rem; border: 1px solid var(--rule); border-radius: 20px; padding: 1.25rem 1.5rem 1.5rem; background: var(--surface); }
 .integration-panel-head { display: flex; gap: .85rem; align-items: flex-start; padding-bottom: .9rem; border-bottom: 1px solid var(--rule); }

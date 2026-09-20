@@ -1333,6 +1333,26 @@ describe('a session that stops working', () => {
     expect(window.localStorage.getItem('motet.apiToken')).toBeNull()
   })
 
+  it('treats a 429 as a refusal, not as an outage', async () => {
+    // The API throttles only requests that already failed to authenticate, so a 429 here
+    // means this credential was refused — a valid one is never throttled. Read as an
+    // error, it would leave a dead token in storage behind a sentence nobody can act on.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        json: async () => ({ detail: 'Too many failed attempts. Wait a minute and try again.' }),
+      })) as unknown as typeof fetch,
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
+    expect(window.localStorage.getItem('motet.apiToken')).toBeNull()
+  })
+
   it('shows the app on an unlocked deployment, which has no door to pass', async () => {
     // MOTET_API_TOKEN unset is the documented local setup: the API answers everything.
     // A browser cannot tell "I have no credential" from "no credential is needed" without
@@ -1363,6 +1383,27 @@ describe('signing out', () => {
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined()
     expect(calls.find((call) => call.url.includes('/v1/auth/logout'))?.method).toBe('POST')
     expect(window.localStorage.getItem('motet.apiToken')).toBeNull()
+  })
+
+  it('offers no Sign out to a personal access token, and says where to revoke it', async () => {
+    // A PAT carries the address of the session that minted it, so it has an email and is
+    // not a sign-in: /v1/auth/logout is a no-op for one, and a Sign out button there
+    // would do nothing at all.
+    mockApi({
+      '/v1/auth/session': {
+        how: 'pat',
+        email: 'owner@motet.test',
+        expires_at: null,
+        login_configured: true,
+        admin: false,
+      },
+    })
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'Backlog', level: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /owner@motet.test/ }))
+    expect(screen.getByText(/Using an access token for owner@motet.test/)).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull()
   })
 
   it('says nothing about a session when the caller is using the shared token', async () => {

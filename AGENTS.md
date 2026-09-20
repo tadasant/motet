@@ -3085,6 +3085,186 @@ API still accepts the token everywhere else. As with every
 change to sign-in, a green CI run proves nothing about the real consent screen, so a human
 signs in on a phone once after this ships.
 
+#### A personal access token is a third key to the same lock
+
+**Sign-off: Tadas, 2026-09-20.** He asked for *"functionality in motet to create 'app
+passwords' that bypass the human oauth flow … the mechanism we'll have the agent leverage
+when testing on staging"*, was given the two shapes — a staging-only shared secret login,
+or a real per-user token system — and answered *"Go straight to PATs."* `api_tokens`
+(migration 0024), `motet_db.api_tokens`, `POST/GET /v1/auth/tokens`,
+`DELETE /v1/auth/tokens/{id}`, `deps.require_session`, `motet_api.throttle`,
+`web/src/screens/credentials/AccessTokens.tsx`.
+
+**The problem it answers is that an agent cannot sign in.** Google refuses an automated
+browser at the identifier step — that is settled, not untried, and the sign-in section
+above says so — so until now the only non-interactive way into `/v1` was the shared
+`MOTET_API_TOKEN`, which belongs to no person, cannot be revoked by a request, and is
+rotated by a deploy. A staging harness driving the product end to end needs a credential
+of its own.
+
+**Tokens, not passwords, and that is the one place this departs from the words he used.**
+Motet has no password store at all: sign-in is OAuth-only, so `auth_sessions` is the whole
+credential surface. An "email + app password" login would mean introducing password
+hashing, a reset flow and lockout logic that nothing else in the product needs, for
+ergonomics a bearer token already has. A token is the smaller surface and the same
+affordance.
+
+**A PAT is a third bearer in the same header, and resolves to the same user and the same
+checks.** `require_caller` tries the shared token first (constant-time), then routes on
+the `mot_` marker: a bearer carrying it is looked up in `api_tokens`, anything else in
+`auth_sessions`. So the feed tooling's path is unchanged and costs no extra probe, and a
+PAT never costs a session probe. Nothing about "one account" changed — `user_id`
+references the same seeded `motet-owner` row, and
+`test_every_token_belongs_to_the_one_seeded_account` says so.
+
+**What a PAT may not do is the short list, and each entry is a different escalation.**
+
+| Refused | Because |
+|---|---|
+| Mint, list or revoke a token | A credential that issues its own successors makes revocation unbounded: revoke the one you know about and it has already produced three you do not, with no surface that could show you the tree. A token is a leaf. |
+| `/v1/admin/*` | The operator view is the one route family that returns every user's data. `is_admin` already required a session; a PAT is not one, for the reason an MCP grant is not. |
+| Anything the API itself cannot do | Invariant 8 is untouched: the API holds `DekWrapper` and no `unwrap`, and the deployed service account has `useToEncrypt` and not `useToDecrypt`. A PAT inherits the process's capability, which does not include reading a source credential. |
+
+**The shared `MOTET_API_TOKEN` cannot mint one either, and neither can an MCP client's
+grant — that second one is the trap.** An MCP access token *is* an `auth_sessions` row
+(motet#111), so `how` reads `"session"` for it and a plain check on that alone would have
+admitted it: a one-hour delegated grant, revocable by deleting the client registration,
+minting a credential that outlives the grant, the revocation and the registration
+together. `require_session` spells the check the same way `is_admin` does so the two
+cannot drift. The shared token is refused for a different reason: rotating it is a deploy
+and that rotation is the recovery for it having leaked, so a token minted from it would
+make the recovery silently incomplete.
+
+That leaves a signed-in browser, or `motet_db.mint_session` — the staging deploy's own job
+entrypoint, which is **how the agent this feature is for gets its first token** without a
+human at a consent screen.
+
+**It is hashed at rest and shown exactly once.** Only the hex SHA-256 is stored; the
+plaintext is in the mint response body and nowhere else. Lookup is by that digest, which
+makes verification one full-length index probe — `auth_sessions`' argument — and what
+comes back is compared again with `hmac.compare_digest`, so "the comparison is
+constant-time" is a property of `motet_db.api_tokens` rather than a claim about what
+Postgres does inside an index. A lost token is revoked and re-minted, never recovered;
+that is the opposite of the feed token's trade, and the feed token's section says why it
+goes the other way.
+
+**The prefix is the incident-response affordance and is display only.**
+`mot_<environment>_<first 8 of the secret>` — `mot_` so a leaked credential is
+recognisable at a glance and greppable, and the environment so it is obvious *what* it
+opens. **The marker routes the lookup and never decides it**: a session token is 43 random
+url-safe characters and one in 16.7 million begins `mot_`, so a bearer the token table
+does not recognise falls through to the session table rather than being refused forever. **No new variable is required in the private repo**: the label falls back to
+`deployment.environment.name` out of `OTEL_RESOURCE_ATTRIBUTES`, which every deployment
+already sets because GlitchTip labels errors with it, so staging mints `mot_staging_…`
+unconfigured. `MOTET_TOKEN_LABEL` exists only so a deployment can pick a shorter spelling
+(`stg`, `live`) without renaming the environment every span and every error report wears
+— the same shape as `OTEL_INGEST_TOKEN` beside `OTEL_EXPORTER_OTLP_HEADERS`. A label that
+will not slugify falls back rather than refusing: a deployment must not be unable to mint
+a token because of how it labels its telemetry.
+
+**Revocation is a stamp, not a `DELETE`, and the row stays in the list.** With no database
+shell (invariant 10) that list is the only place "which tokens existed, and when did each
+stop" can be asked. Expiry is optional at creation and enforced in the lookup predicate
+rather than by a sweep, so a token that lapsed a second ago stops now. `last_used_at` is
+written at most every five minutes, which is `auth_sessions.last_seen_at`'s argument on
+the credential most likely to meet it — an agent makes concurrent requests on one token,
+and a write per request would take a row lock held to commit and serialize them.
+
+**A token dies with the address that minted it.** The row carries the allowlisted email of
+the session that created it, and `require_caller` re-checks it on every request exactly as
+it does a session's — de-listed has to mean gone, and a PAT outlives the browser session,
+so without this, taking somebody off `MOTET_ALLOWED_EMAILS` would revoke their sessions and
+leave their long-lived tokens working. The revocation is committed on the spot, because
+the 401 it raises rolls the request back.
+
+**`/v1/auth/logout-all` deliberately does not touch tokens, and a token may not call
+it.** Folding tokens into it would mean a person signing out everywhere silently killed
+the credential an agent is running on; the token list is the lever instead, and reaching
+it from another device needs only a sign-in, which is the property `logout-all` exists
+for. **The second half is the one a review had to find**: a PAT reaching that route could
+delete the owner's browser session on a loop, and a session is the only credential that
+can reach the revoke route — so a leaked token would be able to out-race its own
+revocation, which is exactly the weakness "rotating the shared secret is a deploy" has and
+that this feature is supposed to improve on. A PAT therefore gets a 403 there.
+
+**The failed-auth throttle is small and its value is narrow — read `motet_api.throttle`
+before relying on it.** It is not what stops a token being guessed; a 256-bit secret is.
+What it bounds is the *work* a stranger can make one API process do: a database probe per
+attempt, on an API whose connection is per request.
+
+**The bucket is the process, with no key at all, and that is a correction a review
+forced.** The first draft keyed on `request.client.host` — and the API is served by
+`uvicorn --forwarded-allow-ips='*'`, because Cloud Run's front end is the peer, so uvicorn
+rewrites `request.client` from the **left-most** `X-Forwarded-For` entry: whatever the
+outermost caller typed. The key was therefore attacker-chosen, a fresh value per request
+bought a fresh budget, and the limiter bounded nothing while *looking* like it bounded
+something. There is no unspoofable per-caller key available here — the right-most entry is
+Google's front end, one value for the whole internet — so one counter for the process is
+the honest shape, and `test_a_spoofed_forwarded_for_buys_no_fresh_budget` pins it.
+
+Three properties keep that from being a liability:
+
+- **It is consulted only after a request has already failed, and only when the request
+  presented a bearer.** A valid credential never touches it, so no amount of hammering can
+  lock the owner out; and a request carrying *no* credential cost no lookup, so there is
+  nothing to bound — which is also what keeps an MCP client's unauthenticated discovery
+  probe answering 401 with its RFC 9728 pointer rather than 429.
+- **The worst an attacker does to somebody else is turn their 401 into a 429**, and the SPA
+  reads both as "not signed in" on `/v1/auth/session` for exactly that reason: a 429 there
+  means this credential was refused, since a valid one is never throttled, and reading it
+  as an outage would leave a dead token in storage behind a sentence nobody can act on.
+- **It is in-process and per-instance, and it fails open.** The real budget is sixty a
+  minute times the instance count. A cross-instance limiter would be a row and a lock on
+  the one path whose job is to be cheap, which is the shape `motet_api.waitlist` already
+  declines — a new mechanism, and invariant 12's business.
+
+`motet.api.auth_failures{outcome}` is what makes it falsifiable, because a queue of 401s
+and a queue of 429s look identical in an access log. One object per process also means
+**`api/tests/conftest.py` resets it between tests** — without that, a module asserting a
+401 gets whichever status the module before it left the budget at, which is the throttle
+working and a leak all the same.
+
+**Every local on the auth path that holds a credential is named `token` or `secret`, and
+that is load-bearing.** `sentry_sdk` captures frame locals into an error report and its
+default scrubber redacts by *variable name*; both of those are on its denylist and
+`presented`, which `require_caller` used to call it, is not. So an unhandled exception on
+the auth path redacts the bearer instead of shipping it to GlitchTip.
+`api/tests/test_api_tokens.py` asserts the names against the installed SDK's own list,
+because a rename on either side would otherwise be silent. `MintedToken.secret` is out of
+the dataclass's repr for the same reason `motet_api.waitlist.Submission.email` is, and
+`CreatedApiTokenResponse.token` carries `Field(repr=False)` because Pydantic's default
+repr prints every field and that model is a frame local of the route that returns it.
+**The residue is named rather than hidden**: the encoder's own frames and the rendered
+body still hold the bytes, under names (`obj`, `content`) no scrubber denylist covers, so
+an unhandled exception raised *inside* serialization on that one route could still carry a
+token. Closing that would mean not building a response model for it at all, which is a
+worse trade than saying so.
+
+**The SPA affordance is a panel at the foot of Credentials**, offered only to a caller
+`/v1/auth/session` says is a session — the sidebar-and-403 split the Admin screen already
+keeps. The minted value gets a panel of its own with a copy button and a "this will not be
+shown again" line, is held in component state and never in `localStorage` or a URL, and
+the list beside it shows prefix, label, created, last used and state, because the API has
+no secret to send it. The account menu has a `pat` arm of its own, because a PAT carries an
+address and is *not* a sign-in: `/v1/auth/logout` is a no-op for one, so offering Sign out
+there would be a button that does nothing.
+
+**The invariant-12 reading, recorded as invariant 12 asks.** This adds a second credential
+kind on the existing bearer slot, one table used the way `auth_sessions` already is, three
+routes on the existing API, one in-process counter, and a panel on an existing screen: no
+deployable, datastore, vendor, seam, protocol, queue mechanism, inference stage or model
+call, and **no resource, secret or required variable in the private infrastructure repo**.
+It is above the line all the same — it is an authentication path, and "when in doubt, it
+counts" — so the sign-off it rests on is the owner's own answer above, given against the
+alternative he was shown, not the size of the diff.
+
+**What no test here can tell you** is whether the first real token minted in a deployed
+environment is minted by a *human's* browser session or by the staging mint, because both
+paths need something CI does not have — a Google consent screen, or the private repo's
+deploy job. What is pinned offline is the whole decision procedure against a real Postgres:
+mint, authenticate, refuse a wrong one, refuse a revoked one, refuse an expired one, and
+read the row back to prove it holds a hash and not the token.
+
 ### The operator view is the one read across users, and only a listed person gets it
 
 `GET /v1/admin/overview`, `deps.require_admin`, `web/src/screens/Admin.tsx` (motet#87).

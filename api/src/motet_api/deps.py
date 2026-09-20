@@ -3,12 +3,14 @@ asking.
 
 Authentication paths, deliberately different, because they serve different clients:
 
-* **``/v1`` takes a bearer token, and there are two kinds.** The configured
+* **``/v1`` takes a bearer token, and there are three kinds.** The configured
   ``MOTET_API_TOKEN`` is the shared secret the RSS tooling, the iOS app and any script
   hold — unchanged, and it keeps working. A **session token** is what a browser gets by
-  signing in with Google, so that a human stops typing the shared secret into a form.
-  Both arrive in the same header and mean the same thing, because there is still exactly
-  one account: this is a lock on the door, not an identity system.
+  signing in with Google, so that a human stops typing the shared secret into a form. A
+  **personal access token** is the non-interactive third: minted from a session, hashed
+  at rest, revocable, and the credential an agent driving staging holds. All three arrive
+  in the same header and mean the same thing, because there is still exactly one account:
+  this is a lock on the door, not an identity system.
 * **The feed and the audio it links to take a token in the query string.** That is not a
   weaker choice made for convenience: podcast clients handle a secret in a URL far better
   than they handle HTTP auth, and a feed nobody's player can subscribe to is not a feed.
@@ -16,8 +18,19 @@ Authentication paths, deliberately different, because they serve different clien
 
 The shared-secret comparison is constant-time. A token compared with ``==`` leaks its
 prefix to anyone patient enough to measure, and this one is the only thing standing
-between the internet and a bill. A session token is looked up by SHA-256 instead, which
-is a full-length index probe and gives a timing attack nothing partial to work with.
+between the internet and a bill. A session token and a personal access token are looked
+up by SHA-256 instead, which is a full-length index probe and gives a timing attack
+nothing partial to work with — and the PAT's digest is compared again with
+``hmac.compare_digest`` after the probe, so that property is local to
+:mod:`motet_db.api_tokens` rather than a claim about Postgres.
+
+**Every local on this path that holds a credential is named ``token`` or ``secret``, and
+that is load-bearing rather than taste.** ``sentry_sdk`` captures frame locals into an
+error report and its default scrubber redacts by *variable name*; both of those names are
+on its denylist and ``presented``, which this function used to call it, is not. So an
+unhandled exception anywhere on the auth path redacts the bearer instead of shipping it to
+GlitchTip. ``api/tests/test_api_tokens.py`` pins the names against the installed SDK's own
+list, because a rename would break it silently.
 """
 
 from __future__ import annotations
@@ -31,7 +44,8 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
-from fastapi import Depends, Header, HTTPException, Query, status
+from fastapi import Depends, Header, HTTPException, Query, Request, status
+from motet_db import api_tokens as token_repo
 from motet_db import auth as auth_repo
 from motet_db import repo
 from motet_storage import ObjectStore, build_store
@@ -40,6 +54,7 @@ from motet_vault import DekWrapper, VaultConfigError, build_dek_wrapper
 from .auth import ADMIN_EMAILS_ENV, ALLOWED_EMAILS_ENV, is_allowed
 from .config import Settings
 from .drain import DrainNudge, DrainTrigger, build_trigger
+from .throttle import auth_failures, failed_auth
 
 logger = logging.getLogger("motet.api")
 
@@ -196,14 +211,15 @@ class Caller:
 
     ``user_id`` is always the one account. ``how`` exists so the SPA can render "signed in
     as …" and offer a logout that actually revokes something, and so an operator reading
-    ``/v1/auth/session`` can tell a browser session from the shared secret from a
-    deployment with no lock on it at all.
+    ``/v1/auth/session`` can tell a browser session from a personal access token from the
+    shared secret from a deployment with no lock on it at all.
     """
 
     user_id: str
-    how: Literal["token", "session", "open"]
-    #: The Google account on the session, when the caller signed in. Never set for the
-    #: shared token, which belongs to no person.
+    how: Literal["token", "session", "pat", "open"]
+    #: The Google account on the session, when the caller signed in — or, for a personal
+    #: access token, the address of the session that minted it. Never set for the shared
+    #: token, which belongs to no person.
     email: str | None = None
     session_id: str | None = None
     #: When this browser has to sign in again. ``None`` for the shared token, which does
@@ -216,24 +232,35 @@ class Caller:
 
 
 def require_caller(
+    request: Request,
     config: Annotated[Settings, Depends(settings)],
     conn: Annotated[psycopg.Connection[Any], Depends(connection, scope="function")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> Caller:
-    """Authorize a ``/v1`` request, by shared token or by browser session.
+    """Authorize a ``/v1`` request: shared token, browser session, or personal access token.
 
-    The shared token is tried first and compared in constant time; a session lookup only
-    happens for a bearer value that is not it. That ordering is what keeps the path every
-    non-browser client takes — the feed tooling, the iOS app, any script — off the
-    database entirely.
+    The shared token is tried first and compared in constant time, which keeps the path
+    every non-browser client takes — the feed tooling, the iOS app, any script — off the
+    database entirely. A bearer that is not it is looked up in **one** table on the way to
+    succeeding: the ``mot_`` marker routes it to ``api_tokens`` and anything else to
+    ``auth_sessions``, so a PAT never costs a session probe and a session never costs a
+    token probe. Only a request on its way to a refusal pays for both — see the note at
+    the marker, which is a routing hint rather than a commitment.
+
+    **A PAT resolves to the same user and the same checks as the session that minted it,
+    and to nothing more.** It is not an operator (:func:`is_admin` requires a session, for
+    the reason an MCP grant is refused there), and it cannot mint or revoke another token
+    — the three routes that manage tokens require a session. What it *can* do is
+    everything else the owner can, which is the point: an agent driving staging needs the
+    product, not a subset of it.
 
     When no token is configured the API is open, and says so in the log on every request
     rather than only at startup — a warning nobody sees after the first minute of uptime
     is a warning that does not exist.
     """
-    presented = ""
+    token = ""
     if authorization and authorization.lower().startswith("bearer "):
-        presented = authorization[7:].strip()
+        token = authorization[7:].strip()
 
     if config.api_token is None:
         logger.warning(
@@ -247,10 +274,22 @@ def require_caller(
     # `compare_digest` raises TypeError on a str with a codepoint above 127 — so
     # `Authorization: Bearer é` would be a 500 from an unauthenticated request rather
     # than the 401 it is. A token this process generated is always URL-safe ASCII.
-    if presented and presented.isascii() and secrets.compare_digest(presented, config.api_token):
+    if token and token.isascii() and secrets.compare_digest(token, config.api_token):
         return Caller(user_id=repo.OWNER_USER_ID, how="token")
 
-    session = auth_repo.session_for_token(conn, presented) if presented else None
+    # The marker routes the probe; it does not commit to an answer. A bearer carrying it
+    # is almost always a PAT, so this is the lookup that saves the session table a probe
+    # on every agent request — but a session token is 43 random url-safe characters and
+    # one in 16.7 million of them begins `mot_`, and committing to the answer would refuse
+    # that person until they signed in again. So an unrecognised PAT falls through to the
+    # session lookup, which costs a second probe only on a request that was being refused
+    # anyway.
+    if token and token_repo.looks_like_api_token(token):
+        caller = _caller_for_api_token(request, conn, config, token)
+        if caller is not None:
+            return caller
+
+    session = auth_repo.session_for_token(conn, token) if token else None
     if session is not None:
         # **The allowlist is re-checked on every request, not only at sign-in.** Otherwise
         # taking an address off `MOTET_ALLOWED_EMAILS` would revoke nothing for up to the
@@ -269,10 +308,11 @@ def require_caller(
             # row to linger until its expiry — refused on every request, but present, and
             # quietly contradicting everything this comment and the migration claim.
             conn.commit()
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="This session is no longer allowed. Sign in again.",
-                headers={"WWW-Authenticate": "Bearer"},
+            raise _refused(
+                request,
+                "This session is no longer allowed. Sign in again.",
+                outcome="session_delisted",
+                counted=True,
             )
         return Caller(
             user_id=session.user_id,
@@ -283,9 +323,103 @@ def require_caller(
             mcp_client_id=session.mcp_client_id,
         )
 
-    raise HTTPException(
+    if token and token_repo.looks_like_api_token(token):
+        # It was shaped like one of ours and matched nothing in either table. Say so, so
+        # that "I pasted the wrong thing" and "that token has been revoked" are not the
+        # same sentence — the detail still names no state of any particular row.
+        raise _refused(
+            request,
+            "This access token is not valid. It may have been revoked or have expired.",
+            outcome="unknown_token",
+            counted=True,
+        )
+    raise _refused(
+        request,
+        "A valid bearer token is required. Sign in, or set the API token.",
+        outcome="unknown_bearer",
+        # A request with no bearer at all made no lookup, so there is nothing to bound
+        # and a scanner cannot spend the budget a real stale session needs.
+        counted=bool(token),
+    )
+
+
+def _caller_for_api_token(
+    request: Request,
+    conn: psycopg.Connection[Any],
+    config: Settings,
+    token: str,
+) -> Caller | None:
+    """Resolve a bearer that is shaped like a PAT. ``None`` means "not one of these".
+
+    ``None`` rather than a refusal, so that :func:`require_caller` can go on to the
+    session table — see the note at its call site. It still *raises* for a token that
+    resolved and is no longer allowed, because that one is an answer rather than a miss.
+
+    Unknown, revoked and expired all come back as ``None`` on purpose: the refusal the
+    caller eventually raises says which *kind* of credential was refused and never which
+    state a particular row is in, because "that token exists but is revoked" is a fact
+    worth nothing to its owner (who has the list route) and worth something to anyone else.
+    """
+    found = token_repo.token_for_secret(conn, token)
+    if found is None:
+        return None
+    # The same re-check a session gets, and it has to be: a PAT outlives the browser
+    # session that minted it, so without this, taking an address off the allowlist would
+    # revoke every *session* that person holds and leave their long-lived tokens working.
+    # Revoked rather than deleted, so the list still shows what happened and when.
+    if not is_allowed(found.email, config.allowed_emails):
+        logger.warning(
+            "revoking access token %s for %s: no longer on %s",
+            found.id,
+            found.email,
+            ALLOWED_EMAILS_ENV,
+        )
+        token_repo.revoke_token(conn, user_id=found.user_id, token_id=found.id)
+        # Committed here for `require_caller`'s reason one branch up: the raise below
+        # rolls the request back, and a revocation that vanished with it would be a
+        # warning logged on every request about a row that is still live.
+        conn.commit()
+        raise _refused(
+            request,
+            "This access token is no longer allowed and has been revoked.",
+            outcome="token_delisted",
+            counted=True,
+        )
+    return Caller(
+        user_id=found.user_id,
+        how="pat",
+        email=found.email,
+        expires_at=found.expires_at,
+    )
+
+
+def _refused(request: Request, detail: str, *, outcome: str, counted: bool) -> HTTPException:
+    """The 401 for a bearer that did not resolve, counted and rate-limited.
+
+    **The throttle is consulted here and nowhere else**, which is the property that makes
+    it safe: a caller holding a valid credential never reaches this function, so no amount
+    of hammering can refuse one. ``counted`` is the second half of that — a request that
+    presented no credential at all cost no database probe, so it is reported and not
+    counted, which is what keeps an unauthenticated probe (an MCP client's discovery, a
+    browser before sign-in) answering 401 rather than 429. See :mod:`motet_api.throttle`.
+
+    Returned rather than raised so that every call site reads ``raise _refused(...)`` and
+    a reviewer can see the control flow leaves at each one. ``request`` is unused today
+    and kept because the shape of this refusal is a property of the request, not of the
+    process; dropping it would be a signature change the day anything here needs it.
+    """
+    del request  # see the docstring: kept for shape, deliberately unread.
+    if counted and failed_auth.record_failure():
+        auth_failures.add(1, {"outcome": "throttled"})
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Wait a minute and try again.",
+            headers={"Retry-After": str(failed_auth.retry_after_seconds())},
+        )
+    auth_failures.add(1, {"outcome": outcome})
+    return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="A valid bearer token is required. Sign in, or set the API token.",
+        detail=detail,
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -300,16 +434,90 @@ def require_api_token(caller: Annotated[Caller, Depends(require_caller)]) -> str
     return caller.user_id
 
 
+def is_browser_session(caller: Caller) -> bool:
+    """Whether this caller is a person signed in to a browser, and nothing else.
+
+    **One predicate, because two spellings of it drift.** Both :func:`require_session` and
+    :func:`is_admin` need exactly this question and need the same answer to it, and the
+    interesting half is the second clause: an MCP client's access token *is* an
+    ``auth_sessions`` row (motet#111), so ``how`` reads ``"session"`` for it and a check on
+    that alone admits a delegated grant to both.
+
+    The address is part of the question rather than an extra guard on top of it. A session
+    always carries one — the column is ``NOT NULL`` and every writer of the table checks
+    the allowlist first — so this narrows nothing today; what it does is let the callers
+    rely on ``caller.email`` being a string instead of asserting it, and an ``assert`` is
+    what ``python -O`` removes.
+    """
+    return caller.how == "session" and caller.mcp_client_id is None and caller.email is not None
+
+
+def require_session(caller: Annotated[Caller, Depends(require_caller)]) -> Caller:
+    """Refuse anyone who is not a signed-in person. The guard on the token routes.
+
+    **Minting, listing and revoking a personal access token all require a session**, and
+    the three credentials refused here are refused for different reasons:
+
+    * **A personal access token cannot mint another one.** A credential that can issue
+      its own successors makes revocation unbounded — revoke the one you know about and
+      it has already produced three you do not — and there is no surface anywhere that
+      could show you the tree. A token is a leaf, always.
+    * **The shared ``MOTET_API_TOKEN`` cannot mint one either.** Rotating that secret is a
+      deploy, and it is the recovery for it having leaked; a token minted from it would
+      survive that rotation and quietly make the recovery incomplete.
+    * **An MCP client's grant cannot, and this is the one that is easy to miss.** An MCP
+      access token *is* an ``auth_sessions`` row (motet#111), so ``how`` is ``"session"``
+      for it and a plain check on that alone would admit it. What the person approved on
+      the consent screen was an agent acting as them for an hour, revocable by deleting
+      the client registration; minting a PAT from it would produce a credential that
+      outlives the grant, the revocation and the registration together.
+      :func:`is_admin` refuses it for the same reason and asks the *same function* —
+      :func:`is_browser_session` — so the two cannot drift apart.
+
+    That leaves a signed-in browser, or the staging deploy's own
+    ``motet_db.mint_session`` — which is how an agent bootstraps one without a human at a
+    consent screen, and therefore how the agent this feature is for gets its first token.
+    A 403 rather than a 401 for the same reason :func:`require_admin` answers 403: the
+    caller is authenticated, and asking again with the same credential will not help.
+    """
+    if is_browser_session(caller):
+        return caller
+    if caller.mcp_client_id is not None:
+        detail = (
+            "Managing access tokens needs a signed-in browser session; an MCP client's "
+            "grant is not one."
+        )
+    else:
+        detail = {
+            "pat": "An access token cannot manage access tokens. Sign in, and manage them there.",
+            "token": (
+                "Managing access tokens needs a signed-in session; the shared API token is not one."
+            ),
+            "open": (
+                "Managing access tokens needs a signed-in session, and this deployment has "
+                "no sign-in lock (MOTET_API_TOKEN is unset)."
+            ),
+        }.get(caller.how, "Managing access tokens needs a signed-in browser session.")
+    logger.warning("refused a token-management request from <%s>: %s", caller.how, detail)
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
 def is_admin(caller: Caller, config: Settings) -> bool:
     """Whether this caller may read the operator view — every user's data at once.
 
-    **Only a signed-in person, and only one on ``MOTET_ADMIN_EMAILS``.** Three callers are
+    **Only a signed-in person, and only one on ``MOTET_ADMIN_EMAILS``.** Four callers are
     refused however the list is set, and each for a reason rather than by accident:
 
     * **The shared API token.** It belongs to no person — the feed tooling, the iOS app
       and any script hold it — so there is no address to compare, and "unset means nobody
       is an admin" could not be literally true if a credential with no name on it passed.
     * **An open deployment** (``MOTET_API_TOKEN`` unset). Nobody has proved anything.
+    * **A personal access token**, which *does* carry an address — the one that minted it
+      — and is still refused, for the reason an MCP grant below is. It is a credential
+      pasted into an agent's environment and read back out of it, and the operator view is
+      the one route that returns every user's data at once. The owner reads it in a
+      browser they are signed in to; nothing an agent does needs it. If that ever stops
+      being true, it is a deliberate widening and a line in AGENTS.md, not a default.
     * **A session on an empty list.** :func:`~motet_db.allowlist.is_allowed` fails closed.
 
     The sign-in allowlist is not re-checked here because it does not need to be:
@@ -318,15 +526,19 @@ def is_admin(caller: Caller, config: Settings) -> bool:
     ``/v1/auth/session``'s ``admin`` flag, so the SPA can never offer a screen the API
     would refuse.
     """
-    if caller.how != "session" or caller.email is None:
-        return False
     # **An MCP client's grant is never an operator**, whoever approved it (motet#111). The
     # consent screen asks a person to let an agent act as them in their own account; reading
     # every user's data is not what they were asked about, and a delegated token is exactly
-    # the credential that should not carry it. The operator view needs a browser session.
-    if caller.mcp_client_id is not None:
-        return False
-    return is_allowed(caller.email, config.admin_emails)
+    # the credential that should not carry it. That, and the refusal of a PAT and of the
+    # shared token, are all one question — :func:`is_browser_session` — so that this guard
+    # and the token routes' cannot answer it differently.
+    # `caller.email is not None` is part of `is_browser_session`; repeating it here is
+    # what narrows the type without an `assert`, which `python -O` would remove.
+    return (
+        is_browser_session(caller)
+        and caller.email is not None
+        and is_allowed(caller.email, config.admin_emails)
+    )
 
 
 def require_admin(
@@ -356,6 +568,10 @@ def require_admin(
     elif caller.mcp_client_id is not None:
         detail = (
             "The admin view needs a signed-in browser session; an MCP client's grant is not one."
+        )
+    elif caller.how == "pat":
+        detail = (
+            "The admin view needs a signed-in browser session; a personal access token is not one."
         )
     elif caller.how == "token":
         detail = "The admin view needs a signed-in session; the shared API token is not one."
