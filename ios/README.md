@@ -371,10 +371,96 @@ locale-proof formatting — are `MotetKit` and run on Linux in `bin/ci`, which i
 split `AudioSessionPlan` makes. Whether the tap actually fires is a claim about a running
 `AVPlayer`, and `ios/bin/ui-test` is what makes it.
 
+## The audio readout a device-farm recording can read
+
+`Sources/MotetKit/Diagnostics/AudioReadout.swift`, `App/Motet/Support/AudioReadoutView.swift`,
+`App/Motet/Support/LiveProbeFixture.swift`, `App/MotetUITests/AudioReadoutUITests.swift`
+(motet#152).
+
+A farm run on a real iPhone proves nothing about sound unless the answer is **on screen**:
+the recording has no audio track, and the only other thing a farm driver can read is the
+accessibility tree. So the probe above has a second rendering — eight fixed rows in large
+white-on-black monospace, pinned to the top of the player and of the probe screen, updating
+as often as the probe samples (twice a second while playing, every two seconds while not):
+
+| Row | Identifier | Value (accessibility label *and* value) |
+|---|---|---|
+| MODE | `audio-readout-mode` | `listen` · `live` (a Play Live session is running) |
+| VERDICT | `audio-readout-verdict` | `audible` · `silent` · `unmeasured` |
+| WHY | `audio-readout-reason` | `none` · `notPlaying` · `clockNotMoving` · `noAudioRendered` · `no_tap` · `live_reply_untapped` · `live_not_narrating` |
+| TRANSPORT | `audio-readout-transport` | `playing` · `waiting` · `paused` |
+| POSITION | `audio-readout-position` | position in ms (drawn as `m:ss`) |
+| CLOCK | `audio-readout-clock` | `advancing` · `frozen` · `stopped` |
+| RMS | `audio-readout-rms` | four decimals, or `unmeasured`; drawn with a ten-cell `[####......]` bar on a -72…0 dBFS scale |
+| ROUTE | `audio-readout-route` | output ports joined with `+` — `Speaker`, `BluetoothA2DPOutput` — or `none` / `unknown` |
+
+`audio-readout` is the container, and `audio-readout-summary` carries every field as one
+`key=value` line (`mode=listen verdict=audible reason=none transport=playing position_ms=…
+clock=advancing rms=0.3535 peak=0.5000 route=Speaker live_phase=none`) for a driver that
+would rather parse one element than eight. The identifiers are a contract: a driver — the
+`aws-device-farm` server's `read_screen` in strad#369, and `AudioReadoutUITests` here —
+asserts on these exact strings, so renaming one is a breaking change on both sides.
+
+**Turning it on: the `Staging` (or `Debug`) configuration, plus the launch argument
+`-MotetAudioReadout`.** Both are needed. Without the argument a Staging build looks like the
+app (the small #140 strip, as before); with it the readout replaces that strip on the player
+and is added to the probe screen. A farm cannot sign in any more than an agent can, so the
+flow a farm can actually drive is the probe screen:
+
+```
+-MotetPlaybackProbe -MotetAudioReadout                          # Listen: press Play / Pause
+-MotetPlaybackProbe -MotetAudioReadout -MotetPlaybackProbeLive  # adds Start Live / Ask / Resume
+```
+
+`-MotetPlaybackProbeAutoplay` starts playback (or, with `-MotetPlaybackProbeLive`, Play Live)
+with nobody to press anything, and `-MotetPlaybackProbeLiveAsk` then asks after five seconds
+— both for `simctl`, which can screenshot and cannot tap.
+
+**It can never be in a TestFlight or App Store build, and that is structural rather than a
+runtime flag.** Every line of the view, its gate and the Live fixture is inside `#if DEBUG`.
+The archive `ios/bin/testflight` uploads is the `Release` configuration, which does not
+define `DEBUG`, so the code does not exist in that binary and no launch argument can reach
+it. Two checks hold that in place: `ios/bin/testflight check` (run on every iOS PR) fails if
+the archived Release bundle contains the bytes `-MotetAudioReadout` or `-MotetPlaybackProbe`
+anywhere, and `ios/bin/ui-test` fails if the Debug/Staging bundle does **not** contain the
+first — which is what keeps the Release check from passing vacuously. `MotetKit`'s
+`AudioReadout` itself is an ordinary value type and does ship, exactly as `PlaybackProbe`
+does; nothing in Release constructs one.
+
+Two decisions shape what it says:
+
+- **`audible` requires layer 3.** `PlaybackProbe.isAudible` lets layers 1 and 2 decide when
+  no tap has measured anything, which is right for a log line. A readout standing in for a
+  pair of ears must not say `audible` about audio nothing heard, so there it says
+  `unmeasured` (`WHY no_tap`) — and still never `silent`, because a missing layer abstains.
+- **Live mode's replies are not measured, and the readout says so.** The tap is on
+  `AVPlayer`'s audio mix; a Play Live reply plays through `AVLiveAudio`'s separate
+  `AVAudioEngine`, which no tap is on. So in Live mode the narration is still measured and
+  is the only thing that can read `audible`. While the session is narrating and the player is
+  playing, the narration's layers decide exactly as in Listen mode, so a frozen clock under a
+  running session still reads `silent`. Every other moment — connecting, narration paused for
+  a question, a reply playing, a pause — reads `unmeasured` (`WHY live_reply_untapped` while
+  a question or reply is in flight, `live_not_narrating` otherwise), never `silent` and never
+  a false `audible`. Measuring the reply path would mean a tap on that
+  engine's mixer, which is code on the shipping Live path that only a real device can
+  exercise; it was left out rather than shipped unverified.
+
+**What the Live fixture is.** The real `LiveSession`, pausing and resuming the real
+`PlaybackController` over the probe tone, with its two outward edges scripted: the mint
+answers with a socket URL that is never dialled, and the socket answers `authenticate` with a
+live `ready` and a `barge_in` with an `interrupted_at`, as the voice service does. **The
+microphone is never opened and no reply is played** — a CI simulator has no microphone and a
+permission prompt would stop the run — which costs nothing true, because the reply path is
+precisely the one the readout reports as `unmeasured`.
+
+**It never touches playback.** Its whole input is the probe and the Live snapshot that
+`AppModel` already publishes; nothing on the playback path awaits it, and it takes no taps
+(`allowsHitTesting(false)`).
+
 ## The one flow that actually runs the app
 
 `ios/bin/ui-test`, `App/MotetUITests/PlaybackProbeUITests.swift`,
-`.github/workflows/ios-ui-tests.yml`.
+`App/MotetUITests/AudioReadoutUITests.swift`, `.github/workflows/ios-ui-tests.yml`.
 
 ```bash
 ios/bin/ui-test                                              # Debug, no default server
@@ -383,9 +469,10 @@ gh workflow run ios-ui-tests.yml --ref main \
   -f configuration=Staging -f api_base_url_variable=MOTET_IOS_STAGING_API_BASE_URL
 ```
 
-It boots a simulator, builds, records video, runs two XCUITests, and keeps the result
-bundle, the video and **three** screenshots. Three because the obvious one is worthless
-alone: XCUITest terminates the app when the run ends, so a `simctl` screenshot taken then
+It boots a simulator, builds, records video, runs four XCUITests, and keeps the result
+bundle, the video and seven screenshots: the three below, and four of the audio readout —
+Listen idle and playing, Live narrating and asking (see the section above). The first three
+because the obvious one is worthless alone: XCUITest terminates the app when the run ends, so a `simctl` screenshot taken then
 catches the springboard. The other two relaunch the app and photograph the probe idle and
 then — with `-MotetPlaybackProbeAutoplay` — playing, because `simctl` can screenshot and
 cannot tap, which is the whole reason that launch argument exists. **A pair, because
@@ -414,8 +501,9 @@ when something measured it, and an abstention is recorded as an activity rather 
 a runner with no audio device installs the tap and is handed nothing, and layers 1 and 2
 still answer the question.
 
-**One flow on purpose.** A broad suite that is flaky on day one reddens every iOS pull
-request for reasons that have nothing to do with the change.
+**One fixture on purpose.** A broad suite that is flaky on day one reddens every iOS pull
+request for reasons that have nothing to do with the change; the readout's two tests drive
+the same probe screen rather than a second one.
 
 **Where it runs, and what that costs.** The `ios` job in `ci.yml` runs it on every change
 under `ios/**`, on the macOS runner that job was already paying for — a simulator boot plus

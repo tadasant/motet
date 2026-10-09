@@ -371,6 +371,11 @@ final class AppModel: ObservableObject {
             audio: audio,
             makeTransport: { URLSessionLiveTransport() }
         )
+        adopt(session)
+        return session
+    }
+
+    private func adopt(_ session: LiveSession) {
         liveSession = session
         liveTask?.cancel()
         liveTask = Task { [weak self] in
@@ -378,8 +383,16 @@ final class AppModel: ObservableObject {
                 self?.live = snapshot
             }
         }
-        return session
     }
+
+    #if DEBUG
+    /// The playback-probe fixture's Live session (`LiveProbeFixture`): a real `LiveSession`
+    /// over a scripted socket, so the audio readout can be shown in Live mode with no voice
+    /// service and no sign-in. Debug-only, like the fixture.
+    func useLiveSessionForFixture(_ session: LiveSession) {
+        adopt(session)
+    }
+    #endif
 
     /// Asked of our API whenever the player opens: whether this deployment has a voice
     /// service. "Not configured" is an answer, shown beside a disabled pill.

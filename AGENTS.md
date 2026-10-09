@@ -2778,6 +2778,20 @@ changes the package graph or the system diagram. The one judgement worth stating
 probe reads `AVPlayer`'s audio mix through `MTAudioProcessingTap`, which is a new *use* of
 an SDK the app already links rather than a new dependency.
 
+**A farm recording reads it off the screen, and only a `DEBUG` build can draw it**
+(motet#152). `AudioReadout` reduces the probe to eight fixed rows — mode, verdict, reason,
+transport, position, clock, RMS with a bar, route — each also an accessibility element with
+a documented identifier, shown in a `Debug` or `Staging` build launched with
+`-MotetAudioReadout`. Every line of the view is `#if DEBUG`, `Release` does not define it,
+and `ios/bin/testflight check` fails a Release bundle that contains the launch argument's
+bytes; `ios/bin/ui-test` asserts the opposite of a Staging one, so the guard cannot pass
+vacuously. **It is stricter than `isAudible` in one direction only**: `audible` needs layer
+3, and Live mode — whose replies play through `AVLiveAudio`'s own engine, which no tap is on
+— reads `unmeasured` whenever the narration is not what should be sounding, never `silent`
+and never a false `audible`; while a session narrates, a frozen clock is still `silent`. ios/README.md, "The audio readout a device-farm recording can
+read", is the reference. The invariant-12 reading: a view, a Debug fixture and test
+scaffolding over a measurement that already exists — no new mechanism.
+
 ### The RSS feed is the seam to the ears, and podcast clients are stricter than the spec
 
 `api/src/motet_api/feed.py`. RSS is Phase 1's listening surface *instead of* an in-app
