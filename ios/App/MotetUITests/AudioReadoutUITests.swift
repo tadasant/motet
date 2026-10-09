@@ -1,7 +1,8 @@
 import XCTest
 
 /// **The device-farm readout, read the way a farm driver will read it** (motet#152): by
-/// accessibility identifier, never by a parse of how it is drawn.
+/// accessibility identifier. The documented per-field elements must exist, and the values
+/// are read off `audio-readout-summary`, the one element that is a single frame.
 ///
 /// Same fixture as `PlaybackProbeUITests` — a generated tone through the shipping player —
 /// with `-MotetAudioReadout` on, and for Live mode `-MotetPlaybackProbeLive`, which runs the
@@ -73,7 +74,11 @@ final class AudioReadoutUITests: XCTestCase {
         ask.tap()
 
         // The session pauses the narration for the question; the reply path is untapped.
-        let asking = try waitForReadout(app) { $0[ID.mode] == "live" && $0[ID.transport] == "paused" }
+        // On the session's phase, not the transport: the player pauses an instant before the
+        // session records that it is listening, and that instant is neither state.
+        let asking = try waitForReadout(app) {
+            $0[ID.mode] == "live" && $0["live_phase"] == "listening" && $0[ID.transport] == "paused"
+        }
         XCTAssertEqual(asking[ID.verdict], "unmeasured", "a Live pause is not a measured silence: \(asking)")
         XCTAssertEqual(asking[ID.reason], "live_reply_untapped", "\(asking)")
         screenshot(app, "readout-live-asking")
@@ -86,38 +91,51 @@ final class AudioReadoutUITests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// The identifiers, spelled here rather than imported: a UI test target cannot see
-    /// MotetKit, and a driver on a farm will not either — these strings are the contract
-    /// `ios/README.md` documents.
+    /// The summary's keys. The fields are asserted off `audio-readout-summary` rather than
+    /// element by element, because the readout re-renders twice a second and eight separate
+    /// queries can straddle an update — a verdict from one frame beside a transport from the
+    /// next. One element is one frame.
     private enum ID {
-        static let mode = "audio-readout-mode"
-        static let verdict = "audio-readout-verdict"
-        static let reason = "audio-readout-reason"
-        static let transport = "audio-readout-transport"
-        static let clock = "audio-readout-clock"
-        static let rms = "audio-readout-rms"
-        static let all = [mode, verdict, reason, transport, clock, rms]
+        static let mode = "mode"
+        static let verdict = "verdict"
+        static let reason = "reason"
+        static let transport = "transport"
+        static let clock = "clock"
+        static let rms = "rms"
     }
+
+    /// The per-field identifiers a farm driver reads, spelled here rather than imported: a UI
+    /// test target cannot see MotetKit, and a driver on a farm will not either — these strings
+    /// are the contract `ios/README.md` documents.
+    private static let fieldIdentifiers = [
+        "audio-readout-mode", "audio-readout-verdict", "audio-readout-reason", "audio-readout-transport",
+        "audio-readout-position", "audio-readout-clock", "audio-readout-rms", "audio-readout-route",
+    ]
 
     private func launch(live: Bool) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-MotetPlaybackProbe", "-MotetAudioReadout"] + (live ? ["-MotetPlaybackProbeLive"] : [])
         app.launch()
         XCTAssertTrue(
-            app.otherElements["audio-readout"].waitForExistence(timeout: timeout)
-                || app.staticTexts[ID.verdict].waitForExistence(timeout: timeout),
+            app.staticTexts["audio-readout-summary"].waitForExistence(timeout: timeout),
             "the readout never rendered"
         )
+        for id in Self.fieldIdentifiers {
+            XCTAssertTrue(app.staticTexts[id].exists, "no element carries the documented identifier \(id)")
+        }
         return app
     }
 
-    /// Each field's accessibility value, keyed by identifier — what a farm driver reads.
+    /// The summary line's `key=value` fields — one frame of the readout.
     private func read(_ app: XCUIApplication) -> [String: String] {
+        let element = app.staticTexts["audio-readout-summary"]
+        guard element.exists else { return [:] }
+        let line = (element.value as? String) ?? element.label
         var fields: [String: String] = [:]
-        for id in ID.all {
-            let element = app.staticTexts[id]
-            guard element.exists else { continue }
-            fields[id] = (element.value as? String) ?? element.label
+        for field in line.split(separator: " ") {
+            let halves = field.split(separator: "=", maxSplits: 1)
+            guard halves.count == 2 else { continue }
+            fields[String(halves[0])] = String(halves[1])
         }
         return fields
     }
