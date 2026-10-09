@@ -22,9 +22,11 @@ import Foundation
 /// **Live mode's replies are not measured, and the readout says so rather than guessing.**
 /// The layer-3 tap sits on `AVPlayer`'s audio mix, and a Play Live reply is played by a
 /// separate `AVAudioEngine` (`AVLiveAudio`). So in Live mode the narration is measured as
-/// it always was, and only it can produce `audible`; every other moment of a Live session —
-/// the listener asking, a reply playing, narration paused — is ``Verdict/unmeasured``,
-/// because the path that might be making sound is one nothing is listening to.
+/// it always was, and only it can produce `audible`. While the session is narrating and the
+/// player is playing, the narration's layers decide exactly as in Listen mode — a frozen
+/// clock there is still `silent`. Every other moment of a Live session — connecting, the
+/// listener asking, a reply playing, narration paused — is ``Verdict/unmeasured``, because
+/// the path that might be making sound is one nothing is listening to.
 ///
 /// A value type with no dependencies, for ``PlaybackClockWatch``'s reason: the rules are
 /// tested on Linux, and the SwiftUI view that draws them does nothing but draw.
@@ -94,15 +96,25 @@ public struct AudioReadout: Hashable, Sendable {
         }
 
         let narration = Self.narrationVerdict(probe)
-        switch (mode, narration.verdict) {
-        case (.listen, _), (.live, .audible):
+        let phase = live?.phase
+        if mode == .listen || narration.verdict == .audible
+            || (phase == .narrating && probe.transport == .playing) {
+            // Listen mode; or a measured narration; or a Live session that says the narration
+            // is the thing sounding — replies are flushed before it narrates again — and the
+            // player agrees. In each the narration's own layers are the whole question, so a
+            // frozen clock or a measured hush under a narrating session still reads `silent`.
             verdict = narration.verdict
             reason = narration.reason
-        case (.live, _):
-            // The narration is not what is sounding, so whatever is — a reply, or nothing —
-            // came through a path no tap is on.
+        } else {
+            // The narration is not what should be sounding, so whatever is — a reply, or
+            // nothing — came through a path no tap is on. Never a vote either way.
             verdict = .unmeasured
-            reason = "live_reply_untapped"
+            switch phase {
+            case .listening?, .replying?, .resuming?:
+                reason = "live_reply_untapped"
+            default:
+                reason = "live_not_narrating"
+            }
         }
     }
 

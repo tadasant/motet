@@ -238,7 +238,9 @@ struct PlaybackProbeView: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                .disabled(!isReady)
+                // `startLive` asks which episode is loaded, which arrives on the snapshot
+                // stream a moment after the load; pressed before it, the start is a no-op.
+                .disabled(!isReady || model.playback.episodeId == nil)
                 .accessibilityIdentifier("probe-live-start-stop")
 
                 Button("Ask") { Task { await model.interruptLive() } }

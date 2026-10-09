@@ -387,7 +387,7 @@ as often as the probe samples (twice a second while playing, every two seconds w
 |---|---|---|
 | MODE | `audio-readout-mode` | `listen` · `live` (a Play Live session is running) |
 | VERDICT | `audio-readout-verdict` | `audible` · `silent` · `unmeasured` |
-| WHY | `audio-readout-reason` | `none` · `notPlaying` · `clockNotMoving` · `noAudioRendered` · `no_tap` · `live_reply_untapped` |
+| WHY | `audio-readout-reason` | `none` · `notPlaying` · `clockNotMoving` · `noAudioRendered` · `no_tap` · `live_reply_untapped` · `live_not_narrating` |
 | TRANSPORT | `audio-readout-transport` | `playing` · `waiting` · `paused` |
 | POSITION | `audio-readout-position` | position in ms (drawn as `m:ss`) |
 | CLOCK | `audio-readout-clock` | `advancing` · `frozen` · `stopped` |
@@ -436,9 +436,12 @@ Two decisions shape what it says:
 - **Live mode's replies are not measured, and the readout says so.** The tap is on
   `AVPlayer`'s audio mix; a Play Live reply plays through `AVLiveAudio`'s separate
   `AVAudioEngine`, which no tap is on. So in Live mode the narration is still measured and
-  is the only thing that can read `audible`, and every other moment — narration paused for a
-  question, a reply playing, a pause — reads `unmeasured` (`WHY live_reply_untapped`), never
-  `silent` and never a false `audible`. Measuring the reply path would mean a tap on that
+  is the only thing that can read `audible`. While the session is narrating and the player is
+  playing, the narration's layers decide exactly as in Listen mode, so a frozen clock under a
+  running session still reads `silent`. Every other moment — connecting, narration paused for
+  a question, a reply playing, a pause — reads `unmeasured` (`WHY live_reply_untapped` while
+  a question or reply is in flight, `live_not_narrating` otherwise), never `silent` and never
+  a false `audible`. Measuring the reply path would mean a tap on that
   engine's mixer, which is code on the shipping Live path that only a real device can
   exercise; it was left out rather than shipped unverified.
 

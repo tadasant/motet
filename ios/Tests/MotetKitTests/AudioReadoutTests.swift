@@ -85,15 +85,41 @@ final class AudioReadoutTests: XCTestCase {
     /// The reply plays through `AVLiveAudio`'s engine, which no tap is on. Narration paused
     /// for the question is the expected state, and calling it silent would be a vote by a
     /// layer that is not there.
-    func testEveryNonAudibleLiveMomentIsUnmeasured() {
-        for phase in [LiveSnapshot.Phase.connecting, .narrating, .paused, .listening, .replying, .resuming] {
+    func testANonAudibleLiveMomentAwayFromNarrationIsUnmeasured() {
+        let expected: [LiveSnapshot.Phase: String] = [
+            .connecting: "live_not_narrating", .paused: "live_not_narrating",
+            .listening: "live_reply_untapped", .replying: "live_reply_untapped", .resuming: "live_reply_untapped",
+        ]
+        for (phase, reason) in expected {
             for source in [probe(.paused, advancedMs: 0, level: tone), probe(advancedMs: 0), probe(level: hush), probe(level: nil)] {
                 let readout = AudioReadout(probe: source, live: live(phase))
                 XCTAssertEqual(readout.mode, .live, "\(phase)")
                 XCTAssertEqual(readout.verdict, .unmeasured, "\(phase) \(source.summary)")
-                XCTAssertEqual(readout.reason, "live_reply_untapped")
+                XCTAssertEqual(readout.reason, reason, "\(phase)")
             }
         }
+    }
+
+    /// A paused player under a narrating session — the listener's own pause landing before
+    /// the session hears of it — is not the narration sounding, so it abstains.
+    func testANarratingSessionWithAPausedPlayerIsUnmeasured() {
+        let readout = AudioReadout(probe: probe(.paused, advancedMs: 0, level: tone), live: live(.narrating))
+        XCTAssertEqual(readout.verdict, .unmeasured)
+        XCTAssertEqual(readout.reason, "live_not_narrating")
+    }
+
+    /// While the session narrates and the player plays, the narration is what should be
+    /// sounding and its layers decide — #140's frozen clock must not hide behind Live mode.
+    func testANarratingSessionKeepsTheNarrationsMeasuredSilence() {
+        let frozen = AudioReadout(probe: probe(advancedMs: 0, level: tone), live: live(.narrating))
+        XCTAssertEqual(frozen.verdict, .silent)
+        XCTAssertEqual(frozen.reason, "clockNotMoving")
+        let hushed = AudioReadout(probe: probe(level: hush), live: live(.narrating))
+        XCTAssertEqual(hushed.verdict, .silent)
+        XCTAssertEqual(hushed.reason, "noAudioRendered")
+        let untapped = AudioReadout(probe: probe(level: nil), live: live(.narrating))
+        XCTAssertEqual(untapped.verdict, .unmeasured)
+        XCTAssertEqual(untapped.reason, "no_tap")
     }
 
     /// The property the issue names: in Live mode, nothing but a measured narration may

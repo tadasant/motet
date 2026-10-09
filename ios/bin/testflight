@@ -252,10 +252,19 @@ if grep -aq '\$(' "$plist"; then fail "Info.plist carries a malformed \$(...) bu
 # piped, for the SIGPIPE reason the entitlements guard above gives: a guard that could read
 # a match as a miss fails open, and this one must not. `ios/bin/ui-test` makes the opposite
 # assertion of a Staging build, which is what proves these markers are findable at all.
+# Exit status rather than output: grep's 1 is "absent", and anything but 0 or 1 is an error
+# that must fail the guard rather than read as absent. Each marker is longer than 15 bytes on
+# purpose — Swift stores a string of 15 UTF-8 bytes or fewer inline in the instructions, where
+# no byte scan can find it, so a shorter marker would pass this check vacuously.
 for marker in -MotetAudioReadout -MotetPlaybackProbe; do
-  found="$(grep -rlaF -- "$marker" "$app" || true)"
-  [ -z "$found" ] || fail "the Release app contains '$marker' (in ${found##*/}) — a debug-only diagnostic reached the shipping build"
-  printf '    ok  %-44s absent\n' "$marker"
+  [ "${#marker}" -gt 15 ] || fail "marker '$marker' is too short to be found in a binary"
+  rc=0
+  found="$(grep -rlaF -- "$marker" "$app")" || rc=$?
+  case "$rc" in
+    0) fail "the Release app contains '$marker' (in: $(printf '%s' "$found" | tr '\n' ' ')) — a debug-only diagnostic reached the shipping build" ;;
+    1) printf '    ok  %-44s absent\n' "$marker" ;;
+    *) fail "could not scan the archived app for '$marker' (grep exit $rc)" ;;
+  esac
 done
 
 version="$(value CFBundleShortVersionString)"

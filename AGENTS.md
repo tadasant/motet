@@ -2787,8 +2787,8 @@ and `ios/bin/testflight check` fails a Release bundle that contains the launch a
 bytes; `ios/bin/ui-test` asserts the opposite of a Staging one, so the guard cannot pass
 vacuously. **It is stricter than `isAudible` in one direction only**: `audible` needs layer
 3, and Live mode — whose replies play through `AVLiveAudio`'s own engine, which no tap is on
-— reads `unmeasured` whenever the narration is not what is sounding, never `silent` and
-never a false `audible`. ios/README.md, "The audio readout a device-farm recording can
+— reads `unmeasured` whenever the narration is not what should be sounding, never `silent`
+and never a false `audible`; while a session narrates, a frozen clock is still `silent`. ios/README.md, "The audio readout a device-farm recording can
 read", is the reference. The invariant-12 reading: a view, a Debug fixture and test
 scaffolding over a measurement that already exists — no new mechanism.
 
