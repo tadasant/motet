@@ -44,7 +44,11 @@ struct PlayerView: View {
                 // The measured answer to "is there sound", where a developer on a
                 // simulator can see it. A TestFlight build is Release and has the
                 // `playback-probe` log category instead — see `PlaybackProbeReporter`.
-                PlaybackProbeStrip(probe: model.playbackProbe)
+                // Launched with `-MotetAudioReadout`, the large readout pinned above takes
+                // its place (motet#152).
+                if !AudioReadoutGate.isRequested {
+                    PlaybackProbeStrip(probe: model.playbackProbe)
+                }
                 #endif
 
                 if let episode {
@@ -53,6 +57,18 @@ struct PlayerView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal)
+            #if DEBUG
+            // Pinned rather than in the scroll of the screen, so a farm recording finds it
+            // in the same place in every frame — Listen and Live alike, because Play Live's
+            // panel is on this screen too.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if AudioReadoutGate.isRequested {
+                    AudioReadoutView(probe: model.playbackProbe, live: model.live)
+                        .padding(.horizontal)
+                        .padding(.top, 4)
+                }
+            }
+            #endif
             .background(Theme.parchment.ignoresSafeArea())
             .navigationTitle("Now playing")
             .navigationBarTitleDisplayMode(.inline)

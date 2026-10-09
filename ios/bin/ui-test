@@ -172,6 +172,12 @@ printf '    built Info.plist: MotetBuildEnvironment=%s MotetDefaultBaseURL=%s\n'
   || fail "built MotetBuildEnvironment is '$built_env', expected '$expect_env'"
 [ "$built_url" = "$base_url" ] \
   || fail "built MotetDefaultBaseURL is '$built_url', expected '${base_url:-<empty>}'"
+# The positive half of `ios/bin/testflight`'s Release guard (motet#152): that guard proves
+# the readout's launch argument is absent from the shipping bundle, which would be vacuous
+# if the string could not be found in a bundle that does have it. This one does.
+readout_in="$(grep -rlaF -- -MotetAudioReadout "$derived/Build/Products/$configuration-iphonesimulator/Motet.app" || true)"
+[ -n "$readout_in" ] || fail "the $configuration app does not contain -MotetAudioReadout — the readout was compiled out"
+printf '    the audio readout is compiled into this %s build\n' "$configuration"
 # Deliberately no host and no URL. This file is uploaded as a workflow artifact, an
 # artifact on a public repository is downloadable by anyone, and `::add-mask::` does
 # nothing to file contents. What the check needed the host for has already happened above;
@@ -242,10 +248,28 @@ if [ -d "$app" ]; then
   /bin/sleep 12
   xcrun simctl io "$udid" screenshot "$artifacts/probe-playing.png" 2>/dev/null || true
   xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
+
+  # The device-farm readout (motet#152), in both modes and at both ends of each. Same
+  # pairing argument as above, and the Live pair is the one that can only be scripted:
+  # `-MotetPlaybackProbeLiveAsk` asks once the session has narrated for five seconds, so
+  # the second Live picture is the narration paused for a question — `unmeasured`, because
+  # the reply path is the one no tap is on.
+  shoot_readout() {
+    local name="$1" wait="$2"; shift 2
+    xcrun simctl launch "$udid" "$BUNDLE_ID" -MotetPlaybackProbe -MotetAudioReadout "$@" >/dev/null 2>&1 || true
+    /bin/sleep "$wait"
+    xcrun simctl io "$udid" screenshot "$artifacts/$name.png" 2>/dev/null || true
+    xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
+  }
+  printf '==> photographing the audio readout, Listen and Live\n'
+  shoot_readout readout-listen-idle 6
+  shoot_readout readout-listen-playing 12 -MotetPlaybackProbeAutoplay
+  shoot_readout readout-live-narrating 12 -MotetPlaybackProbeLive -MotetPlaybackProbeAutoplay
+  shoot_readout readout-live-asking 14 -MotetPlaybackProbeLive -MotetPlaybackProbeAutoplay -MotetPlaybackProbeLiveAsk
 fi
 
 # The derived data is a gigabyte of object files nobody wants in an artifact bundle; the
-# result bundle, the video and the three screenshots are the evidence.
+# result bundle, the video and the screenshots are the evidence.
 rm -rf "$derived"
 
 if [ "$status" -ne 0 ]; then

@@ -244,6 +244,20 @@ expect MotetAppLinkDomain "$app_link_domain"
 [ -f "$app/PrivacyInfo.xcprivacy" ] || fail "no privacy manifest in the app bundle"
 if grep -aq '\$(' "$plist"; then fail "Info.plist carries a malformed \$(...) build setting"; fi
 
+# The diagnostics a device farm reads (motet#152) and the fixtures a UI test drives are
+# `#if DEBUG`, and Release does not define DEBUG — so none of their strings may be anywhere
+# in the app a listener installs. Asked of the archived bundle's bytes rather than of the
+# build settings, because a DEBUG that crept into Release, or a call site that slipped out
+# from under its `#if`, compiles cleanly and is visible only here. Captured rather than
+# piped, for the SIGPIPE reason the entitlements guard above gives: a guard that could read
+# a match as a miss fails open, and this one must not. `ios/bin/ui-test` makes the opposite
+# assertion of a Staging build, which is what proves these markers are findable at all.
+for marker in -MotetAudioReadout -MotetPlaybackProbe; do
+  found="$(grep -rlaF -- "$marker" "$app" || true)"
+  [ -z "$found" ] || fail "the Release app contains '$marker' (in ${found##*/}) — a debug-only diagnostic reached the shipping build"
+  printf '    ok  %-44s absent\n' "$marker"
+done
+
 version="$(value CFBundleShortVersionString)"
 
 if [ "$mode" = check ]; then

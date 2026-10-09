@@ -42,6 +42,13 @@ enum PlaybackProbeFixture {
         ProcessInfo.processInfo.arguments.contains("-MotetPlaybackProbeAutoplay")
     }
 
+    /// `-MotetPlaybackProbeLiveAsk` alongside autoplay and `-MotetPlaybackProbeLive`: once
+    /// the Live session has been narrating for a few seconds, ask — so `simctl`, which
+    /// cannot tap, can photograph the readout with the narration paused for a question.
+    static var asksLive: Bool {
+        ProcessInfo.processInfo.arguments.contains("-MotetPlaybackProbeLiveAsk")
+    }
+
     static let durationMs = 20_000
     static let episodeId = "probe-tone"
 
@@ -122,6 +129,11 @@ struct PlaybackProbeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // First, so it sits at the same place in every frame of a recording (motet#152).
+            if AudioReadoutGate.isRequested {
+                AudioReadoutView(probe: model.playbackProbe, live: model.live)
+            }
+
             Text("Playback probe")
                 .font(Theme.display(22, relativeTo: .title3))
                 .accessibilityIdentifier("probe-title")
@@ -149,6 +161,10 @@ struct PlaybackProbeView: View {
                 Text(isReady ? "loaded" : "loading")
                     .font(.system(.caption, design: .monospaced))
                     .accessibilityIdentifier("probe-load-state")
+            }
+
+            if LiveProbeFixture.isRequested {
+                liveControls
             }
 
             PlaybackProbeStrip(probe: model.playbackProbe)
@@ -187,11 +203,57 @@ struct PlaybackProbeView: View {
                 autoplay: false
             )
             isReady = true
+            if LiveProbeFixture.isRequested {
+                model.useLiveSessionForFixture(LiveProbeFixture.makeSession(narration: model.controller))
+            }
             if PlaybackProbeFixture.autoplays {
-                await model.perform(.play)
+                if LiveProbeFixture.isRequested {
+                    // `startLive` asks which episode is loaded, and that arrives on the
+                    // snapshot stream a moment after `load` returns.
+                    for _ in 0..<40 where model.playback.episodeId == nil {
+                        try? await Task.sleep(for: .milliseconds(50))
+                    }
+                    // Play Live starts the narration itself, on the session's first `ready`.
+                    await model.startLive()
+                    if PlaybackProbeFixture.asksLive {
+                        try? await Task.sleep(for: .seconds(5))
+                        await model.interruptLive()
+                    }
+                } else {
+                    await model.perform(.play)
+                }
             }
         } catch {
             loadError = "load: \(String(describing: error))"
+        }
+    }
+
+    /// Play Live over the scripted socket (`LiveProbeFixture`): start it, ask, carry on.
+    private var liveControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(model.live.isRunning ? "Stop Live" : "Start Live") {
+                    Task {
+                        if model.live.isRunning { await model.stopLive() } else { await model.startLive() }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(!isReady)
+                .accessibilityIdentifier("probe-live-start-stop")
+
+                Button("Ask") { Task { await model.interruptLive() } }
+                    .buttonStyle(.bordered)
+                    .disabled(model.live.phase != .narrating)
+                    .accessibilityIdentifier("probe-live-ask")
+
+                Button("Resume") { Task { await model.resumeLiveNarration() } }
+                    .buttonStyle(.bordered)
+                    .disabled(model.live.phase != .listening)
+                    .accessibilityIdentifier("probe-live-resume")
+            }
+            Text("live_phase=\(model.live.phase.rawValue)")
+                .font(.system(.caption, design: .monospaced))
+                .accessibilityIdentifier("probe-live-phase")
         }
     }
 }
