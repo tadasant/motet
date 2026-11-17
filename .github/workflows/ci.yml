@@ -1,33 +1,31 @@
 name: CI
 
-# Motet's one CI command, run on the shared self-hosted runner pool (label `self-hosted`)
-# that this repo registers against, to stay off the GitHub-hosted Actions minute quota.
-# Postgres comes up as a service container on a *dynamic* host port, and dependencies
-# install into per-runner paths, so concurrent jobs from co-tenant repos never collide.
+# Motet's one CI command, run on GitHub-hosted runners: `ubuntu-latest` for everything
+# except the iOS job, which needs `macos-latest`. Standard hosted runners are free and
+# unmetered on a public repo, and each job gets a fresh, ephemeral VM.
 #
-# THIS REPO IS PUBLIC, AND A SELF-HOSTED RUNNER ON A PUBLIC REPO IS THE COMBINATION GITHUB
-# WARNS ABOUT: without a guard, any stranger's fork PR would execute arbitrary code on
-# shared infrastructure. Three things close that gap, and all three have to stay:
+# THE RUNNER LABELS ARE LITERALS, ON PURPOSE. This repo used to run on a shared self-hosted
+# pool (moved off on 2026-11-17, after that box went down and took every runner with it).
+# Never make `runs-on` a variable or an expression: on a public repo the one thing that
+# must never be reachable from a fork PR is a self-hosted runner, and a literal is the
+# only spelling of that a reviewer can check at a glance.
+#
+# The fork guard stays on every job that checks out code, even though a hosted VM is not
+# the shared-machine problem it was written for:
 #
 #   1. Every job that checks out code carries the fork guard
 #      `github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository`,
 #      so a fork PR skips it and fork code never runs here.
 #   2. `all-checks-pass` below aggregates the result WITHOUT a checkout, so a fork PR —
 #      where everything skipped — still reports green instead of hanging on a required check.
-#   3. `pr-auto-close.yml` closes outside PRs on `ubuntu-latest`, so the untrusted path
-#      never touches this pool even to be rejected.
+#   3. `pr-auto-close.yml` closes outside PRs with no checkout at all.
 #
 # Belt-and-braces on top: the repo's Actions fork-PR approval policy is set to
 # `all_external_contributors`, so a fork workflow needs a maintainer's click regardless.
 #
-# ADDING A JOB? It needs the fork guard AND an entry in `all-checks-pass`. A job without
-# the guard is the whole hole. Adding a *check*, on the other hand, belongs in `bin/ci` —
-# a check that lives only in this file cannot be run on a laptop.
-#
-# ONE JOB IS NOT ON THAT POOL: `ios` runs on GitHub-hosted `macos-latest`, because
-# `xcodebuild` needs a Mac and there is no Mac in the pool. It carries the same fork guard;
-# a hosted runner is ephemeral, so a fork PR reaching it would not be the shared-machine
-# problem the guard exists for, but there is no reason for a fork to run it either.
+# ADDING A JOB? It needs the fork guard, a `timeout-minutes`, AND an entry in
+# `all-checks-pass`. Adding a *check*, on the other hand, belongs in `bin/ci` — a check
+# that lives only in this file cannot be run on a laptop.
 
 on:
   pull_request:
@@ -42,7 +40,8 @@ concurrency:
 jobs:
   ci:
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -51,7 +50,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: motet_test
-        # Dynamic host port — a fixed 5432 would collide with co-tenant jobs on the box.
+        # A dynamic host port, resolved below. Nothing else shares this VM, so a fixed 5432
+        # would also work; the dynamic one costs nothing and keeps the step honest.
         ports:
           - 5432/tcp
         options: >-
@@ -61,10 +61,11 @@ jobs:
           --health-retries 5
 
     env:
-      # GitHub-hosted runners export CI=true automatically; this self-hosted runner does
-      # not. Set it explicitly so tooling that keys off it behaves the same way here.
+      # GitHub-hosted runners export CI=true already. Kept explicit, because `ios/bin/ci-swift`
+      # and `ios/bin/build-app` fail rather than skip when it is set.
       CI: true
       UV_VERSION: "0.12.3"
+      MOTET_SWIFT_VERSION: "6.2"
 
     steps:
       - uses: actions/checkout@v4
@@ -73,35 +74,35 @@ jobs:
         run: |
           echo "DATABASE_URL=postgresql://postgres:postgres@localhost:${{ job.services.postgres.ports[5432] }}/motet_test" >> "$GITHUB_ENV"
 
-      - name: Install uv and Python (per-runner paths)
-        # uv is installed and cached per runner, and manages its own CPython, so this
-        # never writes to the shared tool cache that co-tenant jobs also use.
-        run: |
-          RUNNER_NUM=$(echo "$RUNNER_NAME" | grep -oE '[0-9]+$' || echo "0")
-          MOTET_HOME="$HOME/.motet/runner-${RUNNER_NUM}"
-          echo "UV_CACHE_DIR=${MOTET_HOME}/uv-cache" >> "$GITHUB_ENV"
-          echo "UV_PYTHON_INSTALL_DIR=${MOTET_HOME}/python" >> "$GITHUB_ENV"
-          echo "npm_config_cache=${MOTET_HOME}/npm-cache" >> "$GITHUB_ENV"
-
-          export UV_INSTALL_DIR="${MOTET_HOME}/bin"
-          mkdir -p "$UV_INSTALL_DIR"
-          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
-          echo "$UV_INSTALL_DIR" >> "$GITHUB_PATH"
+      - name: Install uv
+        # uv manages its own CPython (`requires-python` in the workspace), so there is no
+        # setup-python step. The cache is GitHub's Actions cache, keyed on `uv.lock`.
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install the Swift toolchain (per-runner paths)
-        # MotetKit — the iOS client's logic — is tested by `bin/ci`, and these runners have
-        # no Swift. The toolchain is ~1 GB, so it installs ONCE per runner into the same
-        # per-runner directory uv and npm use above, and every later run reuses it. Without
-        # this step `bin/ci` skips the iOS tests rather than failing, which is why this is a
-        # real step and not `continue-on-error`.
+      - name: Cache the Swift toolchain
+        # MotetKit — the iOS client's logic — is tested by `bin/ci`. The toolchain is ~1 GB,
+        # so it is restored from the Actions cache rather than downloaded on every run. The
+        # key is the version `ios/bin/install-swift-toolchain` installs, which is all the
+        # directory depends on.
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/swift
+          key: swift-${{ env.MOTET_SWIFT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu24.04
+
+      - name: Install the Swift toolchain
+        # A no-op beyond writing the shim when the cache restored the toolchain. Without this
+        # step `bin/ci` skips the iOS tests rather than failing, which is why this is a real
+        # step and not `continue-on-error`.
         run: |
-          RUNNER_NUM=$(echo "$RUNNER_NAME" | grep -oE '[0-9]+$' || echo "0")
-          MOTET_HOME="$HOME/.motet/runner-${RUNNER_NUM}"
-          SHIM_DIR=$(ios/bin/install-swift-toolchain "${MOTET_HOME}/swift")
+          SHIM_DIR=$(ios/bin/install-swift-toolchain "${RUNNER_TEMP}/swift")
           echo "$SHIM_DIR" >> "$GITHUB_PATH"
 
       - name: Run the one CI command
@@ -116,12 +117,11 @@ jobs:
   # infrastructure repo. Nothing here authenticates to anything.
   images:
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     # Raised from 20 when `motet-enrich` joined the set (motet#102). That target is built on
-    # Playwright's own base image — a ~1.5 GiB pull the first time a runner sees a new tag —
-    # installs the agent toolchain from npm, and copies a Chromium, so a cold run is
-    # materially longer than the other four put together. The pull is cached on the shared
-    # pool afterwards; the ceiling is for the cold case.
+    # Playwright's own base image — a ~1.5 GiB pull — installs the agent toolchain from npm,
+    # and copies a Chromium. A hosted VM starts with no Docker layer cache, so every run is
+    # the cold case this ceiling was sized for.
     timeout-minutes: 45
 
     steps:
@@ -129,9 +129,8 @@ jobs:
 
       - name: Build and smoke-test the container images
         # Tags itself per run and removes its own containers and images on the way out,
-        # including on the failure path. Deliberately no `docker image prune` step here:
-        # this pool is shared, and a blanket prune would delete a co-tenant job's layers
-        # out from under it.
+        # including on the failure path. The VM is discarded after the job, so nothing
+        # here needs pruning.
         run: bin/build-images
 
   # Does this change touch the iOS app at all?
@@ -212,10 +211,9 @@ jobs:
 
   # The iOS app, compiled by Xcode for the simulator.
   #
-  # This is the only job in the repo that does NOT run on the self-hosted pool: there is no
-  # Mac in it, and `xcodebuild` needs one. GitHub's hosted macOS runners are free on a
-  # public repo, which is what makes an unproven-until-now app buildable in CI with nobody
-  # having to own a Mac.
+  # This is the one job on `macos-latest` rather than `ubuntu-latest`: `xcodebuild` needs a
+  # Mac. GitHub's hosted macOS runners are free on a public repo, which is what makes an
+  # unproven-until-now app buildable in CI with nobody having to own a Mac.
   #
   # NOTHING HERE SIGNS ANYTHING, and that is the property to preserve. A simulator build
   # and an unsigned device archive need no identity, no certificate, no provisioning profile
@@ -320,7 +318,8 @@ jobs:
   #      relied on a second time: a skipped job is a non-answer, not a pass.
   all-checks-pass:
     if: ${{ !cancelled() }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - ci
       - images

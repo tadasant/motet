@@ -80,8 +80,8 @@ API's reason beside it.
 ## What is verified, and how
 
 `bin/ci` runs the iOS checks along with everything else. On this repo's Linux runners it
-installs a Swift toolchain once per runner (`ios/bin/install-swift-toolchain`, ~1 GB, cached
-afterwards); on a Mac it uses Xcode's. Locally:
+installs a Swift toolchain (`ios/bin/install-swift-toolchain`, ~1 GB) that CI restores from
+the Actions cache, keyed on the Swift version; on a Mac it uses Xcode's. Locally:
 
 ```bash
 ios/bin/ci-swift          # swift build && swift test

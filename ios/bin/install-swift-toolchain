@@ -3,10 +3,10 @@
 # Install a Swift toolchain into a directory the caller owns, and print the `bin` path to
 # put on PATH. Idempotent: an existing, working install is reused.
 #
-# WHY THIS EXISTS. `bin/ci` runs MotetKit's test suite, and the shared self-hosted runners
-# have no Swift. A toolchain is ~1 GB, so it is installed **once per runner** into a
-# per-runner path — the same shape `ci.yml` already uses for uv, Python, and npm — and
-# every later run reuses it. Nothing here touches a shared tool cache.
+# WHY THIS EXISTS. `bin/ci` runs MotetKit's test suite, and a Linux machine has no Swift
+# of a known version. A toolchain is ~1 GB, so it is installed into a directory the caller
+# owns and reused on every later run — in CI, that directory is restored from the Actions
+# cache (`ci.yml`). Nothing here touches a shared tool cache.
 #
 # On a Mac this script is never needed: `swift` comes with Xcode, and `bin/ci` finds it.
 #
