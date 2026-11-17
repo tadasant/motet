@@ -1,7 +1,8 @@
 name: CI
 
 # Motet's one CI command, run on GitHub-hosted runners: `ubuntu-latest` for everything
-# except the iOS job, which needs `macos-latest`. Standard hosted runners are free and
+# except `ci` (pinned to `ubuntu-24.04` for the Swift toolchain; see that job) and the iOS
+# job, which needs `macos-latest`. Standard hosted runners are free and
 # unmetered on a public repo, and each job gets a fresh, ephemeral VM.
 #
 # THE RUNNER LABELS ARE LITERALS, ON PURPOSE. This repo used to run on a shared self-hosted
@@ -40,7 +41,11 @@ concurrency:
 jobs:
   ci:
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 rather than `ubuntu-latest`, because `ios/bin/install-swift-toolchain`
+    # installs swift.org's Ubuntu 24.04 build, and on `ubuntu-latest` (26.04 since late 2026)
+    # `swift-build` fails to load `libxml2.so.2`. Move this together with the toolchain's
+    # target distribution, never on its own.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:

@@ -828,7 +828,8 @@ client reads it at call time. One image, configured where it runs.
 ### Runner policy
 
 **Every job runs on a GitHub-hosted runner**, and the label is a literal: `ubuntu-latest`,
-or `macos-latest` where Xcode is needed. Decided by Tadas on 2026-11-17 for every public
+`macos-latest` where Xcode is needed, or `ubuntu-24.04` for the `ci` job, whose Swift
+toolchain is swift.org's Ubuntu 24.04 build and does not load on the newer image. Decided by Tadas on 2026-11-17 for every public
 repo — standard hosted runners are free and unmetered on a public repo — after the shared
 self-hosted pool this repo used to run on went down on 2026-11-16 and took every job with
 it. **Never put `runs-on` behind a variable or an expression**, and never point a job in
