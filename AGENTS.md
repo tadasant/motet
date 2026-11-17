@@ -34,7 +34,7 @@ signal it belongs in the private repo instead — say so and stop rather than in
 Deploy workflows live in the private repo — with one exception, the TestFlight upload, which
 lives here for its free macOS runner, runs on every merge that touches `ios/`, and is
 fenced to `main` (see [Runner policy](#runner-policy)). CI in *this* repo runs on
-GitHub-hosted `ubuntu-latest` behind a fork guard, with one job on a GitHub-hosted macOS
+GitHub-hosted Ubuntu runners behind a fork guard, with one job on a GitHub-hosted macOS
 runner because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
 
 ---
@@ -829,10 +829,10 @@ client reads it at call time. One image, configured where it runs.
 
 **Every job runs on a GitHub-hosted runner**, and the label is a literal: `ubuntu-latest`,
 `macos-latest` where Xcode is needed, or `ubuntu-24.04` for the `ci` job, whose Swift
-toolchain is swift.org's Ubuntu 24.04 build and does not load on the newer image. Decided by Tadas on 2026-11-17 for every public
-repo — standard hosted runners are free and unmetered on a public repo — after the shared
-self-hosted pool this repo used to run on went down on 2026-11-16 and took every job with
-it. **Never put `runs-on` behind a variable or an expression**, and never point a job in
+toolchain is swift.org's Ubuntu 24.04 build and does not load on the newer image. Decided
+by Tadas on 2026-11-17 for every public repo — standard hosted runners are free and
+unmetered on a public repo — after the shared self-hosted pool this repo used to run on
+went down on 2026-11-16 and took every job with it. **Never put `runs-on` behind a variable or an expression**, and never point a job in
 this repo back at `self-hosted`: on a public repo a self-hosted runner is the one place a
 fork PR must never reach, and a literal label is the only spelling of that a reviewer can
 check at a glance. Nothing a job needs may live on a machine: uv, Node, the Swift
@@ -859,8 +859,8 @@ run even if a guard were dropped.
 in `all-checks-pass`.** The default timeout is six hours.
 
 **One job is on `macos-latest` rather than `ubuntu-latest`: `ios`, which runs
-`xcodebuild`.** There is no Mac anywhere in this project — which is why the iOS app went months without a compiler ever being pointed at
-it. It is free because this repo is public, and it needs no Apple Developer Program
+`xcodebuild`.** There is no Mac anywhere in this project — which is why the iOS app went
+months without a compiler ever being pointed at it. It is free because this repo is public, and it needs no Apple Developer Program
 credential because a **simulator** build needs no identity, no certificate, no provisioning
 profile and no App Store Connect key — and neither does the unsigned device archive it also
 runs (`ios/bin/testflight check`). That is the property to preserve: adding signing, a

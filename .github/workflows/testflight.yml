@@ -16,7 +16,7 @@ name: TestFlight
 #      that environment's deployment-branch policy admits `main` only. So a branch that
 #      edits this file to drop (2) still cannot read the key: GitHub withholds environment
 #      secrets from a job on a ref the policy does not admit.
-#   4. It runs on a GitHub-hosted, ephemeral macOS runner — never on the self-hosted pool,
+#   4. It runs on a GitHub-hosted, ephemeral macOS runner — never on a self-hosted runner,
 #      where a key written to disk would outlive the job on a shared machine.
 #
 # The credential is an App Store Connect API key and nothing else: no GCP identity, no

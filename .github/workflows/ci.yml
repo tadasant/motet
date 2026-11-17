@@ -92,15 +92,15 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Cache the Swift toolchain
+      - name: Restore the Swift toolchain
         # MotetKit — the iOS client's logic — is tested by `bin/ci`. The toolchain is ~1 GB,
         # so it is restored from the Actions cache rather than downloaded on every run. The
-        # key is the version `ios/bin/install-swift-toolchain` installs, which is all the
-        # directory depends on.
-        uses: actions/cache@v4
+        # key is the version and the install script, which is all the directory depends on.
+        id: swift-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/swift
-          key: swift-${{ env.MOTET_SWIFT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu24.04
+          key: swift-${{ env.MOTET_SWIFT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu24.04-${{ hashFiles('ios/bin/install-swift-toolchain') }}
 
       - name: Install the Swift toolchain
         # A no-op beyond writing the shim when the cache restored the toolchain. Without this
@@ -109,6 +109,16 @@ jobs:
         run: |
           SHIM_DIR=$(ios/bin/install-swift-toolchain "${RUNNER_TEMP}/swift")
           echo "$SHIM_DIR" >> "$GITHUB_PATH"
+
+      - name: Save the Swift toolchain
+        # Saved here, straight after the install and its self-check, rather than in a post
+        # step: `actions/cache` saves only when the whole job succeeds, so a red test would
+        # otherwise mean re-downloading 1 GB on every run until something went green.
+        if: steps.swift-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/swift
+          key: ${{ steps.swift-cache.outputs.cache-primary-key }}
 
       - name: Run the one CI command
         run: bin/ci

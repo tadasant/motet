@@ -5,7 +5,8 @@
 #
 # Finding a toolchain, in order:
 #   1. `swift` on PATH            — a Mac with Xcode, or a machine that already has one.
-#   2. a per-runner install       — what `ci.yml` sets up with install-swift-toolchain.
+#   2. an install-swift-toolchain shim — `MOTET_SWIFT_SHIM`, or the default install path.
+#      (CI puts its shim on PATH, so it is found by 1.)
 #   3. nothing                    — SKIP on a laptop, FAIL in CI.
 #
 # The skip is a deliberate compromise for contributors: someone with neither Xcode nor a
@@ -22,10 +23,8 @@ find_swift() {
     command -v swift
     return 0
   fi
-  local runner_num shim
-  runner_num=$(echo "${RUNNER_NAME:-}" | grep -oE '[0-9]+$' || echo "0")
+  local shim
   for shim in "${MOTET_SWIFT_SHIM:-}" \
-              "$HOME/.motet/runner-${runner_num}/swift/shim/swift" \
               "$HOME/.motet/swift/shim/swift"; do
     if [ -n "$shim" ] && [ -x "$shim" ]; then
       printf '%s\n' "$shim"

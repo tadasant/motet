@@ -104,8 +104,8 @@ def _run(module: str, *args: str) -> subprocess.CompletedProcess[str]:
 
     ``DATABASE_URL`` is dropped so that a module which somehow got past argparse would stop
     on its own missing-database check rather than touch a database the rest of the suite is
-    using, and the telemetry variables are dropped because CI runs on a shared pool holding
-    credentials for the real obs stack (invariant 11) — a startup test that exported to it
+    using, and the telemetry variables are dropped because a developer shell with `.env`
+    loaded holds credentials for the real obs stack (invariant 11) — a startup test that exported to it
     would put test spans under a label an operator filters on.
 
     ``-W error::RuntimeWarning`` is what gives this teeth: runpy emits the double-execution

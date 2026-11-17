@@ -20,8 +20,8 @@ name: Notify tadasant-internal that main moved
 #      survives a branch adding its own workflow, or editing this one, to read the secret:
 #      GitHub withholds an environment's secrets from a job on a ref the policy does not
 #      admit. Never move it to repository secrets.
-#   4. It runs on a GitHub-hosted, ephemeral runner with no checkout, never the self-hosted
-#      pool, and hands the token to curl on stdin rather than in argv, where anything on a
+#   4. It runs on a GitHub-hosted, ephemeral runner with no checkout, never a self-hosted
+#      runner, and hands the token to curl on stdin rather than in argv, where anything on a
 #      shared machine that can run `ps` could read it.
 #
 # It is its own workflow rather than a job after `all-checks-pass` in ci.yml deliberately.

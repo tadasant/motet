@@ -19,9 +19,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Tagged per run, not `local`. The self-hosted pool is shared and `ci.yml` groups
-# concurrency by ref, so a PR run and a push-to-main run overlap freely on one box —
-# a fixed tag means one run retags the image another is about to smoke-test.
+# Tagged per run, not `local`. Two runs against one Docker daemon — two terminals, two
+# agent sessions on one machine — would otherwise retag the image the other is about to
+# smoke-test.
 TAG="${TAG:-local-$$}"
 
 # The commit these images are built from, which a deployed revision reports on
@@ -47,8 +47,8 @@ cleanup() {
   for name in "${CONTAINERS[@]:-}"; do
     [ -n "$name" ] && docker rm -f "$name" >/dev/null 2>&1 || true
   done
-  # Only the tags this run created. A blanket `docker image prune` here would delete a
-  # co-tenant job's dangling layers off the shared runner mid-build.
+  # Only the tags this run created. A blanket `docker image prune` here would delete
+  # another build's dangling layers off a shared daemon mid-build.
   for image in "${IMAGES[@]:-}"; do
     [ -n "$image" ] && docker rmi -f "$image" >/dev/null 2>&1 || true
   done
@@ -56,15 +56,16 @@ cleanup() {
 trap cleanup EXIT
 
 # The host port Docker chose for a container's 8080. Ports are assigned by the daemon
-# (`-P`) rather than hardcoded: two concurrent jobs on this shared runner would otherwise
-# collide on a fixed port and fail for a reason unrelated to the change under test.
+# (`-P`) rather than hardcoded: two concurrent runs on one machine would otherwise collide
+# on a fixed port, or on a laptop's own dev server, and fail for a reason unrelated to the
+# change under test.
 host_port() {
   docker port "$1" 8080 | head -1 | sed 's/.*://'
 }
 
 # Wait for a container's HTTP endpoint, then hand back the body. Polls rather than
 # sleeping a fixed interval: a cold Python start is a second on a laptop and rather
-# longer on a loaded shared runner.
+# longer on a loaded CI runner.
 wait_for_http() {
   local url="$1" name="$2" attempts=60
   for _ in $(seq "$attempts"); do
