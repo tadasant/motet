@@ -10,10 +10,9 @@ name: Close outside pull requests
 # and could not. This is safe because the job never checks out or runs any code from the
 # PR branch; it only calls the issues/PR API via github-script.
 #
-# It runs on GitHub-hosted `ubuntu-latest`, NEVER the self-hosted runners. That is the
-# point: this is the one workflow an untrusted fork PR reliably triggers, so it must not
-# touch the shared pool even to reject the PR. See ci.yml for the other two legs of the
-# guard.
+# It runs on GitHub-hosted `ubuntu-latest`, as every job in this repo now does, and must
+# never be moved to a self-hosted runner: this is the one workflow an untrusted fork PR
+# reliably triggers. See ci.yml for the other two legs of the guard.
 
 on:
   pull_request_target:
@@ -29,6 +28,7 @@ concurrency:
 jobs:
   close:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Skip PRs from the owner / org members / collaborators — only outside PRs are closed.
     if: >-
       github.event.pull_request.author_association != 'OWNER' &&

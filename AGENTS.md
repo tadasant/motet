@@ -33,9 +33,9 @@ signal it belongs in the private repo instead — say so and stop rather than in
 
 Deploy workflows live in the private repo — with one exception, the TestFlight upload, which
 lives here for its free macOS runner, runs on every merge that touches `ios/`, and is
-fenced to `main` (see [Runner policy](#runner-policy)). CI in *this* repo runs on the shared
-self-hosted runner pool behind a fork guard, with one job on a GitHub-hosted macOS runner
-because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
+fenced to `main` (see [Runner policy](#runner-policy)). CI in *this* repo runs on
+GitHub-hosted Ubuntu runners behind a fork guard, with one job on a GitHub-hosted macOS
+runner because `xcodebuild` needs a Mac — see [Runner policy](#runner-policy).
 
 ---
 
@@ -827,34 +827,40 @@ client reads it at call time. One image, configured where it runs.
 
 ### Runner policy
 
-CI runs on the shared self-hosted runner pool (`runs-on: self-hosted`), the same pool
-`tadasant/zimmer` uses, to stay off the GitHub-hosted Actions minute quota.
+**Every job runs on a GitHub-hosted runner**, and the label is a literal: `ubuntu-latest`,
+`macos-latest` where Xcode is needed, or `ubuntu-24.04` for the `ci` job, whose Swift
+toolchain is swift.org's Ubuntu 24.04 build and does not load on the newer image. Decided
+by Tadas on 2026-11-17 for every public repo — standard hosted runners are free and
+unmetered on a public repo — after the shared self-hosted pool this repo used to run on
+went down on 2026-11-16 and took every job with it. **Never put `runs-on` behind a variable or an expression**, and never point a job in
+this repo back at `self-hosted`: on a public repo a self-hosted runner is the one place a
+fork PR must never reach, and a literal label is the only spelling of that a reviewer can
+check at a glance. Nothing a job needs may live on a machine: uv, Node, the Swift
+toolchain and Postgres are installed or started in-job, and what is worth keeping between
+runs goes in GitHub's Actions cache.
 
-This repo is **public**, and a self-hosted runner on a public repo is exactly the
-combination GitHub warns about: without a guard, any stranger's fork PR would execute
-arbitrary code on shared infrastructure. Three mechanisms close that gap, and **all three
-have to stay in place** — removing any one of them reopens it:
+The fork guard predates the move and is kept, because it is harmless on a hosted VM and
+it is what makes a fork PR cost nothing at all:
 
 1. **A fork guard on every job that checks out code.**
    `if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}`
-   A PR from a fork skips every job, so fork code never runs on the runner. Branches pushed
-   to this repo itself run everything.
+   A PR from a fork skips every job, so fork code never runs. Branches pushed to this repo
+   itself run everything.
 2. **A no-checkout `all-checks-pass` gate**, so a fork PR — where every job skipped — still
    reports green instead of hanging forever on a required check.
 3. **`pr-auto-close.yml`**, which closes outside PRs on `ubuntu-latest` with no checkout at
-   all, so the untrusted path never touches the self-hosted pool even to be rejected.
+   all.
 
 Belt-and-braces on top: the repo's Actions fork-PR approval policy is set to
 `all_external_contributors`, so a fork workflow needs a maintainer's click before it could
 run even if a guard were dropped.
 
-**If you add a job to `ci.yml`, it needs the fork guard and an entry in
-`all-checks-pass`.** A job without the guard is the whole hole.
+**If you add a job to `ci.yml`, it needs the fork guard, a `timeout-minutes`, and an entry
+in `all-checks-pass`.** The default timeout is six hours.
 
-**One job is deliberately not on that pool: `ios`, which runs `xcodebuild` on GitHub-hosted
-`macos-latest`.** There is no Mac in the pool, and there is no Mac anywhere in this
-project — which is why the iOS app went months without a compiler ever being pointed at
-it. It is free because this repo is public, and it needs no Apple Developer Program
+**One job is on `macos-latest` rather than `ubuntu-latest`: `ios`, which runs
+`xcodebuild`.** There is no Mac anywhere in this project — which is why the iOS app went
+months without a compiler ever being pointed at it. It is free because this repo is public, and it needs no Apple Developer Program
 credential because a **simulator** build needs no identity, no certificate, no provisioning
 profile and no App Store Connect key — and neither does the unsigned device archive it also
 runs (`ios/bin/testflight check`). That is the property to preserve: adding signing, a
@@ -864,9 +870,7 @@ currently needs neither — and the entitlement it asks for
 (`com.apple.developer.carplay-audio`) is granted by Apple's manual review, so wiring it in
 before the grant arrives makes the build fail *to sign* rather than merely lack CarPlay.
 
-It carries the same fork guard as everything else. A hosted runner is ephemeral, so a fork
-PR reaching it would not be the shared-machine problem the guard exists for — but there is
-no reason for a fork to run it either.
+It carries the same fork guard as everything else: there is no reason for a fork to run it.
 
 **A macOS runner bills at a higher multiplier, so `ios-changes` decides whether it starts.**
 It is a no-checkout job that asks the API which files moved and answers one question: did
@@ -911,7 +915,7 @@ this repo that hold a credential, so it is fenced four ways and **all four have 
    admits `main` only.** That is the fence that survives a branch editing (2) away: GitHub
    withholds an environment's secrets from a job on a ref the policy does not admit.
    Never move them to repository secrets.
-4. **It runs on a GitHub-hosted, ephemeral runner**, never the self-hosted pool, where a key
+4. **It runs on a GitHub-hosted, ephemeral runner**, never a self-hosted one, where a key
    written to disk would outlive the job on a shared machine. Its one action is pinned by
    commit SHA, because a moved tag would run inside the job holding the key.
 

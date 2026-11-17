@@ -3,10 +3,10 @@
 # Install a Swift toolchain into a directory the caller owns, and print the `bin` path to
 # put on PATH. Idempotent: an existing, working install is reused.
 #
-# WHY THIS EXISTS. `bin/ci` runs MotetKit's test suite, and the shared self-hosted runners
-# have no Swift. A toolchain is ~1 GB, so it is installed **once per runner** into a
-# per-runner path — the same shape `ci.yml` already uses for uv, Python, and npm — and
-# every later run reuses it. Nothing here touches a shared tool cache.
+# WHY THIS EXISTS. `bin/ci` runs MotetKit's test suite, and a Linux machine has no Swift
+# of a known version. A toolchain is ~1 GB, so it is installed into a directory the caller
+# owns and reused on every later run — in CI, that directory is restored from the Actions
+# cache (`ci.yml`). Nothing here touches a shared tool cache.
 #
 # On a Mac this script is never needed: `swift` comes with Xcode, and `bin/ci` finds it.
 #
@@ -24,12 +24,18 @@ install_toolchain() {
   local url="https://download.swift.org/swift-${VERSION}-release/ubuntu2404/swift-${VERSION}-RELEASE/swift-${VERSION}-RELEASE-ubuntu24.04.tar.gz"
   log "Installing Swift ${VERSION} into ${TARGET} (about 1 GB, once per machine)…"
   mkdir -p "$TARGET"
-  # Download beside the target and move into place, so an interrupted download never leaves
-  # a half-extracted toolchain that later runs would trust.
+  # Download and extract beside the target, then move into place, so an interrupted
+  # download or extraction never leaves a half-extracted toolchain later runs would trust.
   local archive="$TARGET/.swift-${VERSION}.tar.gz"
+  local staging="$TARGET/.staging-${VERSION}"
+  rm -rf "$staging"
+  mkdir -p "$staging"
   curl -fsSL -o "$archive" "$url"
-  tar -xzf "$archive" -C "$TARGET"
+  tar -xzf "$archive" -C "$staging"
   rm -f "$archive"
+  rm -rf "$TOOLCHAIN"
+  mv "$staging/$(basename "$TOOLCHAIN")" "$TOOLCHAIN"
+  rm -rf "$staging"
 }
 
 # The Ubuntu 24.04 toolchain runs on Debian too, except that Debian ships
@@ -62,9 +68,12 @@ if [ ! -x "$TOOLCHAIN/usr/bin/swift" ]; then
 fi
 install_shim
 
-if ! "$SHIM/swift" --version >/dev/null 2>&1; then
+# `swift build --version` rather than `swift --version`: the driver alone loads fine on a
+# distribution the toolchain was not built for, while `swift-build` is what fails to find
+# its shared libraries (libxml2.so.2 on Ubuntu 26.04).
+if ! "$SHIM/swift" build --version >/dev/null 2>&1; then
   log "error: the Swift toolchain in ${TOOLCHAIN} will not run on this machine."
-  log "       Run '${SHIM}/swift --version' to see why."
+  log "       Run '${SHIM}/swift build --version' to see why."
   exit 1
 fi
 

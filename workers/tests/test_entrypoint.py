@@ -77,8 +77,8 @@ def _run_entry_point(*args: str) -> subprocess.CompletedProcess[str]:
 
     ``DATABASE_URL`` is dropped so a queue name stops on the missing-database check rather
     than draining a real queue out from under the rest of the suite, and the telemetry
-    variables are dropped because CI runs on a shared pool that has credentials for the
-    real obs stack (invariant 11). A startup test that exported to it would put test spans
+    variables are dropped because a developer shell with `.env` loaded has credentials for
+    the real obs stack (invariant 11). A startup test that exported to it would put test spans
     under ``motet-worker`` — the very label an operator filters on — and the
     ``parser.error`` path exits before the ``finally`` that flushes, so the only flush
     would be an ``atexit`` hook blocking on a network round trip.
