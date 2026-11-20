@@ -38,7 +38,10 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Serve it.
 # ---------------------------------------------------------------------------
-FROM nginx:1.27-alpine AS runtime
+# Track nginx's stable branch, never an end-of-life one: a frozen branch receives no
+# security fixes. The minor tag floats on patch releases, so a fresh pull resolves to
+# the newest 1.30.x (1.30.7 or later when this was written).
+FROM nginx:1.30-alpine AS runtime
 
 # The image's own default server block listens on 80 and would shadow ours in
 # /etc/nginx/conf.d. Removing it leaves exactly one server block to reason about.
