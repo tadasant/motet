@@ -38,12 +38,9 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Serve it.
 # ---------------------------------------------------------------------------
-# The stable branch, never an end-of-life one. 1.27 stopped receiving fixes in 2025 and
-# sat inside the vulnerable range of nginx's November 2026 advisories (CVE-2026-123007,
-# CVE-2026-123633: fixed in 1.30.7 / 1.31.9). Those two need HTTP/2, which this server
-# does not speak (nginx.conf enables no `http2`, and Cloud Run is not configured for h2c),
-# so the bump is defence in depth — but a frozen branch gets no fix for the next one.
-# The minor tag floats on patch releases; it is 1.30.7 or newer.
+# Track nginx's stable branch, never an end-of-life one: a frozen branch receives no
+# security fixes. The minor tag floats on patch releases, so a fresh pull resolves to
+# the newest 1.30.x (1.30.7 or later when this was written).
 FROM nginx:1.30-alpine AS runtime
 
 # The image's own default server block listens on 80 and would shadow ours in
